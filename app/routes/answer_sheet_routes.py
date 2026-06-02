@@ -77,6 +77,22 @@ from app.services.celery_tasks.ai_analysis_cache_tasks import generate_ai_analys
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 
+# Admin e aplicador: leitura e correção de todos os cartões do tenant (sem filtro created_by).
+_CARTAO_FULL_GABARITO_ACCESS_ROLES = frozenset({"admin", "aplicador"})
+
+
+def _user_sees_all_city_gabaritos(user: dict) -> bool:
+    return str(user.get("role") or "").lower() in _CARTAO_FULL_GABARITO_ACCESS_ROLES
+
+
+def _user_can_read_gabarito(user: dict, gabarito: AnswerSheetGabarito) -> bool:
+    """Leitura de gabarito: admin/aplicador = qualquer; demais = criador."""
+    if _user_sees_all_city_gabaritos(user):
+        return True
+    if not gabarito.created_by:
+        return True
+    return str(gabarito.created_by) == str(user.get("id"))
+
 
 def _validate_blocks_config(blocks: List, total_questions: int) -> Optional[str]:
     """
@@ -509,7 +525,7 @@ def generate_answer_sheets():
             gabarito = AnswerSheetGabarito.query.get(existing_gabarito_id)
             if not gabarito:
                 return jsonify({"error": "Gabarito não encontrado"}), 404
-            if gabarito.created_by and str(gabarito.created_by) != str(user.get('id')):
+            if not _user_can_read_gabarito(user, gabarito):
                 return jsonify({"error": "Você não tem permissão para usar este gabarito"}), 403
 
             school_ids_scope = school_ids
@@ -1139,7 +1155,8 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None, t
 
 @bp.route('/process-correction', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
+@requires_city_context
 def process_answer_sheet_correction_batch():
     """
     Processa correção em lote de vários cartões resposta (assíncrono).
@@ -1204,6 +1221,7 @@ def process_answer_sheet_correction_batch():
 
 @bp.route('/correction-progress/<string:job_id>', methods=['GET'])
 @jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 def get_answer_sheet_correction_progress(job_id):
     """
     Consulta progresso de uma correção em lote de cartões resposta
@@ -1255,7 +1273,7 @@ def get_answer_sheet_correction_progress(job_id):
 
 @bp.route('/gabaritos', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 @requires_city_context
 def list_gabaritos():
     """
@@ -1289,8 +1307,10 @@ def list_gabaritos():
         school_id = request.args.get('school_id')
         title = request.args.get('title')
         
-        # Construir query base - filtrar apenas gabaritos criados pelo usuário atual
-        query = AnswerSheetGabarito.query.filter(AnswerSheetGabarito.created_by == str(user['id']))
+        # Admin/aplicador: todos do tenant; demais: apenas os que criaram
+        query = AnswerSheetGabarito.query
+        if not _user_sees_all_city_gabaritos(user):
+            query = query.filter(AnswerSheetGabarito.created_by == str(user['id']))
         
         # Aplicar filtros adicionais
         if class_id:
@@ -1530,7 +1550,7 @@ def list_gabaritos():
 
 @bp.route('/gabarito/<string:gabarito_id>/download', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 @requires_city_context
 def download_gabarito(gabarito_id):
     """
@@ -1550,7 +1570,7 @@ def download_gabarito(gabarito_id):
         if not gabarito:
             return jsonify({"error": "Gabarito não encontrado"}), 404
         
-        if user['role'] != 'admin' and gabarito.created_by != str(user['id']):
+        if not _user_can_read_gabarito(user, gabarito):
             return jsonify({"error": "Você não tem permissão para acessar este gabarito"}), 403
         
         minio = MinIOService()
@@ -1746,7 +1766,7 @@ def delete_all_answer_sheet_generations(gabarito_id):
 
 @bp.route('/gabarito/<string:gabarito_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 @requires_city_context
 def get_gabarito(gabarito_id):
     """
@@ -1761,7 +1781,7 @@ def get_gabarito(gabarito_id):
         if not gabarito:
             return jsonify({"error": "Gabarito não encontrado"}), 404
 
-        if gabarito.created_by and str(gabarito.created_by) != str(user.get('id')):
+        if not _user_can_read_gabarito(user, gabarito):
             return jsonify({"error": "Você não tem permissão para acessar este gabarito"}), 403
 
         generations_list = []
@@ -2184,7 +2204,8 @@ def get_gabarito_students(gabarito_id):
 
 @bp.route('/correct-new', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
+@requires_city_context
 def correct_answer_sheet_new_pipeline():
     """
     🆕 ROTA DE TESTE - Novo Pipeline OMR Robusto
@@ -2391,7 +2412,7 @@ def bulk_delete_gabaritos():
 
 @bp.route('/results', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 def list_answer_sheet_results():
     """
     Lista resultados de correção de cartões resposta (AnswerSheetResult)
@@ -2427,8 +2448,8 @@ def list_answer_sheet_results():
             query = query.filter_by(student_id=student_id)
         
         # Filtrar por permissões do usuário
-        if user['role'] == 'professor':
-            # Professor vê apenas resultados de seus gabaritos
+        if str(user.get('role') or '').lower() == 'professor':
+            # Professor vê apenas resultados de seus gabaritos; admin/aplicador/tecadm veem todos do tenant
             from app.models.answerSheetGabarito import AnswerSheetGabarito
             gabaritos_ids = [g.id for g in AnswerSheetGabarito.query.filter_by(created_by=user['id']).all()]
             query = query.filter(AnswerSheetResult.gabarito_id.in_(gabaritos_ids))
@@ -2487,7 +2508,7 @@ def list_answer_sheet_results():
 
 @bp.route('/result/<string:result_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 def get_answer_sheet_result(result_id):
     """
     Busca detalhes de um resultado específico de correção de cartão resposta
@@ -4165,7 +4186,12 @@ def _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user,
     permissao = get_user_permission_scope(user) if user else {'scope': 'all'}
 
     if nivel_granularidade in ["estado", "municipio", "escola"] and municipio_id:
-        q = AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.title).filter(AnswerSheetGabarito.created_by == str(user['id'])) if user and user.get('role') == 'professor' else AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.title)
+        q = (
+            AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.title)
+            .filter(AnswerSheetGabarito.created_by == str(user['id']))
+            if user and str(user.get('role') or '').lower() == 'professor'
+            else AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.title)
+        )
         gabaritos = q.distinct().all()
         _rq = AnswerSheetResult.query.join(Student).join(Class).join(School, School.id == cast(Class.school_id, String)).filter(School.city_id == municipio_id)
         _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
@@ -4297,7 +4323,7 @@ def _obter_gabaritos_por_municipio_cartao(
             Test.evaluation_mode == 'physical',
         )
     )
-    # Admin (scope 'all') vê todos os gabaritos do município.
+    # Admin/aplicador (scope 'all') vê todos os gabaritos do município.
     # Tecadm vê todos do seu município (sem restringir por created_by).
     # Diretor/Coordenador com scope escola: filtro por escola abaixo; aqui não restringir por created_by.
     # Professor: regra específica abaixo (o que criou OU escopo turmas/escolas).
@@ -4308,6 +4334,7 @@ def _obter_gabaritos_por_municipio_cartao(
         'diretor',
         'coordenador',
         'professor',
+        'aplicador',
     ):
         q = q.filter(AnswerSheetGabarito.created_by == str(user['id']))
     if permissao.get('scope') == 'escola' and user.get('role') in ['diretor', 'coordenador']:
@@ -5904,7 +5931,7 @@ def list_generation_jobs_for_gabarito(gabarito_id):
         if not gabarito:
             return jsonify({"error": "Gabarito não encontrado"}), 404
 
-        if gabarito.created_by and str(gabarito.created_by) != str(user.get('id')):
+        if not _user_can_read_gabarito(user, gabarito):
             return jsonify({"error": "Você não tem permissão para acessar este gabarito"}), 403
 
         current_user_id = str(user.get('id'))

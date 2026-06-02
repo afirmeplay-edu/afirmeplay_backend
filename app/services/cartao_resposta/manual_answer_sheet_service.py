@@ -177,6 +177,7 @@ def assert_user_can_manual_correct(
     if role not in STAFF_ROLES:
         raise ManualAnswerSheetError("Sem permissão.", 403)
 
+    # Admin, aplicador, diretor, coordenador, tecadm: qualquer gabarito/aluno do tenant.
     if role == "professor":
         if not gabarito.created_by or str(gabarito.created_by) != str(user.get("id")):
             raise ManualAnswerSheetError(

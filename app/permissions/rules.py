@@ -673,22 +673,18 @@ def get_user_permission_scope(user: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     elif role == Roles.APLICADOR:
-        if not city_id:
-            return {
-                'permitted': False,
-                'error': 'Aplicador não vinculado a um município',
-            }
+        # Cartões resposta / filtros: mesmo escopo de leitura que admin no tenant.
         return {
             'permitted': True,
-            'scope': 'municipio',
+            'scope': 'all',
             'city_id': city_id,
             'filters': {
-                'estados': 'specific',
-                'municipios': 'specific',
-                'escolas': 'municipio',
-                'series': 'municipio',
-                'turmas': 'municipio',
-                'avaliacoes': 'municipio',
+                'estados': 'all',
+                'municipios': 'all',
+                'escolas': 'all',
+                'series': 'all',
+                'turmas': 'all',
+                'avaliacoes': 'all',
             },
         }
     

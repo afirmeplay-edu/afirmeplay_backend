@@ -41,23 +41,30 @@ def apply_active_student_password_log_filter(query: Query) -> Query:
 
 
 def build_password_report_query(session: Session) -> Query:
-    """Query base do relatório de senhas (Excel/PDF) com filtro de aluno ativo."""
+    """
+    Query base do relatório de senhas (Excel/PDF) com filtro de aluno ativo.
+
+    Credenciais vêm do log; escola, turma e série refletem a matrícula atual (Student).
+    """
     from app.models.city import City
     from app.models.grades import Grade
     from app.models.school import School
+    from app.models.student import Student
     from app.models.studentClass import Class
     from app.models.studentPasswordLog import StudentPasswordLog
 
-    return apply_active_student_password_log_filter(
-        session.query(
-            StudentPasswordLog,
-            School,
-            City,
-            Class,
-            Grade,
+    return (
+        apply_active_student_password_log_filter(
+            session.query(
+                StudentPasswordLog,
+                School,
+                City,
+                Class,
+                Grade,
+            )
         )
-        .outerjoin(School, StudentPasswordLog.school_id == School.id)
-        .outerjoin(City, StudentPasswordLog.city_id == City.id)
-        .outerjoin(Class, StudentPasswordLog.class_id == Class.id)
-        .outerjoin(Grade, StudentPasswordLog.grade_id == Grade.id)
+        .outerjoin(School, Student.school_id == School.id)
+        .outerjoin(City, School.city_id == City.id)
+        .outerjoin(Class, Student.class_id == Class.id)
+        .outerjoin(Grade, Student.grade_id == Grade.id)
     )

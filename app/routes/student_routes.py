@@ -1392,7 +1392,7 @@ def get_password_report():
             # Se professor está vinculado a turmas específicas, filtrar por elas
             # Se não houver turmas vinculadas, mostrar todas as turmas das escolas vinculadas
             if class_ids:
-                query = query.filter(StudentPasswordLog.class_id.in_(class_ids))
+                query = query.filter(Student.class_id.in_(class_ids))
         
         # 4. Aplicar filtros opcionais (query parameters)
         city_id_param = request.args.get('city_id')
@@ -1407,9 +1407,9 @@ def get_password_report():
         if school_id_param:
             query = query.filter(StudentPasswordLog.school_id == school_id_param)
         if class_id_param:
-            query = query.filter(StudentPasswordLog.class_id == class_id_param)
+            query = query.filter(Student.class_id == class_id_param)
         if grade_id_param:
-            query = query.filter(StudentPasswordLog.grade_id == grade_id_param)
+            query = query.filter(Student.grade_id == grade_id_param)
         if date_from:
             try:
                 date_from_obj = datetime.strptime(date_from, "%Y-%m-%d").date()
@@ -1578,9 +1578,9 @@ def get_password_report_pdf():
         class_id_param = request.args.get('class_id')
         grade_id_param = request.args.get('grade_id')
         if class_id_param:
-            query = query.filter(StudentPasswordLog.class_id == class_id_param)
+            query = query.filter(Student.class_id == class_id_param)
         if grade_id_param:
-            query = query.filter(StudentPasswordLog.grade_id == grade_id_param)
+            query = query.filter(Student.grade_id == grade_id_param)
 
         # Ordenar por série, turma e nome para agrupamento
         query = query.order_by(
@@ -1590,10 +1590,10 @@ def get_password_report_pdf():
         )
         results = query.all()
 
-        # Agrupar por turma (class_id + class_name + grade_name)
+        # Agrupar por turma atual do aluno (class_id + class_name + grade_name)
         turmas_map = {}
         for log, school, city, class_obj, grade in results:
-            class_id_key = str(log.class_id) if log.class_id else "_sem_turma_"
+            class_id_key = str(class_obj.id) if class_obj else "_sem_turma_"
             class_name = class_obj.name if class_obj else "—"
             grade_name = grade.name if grade else "—"
             key = (class_id_key, class_name, grade_name)

@@ -66,7 +66,7 @@ def _parse_filters(args: Dict[str, Any]) -> Dict[str, str]:
     nivel = _norm_param(args.get("nivel"))
     serie = _norm_param(args.get("serie"))
     turma = _norm_param(args.get("turma"))
-    turno = _norm_param(args.get("turno"))
+    shift = _norm_param(args.get("shift")) or _norm_param(args.get("turno"))
     evaluation_id = _norm_param(args.get("evaluation_id"))
     answer_sheet_id = _norm_param(args.get("answer_sheet_id"))
 
@@ -92,7 +92,7 @@ def _parse_filters(args: Dict[str, Any]) -> Dict[str, str]:
         "nivel": nivel,
         "serie": serie,
         "turma": turma,
-        "turno": turno,
+        "shift": shift,
         "evaluation_id": evaluation_id,
         "answer_sheet_id": answer_sheet_id,
     }
@@ -170,8 +170,8 @@ class EtiquetasService:
         city_name = str(city.name or "").strip().upper()
         prefeitura_label = f"PREFEITURA MUNICIPAL DE {city_name}"
 
-        class_turno = str(getattr(selected_class, "turno", None) or "").strip() if selected_class else ""
-        turno = filters["turno"] or class_turno
+        class_shift = str(selected_class.shift or "").strip() if selected_class else ""
+        shift = filters["shift"] or class_shift
 
         return {
             "municipio": {
@@ -185,7 +185,7 @@ class EtiquetasService:
                 "nivel": str(selected_stage.name or "").strip() if selected_stage else "Todos os níveis",
                 "serie": str(selected_grade.name or "").strip() if selected_grade else "Todas as séries",
                 "turma": str(selected_class.name or "").strip() if selected_class else "Todas as turmas",
-                "turno": turno,
+                "shift": shift,
                 "ano": datetime.now().year,
             },
             "modo": filters["modo"],

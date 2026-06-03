@@ -636,7 +636,8 @@ def _obter_todas_turmas_do_contexto() -> List[Dict[str, Any]]:
             "serie_id": str(turma.grade_id) if turma.grade_id else None,
             "serie_nome": serie_nome,
             "escola_id": turma.school_id,
-            "escola_nome": turma.school.name if turma.school else None
+            "escola_nome": turma.school.name if turma.school else None,
+            "shift": turma.shift,
         })
     return result
 
@@ -678,7 +679,8 @@ def _obter_turmas_por_municipio_formatadas(city_id: str) -> List[Dict[str, Any]]
             "serie_id": str(turma.grade_id) if turma.grade_id else None,
             "serie_nome": serie_nome,
             "escola_id": turma.school_id,
-            "escola_nome": turma.school.name if turma.school else None
+            "escola_nome": turma.school.name if turma.school else None,
+            "shift": turma.shift,
         })
     return result
 
@@ -742,7 +744,8 @@ def _obter_turmas_por_ids_formatadas(class_ids: List[str]) -> List[Dict[str, Any
             "serie_id": str(turma.grade_id) if turma.grade_id else None,
             "serie_nome": serie_nome,
             "escola_id": turma.school_id,
-            "escola_nome": turma.school.name if turma.school else None
+            "escola_nome": turma.school.name if turma.school else None,
+            "shift": turma.shift,
         })
     return result
 

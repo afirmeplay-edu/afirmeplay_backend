@@ -151,7 +151,7 @@ def _cabecalho_real(classe, tipo, test=None, gabarito=None, school=None, city=No
         "serie": serie,
         "turma": turma,
         "serie_turma": classe.name if classe else None,
-        "turno": getattr(classe, "turno", None),
+        "turno": classe.shift,
         "disciplina": disciplina,
         "legenda": LEGENDA,
         "instrucoes_aplicador": INSTRUCOES_APLICADOR,

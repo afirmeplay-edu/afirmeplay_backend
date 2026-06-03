@@ -77,7 +77,7 @@ class TestFolhaRascunhoService(unittest.TestCase):
                             "c1": {
                                 "id": "c1",
                                 "name": "Turma A",
-                                "turno": "Manhã",
+                                "shift": "Manhã",
                                 "students": [{"id": "1", "name": "Ana"}],
                             }
                         },
@@ -95,7 +95,7 @@ class TestFolhaRascunhoService(unittest.TestCase):
                             "c2": {
                                 "id": "c2",
                                 "name": "Turma B",
-                                "turno": "",
+                                "shift": "",
                                 "students": [{"id": "2", "name": "Bruno"}],
                             }
                         },
@@ -173,7 +173,7 @@ class TestFolhaRascunhoService(unittest.TestCase):
                             "c1": {
                                 "id": "c1",
                                 "name": "Turma A",
-                                "turno": "Manhã",
+                                "shift": "Manhã",
                                 "students": [{"id": "st1", "name": "Aluno Um"}],
                             }
                         },

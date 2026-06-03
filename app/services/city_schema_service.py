@@ -202,6 +202,54 @@ def ensure_monitoring_action_columns(schema: str) -> None:
     db.session.commit()
 
 
+def get_class_shift_column_migrations_ddl(schema: str) -> str:
+    """DDL idempotente: coluna shift em class (morning, afternoon, full-time, etc.)."""
+    return f"""
+DO $mig$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = '{schema}' AND table_name = 'class' AND column_name = 'turno'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = '{schema}' AND table_name = 'class' AND column_name = 'shift'
+    ) THEN
+        ALTER TABLE "{schema}".class RENAME COLUMN turno TO shift;
+    ELSIF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = '{schema}' AND table_name = 'class' AND column_name = 'shift'
+    ) THEN
+        ALTER TABLE "{schema}".class ADD COLUMN shift VARCHAR(50);
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = '{schema}' AND table_name = 'class' AND column_name = 'turno'
+    ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = '{schema}' AND table_name = 'class' AND column_name = 'shift'
+    ) THEN
+        UPDATE "{schema}".class SET shift = turno WHERE shift IS NULL AND turno IS NOT NULL;
+        ALTER TABLE "{schema}".class DROP COLUMN turno;
+    END IF;
+END $mig$;
+"""
+
+
+def ensure_class_shift_column(schema: str) -> None:
+    """Garante coluna shift em class no schema do município (idempotente)."""
+    import re
+
+    from sqlalchemy import text
+
+    from app import db
+
+    if not schema or not re.match(r"^city_[a-zA-Z0-9_]+$", schema):
+        return
+    db.session.execute(text(get_class_shift_column_migrations_ddl(schema)))
+    db.session.commit()
+
+
 def get_saved_ata_sala_tables_ddl(schema: str) -> str:
     """DDL idempotente de atas de sala salvas no schema city_xxx."""
     return f"""
@@ -743,6 +791,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
         # DDL das tabelas (igual à migração 0001) – um bloco por vez para compatibilidade
         ddl = _get_city_tables_ddl(schema_name)
         cursor.execute(ddl)
+        cursor.execute(get_class_shift_column_migrations_ddl(schema_name))
 
         mobile_ddl = get_mobile_tables_ddl(schema_name)
         cursor.execute(mobile_ddl)
@@ -788,7 +837,8 @@ CREATE TABLE IF NOT EXISTS "{schema}".class (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR(100),
     school_id VARCHAR(36) REFERENCES "{schema}".school(id),
-    grade_id UUID REFERENCES public.grade(id)
+    grade_id UUID REFERENCES public.grade(id),
+    shift VARCHAR(50)
 );
 COMMENT ON TABLE "{schema}".class IS 'Turmas das escolas';
 

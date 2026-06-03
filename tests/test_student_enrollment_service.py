@@ -52,15 +52,19 @@ class TestStudentEnrollmentService(unittest.TestCase):
             id="student-1",
             school_id="school-1",
             class_id="class-old",
+            grade_id="grade-old",
             user=SimpleNamespace(city_id="city-1"),
         )
-        new_class = SimpleNamespace(id="class-new", school_id="school-1")
+        new_class = SimpleNamespace(id="class-new", school_id="school-1", grade_id="grade-new")
 
         with patch("app.models.school.School", FakeSchoolModel):
             with patch("app.services.student_enrollment_service.assert_same_municipality_two_schools") as assert_mock:
                 with patch("app.services.student_enrollment_service.close_active_enrollment") as close_mock:
                     with patch("app.services.student_enrollment_service.open_enrollment") as open_mock:
-                        transfer_student_to_class(session, student, new_class, update_user_city=True)
+                        with patch(
+                            "app.services.student_password_log_service.sync_password_logs_with_student_placement"
+                        ):
+                            transfer_student_to_class(session, student, new_class, update_user_city=True)
 
         assert_mock.assert_not_called()
         close_mock.assert_called_once_with(session, "student-1")
@@ -78,14 +82,18 @@ class TestStudentEnrollmentService(unittest.TestCase):
             id="student-1",
             school_id="school-1",
             class_id="class-old",
+            grade_id="grade-old",
             user=SimpleNamespace(city_id="city-1"),
         )
-        new_class = SimpleNamespace(id="class-new", school_id="school-2")
+        new_class = SimpleNamespace(id="class-new", school_id="school-2", grade_id="grade-new")
 
         with patch("app.models.school.School", FakeSchoolModel):
             with patch("app.services.student_enrollment_service.close_active_enrollment"):
                 with patch("app.services.student_enrollment_service.open_enrollment"):
-                    transfer_student_to_class(session, student, new_class, update_user_city=True)
+                    with patch(
+                        "app.services.student_password_log_service.migrate_password_logs_to_new_school"
+                    ):
+                        transfer_student_to_class(session, student, new_class, update_user_city=True)
 
         self.assertEqual(student.class_id, "class-new")
         self.assertEqual(student.school_id, "school-2")

@@ -97,9 +97,9 @@ def _class_context(classe: Class) -> Tuple[str, str, str, str, str, str, str]:
     grade_name = str(grade.name or "").strip() if grade else "Sem série"
     class_id = str(classe.id)
     class_name = str(classe.name or "").strip() or "Turma"
-    turno = str(getattr(classe, "turno", None) or "").strip()
+    shift = str(classe.shift or "").strip()
     turma_label = str(getattr(classe, "turma", None) or "").strip() or class_name
-    return school_id, school_name, grade_id, grade_name, class_id, turma_label, turno
+    return school_id, school_name, grade_id, grade_name, class_id, turma_label, shift
 
 
 def _students_enrolled(classe: Class) -> List[Dict[str, str]]:
@@ -151,7 +151,7 @@ def _append_class_to_tree(
     students = _filter_students_by_ids(students, student_ids)
     if not students:
         return
-    school_id, school_name, grade_id, grade_name, class_id, turma_label, turno = _class_context(classe)
+    school_id, school_name, grade_id, grade_name, class_id, turma_label, shift = _class_context(classe)
     if not school_id:
         return
 
@@ -166,7 +166,7 @@ def _append_class_to_tree(
     series_bucket["_classes"][class_id] = {
         "id": class_id,
         "name": turma_label,
-        "turno": turno,
+        "shift": shift,
         "students": sorted(students, key=lambda s: s["name"].lower()),
     }
 
@@ -333,7 +333,7 @@ def _tree_to_response(tree: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
                 {
                     "id": c["id"],
                     "name": c["name"],
-                    "turno": c.get("turno") or "",
+                    "shift": c.get("shift") or "",
                     "students": c["students"],
                 }
                 for c in sorted(serie["_classes"].values(), key=lambda x: x["name"].lower())

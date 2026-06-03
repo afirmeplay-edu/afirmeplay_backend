@@ -108,7 +108,8 @@ def format_student_details(student):
             "id": student.class_.id,
             "name": student.class_.name,
             "school_id": student.class_.school_id,
-            "grade_id": str(student.class_.grade_id) if student.class_.grade_id else None
+            "grade_id": str(student.class_.grade_id) if student.class_.grade_id else None,
+            "shift": student.class_.shift if student.class_ else None,
         }
 
     grade_details = None

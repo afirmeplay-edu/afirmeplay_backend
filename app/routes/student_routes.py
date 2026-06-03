@@ -555,15 +555,19 @@ def atualizar_aluno(student_id, class_id):
             if not new_class:
                 return jsonify({"error": "Nova turma não encontrada"}), 404
             
-            # Atualizar turma
+            if new_class.school_id != old_school_id:
+                school_changed = True
+
+            # Atualizar turma e série da turma de destino
             aluno.class_id = new_class_id
             class_changed = True
-            
+            if getattr(new_class, "grade_id", None) is not None:
+                aluno.grade_id = new_class.grade_id
+
             # Se a turma pertence a outra escola, atualizar automaticamente
-            if new_class.school_id != old_school_id:
+            if school_changed:
                 aluno.school_id = new_class.school_id
-                school_changed = True
-                
+
                 # Atualizar city_id do usuário
                 new_school = get_orm_session().query(School).get(new_class.school_id)
                 if new_school and new_school.city_id != usuario.city_id:
@@ -600,6 +604,27 @@ def atualizar_aluno(student_id, class_id):
             from app.services.student_enrollment_service import sync_enrollment_from_student_placement
 
             sync_enrollment_from_student_placement(get_orm_session(), aluno)
+
+        if class_changed or school_changed:
+            from app.services.student_password_log_service import (
+                migrate_password_logs_to_new_school,
+                sync_password_logs_with_student_placement,
+            )
+
+            sess = get_orm_session()
+            if school_changed and old_school_id:
+                new_school = sess.query(School).get(aluno.school_id)
+                migrate_password_logs_to_new_school(
+                    sess,
+                    aluno.id,
+                    str(old_school_id),
+                    new_school_id=str(aluno.school_id),
+                    class_id=aluno.class_id,
+                    grade_id=aluno.grade_id,
+                    city_id=new_school.city_id if new_school else None,
+                )
+            elif class_changed:
+                sync_password_logs_with_student_placement(sess, aluno)
 
         get_orm_session().commit()
         
@@ -1346,11 +1371,38 @@ def get_password_report():
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
         
-        # 2. Construir query base (somente alunos ainda matriculados na escola do log)
-        from app.services.student_password_log_service import build_password_report_query
+        from app.services.student_password_log_service import (
+            build_password_report_query,
+            provision_password_logs_for_report_scope,
+        )
+        from app.utils.uuid_helpers import ensure_uuid
 
-        query = build_password_report_query(get_orm_session())
-        
+        sess = get_orm_session()
+        school_id_param = request.args.get('school_id')
+        class_id_param = request.args.get('class_id')
+        grade_id_param = request.args.get('grade_id')
+        class_uuid = ensure_uuid(class_id_param) if class_id_param else None
+        grade_uuid = ensure_uuid(grade_id_param) if grade_id_param else None
+
+        # 2. Resolver escola do recorte conforme role (antes de provisionar logs)
+        if user['role'] in ["diretor", "coordenador"]:
+            manager = sess.query(Manager).filter_by(user_id=user['id']).first()
+            if not manager:
+                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
+            if not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
+            if not school_id_param:
+                school_id_param = str(manager.school_id)
+
+        provision_password_logs_for_report_scope(
+            sess,
+            school_id=school_id_param,
+            class_id=class_uuid,
+            grade_id=grade_uuid,
+        )
+        sess.commit()
+        query = build_password_report_query(sess)
+
         # 3. Aplicar filtros automáticos baseados no role
         if user['role'] == "admin":
             # Admin pode ver todos os alunos
@@ -1362,12 +1414,7 @@ def get_password_report():
                 return jsonify({"error": "ID da cidade não disponível para este usuário"}), 400
             query = query.filter(StudentPasswordLog.city_id == city_id)
         elif user['role'] in ["diretor", "coordenador"]:
-            # Diretor e coordenador veem apenas alunos da sua escola
-            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
-            if not manager:
-                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
-            if not manager.school_id:
-                return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
+            manager = sess.query(Manager).filter_by(user_id=user['id']).first()
             query = query.filter(StudentPasswordLog.school_id == manager.school_id)
         elif user['role'] == "professor":
             # Professor vê apenas alunos das escolas onde está vinculado
@@ -1396,9 +1443,6 @@ def get_password_report():
         
         # 4. Aplicar filtros opcionais (query parameters)
         city_id_param = request.args.get('city_id')
-        school_id_param = request.args.get('school_id')
-        class_id_param = request.args.get('class_id')
-        grade_id_param = request.args.get('grade_id')
         date_from = request.args.get('date_from')
         date_to = request.args.get('date_to')
         
@@ -1406,10 +1450,10 @@ def get_password_report():
             query = query.filter(StudentPasswordLog.city_id == city_id_param)
         if school_id_param:
             query = query.filter(StudentPasswordLog.school_id == school_id_param)
-        if class_id_param:
-            query = query.filter(Student.class_id == class_id_param)
-        if grade_id_param:
-            query = query.filter(Student.grade_id == grade_id_param)
+        if class_uuid:
+            query = query.filter(Student.class_id == class_uuid)
+        if grade_uuid:
+            query = query.filter(Student.grade_id == grade_uuid)
         if date_from:
             try:
                 date_from_obj = datetime.strptime(date_from, "%Y-%m-%d").date()
@@ -1536,51 +1580,70 @@ def get_password_report_pdf():
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
 
-        from app.services.student_password_log_service import build_password_report_query
+        from app.services.student_password_log_service import (
+            build_password_report_query,
+            provision_password_logs_for_report_scope,
+        )
 
-        query = build_password_report_query(get_orm_session())
-
-        # Filtros por role
+        sess = get_orm_session()
         school_id_param = request.args.get('school_id')
+        class_id_param = request.args.get('class_id')
+        grade_id_param = request.args.get('grade_id')
+        from app.utils.uuid_helpers import ensure_uuid
+
+        class_uuid = ensure_uuid(class_id_param) if class_id_param else None
+        grade_uuid = ensure_uuid(grade_id_param) if grade_id_param else None
+
         if user['role'] == "admin":
             if not school_id_param:
                 return jsonify({"error": "Para gerar o PDF é necessário informar school_id"}), 400
-            query = query.filter(StudentPasswordLog.school_id == school_id_param)
         elif user['role'] == "tecadm":
             city_id = user.get('tenant_id') or user.get('city_id')
             if not city_id:
                 return jsonify({"error": "ID da cidade não disponível para este usuário"}), 400
-            query = query.filter(StudentPasswordLog.city_id == city_id)
-            if school_id_param:
-                query = query.filter(StudentPasswordLog.school_id == school_id_param)
         elif user['role'] in ["diretor", "coordenador"]:
-            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
+            manager = sess.query(Manager).filter_by(user_id=user['id']).first()
             if not manager or not manager.school_id:
                 return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
-            query = query.filter(StudentPasswordLog.school_id == manager.school_id)
             school_id_param = str(manager.school_id)
         elif user['role'] == "professor":
-            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
+            teacher = sess.query(Teacher).filter_by(user_id=user['id']).first()
             if not teacher:
                 return jsonify({"error": "Professor não encontrado"}), 404
-            school_teachers = get_orm_session().query(SchoolTeacher).filter_by(teacher_id=teacher.id).all()
+            school_teachers = sess.query(SchoolTeacher).filter_by(teacher_id=teacher.id).all()
             school_ids = [st.school_id for st in school_teachers]
             if not school_ids:
                 return jsonify({"error": "Professor não está vinculado a nenhuma escola"}), 400
-            query = query.filter(StudentPasswordLog.school_id.in_(school_ids))
             if len(school_ids) > 1 and not school_id_param:
                 return jsonify({"error": "Professor vinculado a mais de uma escola. Informe school_id para gerar o PDF."}), 400
             if not school_id_param:
                 school_id_param = school_ids[0]
-            else:
-                query = query.filter(StudentPasswordLog.school_id == school_id_param)
 
-        class_id_param = request.args.get('class_id')
-        grade_id_param = request.args.get('grade_id')
-        if class_id_param:
-            query = query.filter(Student.class_id == class_id_param)
-        if grade_id_param:
-            query = query.filter(Student.grade_id == grade_id_param)
+        provision_password_logs_for_report_scope(
+            sess,
+            school_id=school_id_param,
+            class_id=class_uuid,
+            grade_id=grade_uuid,
+        )
+        sess.commit()
+        query = build_password_report_query(sess)
+
+        if user['role'] == "admin":
+            query = query.filter(StudentPasswordLog.school_id == school_id_param)
+        elif user['role'] == "tecadm":
+            city_id = user.get('tenant_id') or user.get('city_id')
+            query = query.filter(StudentPasswordLog.city_id == city_id)
+            if school_id_param:
+                query = query.filter(StudentPasswordLog.school_id == school_id_param)
+        elif user['role'] in ["diretor", "coordenador"]:
+            query = query.filter(StudentPasswordLog.school_id == school_id_param)
+        elif user['role'] == "professor":
+            query = query.filter(StudentPasswordLog.school_id == school_id_param)
+
+        if class_uuid:
+            query = query.filter(Student.class_id == class_uuid)
+        if grade_uuid:
+            query = query.filter(Student.grade_id == grade_uuid)
 
         # Ordenar por série, turma e nome para agrupamento
         query = query.order_by(

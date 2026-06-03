@@ -15,6 +15,7 @@ class Class(db.Model):
     # Usando coluna privada + hybrid_property para forçar sempre retornar string
     _school_id = db.Column('school_id', db.String(36), db.ForeignKey('tenant.school.id'))
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'))
+    shift = db.Column(db.String(50), nullable=True)
 
     # ✅ CORREÇÃO CRÍTICA: hybrid_property que sempre retorna string
     # Isso força que school_id seja sempre string, mesmo que SQLAlchemy carregue como UUID

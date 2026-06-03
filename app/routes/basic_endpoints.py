@@ -1648,7 +1648,8 @@ def list_classes():
                 'school_id': class_obj.school_id,
                 'school_name': class_obj.school.name if class_obj.school else None,
                 'grade_id': class_obj.grade_id,
-                'grade_name': class_obj.grade.name if class_obj.grade else None
+                'grade_name': class_obj.grade.name if class_obj.grade else None,
+                'shift': class_obj.shift,
             })
         
         return jsonify(results), 200

@@ -296,7 +296,9 @@ def obter_turmas_por_gabarito_escola_serie(
         if str(c.school_id) == str(escola_id) and str(c.grade_id) == str(serie_id)
     ]
     turmas.sort(key=lambda c: (c.name or "") or str(c.id))
-    return [{"id": str(t.id), "name": t.name or f"Turma {t.id}"} for t in turmas]
+    from app.utils.class_label_helpers import class_model_filter_option
+
+    return [class_model_filter_option(t) for t in turmas]
 
 
 def obter_series_por_gabarito_municipio(
@@ -344,7 +346,9 @@ def obter_turmas_por_gabarito_serie_municipio(
     classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
     turmas = [c for c in classes if str(c.grade_id) == str(serie_id)]
     turmas.sort(key=lambda c: (c.name or "") or str(c.id))
-    return [{"id": str(t.id), "name": t.name or f"Turma {t.id}"} for t in turmas]
+    from app.utils.class_label_helpers import class_model_filter_option
+
+    return [class_model_filter_option(t) for t in turmas]
 
 
 def results_for_listing_filters(

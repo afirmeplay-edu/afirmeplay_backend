@@ -979,7 +979,11 @@ class MonitoringService:
                 classes_query = classes_query.filter(Class.grade_id == serie_id_filter)
         elif scope_school_ids:
             classes_query = classes_query.filter(Class._school_id.in_(list(scope_school_ids)))
-        turmas = [{"id": str(t.id), "name": t.name} for t in classes_query.order_by(Class.name.asc()).all()]
+        from app.utils.class_label_helpers import class_model_filter_option
+
+        turmas = [
+            class_model_filter_option(t) for t in classes_query.order_by(Class.name.asc()).all()
+        ]
 
         series = (
             MonitoringService._series_for_source(user, filters, source_type, source_id, escola_id)
@@ -1251,6 +1255,7 @@ class MonitoringService:
                             "school_name": (school.name if school and school.name else None) or "Escola",
                             "class_id": str(student.class_id) if student.class_id else None,
                             "class_name": class_.name if class_ else "—",
+                            "shift": (class_.shift or "").strip() if class_ and getattr(class_, "shift", None) else "",
                             "grade_id": str(student.grade_id) if student.grade_id else None,
                             "grade_name": grade.name if grade else "—",
                             "discipline": discipline_name,
@@ -1331,6 +1336,7 @@ class MonitoringService:
                             "school_name": (school.name if school and school.name else None) or "Escola",
                             "class_id": str(student.class_id) if student.class_id else None,
                             "class_name": class_.name if class_ else "—",
+                            "shift": (class_.shift or "").strip() if class_ and getattr(class_, "shift", None) else "",
                             "grade_id": str(student.grade_id) if student.grade_id else None,
                             "grade_name": grade.name if grade else "—",
                             "discipline": discipline_name,
@@ -1533,6 +1539,7 @@ class MonitoringService:
                     "turma_id": class_key,
                     "turma_nome": class_name,
                     "serie_nome": (row.get("grade_name") or "").strip() or "—",
+                    "shift": (row.get("shift") or "").strip(),
                     "escola_id": school_key,
                     "escola_nome": row.get("school_name") or "Escola",
                     "total_alunos": 0,
@@ -1557,6 +1564,7 @@ class MonitoringService:
                 "turma_id": turma_id_filter,
                 "turma_nome": (class_row.name if class_row and class_row.name else None) or "Turma",
                 "serie_nome": grade_name,
+                "shift": (class_row.shift or "").strip() if class_row and getattr(class_row, "shift", None) else "",
                 "escola_id": escola_id_filter,
                 "escola_nome": (school_row.name if school_row and school_row.name else None) or "Escola",
                 "total_alunos": 0,

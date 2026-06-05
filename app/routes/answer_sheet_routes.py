@@ -25,6 +25,7 @@ from app.services.cartao_resposta.manual_answer_sheet_service import (
     submit_manual_correction,
 )
 from app.config import Config
+from app.utils.class_label_helpers import class_filter_option
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job, purge_answer_sheet_job_keys,
@@ -4248,8 +4249,8 @@ def _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user,
         student_ids = list({r.student_id for r in results})
         students = Student.query.filter(Student.id.in_(student_ids)).filter(Student.class_id.isnot(None)).all()
         class_ids = list({s.class_id for s in students})
-        turmas = Class.query.filter(Class.id.in_(class_ids), Class.grade_id == scope_info['serie']).with_entities(Class.id, Class.name).all()
-        opcoes["turmas"] = [{"id": str(t[0]), "name": t[1] or f"Turma {t[0]}"} for t in turmas]
+        turmas = Class.query.filter(Class.id.in_(class_ids), Class.grade_id == scope_info['serie']).with_entities(Class.id, Class.name, Class.shift).all()
+        opcoes["turmas"] = [class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None) for t in turmas]
     return opcoes
 
 
@@ -4724,7 +4725,7 @@ def _obter_turmas_por_serie_cartao(
         return []
     if permissao.get('scope') != 'all' and str(user.get('city_id')) != str(city.id):
         return []
-    query = Class.query.with_entities(Class.id, Class.name).filter(
+    query = Class.query.with_entities(Class.id, Class.name, Class.shift).filter(
         Class.school_id == escola_id, Class.grade_id == serie_id
     )
     if permissao.get('scope') == 'escola' and user.get('role') == 'professor':
@@ -4741,7 +4742,7 @@ def _obter_turmas_por_serie_cartao(
         else:
             return []
     turmas = query.order_by(Class.name).all()
-    out = [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+    out = [class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None) for t in turmas]
     if not periodo_bounds:
         return out
     filtered = []
@@ -6692,7 +6693,7 @@ def _obter_turmas_por_serie(escola_id: str, serie_id: str, municipio_id: str, us
                 return []
     
     # Buscar turmas
-    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                               .filter(
                                   Class.school_id == school.id,
                                   Class.grade_id == grade.id
@@ -6713,7 +6714,7 @@ def _obter_turmas_por_serie(escola_id: str, serie_id: str, municipio_id: str, us
             return []
     
     turmas = query_turmas.order_by(Class.name).all()
-    return [{"id": str(t[0]), "nome": t[1]} for t in turmas]
+    return [class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None) for t in turmas]
 
 
 # ==================== ENDPOINT: GET /opcoes-filtros ====================

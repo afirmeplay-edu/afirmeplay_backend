@@ -154,7 +154,9 @@ def _obter_turmas_por_serie_avaliacao_inse_saeb(
             return []
         if permissao['scope'] != 'all' and user.get('city_id') != city.id:
             return []
-        query_turmas = Class.query.with_entities(Class.id, Class.name).join(
+        from app.utils.class_label_helpers import class_filter_option
+
+        query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift).join(
             ClassTest, Class.id == ClassTest.class_id
         ).join(Test, ClassTest.test_id == Test.id).join(
             School, School.id == cast(Class.school_id, String)
@@ -172,7 +174,11 @@ def _obter_turmas_por_serie_avaliacao_inse_saeb(
                 else:
                     return []
         turmas = query_turmas.distinct().all()
-        return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}", "name": t[1] or f"Turma {t[0]}"} for t in turmas]
+        out = []
+        for t in turmas:
+            opt = class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None)
+            out.append({**opt, "nome": opt["name"]})
+        return out
     except Exception as e:
         logging.error("Erro ao obter turmas por série/avaliação (INSE-Saeb): %s", str(e))
         return []

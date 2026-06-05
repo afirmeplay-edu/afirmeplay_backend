@@ -954,11 +954,13 @@ class AnswerSheetGenerator:
             class_name = ''
             school_name = ''
             grade_name = ''
+            shift = ''
             
             if student_obj.class_id:
                 class_obj = Class.query.get(student_obj.class_id)
                 if class_obj:
                     class_name = class_obj.name or ''
+                    shift = (class_obj.shift or '').strip()
                     if class_obj.grade:
                         grade_name = class_obj.grade.name or ''
             
@@ -974,6 +976,7 @@ class AnswerSheetGenerator:
                 'registration': getattr(student_obj, 'registration', ''),
                 'class_name': class_name,
                 'grade_name': grade_name,
+                'shift': shift,
                 'school_name': school_name,
                 'class_id': str(student_obj.class_id) if student_obj.class_id else ''
             }

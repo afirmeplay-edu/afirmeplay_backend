@@ -1654,14 +1654,22 @@ def get_password_report_pdf():
         results = query.all()
 
         # Agrupar por turma atual do aluno (class_id + class_name + grade_name)
+        from app.utils.class_label_helpers import normalize_shift
+
         turmas_map = {}
         for log, school, city, class_obj, grade in results:
             class_id_key = str(class_obj.id) if class_obj else "_sem_turma_"
             class_name = class_obj.name if class_obj else "—"
             grade_name = grade.name if grade else "—"
+            shift = normalize_shift(class_obj.shift) if class_obj else None
             key = (class_id_key, class_name, grade_name)
             if key not in turmas_map:
-                turmas_map[key] = {"class_name": class_name, "grade_name": grade_name, "alunos": []}
+                turmas_map[key] = {
+                    "class_name": class_name,
+                    "grade_name": grade_name,
+                    "shift": shift,
+                    "alunos": [],
+                }
             turmas_map[key]["alunos"].append({
                 "student_name": log.student_name,
                 "email": log.email,
@@ -1686,6 +1694,7 @@ def get_password_report_pdf():
             turmas.append({
                 "class_name": turma["class_name"],
                 "grade_name": turma["grade_name"],
+                "shift": turma.get("shift") or "",
                 "pages": pages,
                 "total_alunos": len(alunos),
             })

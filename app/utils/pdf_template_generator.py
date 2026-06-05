@@ -934,6 +934,9 @@ def _adicionar_participacao(elements: List, total_alunos: Dict, avaliacao_titulo
     for item_data in total_alunos.get(dados_key, []):
         # Quebrar texto para nomes de escolas longos
         nome_item = item_data.get(nome_key, '')
+        shift_item = (item_data.get('shift') or '').strip()
+        if shift_item and dados_key == 'por_turma':
+            nome_item = f"{nome_item} — {shift_item}" if nome_item else shift_item
         if scope_type == 'city' and len(nome_item) > 20:
             # Quebrar em linhas de no máximo 20 caracteres
             palavras = nome_item.split()

@@ -57,6 +57,7 @@ from app.models.grades import Grade
 from app.models.evaluationResult import EvaluationResult
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.decimal_helpers import round_to_two_decimals
+from app.utils.class_label_helpers import normalize_shift, class_filter_option
 from app.utils.school_equal_weight_means import (
     granularidade_to_hierarchical_target,
     hierarchical_mean_grade_and_proficiency,
@@ -1979,8 +1980,10 @@ def _gerar_tabela_detalhada_por_disciplina(
                 escola_nome = "N/A"
                 escola_id = None
                 
+                turma_shift = ""
                 if student.class_:
                     turma_nome = student.class_.name or "N/A"
+                    turma_shift = normalize_shift(student.class_.shift) or ""
                     if student.class_.grade:
                         serie_nome = student.class_.grade.name or "N/A"
                     sid = getattr(student.class_, 'school_id', None)
@@ -2092,6 +2095,7 @@ def _gerar_tabela_detalhada_por_disciplina(
                     "escola": escola_nome,
                     "serie": serie_nome,
                     "turma": turma_nome,
+                    "shift": turma_shift,
                     "respostas_por_questao": respostas_por_questao,
                     "total_acertos": total_acertos,
                     "total_erros": total_erros,
@@ -3296,7 +3300,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                 
                 if escola_valida and serie_valida:
                     # Ambos são específicos
-                    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+                    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
@@ -3309,7 +3313,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .distinct()
                 elif escola_valida and not serie_valida:
                     # Escola específica, série "all"
-                    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+                    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
@@ -3320,7 +3324,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .distinct()
                 elif not escola_valida and serie_valida:
                     # Escola "all", série específica
-                    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+                    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
@@ -3332,7 +3336,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .distinct()
                 else:
                     # Ambos são "all"
-                    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+                    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
@@ -3346,7 +3350,9 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                     query_turmas = filter_classes_by_user(query_turmas, user)
                 
                 turmas = query_turmas.all()
-                opcoes["turmas"] = [{"id": str(t[0]), "name": t[1] or f"Turma {t[0]}"} for t in turmas]
+                opcoes["turmas"] = [
+                    class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None) for t in turmas
+                ]
         
         return opcoes
         
@@ -6066,7 +6072,7 @@ def _obter_turmas_por_serie(
         return []
     
     # Buscar turmas onde a avaliação foi aplicada na escola e série específicas
-    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                          .join(ClassTest, Class.id == ClassTest.class_id)\
                          .join(Test, ClassTest.test_id == Test.id)\
                          .join(School, School.id == cast(Class.school_id, String))\
@@ -6096,7 +6102,9 @@ def _obter_turmas_por_serie(
             return []
     
     turmas = query_turmas.distinct().all()
-    return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+    return [
+        class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None) for t in turmas
+    ]
 
 
 def _escola_param_eh_especifica(escola: Optional[str]) -> bool:
@@ -6185,7 +6193,7 @@ def _obter_turmas_por_serie_municipio(
         return []
 
     query_turmas = (
-        Class.query.with_entities(Class.id, Class.name)
+        Class.query.with_entities(Class.id, Class.name, Class.shift)
         .join(ClassTest, Class.id == ClassTest.class_id)
         .join(Test, ClassTest.test_id == Test.id)
         .join(School, School.id == cast(Class.school_id, String))
@@ -6222,7 +6230,9 @@ def _obter_turmas_por_serie_municipio(
             return []
 
     turmas = query_turmas.distinct().all()
-    return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+    return [
+        class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None) for t in turmas
+    ]
 
 
 # ==================== OPÇÕES DE FILTRO PARA EVOLUÇÃO (Estado → Município → Escola → Série → Turma) ====================
@@ -6356,7 +6366,7 @@ def _obter_turmas_por_serie_evolucao(municipio_id: str, escola_id: str, serie_id
     escola_id_str = str(escola_id).strip()
     serie_id_str = str(serie_id).strip()
     query_turmas = (
-        Class.query.with_entities(Class.id, Class.name)
+        Class.query.with_entities(Class.id, Class.name, Class.shift)
         .join(ClassTest, Class.id == ClassTest.class_id)
         .join(School, School.id == cast(Class.school_id, String))
         .join(City, School.city_id == City.id)
@@ -6378,7 +6388,14 @@ def _obter_turmas_por_serie_evolucao(municipio_id: str, escola_id: str, serie_id
         query_turmas = query_turmas.filter(Class.id.in_(teacher_class_ids))
 
     turmas = query_turmas.distinct().all()
-    return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+    return [
+        {
+            "id": str(t[0]),
+            "nome": t[1] or f"Turma {t[0]}",
+            "shift": normalize_shift(t[2]) or "",
+        }
+        for t in turmas
+    ]
 
 
 def _parse_data_filtro(value: Optional[str]):
@@ -8525,7 +8542,14 @@ def _calcular_ranking_global_alunos(
         class_info_by_id = {}
         if class_ids:
             classes_with_grade = Class.query.options(joinedload(Class.grade)).filter(Class.id.in_(class_ids)).all()
-            class_info_by_id = {c.id: (c.name or "N/A", c.grade.name if c.grade else "N/A") for c in classes_with_grade}
+            class_info_by_id = {
+                c.id: (
+                    c.name or "N/A",
+                    c.grade.name if c.grade else "N/A",
+                    normalize_shift(c.shift) or "",
+                )
+                for c in classes_with_grade
+            }
             school_ids = list({c.school_id for c in classes_with_grade if c.school_id})
             if school_ids:
                 schools = School.query.filter(School.id.in_(school_ids)).all()
@@ -8557,7 +8581,7 @@ def _calcular_ranking_global_alunos(
             # Dados do aluno para ranking
             nota = evaluation_result.grade if evaluation_result else 0.0
             
-            turma_nome, serie_nome = class_info_by_id.get(student.class_id, ("N/A", "N/A"))
+            turma_nome, serie_nome, turma_shift = class_info_by_id.get(student.class_id, ("N/A", "N/A", ""))
             escola_nome = "N/A"
             escola_id = None
             if student.class_id and school_by_class_id.get(student.class_id):
@@ -8571,6 +8595,7 @@ def _calcular_ranking_global_alunos(
                 "escola": escola_nome,
                 "serie": serie_nome,
                 "turma": turma_nome,
+                "shift": turma_shift,
                 "total_acertos": total_acertos,
                 "total_respondidas": total_respondidas,
                 "nota": nota,

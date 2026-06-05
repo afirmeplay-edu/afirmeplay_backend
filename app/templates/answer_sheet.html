@@ -667,6 +667,10 @@
 								student.class_name or 'A' }}</span
 							>
 						</div>
+						<div class="header-info-line">
+							<span class="label">TURNO:</span>
+							<span class="value">{{ student.shift or '—' }}</span>
+						</div>
 					</div>
 					<div class="student-name-grid">
 						<div class="student-name-label">NOME DO ALUNO:</div>
@@ -994,6 +998,10 @@
 								>{{ student.grade_name or test_data.grade_name or 'Sem série' }} - {{
 								student.class_name or 'A' }}</span
 							>
+						</div>
+						<div class="header-info-line">
+							<span class="label">TURNO:</span>
+							<span class="value">{{ student.shift or '—' }}</span>
 						</div>
 					</div>
 					<div class="student-name-grid">

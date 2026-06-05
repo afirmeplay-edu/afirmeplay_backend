@@ -1591,6 +1591,7 @@ class DashboardService:
                 db.session.query(
                     Class.id.label("class_id"),
                     Class.name.label("turma"),
+                    Class.shift.label("shift"),
                     Grade.name.label("serie"),
                     func.count(distinct(Student.id)).label("alunos"),
                     func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
@@ -1630,6 +1631,7 @@ class DashboardService:
             query = query.group_by(
                 Class.id,
                 Class.name,
+                Class.shift,
                 Grade.name,
                 er_by_class.c.cnt,
                 asr_by_class.c.cnt,
@@ -1666,6 +1668,7 @@ class DashboardService:
                         "class_id": class_id_str,
                         "turma": row.turma or "",
                         "serie": row.serie or "",
+                        "shift": (row.shift or "").strip() if getattr(row, "shift", None) else "",
                         "media": float(row.media or 0),
                         "acerto": int(row.acerto_total or 0),
                         "acerto_percent": float(row.acerto_percent or 0),
@@ -1872,6 +1875,7 @@ class DashboardService:
                 db.session.query(
                     Class.id.label("class_id"),
                     Class.name.label("turma"),
+                    Class.shift.label("shift"),
                     Grade.name.label("serie"),
                     func.count(distinct(Student.id)).label("alunos"),
                     func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
@@ -1911,6 +1915,7 @@ class DashboardService:
             query = query.group_by(
                 Class.id,
                 Class.name,
+                Class.shift,
                 Grade.name,
                 er_by_class.c.cnt,
                 asr_by_class.c.cnt,
@@ -1946,6 +1951,7 @@ class DashboardService:
                     "class_id": class_id_str,
                     "turma": row.turma or "",
                     "serie": row.serie or "",
+                    "shift": (row.shift or "").strip() if getattr(row, "shift", None) else "",
                     "media": float(row.media or 0),
                     "acerto": int(row.acerto_total or 0),
                     "acerto_percent": float(row.acerto_percent or 0),
@@ -1992,6 +1998,7 @@ class DashboardService:
                 Student.name.label("student_name"),
                 school_alias.name.label("school_name"),
                 class_alias.name.label("class_name"),
+                class_alias.shift.label("shift"),
                 Grade.name.label("serie"),
                 func.coalesce(func.avg(EvaluationResult.grade), 0).label("average_grade"),
                 (
@@ -2018,6 +2025,7 @@ class DashboardService:
                 Student.name,
                 school_alias.name,
                 class_alias.name,
+                class_alias.shift,
                 Grade.name,
                 er_by_student.c.cnt,
                 asr_by_student.c.cnt,
@@ -2044,6 +2052,7 @@ class DashboardService:
                     "school_name": row.school_name,
                     "class_name": row.class_name,
                     "serie": row.serie or "",
+                    "shift": (row.shift or "").strip() if getattr(row, "shift", None) else "",
                     "media": float(row.average_grade or 0),
                     "completed_evaluations": int(row.completed_evaluations or 0),
                     "position": idx + 1,

@@ -590,6 +590,7 @@ def _build_total_alunos(
             {
                 "turma": c.name or "Turma",
                 "turma_id": cid,
+                "shift": (c.shift or "").strip() if getattr(c, "shift", None) else "",
                 "matriculados": mat,
                 "avaliados": ava,
                 "percentual": pct,
@@ -759,6 +760,7 @@ def _build_niveis_layer(
         row = _totais_niveis(b)
         row["turma"] = c.name or "Turma"
         row["turma_id"] = cid
+        row["shift"] = (c.shift or "").strip() if getattr(c, "shift", None) else ""
         por_turma.append(row)
     por_turma.sort(key=lambda x: (x.get("turma") or "").upper())
 
@@ -936,10 +938,12 @@ def _build_proficiencia_nota(
             sub = [r for r in results if _student_in_class(r, cl_id)]
             rows_t = _discipline_ns_rows(sub, name)
             tg, tp = hierarchical_mean_grade_and_proficiency(rows_t, "turma")
+            class_shift = (c.shift or "").strip() if getattr(c, "shift", None) else ""
             por_turma_p.append(
                 {
                     "turma": c.name or "Turma",
                     "turma_id": cl_id,
+                    "shift": class_shift,
                     "proficiencia": round_to_two_decimals(tp),
                 }
             )
@@ -947,6 +951,7 @@ def _build_proficiencia_nota(
                 {
                     "turma": c.name or "Turma",
                     "turma_id": cl_id,
+                    "shift": class_shift,
                     "nota": round_to_two_decimals(tg),
                 }
             )

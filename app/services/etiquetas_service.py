@@ -170,8 +170,11 @@ class EtiquetasService:
         city_name = str(city.name or "").strip().upper()
         prefeitura_label = f"PREFEITURA MUNICIPAL DE {city_name}"
 
+        from app.utils.class_label_helpers import normalize_shift
+
         class_shift = str(selected_class.shift or "").strip() if selected_class else ""
         shift = filters["shift"] or class_shift
+        turno = normalize_shift(shift) or shift or ""
 
         return {
             "municipio": {
@@ -186,6 +189,7 @@ class EtiquetasService:
                 "serie": str(selected_grade.name or "").strip() if selected_grade else "Todas as séries",
                 "turma": str(selected_class.name or "").strip() if selected_class else "Todas as turmas",
                 "shift": shift,
+                "turno": turno,
                 "ano": datetime.now().year,
             },
             "modo": filters["modo"],

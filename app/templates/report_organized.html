@@ -921,7 +921,7 @@
 					{% if metadados.scope_type == 'school' %} {% for t in
 					(total_alunos.por_turma or []) %}
 					<tr>
-						<td>{{ t.turma }}</td>
+						<td>{% if t.shift %}{{ t.turma }} — {{ t.shift }}{% else %}{{ t.turma }}{% endif %}</td>
 						<td>{{ t.matriculados }}</td>
 						<td>{{ t.avaliados }}</td>
 						<td>{{ '%.0f' % (t.percentual or 0) }}%</td>
@@ -1034,7 +1034,7 @@
 					{% if metadados.scope_type == 'school' %} {% for t in
 					(bloco.por_turma or []) %}
 					<tr>
-						<td>{{ t.turma }}</td>
+						<td>{% if t.shift %}{{ t.turma }} — {{ t.shift }}{% else %}{{ t.turma }}{% endif %}</td>
 						<td>{{ t.abaixo_do_basico }}</td>
 						<td>{{ t.basico }}</td>
 						<td>{{ t.adequado }}</td>
@@ -1222,7 +1222,7 @@
 					endif %} {% if lista_entidades %} {% for t in
 					lista_entidades %} {% if metadados.scope_type == 'school' %}
 					{% set turma_nome = (t.turma|string|trim)|upper %} {% set
-					entidade_nome_display = t.turma %} {% else %} {% set
+					entidade_nome_display = (t.turma ~ (' — ' ~ t.shift if t.shift else ''))|trim %} {% else %} {% set
 					turma_nome = (t.escola|string|trim)|upper %} {% set
 					entidade_nome_display = t.escola %} {% endif %} {% set
 					ns_turma_prof = namespace(portugues=0, matematica=0) %} {%
@@ -1483,7 +1483,7 @@
 					endif %} {% if lista_entidades %} {% for t in
 					lista_entidades %} {% if metadados.scope_type == 'school' %}
 					{% set turma_nome = (t.turma|string|trim)|upper %} {% set
-					entidade_nome_display = t.turma %} {% else %} {% set
+					entidade_nome_display = (t.turma ~ (' — ' ~ t.shift if t.shift else ''))|trim %} {% else %} {% set
 					turma_nome = (t.escola|string|trim)|upper %} {% set
 					entidade_nome_display = t.escola %} {% endif %} {% set
 					ns_turma_nota = namespace(portugues=0, matematica=0) %} {%

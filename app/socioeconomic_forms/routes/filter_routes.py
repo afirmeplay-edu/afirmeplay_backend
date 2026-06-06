@@ -23,25 +23,84 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import cast, String
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 bp = Blueprint('form_filters', __name__, url_prefix='/forms')
 
 
 # ---------- Helpers para INSE x SAEB (avaliação no filtro) ----------
-def _obter_avaliacoes_por_municipio_inse_saeb(
+def _norm_filtro_inse(val, all_values=("all", "todas", "")):
+    if not val:
+        return None
+    s = str(val).strip()
+    if not s or s.lower() in all_values:
+        return None
+    return s
+
+
+def _obter_series_com_aplicacoes_municipio_inse_saeb(
     municipio_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Séries do município com avaliações aplicadas (modal INSE/SAEB e PNEERQ)."""
+    try:
+        from app.models.test import Test
+        from app.models.classTest import ClassTest
+        from app.models.grades import Grade
+
+        city = City.query.get(municipio_id)
+        if not city:
+            return []
+        if permissao["scope"] != "all" and user.get("city_id") != city.id:
+            return []
+
+        query_series = (
+            Grade.query.with_entities(Grade.id, Grade.name)
+            .join(Class, Grade.id == Class.grade_id)
+            .join(ClassTest, Class.id == ClassTest.class_id)
+            .join(School, School.id == cast(Class.school_id, String))
+            .join(City, School.city_id == City.id)
+            .filter(City.id == city.id)
+        )
+        if permissao["scope"] == "escola" and user.get("role") == "professor":
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if not teacher:
+                return []
+            from app.models.teacherClass import TeacherClass
+
+            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            teacher_class_ids = [tc.class_id for tc in teacher_classes]
+            if not teacher_class_ids:
+                return []
+            query_series = query_series.filter(Class.id.in_(teacher_class_ids))
+
+        series = query_series.distinct().order_by(Grade.name.asc()).all()
+        return [{"id": str(s[0]), "nome": s[1], "name": s[1]} for s in series]
+    except Exception as e:
+        logging.error("Erro ao obter séries por município (INSE-Saeb): %s", str(e))
+        return []
+
+
+def _obter_avaliacoes_por_municipio_inse_saeb(
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    serie_id: Optional[str] = None,
+    nome: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Retorna avaliações aplicadas no município (para filtro INSE x SAEB)."""
     try:
         from app.models.test import Test
         from app.models.classTest import ClassTest
+        from app.models.grades import Grade
 
         city = City.query.get(municipio_id)
         if not city:
             return []
         if permissao['scope'] != 'all' and user.get('city_id') != city.id:
             return []
+
+        serie_param = _norm_filtro_inse(serie_id)
+        nome_param = str(nome).strip() if nome else None
 
         if permissao['scope'] == 'escola':
             from app.permissions.query_filters import filter_tests_by_user
@@ -52,6 +111,11 @@ def _obter_avaliacoes_por_municipio_inse_saeb(
             test_query = test_query.join(School, School.id == cast(Class.school_id, String))
             test_query = test_query.join(City, School.city_id == City.id)
             test_query = test_query.filter(City.id == city.id)
+            if serie_param:
+                test_query = test_query.join(Grade, Class.grade_id == Grade.id)
+                test_query = test_query.filter(cast(Grade.id, String) == serie_param)
+            if nome_param:
+                test_query = test_query.filter(Test.title.ilike(f"%{nome_param}%"))
             avaliacoes = test_query.distinct().all()
         else:
             query_avaliacoes = Test.query.with_entities(Test.id, Test.title).join(
@@ -59,6 +123,11 @@ def _obter_avaliacoes_por_municipio_inse_saeb(
             ).join(Class, ClassTest.class_id == Class.id).join(
                 School, School.id == cast(Class.school_id, String)
             ).join(City, School.city_id == City.id).filter(City.id == city.id)
+            if serie_param:
+                query_avaliacoes = query_avaliacoes.join(Grade, Class.grade_id == Grade.id)
+                query_avaliacoes = query_avaliacoes.filter(cast(Grade.id, String) == serie_param)
+            if nome_param:
+                query_avaliacoes = query_avaliacoes.filter(Test.title.ilike(f"%{nome_param}%"))
             avaliacoes = query_avaliacoes.distinct().all()
 
         return [{"id": str(a[0]), "titulo": a[1], "nome": a[1]} for a in avaliacoes]
@@ -730,6 +799,8 @@ def obter_opcoes_filtros_inse_saeb():
         avaliacao = request.args.get('avaliacao')
         escola = request.args.get('escola')
         serie = request.args.get('serie')
+        serie_filtro = request.args.get('serie_filtro')
+        nome_filtro = request.args.get('nome')
 
         response = {}
 
@@ -740,7 +811,17 @@ def obter_opcoes_filtros_inse_saeb():
 
             if municipio:
                 response["formularios"] = _obter_formularios_por_municipio(estado, municipio, user, permissao)
-                response["avaliacoes"] = _obter_avaliacoes_por_municipio_inse_saeb(municipio, user, permissao)
+                response["avaliacoes"] = _obter_avaliacoes_por_municipio_inse_saeb(
+                    municipio,
+                    user,
+                    permissao,
+                    serie_id=serie_filtro,
+                    nome=nome_filtro,
+                )
+                if not avaliacao:
+                    response["series_disponiveis"] = _obter_series_com_aplicacoes_municipio_inse_saeb(
+                        municipio, user, permissao
+                    )
 
                 if formulario or avaliacao:
                     escolas_form = (

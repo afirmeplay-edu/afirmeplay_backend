@@ -739,6 +739,13 @@ class EvaluationResultService:
                             'score_percentage': round_to_two_decimals((correct_answers_subject / total_respondidas) * 100) if total_respondidas > 0 else 0
                         })
                 
+                empty_classification = {
+                    'abaixo_do_basico': 0,
+                    'basico': 0,
+                    'adequado': 0,
+                    'avancado': 0,
+                }
+
                 if subject_results:
                     # Médias por disciplina: mesmo peso por escola (média das médias escolares)
                     total_students = len(subject_results)
@@ -750,15 +757,9 @@ class EvaluationResultService:
                     avg_proficiency = round_to_two_decimals(avg_proficiency)
                     avg_grade = round_to_two_decimals(avg_grade)
                     avg_score_percentage = round_to_two_decimals(avg_score_percentage)
-                    
-                    # Distribuição de classificação
-                    classification_distribution = {
-                        'abaixo_do_basico': 0,
-                        'basico': 0,
-                        'adequado': 0,
-                        'avancado': 0
-                    }
-                    
+
+                    classification_distribution = dict(empty_classification)
+
                     for sr in subject_results:
                         classification = sr['classification'].lower()
                         # CORREÇÃO: Verificar 'abaixo' primeiro para evitar classificar 'Básico' como 'Abaixo do Básico'
@@ -770,7 +771,7 @@ class EvaluationResultService:
                             classification_distribution['adequado'] += 1
                         elif 'avançado' in classification or 'avancado' in classification:
                             classification_distribution['avancado'] += 1
-                    
+
                     subject_statistics[subject_name] = {
                         'subject_id': str(subject_id),
                         'subject_name': subject_name,
@@ -782,6 +783,21 @@ class EvaluationResultService:
                         'average_score_percentage': avg_score_percentage,  # Já arredondado para 2 casas decimais
                         'classification_distribution': classification_distribution,
                         'student_results': subject_results
+                    }
+                else:
+                    # Avaliação aplicada mas sem EvaluationResult: expor disciplina com zeros
+                    # para o frontend não depender de metadados locais.
+                    subject_statistics[subject_name] = {
+                        'subject_id': str(subject_id),
+                        'subject_name': subject_name,
+                        'total_questions': total_questions_subject,
+                        'questions_with_answer': len(questions_with_answer),
+                        'total_students': 0,
+                        'average_proficiency': 0.0,
+                        'average_grade': 0.0,
+                        'average_score_percentage': 0.0,
+                        'classification_distribution': dict(empty_classification),
+                        'student_results': [],
                     }
             
             return {

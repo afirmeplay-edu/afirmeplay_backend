@@ -4281,7 +4281,12 @@ def _obter_municipios_por_estado_cartao(estado: str, user: dict, permissao: dict
 
 
 def _obter_gabaritos_por_municipio_cartao(
-    municipio_id: str, user: dict, permissao: dict, periodo_bounds: Optional[Tuple[datetime, datetime]] = None
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+    serie_id: Optional[str] = None,
+    nome: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Gabaritos criados para o município (por school_id, class_id ou municipality/state), mesmo sem correções."""
     from sqlalchemy import or_, and_
@@ -4317,6 +4322,9 @@ def _obter_gabaritos_por_municipio_cartao(
     if not conditions:
         return []
     q = q.filter(or_(*conditions))
+    nome_param = str(nome).strip() if nome else None
+    if nome_param:
+        q = q.filter(AnswerSheetGabarito.title.ilike(f"%{nome_param}%"))
     # Só cartão-resposta: não listar gabaritos vinculados a prova online (avaliação virtual)
     q = q.outerjoin(Test, AnswerSheetGabarito.test_id == Test.id).filter(
         or_(
@@ -4465,6 +4473,16 @@ def _obter_gabaritos_por_municipio_cartao(
             first_block = blocks[0] if isinstance(blocks[0], dict) else {}
             disciplina = str(first_block.get("subject_name") or "").strip()
         out.append({"id": gid, "titulo": (getattr(g, "title", None) or "Gabarito"), "disciplina": disciplina})
+    serie_param = str(serie_id).strip() if serie_id and str(serie_id).strip().lower() not in ("all", "") else None
+    if serie_param and out:
+        from app.routes.answer_sheet_evaluation_listing import _gabarito_aplica_serie
+
+        filtered_out = []
+        for item in out:
+            g = AnswerSheetGabarito.query.get(item["id"])
+            if g and _gabarito_aplica_serie(g, serie_param, municipio_id):
+                filtered_out.append(item)
+        out = filtered_out
     if not periodo_bounds or not out:
         return out
     school_ids_city = [s.id for s in School.query.filter(School.city_id == municipio_id).all()]
@@ -4787,6 +4805,8 @@ def obter_opcoes_filtros_cartao():
         escola = request.args.get('escola')
         serie = request.args.get('serie')
         turma = request.args.get('turma')
+        serie_filtro = request.args.get('serie_filtro')
+        nome_filtro = request.args.get('nome')
         periodo_raw = request.args.get('periodo')
         periodo_bounds = None
         if periodo_raw and str(periodo_raw).strip():
@@ -4804,9 +4824,20 @@ def obter_opcoes_filtros_cartao():
                 municipio_str = str(municipio).strip()
                 # Gabaritos, escolas, turmas e classes ficam no schema do tenant do município
                 set_search_path(city_id_to_schema_name(municipio_str))
+                from app.routes.answer_sheet_evaluation_listing import obter_series_com_gabaritos_municipio
+
                 response["gabaritos"] = _obter_gabaritos_por_municipio_cartao(
-                    municipio_str, user, permissao, periodo_bounds
+                    municipio_str,
+                    user,
+                    permissao,
+                    periodo_bounds,
+                    serie_id=serie_filtro,
+                    nome=nome_filtro,
                 )
+                if not gabarito:
+                    response["series_disponiveis"] = obter_series_com_gabaritos_municipio(
+                        municipio_str, user, permissao
+                    )
                 if gabarito:
                     response["escolas"] = _obter_escolas_por_gabarito_cartao(
                         gabarito, municipio, user, permissao, periodo_bounds, estado

@@ -729,7 +729,7 @@ def listar_avaliacoes():
         
         # Identificar escopo de busca baseado nos filtros aplicados
         scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
-        logging.debug(f"scope_info: {scope_info}")
+        logging.info(f"scope_info: {scope_info}")
         
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
@@ -803,9 +803,6 @@ def listar_avaliacoes():
                 scope_info=scope_info,
                 city_data=city_data,
             )
-
-        municipio_str = str(municipio).strip()
-        set_search_path(city_id_to_schema_name(municipio_str))
         
         # Buscar escolas do escopo baseado nas permissões
         escolas_escopo = scope_info.get('escolas', [])
@@ -1166,7 +1163,7 @@ def listar_avaliacoes():
         
         # Determinar nível de granularidade
         nivel_granularidade = _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, avaliacao, user)
-        logging.debug(f"nivel_granularidade: {nivel_granularidade}, estado: {estado}, municipio: {municipio}, escola: {escola}, serie: {serie}, turma: {turma}, avaliacao: {avaliacao}")
+        logging.info(f"nivel_granularidade: {nivel_granularidade}, estado: {estado}, municipio: {municipio}, escola: {escola}, serie: {serie}, turma: {turma}, avaliacao: {avaliacao}")
         
         # Calcular estatísticas consolidadas baseadas no escopo dos filtros
         estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(todas_avaliacoes_escopo, scope_info, nivel_granularidade, user)
@@ -1848,7 +1845,7 @@ def _gerar_tabela_detalhada_por_disciplina(
         # Determinar escopo de alunos baseado na granularidade
         # CORRIGIDO: Usar a lógica correta de filtros hierárquicos
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
-        logging.debug(f"Escopo de cálculo para tabela detalhada: {escopo_calculo}")
+        logging.info(f"Escopo de cálculo para tabela detalhada: {escopo_calculo}")
         
         # Buscar alunos usando a função corrigida
         # Para o caso "escola", usar a lógica específica baseada no usuário
@@ -1924,15 +1921,12 @@ def _gerar_tabela_detalhada_por_disciplina(
         # Log para debug
         logging.debug("Tabela detalhada: %d alunos encontrados", len(all_students))
 
-        # Buscar resultados pré-calculados (mesmo critério de escopo das estatísticas consolidadas)
+        # Buscar resultados pré-calculados (apenas dos alunos do escopo)
         if all_students:
-            from app.services.evaluation_result_snapshot import query_evaluation_results_for_stats
-
             student_ids = [aluno.id for aluno in all_students]
-            class_tests_av = ClassTest.query.filter_by(test_id=avaliacao_id).all()
-            class_ids_av = [ct.class_id for ct in class_tests_av]
-            evaluation_results = query_evaluation_results_for_stats(
-                [avaliacao_id], escopo_calculo, class_ids_av, student_ids
+            evaluation_results = EvaluationResult.query.filter(
+                EvaluationResult.test_id == avaliacao_id,
+                EvaluationResult.student_id.in_(student_ids)
             ).all()
         else:
             evaluation_results = []
@@ -2772,10 +2766,38 @@ def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, n
         # ==========================
         resultados_disciplina: List[Dict[str, Any]] = []
 
-        # Municipio: uma passada no escopo municipal (evita N× serviço por escola).
-        # O breakdown por escola permanece em resultados_detalhados.avaliacoes.
+        # Municipio: quebrar por escola (para cada escola, calcular por disciplina)
         if nivel_granularidade == "municipio":
-            return _safe_get_subject_stats(dict(scope_info or {}), "municipio")
+            escolas = scope_info.get("escolas") if isinstance(scope_info, dict) else None
+            if not escolas:
+                # Fallback: derivar escolas via class_tests
+                escolas = []
+                seen = set()
+                for ct in class_tests:
+                    try:
+                        sc = ct.class_.school if ct.class_ and ct.class_.school else None
+                    except Exception:
+                        sc = None
+                    if not sc:
+                        continue
+                    if sc.id in seen:
+                        continue
+                    seen.add(sc.id)
+                    escolas.append(sc)
+
+            for sc in escolas or []:
+                scoped = dict(scope_info or {})
+                scoped["escola"] = str(sc.id)
+
+                # Para um recorte por escola dentro da visão municipal, o nível efetivo de filtro é "escola"
+                rows = _safe_get_subject_stats(scoped, "escola")
+                for r in rows:
+                    # Só adiciona metadados do grupo; não altera campos existentes.
+                    r["escola_id"] = str(sc.id)
+                    r["escola"] = getattr(sc, "name", None)
+                    resultados_disciplina.append(r)
+
+            return resultados_disciplina
 
         # Escola e Série: quebrar por turma (para cada turma, calcular por disciplina)
         if nivel_granularidade in ("escola", "serie"):
@@ -3057,57 +3079,6 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
     except Exception as e:
         logging.error(f"Erro ao calcular estatísticas gerais: {str(e)}")
         return _get_empty_statistics_gerais(scope_info, nivel_granularidade)
-
-
-def _listar_disciplinas_do_teste(test) -> List[Dict[str, Any]]:
-    """Disciplinas configuradas na avaliação (subjects_info), na ordem do teste."""
-    from app.models.subject import Subject
-
-    if not test:
-        return []
-
-    subject_ids: List[str] = []
-    subjects_info = getattr(test, "subjects_info", None)
-    if isinstance(subjects_info, list):
-        for subject_info in subjects_info:
-            if isinstance(subject_info, dict) and subject_info.get("id"):
-                subject_ids.append(str(subject_info["id"]))
-            elif isinstance(subject_info, str):
-                subject_ids.append(subject_info)
-
-    if not subject_ids:
-        subject_rel = getattr(test, "subject_rel", None)
-        if subject_rel is not None:
-            return [{"id": str(subject_rel.id), "nome": subject_rel.name}]
-        return []
-
-    order = {sid: idx for idx, sid in enumerate(subject_ids)}
-    subjects = Subject.query.filter(Subject.id.in_(subject_ids)).all()
-    rows = [{"id": str(s.id), "nome": s.name} for s in subjects]
-    rows.sort(key=lambda item: order.get(item["id"], 999))
-    return rows
-
-
-def _metadados_avaliacao_consolidada(test_ids: List[str]) -> Dict[str, Any]:
-    """Metadados da avaliação quando há um único test_id no escopo."""
-    from app.models.test import Test
-
-    unique_ids = list({str(tid) for tid in (test_ids or []) if tid})
-    if len(unique_ids) != 1:
-        return {}
-
-    test = Test.query.get(unique_ids[0])
-    if not test:
-        return {}
-
-    disciplinas = _listar_disciplinas_do_teste(test)
-    return {
-        "avaliacao_id": str(test.id),
-        "avaliacao_titulo": test.title,
-        "disciplinas": disciplinas,
-        "disciplina": disciplinas[0]["nome"] if len(disciplinas) == 1 else None,
-        "disciplinas_nomes": [d["nome"] for d in disciplinas],
-    }
 
 
 def _get_empty_statistics_gerais(scope_info, nivel_granularidade):
@@ -8083,7 +8054,6 @@ def obter_opcoes_filtros():
                                     avaliacao, serie, municipio_str, user, permissao
                                 )
                 else:
-                    set_search_path(city_id_to_schema_name(municipio_str))
                     response["avaliacoes"] = _obter_avaliacoes_por_municipio(
                         municipio,
                         user,
@@ -8225,20 +8195,20 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         
         # Determinar escopo de cálculo baseado nos filtros
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
-        logging.debug(f"escopo_calculo: {escopo_calculo}")
+        logging.info(f"escopo_calculo: {escopo_calculo}")
         
         # Coletar dados do escopo
         test_ids = [ct.test_id for ct in class_tests]
         class_ids = [ct.class_id for ct in class_tests]
-        logging.debug(f"class_tests: {len(class_tests)}, test_ids: {test_ids}, class_ids: {class_ids}")
+        logging.info(f"class_tests: {len(class_tests)}, test_ids: {test_ids}, class_ids: {class_ids}")
         
         # Buscar alunos baseado no escopo (união com transferidos que têm snapshot no escopo)
         if nivel_granularidade == "avaliacao":
             todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
-            logging.debug(f"Avaliação específica: class_ids={class_ids}")
+            logging.info(f"Avaliação específica: class_ids={class_ids}")
         else:
             todos_alunos = _buscar_alunos_por_escopo(escopo_calculo)
-            logging.debug(f"Outro nível: nivel={nivel_granularidade}")
+            logging.info(f"Outro nível: nivel={nivel_granularidade}")
 
         from app.services.evaluation_result_snapshot import (
             merge_participant_student_ids,
@@ -8251,7 +8221,7 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         )
         todos_alunos = Student.query.filter(Student.id.in_(merged_ids)).all() if merged_ids else []
         total_alunos = len(todos_alunos)
-        logging.debug(
+        logging.info(
             "Universo de alunos pós-snapshot: total_alunos=%s (base=%s)",
             total_alunos,
             len(base_orig_ids),
@@ -8264,7 +8234,7 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         student_ids_com_resultado = {er.student_id for er in resultados_escopo if getattr(er, "student_id", None)}
         alunos_participantes = len(student_ids_com_resultado)
         resultados_por_aluno_unico = _dedupe_evaluation_results_by_student(resultados_escopo)
-        logging.debug(
+        logging.info(
             "resultados_escopo rows=%s alunos_distintos=%s test_ids=%s total_alunos=%s",
             len(resultados_escopo),
             alunos_participantes,
@@ -8331,7 +8301,7 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             f"alunos_ausentes={alunos_ausentes}, alunos_pendentes_lista={alunos_pendentes}"
         )
 
-        payload = {
+        return {
             "tipo": nivel_granularidade,
             "nome": _get_nome_granularidade(nivel_granularidade, scope_info, escola_info, serie_info),
             "estado": scope_info.get('estado', 'Todos os estados'),
@@ -8341,7 +8311,7 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             "total_escolas": len(set(ct.class_.school.id for ct in class_tests if ct.class_ and ct.class_.school)),
             "total_series": len(set(ct.class_.grade.id for ct in class_tests if ct.class_ and ct.class_.grade)),
             "total_turmas": len(set(ct.class_id for ct in class_tests)),
-            "total_avaliacoes": len(set(test_ids)),
+            "total_avaliacoes": len(test_ids),
             "total_alunos": total_alunos,
             "alunos_participantes": alunos_participantes,
             "alunos_pendentes": alunos_pendentes,
@@ -8349,11 +8319,8 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             "alunos_ausentes": alunos_ausentes,
             "media_nota_geral": round(media_nota, 2),
             "media_proficiencia_geral": format_decimal_two_places(media_proficiencia),
-            "distribuicao_classificacao_geral": distribuicao_geral,
-            "tem_resultados_entrega": alunos_participantes > 0,
+            "distribuicao_classificacao_geral": distribuicao_geral
         }
-        payload.update(_metadados_avaliacao_consolidada(test_ids))
-        return payload
         
     except Exception as e:
         logging.error(f"Erro ao calcular estatísticas consolidadas: {str(e)}")
@@ -8404,7 +8371,7 @@ def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Di
         escopo['municipio_id'] = scope_info.get('municipio_id')
     
     
-    logging.debug(f"Escopo calculado para {nivel_granularidade}: {escopo}")
+    logging.info(f"Escopo calculado para {nivel_granularidade}: {escopo}")
     return escopo
 
 
@@ -8413,7 +8380,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
     Busca alunos baseado no escopo de cálculo
     """
     try:
-        logging.debug(f"Buscando alunos por escopo: {escopo_calculo}")
+        logging.info(f"Buscando alunos por escopo: {escopo_calculo}")
 
         restrict_class_ids = escopo_calculo.get("restrict_class_ids")
         
@@ -8437,7 +8404,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                     query = query.filter(Student.class_id.in_(class_ids))
             
             alunos = query.all()
-            logging.debug(f"Alunos encontrados para município: {len(alunos)}")
+            logging.info(f"Alunos encontrados para município: {len(alunos)}")
             return alunos
         
         elif escopo_calculo['tipo'] == "escola":
@@ -8460,7 +8427,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                     query = query.filter(Student.class_id.in_(class_ids))
             
             alunos = query.all()
-            logging.debug(f"Alunos encontrados para escola: {len(alunos)}")
+            logging.info(f"Alunos encontrados para escola: {len(alunos)}")
             return alunos
         
         elif escopo_calculo['tipo'] == "serie":
@@ -8487,7 +8454,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                     query = query.filter(Student.class_id.in_(class_ids))
             
             alunos = query.all()
-            logging.debug(f"Alunos encontrados para série (escola_id={escopo_calculo.get('escola_id')}): {len(alunos)}")
+            logging.info(f"Alunos encontrados para série (escola_id={escopo_calculo.get('escola_id')}): {len(alunos)}")
             return alunos
         
         elif escopo_calculo['tipo'] == "turma":
@@ -8513,7 +8480,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                     logging.warning(f"Turma {escopo_calculo['turma_id']} não aplicou avaliação {escopo_calculo['avaliacao_id']} - retornando alunos para dados zerados")
             
             alunos = query.all()
-            logging.debug(f"Alunos encontrados para turma: {len(alunos)}")
+            logging.info(f"Alunos encontrados para turma: {len(alunos)}")
             return alunos
         
         
@@ -8632,7 +8599,7 @@ def _calcular_ranking_global_alunos(
         # Determinar escopo de alunos baseado na granularidade
         # CORRIGIDO: Usar a lógica correta de filtros hierárquicos
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
-        logging.debug(f"Escopo de cálculo para ranking: {escopo_calculo}")
+        logging.info(f"Escopo de cálculo para ranking: {escopo_calculo}")
         
         # Buscar alunos usando a função corrigida
         # Para o caso "escola", usar a lógica específica baseada no usuário
@@ -8689,13 +8656,10 @@ def _calcular_ranking_global_alunos(
         ).all()
         questions_map_ranking = {tq.question.id: tq.question for tq in test_questions_ranking}
 
-        # Buscar resultados pré-calculados (mesmo critério de escopo das estatísticas consolidadas)
-        from app.services.evaluation_result_snapshot import query_evaluation_results_for_stats
-
-        class_tests_rank = ClassTest.query.filter_by(test_id=avaliacao_id).all()
-        class_ids_rank = [ct.class_id for ct in class_tests_rank]
-        evaluation_results = query_evaluation_results_for_stats(
-            [avaliacao_id], escopo_calculo, class_ids_rank, student_ids
+        # Buscar resultados pré-calculados
+        evaluation_results = EvaluationResult.query.filter(
+            EvaluationResult.test_id == avaliacao_id,
+            EvaluationResult.student_id.in_(student_ids)
         ).all()
         results_dict = {er.student_id: er for er in evaluation_results}
 

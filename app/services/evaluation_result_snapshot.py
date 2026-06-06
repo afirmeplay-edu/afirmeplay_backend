@@ -147,28 +147,19 @@ def query_evaluation_results_for_stats(
     """
     q = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids))
     snap_expr = snapshot_scope_filter_expression(escopo_calculo, class_ids)
-    base_ids = base_student_ids if base_student_ids else []
-    legacy_null_snapshots = and_(
+    legacy = and_(
         EvaluationResult.school_id_snapshot.is_(None),
         EvaluationResult.class_id_snapshot.is_(None),
-        EvaluationResult.student_id.in_(base_ids) if base_ids else False,
-    )
-    # Aluno ainda no universo do escopo (matrícula atual), mesmo com snapshot
-    # desalinhado das turmas de aplicação (ex.: transferência ou class_ids filtrados por período).
-    in_scope_students = (
-        EvaluationResult.student_id.in_(base_ids) if base_ids else None
+        EvaluationResult.student_id.in_(base_student_ids if base_student_ids else []),
     )
     if snap_expr is not None:
-        if base_ids:
-            parts = [snap_expr, legacy_null_snapshots]
-            if in_scope_students is not None:
-                parts.append(in_scope_students)
-            q = q.filter(or_(*parts))
+        if base_student_ids:
+            q = q.filter(or_(snap_expr, legacy))
         else:
             q = q.filter(snap_expr)
     else:
-        if base_ids:
-            q = q.filter(EvaluationResult.student_id.in_(base_ids))
+        if base_student_ids:
+            q = q.filter(EvaluationResult.student_id.in_(base_student_ids))
         else:
             q = q.filter(False)
     return q

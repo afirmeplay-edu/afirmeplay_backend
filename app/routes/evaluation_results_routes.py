@@ -5862,12 +5862,111 @@ def _obter_municipios_por_estado(estado: str, user: dict, permissao: dict) -> Li
     return [{"id": str(m.id), "nome": m.name} for m in municipios]
 
 
+def _norm_filtro_modal(val, all_values=("all", "todas", "")):
+    if not val:
+        return None
+    s = str(val).strip()
+    if not s or s.lower() in all_values:
+        return None
+    return s
+
+
+def _obter_series_com_aplicacoes_municipio(
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    escola_param: str = "all",
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
+    """Séries do município com pelo menos uma avaliação aplicada (para filtro do modal de seleção)."""
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    city_id_str = str(city.id) if city.id else ""
+    if permissao["scope"] != "all" and _user_city_id(user) != city_id_str:
+        return []
+
+    excluir_olimpiada = or_(Test.type.is_(None), func.upper(Test.type) != "OLIMPIADA")
+    query_series = (
+        Grade.query.with_entities(Grade.id, Grade.name)
+        .join(Class, Grade.id == Class.grade_id)
+        .join(ClassTest, Class.id == ClassTest.class_id)
+        .join(Test, ClassTest.test_id == Test.id)
+        .join(School, School.id == cast(Class.school_id, String))
+        .join(City, School.city_id == City.id)
+        .filter(City.id == city.id, excluir_olimpiada)
+    )
+    query_series = _apply_class_test_application_period(query_series, periodo_bounds)
+
+    escola_param_norm = _norm_filtro_modal(escola_param)
+    if escola_param_norm:
+        query_series = query_series.filter(School.id == escola_param_norm)
+
+    if permissao["scope"] == "escola" and user.get("role") == "professor":
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+
+        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+        if not teacher:
+            return []
+        teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+        teacher_class_ids = [tc.class_id for tc in teacher_classes]
+        if not teacher_class_ids:
+            return []
+        query_series = query_series.filter(Class.id.in_(teacher_class_ids))
+
+    series = query_series.distinct().order_by(Grade.name.asc()).all()
+    return [{"id": str(s[0]), "nome": s[1], "name": s[1]} for s in series]
+
+
+def _format_avaliacoes_opcoes_filtro(avaliacoes_rows: List) -> List[Dict[str, Any]]:
+    """Inclui todas as disciplinas da avaliação (subjects_info + subject_rel)."""
+    from app.utils.response_formatters import _get_all_subjects_from_test
+
+    if not avaliacoes_rows:
+        return []
+
+    test_ids = [str(row[0]) for row in avaliacoes_rows]
+    tests = (
+        Test.query.filter(Test.id.in_(test_ids))
+        .options(joinedload(Test.subject_rel))
+        .all()
+    )
+    tests_by_id = {str(t.id): t for t in tests}
+
+    result: List[Dict[str, Any]] = []
+    for row in avaliacoes_rows:
+        tid = str(row[0])
+        titulo = row[1]
+        legacy_subject = (row[2] or "").strip() if len(row) > 2 else ""
+
+        disciplinas: List[str] = []
+        test = tests_by_id.get(tid)
+        if test:
+            for subj in _get_all_subjects_from_test(test):
+                name = (subj.get("name") or "").strip()
+                if name and name not in disciplinas:
+                    disciplinas.append(name)
+        if not disciplinas and legacy_subject:
+            disciplinas = [legacy_subject]
+
+        result.append({
+            "id": tid,
+            "titulo": titulo,
+            "disciplina": disciplinas[0] if disciplinas else "",
+            "disciplinas": disciplinas,
+        })
+    return result
+
+
 def _obter_avaliacoes_por_municipio(
     municipio_id: str,
     user: dict,
     permissao: dict,
     escola_param: str = "all",
     periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+    serie_id: Optional[str] = None,
+    nome: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Retorna avaliações aplicadas em um município específico, respeitando permissões.
@@ -5878,6 +5977,8 @@ def _obter_avaliacoes_por_municipio(
         permissao: Dicionário com informações de permissão
         escola_param: Parâmetro de escola ('all' ou ID específico)
         periodo_bounds: Se definido, só inclui provas com ClassTest.application no mês (ver _parse_periodo_bounds).
+        serie_id: Filtro opcional — só avaliações aplicadas em turmas da série.
+        nome: Filtro opcional — busca por trecho do título (case-insensitive).
 
     Returns:
         Lista de avaliações no formato [{"id": "...", "titulo": "...", "disciplina": "..."}]
@@ -5889,6 +5990,10 @@ def _obter_avaliacoes_por_municipio(
     # Verificar se o usuário tem acesso ao município
     if permissao['scope'] != 'all' and user.get('city_id') != city.id:
         return []
+
+    serie_param = _norm_filtro_modal(serie_id)
+    nome_param = str(nome).strip() if nome else None
+    escola_param_norm = _norm_filtro_modal(escola_param)
     
     # Exclui fluxo de olimpíada (StudentTestOlimpics); competições (COMPETICAO) permanecem listadas
     excluir_olimpiada = or_(Test.type.is_(None), func.upper(Test.type) != 'OLIMPIADA')
@@ -5904,6 +6009,13 @@ def _obter_avaliacoes_por_municipio(
         test_query = test_query.join(City, School.city_id == City.id)
         test_query = test_query.filter(City.id == city.id, excluir_olimpiada)
         test_query = _apply_class_test_application_period(test_query, periodo_bounds)
+        if serie_param:
+            test_query = test_query.join(Grade, Class.grade_id == Grade.id)
+            test_query = test_query.filter(cast(Grade.id, String) == serie_param)
+        if escola_param_norm:
+            test_query = test_query.filter(School.id == escola_param_norm)
+        if nome_param:
+            test_query = test_query.filter(Test.title.ilike(f"%{nome_param}%"))
 
         avaliacoes = test_query.distinct().all()
     else:
@@ -5917,10 +6029,17 @@ def _obter_avaliacoes_por_municipio(
                             .filter(City.id == city.id)\
                             .filter(excluir_olimpiada)
         query_avaliacoes = _apply_class_test_application_period(query_avaliacoes, periodo_bounds)
+        if serie_param:
+            query_avaliacoes = query_avaliacoes.join(Grade, Class.grade_id == Grade.id)
+            query_avaliacoes = query_avaliacoes.filter(cast(Grade.id, String) == serie_param)
+        if escola_param_norm:
+            query_avaliacoes = query_avaliacoes.filter(School.id == escola_param_norm)
+        if nome_param:
+            query_avaliacoes = query_avaliacoes.filter(Test.title.ilike(f"%{nome_param}%"))
 
         avaliacoes = query_avaliacoes.distinct().all()
-    
-    return [{"id": str(a[0]), "titulo": a[1], "disciplina": (a[2] or "")} for a in avaliacoes]
+
+    return _format_avaliacoes_opcoes_filtro(avaliacoes)
 
 
 def _obter_escolas_por_avaliacao(
@@ -7881,6 +8000,8 @@ def obter_opcoes_filtros():
         escola = request.args.get('escola')
         serie = request.args.get('serie')
         turma = request.args.get('turma')
+        serie_filtro = request.args.get('serie_filtro')
+        nome_filtro = request.args.get('nome')
         
         response = {}
         
@@ -7897,9 +8018,21 @@ def obter_opcoes_filtros():
                 municipio_str = str(municipio).strip()
                 if is_answer_sheet_report_entity():
                     set_search_path(city_id_to_schema_name(municipio_str))
-                    response["avaliacoes"] = obter_gabaritos_por_municipio(
-                        municipio_str, user, permissao, escola_param
+                    from app.routes.answer_sheet_evaluation_listing import (
+                        obter_series_com_gabaritos_municipio,
                     )
+                    response["avaliacoes"] = obter_gabaritos_por_municipio(
+                        municipio_str,
+                        user,
+                        permissao,
+                        escola_param,
+                        serie_id=serie_filtro,
+                        nome=nome_filtro,
+                    )
+                    if not avaliacao:
+                        response["series_disponiveis"] = obter_series_com_gabaritos_municipio(
+                            municipio_str, user, permissao
+                        )
                     if avaliacao:
                         response["escolas"] = obter_escolas_por_gabarito(
                             avaliacao, municipio_str, user, permissao
@@ -7922,8 +8055,22 @@ def obter_opcoes_filtros():
                                 )
                 else:
                     response["avaliacoes"] = _obter_avaliacoes_por_municipio(
-                        municipio, user, permissao, escola_param, periodo_bounds
+                        municipio,
+                        user,
+                        permissao,
+                        escola_param,
+                        periodo_bounds,
+                        serie_id=serie_filtro,
+                        nome=nome_filtro,
                     )
+                    if not avaliacao:
+                        response["series_disponiveis"] = _obter_series_com_aplicacoes_municipio(
+                            municipio,
+                            user,
+                            permissao,
+                            escola_param,
+                            periodo_bounds,
+                        )
                     if avaliacao:
                         response["escolas"] = _obter_escolas_por_avaliacao(
                             avaliacao, municipio, user, permissao, periodo_bounds

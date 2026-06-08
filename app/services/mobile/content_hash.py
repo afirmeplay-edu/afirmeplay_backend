@@ -19,6 +19,7 @@ def question_to_canon(q) -> Dict[str, Any]:
     """Serializa Question ORM para dict estável (sem relações)."""
     return {
         "id": q.id,
+        "question_id": q.id,
         "number": q.number,
         "text": q.text,
         "formatted_text": q.formatted_text,

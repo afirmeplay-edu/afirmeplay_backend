@@ -1,4 +1,5 @@
 import os
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,6 +22,8 @@ from app.services.mobile.student_bundle_serializer import (
     student_bundle_query_options,
 )
 from app.utils.response_formatters import _get_all_subjects_from_test
+
+logger = logging.getLogger(__name__)
 
 
 def _ttl_hours() -> int:
@@ -148,6 +151,11 @@ def build_tests_questions_payload(
         for r in tq_rows:
             q = q_map.get(r.question_id)
             if not q:
+                logger.warning(
+                    "Questão órfã omitida do bundle: test_id=%s question_id=%s",
+                    tid,
+                    r.question_id,
+                )
                 continue
             item = question_to_canon(q)
             item["order"] = r.order

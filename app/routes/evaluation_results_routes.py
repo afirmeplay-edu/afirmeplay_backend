@@ -601,7 +601,7 @@ def listar_avaliacoes():
     - escola (opcional): ID da escola ou 'all' para todas as escolas
     - serie (opcional): ID da série ou 'all' para todas as séries
     - turma (opcional): ID da turma ou 'all' para todas as turmas
-    - periodo (opcional): YYYY-MM; restringe ClassTest por application (ignorado em report_entity_type=answer_sheet)
+    - periodo (opcional): YYYY-MM; eco no payload (só restringe em opcoes-filtros, não nos resultados)
     - page, per_page: Parâmetros de paginação
     
     Lógica hierárquica com "all":
@@ -626,16 +626,16 @@ def listar_avaliacoes():
             return jsonify({"error": "Usuário não encontrado"}), 401
 
         periodo_raw = request.args.get("periodo")
-        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
         if not is_answer_sheet_report_entity():
             if periodo_raw is not None and str(periodo_raw).strip():
                 try:
-                    periodo_bounds = _parse_periodo_bounds(periodo_raw)
+                    _parse_periodo_bounds(periodo_raw)
                 except ValueError as ve:
                     return jsonify({
                         "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
                         "details": str(ve),
                     }), 400
+        periodo_bounds_dados = _periodo_bounds_dados_digital()
 
         # Extrair parâmetros de filtro
         estado = request.args.get('estado')
@@ -1077,7 +1077,7 @@ def listar_avaliacoes():
                     # Se não é um professor válido, não mostrar nenhuma avaliação
                     query_base = query_base.filter(Test.created_by == user['id']).filter(Test.id == None)
 
-            query_base = _apply_class_test_application_period(query_base, periodo_bounds)
+            query_base = _apply_class_test_application_period(query_base, periodo_bounds_dados)
 
         except Exception as e:
             logging.error(f"Erro ao aplicar filtros: {str(e)}")
@@ -1149,7 +1149,7 @@ def listar_avaliacoes():
                             
                             query_base = query_base.filter(or_(*filters))
 
-                    query_base = _apply_class_test_application_period(query_base, periodo_bounds)
+                    query_base = _apply_class_test_application_period(query_base, periodo_bounds_dados)
 
                     todas_avaliacoes_escopo = query_base.all()
                     logging.info(f"Query executada com nova sessão: {len(todas_avaliacoes_escopo)} avaliações encontradas")
@@ -1251,7 +1251,7 @@ def listar_avaliacoes():
                             # Se não é um professor válido, não mostrar nenhuma avaliação
                             query_base = query_base.filter(Test.created_by == user['id']).filter(Test.id == None)
 
-                    query_base = _apply_class_test_application_period(query_base, periodo_bounds)
+                    query_base = _apply_class_test_application_period(query_base, periodo_bounds_dados)
 
                     total = query_base.count()
                     offset = (page - 1) * per_page
@@ -1280,19 +1280,12 @@ def listar_avaliacoes():
         ranking_alunos = []
         
         restrict_class_ids: Optional[Set[Any]] = None
-        if periodo_bounds is not None and avaliacao and avaliacao.lower() != "all":
-            restrict_class_ids = {
-                ct.class_id for ct in todas_avaliacoes_escopo if str(ct.test_id) == str(avaliacao)
-            }
 
         # Para professor, sempre restringir a tabela/ranking às suas turmas (e ao recorte escola/série/turma).
         if (user.get("role") or "").lower() == "professor":
             if professor_allowed_class_ids is None:
                 professor_allowed_class_ids = set()
-            if restrict_class_ids is None:
-                restrict_class_ids = set(professor_allowed_class_ids)
-            else:
-                restrict_class_ids = set(restrict_class_ids).intersection(set(professor_allowed_class_ids))
+            restrict_class_ids = set(professor_allowed_class_ids)
 
         if avaliacao and avaliacao.lower() != 'all':
             tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
@@ -1508,11 +1501,10 @@ def listar_avaliacoes_analise_ia():
         if not municipio:
             return jsonify({"error": "Município é obrigatório"}), 400
 
-        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
         if not is_answer_sheet_report_entity():
             if periodo_raw is not None and str(periodo_raw).strip():
                 try:
-                    periodo_bounds = _parse_periodo_bounds(periodo_raw)
+                    _parse_periodo_bounds(periodo_raw)
                 except ValueError as ve:
                     return jsonify(
                         {
@@ -1520,6 +1512,7 @@ def listar_avaliacoes_analise_ia():
                             "details": str(ve),
                         }
                     ), 400
+        periodo_bounds_dados = _periodo_bounds_dados_digital()
 
         ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
         prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
@@ -1597,8 +1590,7 @@ def listar_avaliacoes_analise_ia():
         from app.models.classTest import ClassTest
 
         q = ClassTest.query
-        # Restringir por período de aplicação quando aplicável
-        q = _apply_class_test_application_period(q, periodo_bounds)
+        q = _apply_class_test_application_period(q, periodo_bounds_dados)
         if avaliacao and str(avaliacao).lower() != "all":
             q = q.filter(ClassTest.test_id == str(avaliacao))
 
@@ -1770,7 +1762,7 @@ def _gerar_tabela_detalhada_por_disciplina(
     Gera tabela detalhada organizada por disciplina com dados dos alunos
     CORRIGIDA: Agora mostra TODOS os alunos em TODAS as disciplinas com TODAS as questões
 
-    restrict_class_ids: quando definido (ex.: filtro periodo em GET /avaliacoes), só alunos dessas turmas.
+    restrict_class_ids: quando definido (ex.: escopo do professor), só alunos dessas turmas.
     """
     try:
         from app.models.question import Question
@@ -6551,6 +6543,14 @@ def _parse_periodo_bounds(periodo: str) -> Tuple[datetime, datetime]:
     return datetime(year, month, 1), datetime(year, month, last)
 
 
+def _periodo_bounds_dados_digital() -> None:
+    """
+    Período (YYYY-MM) só facilita achar a avaliação em opcoes-filtros.
+    Resultados do instrumento selecionado ignoram o mês de aplicação.
+    """
+    return None
+
+
 def _formatar_periodo_br(periodo: Optional[str]) -> Optional[str]:
     """
     Converte período YYYY-MM para intervalo no formato brasileiro (dd/mm/aaaa - dd/mm/aaaa).
@@ -7273,17 +7273,8 @@ def _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
     avaliacao_id: str,
     periodo_bounds: Optional[Tuple[datetime, datetime]],
 ) -> List[Student]:
-    """Restringe alunos às turmas com ClassTest da avaliação aplicada no mês (periodo YYYY-MM)."""
-    if periodo_bounds is None or not students:
-        return students
-    q = ClassTest.query.filter(ClassTest.test_id == str(avaliacao_id))
-    q = _apply_class_test_application_period(q, periodo_bounds)
-    allowed_class_ids = {str(ct.class_id) for ct in q.all()}
-    return [
-        s
-        for s in students
-        if getattr(s, "class_id", None) and str(s.class_id) in allowed_class_ids
-    ]
+    """Período não restringe alunos após avaliação selecionada (mantido por compatibilidade de assinatura)."""
+    return students
 
 
 @bp.route("/mapa-habilidades", methods=["GET"])
@@ -8588,7 +8579,7 @@ def _calcular_ranking_global_alunos(
     Calcula o ranking global dos alunos baseado em nota e acertos totais
     para o nível de granularidade especificado
 
-    restrict_class_ids: quando definido (ex.: filtro periodo em GET /avaliacoes), só alunos dessas turmas.
+    restrict_class_ids: quando definido (ex.: escopo do professor), só alunos dessas turmas.
 
     Returns:
         Lista de alunos ordenados por ranking com formato: "Aluno X, Acertos X, Nota X"

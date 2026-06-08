@@ -59,6 +59,18 @@ Campos **sempre presentes** em todas as páginas:
 | `questions_by_test`    | `object` | Mapa **`test_id` → array de questões** canónicas (com `order`).                            |
 | `test_content_version` | `object` | Mapa **`test_id` → string** (hash de conteúdo; enviar no upload).                          |
 
+#### Identidade das questões (`questions_by_test`)
+
+Cada item do array usa:
+
+| Campo         | Tipo     | Descrição |
+| ------------- | -------- | --------- |
+| `id`          | `string` | UUID global em `public.question.id` (banco de questões). |
+| `question_id` | `string` | Alias de `id` (desde contrato 1.1+); valor enviado no **`POST /sync/upload`** como `answers[].question_id`. |
+| `order`       | `number` | Posição da questão na prova (`tenant.test_questions.order`). |
+
+**Importante para clientes offline:** o mesmo `id` / `question_id` **pode aparecer em provas diferentes** quando a instituição reutiliza itens do banco. O app deve indexar questões localmente pelo par **`(test_id, question_id)`**, nunca só por `question_id`. Não alterar o backend para IDs únicos por prova — o upload valida contra `public.question.id`.
+
 **Página > 1**:
 
 | Campo                   | Tipo      | Descrição           |

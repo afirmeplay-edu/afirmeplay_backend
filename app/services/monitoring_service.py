@@ -499,6 +499,49 @@ class MonitoringService:
         return query
 
     @staticmethod
+    def _norm_modal_filtro(val, all_values=("all", "todas", "")):
+        if not val:
+            return None
+        s = str(val).strip()
+        if not s or s.lower() in all_values:
+            return None
+        return s
+
+    @staticmethod
+    def _list_series_disponiveis_monitoring(
+        user: Dict[str, Any], filters: Dict[str, Any], source_type: str
+    ) -> List[Dict[str, str]]:
+        municipio = (filters.get("municipio") or "").strip()
+        if not municipio:
+            return []
+        if source_type == "cartao_resposta":
+            from app.routes.answer_sheet_evaluation_listing import obter_series_com_gabaritos_municipio
+            from app.permissions import get_user_permission_scope
+
+            permissao = get_user_permission_scope(user)
+            rows = obter_series_com_gabaritos_municipio(municipio, user, permissao)
+            return [{"id": r["id"], "name": r.get("nome") or r.get("name") or ""} for r in rows]
+
+        bounds = MonitoringService._parse_periodo_bounds((filters.get("periodo") or "").strip())
+        scope_school_ids = MonitoringService._scope_filtered_school_ids(user)
+        excluir_olimpiada = or_(Test.type.is_(None), func.upper(Test.type) != "OLIMPIADA")
+        query_series = (
+            db.session.query(Grade.id, Grade.name)
+            .join(Class, Grade.id == Class.grade_id)
+            .join(ClassTest, Class.id == ClassTest.class_id)
+            .join(Test, ClassTest.test_id == Test.id)
+            .join(School, School.id == cast(Class._school_id, String))
+            .filter(School.city_id == municipio, excluir_olimpiada)
+        )
+        query_series = MonitoringService._apply_class_test_application_period(query_series, bounds)
+        if scope_school_ids is not None:
+            if not scope_school_ids:
+                return []
+            query_series = query_series.filter(School.id.in_(list(scope_school_ids)))
+        rows = query_series.distinct().order_by(Grade.name.asc()).all()
+        return [{"id": str(r[0]), "name": r[1]} for r in rows]
+
+    @staticmethod
     def _list_avaliacoes_options(user: Dict[str, Any], filters: Dict[str, Any]) -> List[Dict[str, str]]:
         """Avaliações aplicadas no município (mesmo critério de Resultados)."""
         municipio = (filters.get("municipio") or "").strip()
@@ -507,6 +550,8 @@ class MonitoringService:
         bounds = MonitoringService._parse_periodo_bounds((filters.get("periodo") or "").strip())
         scope_school_ids = MonitoringService._scope_filtered_school_ids(user)
         excluir_olimpiada = or_(Test.type.is_(None), func.upper(Test.type) != "OLIMPIADA")
+        serie_param = MonitoringService._norm_modal_filtro(filters.get("serie_filtro"))
+        nome_param = str(filters.get("nome") or "").strip() or None
 
         scoped_ids = (
             db.session.query(Test.id)
@@ -516,6 +561,9 @@ class MonitoringService:
             .filter(School.city_id == municipio, excluir_olimpiada)
         )
         scoped_ids = MonitoringService._apply_class_test_application_period(scoped_ids, bounds)
+        if serie_param:
+            scoped_ids = scoped_ids.join(Grade, Class.grade_id == Grade.id)
+            scoped_ids = scoped_ids.filter(cast(Grade.id, String) == serie_param)
         if scope_school_ids is not None:
             if not scope_school_ids:
                 return []
@@ -525,12 +573,10 @@ class MonitoringService:
         if not test_ids:
             return []
 
-        tests = (
-            Test.query.filter(Test.id.in_(test_ids))
-            .order_by(Test.created_at.desc())
-            .limit(120)
-            .all()
-        )
+        tests_q = Test.query.filter(Test.id.in_(test_ids))
+        if nome_param:
+            tests_q = tests_q.filter(Test.title.ilike(f"%{nome_param}%"))
+        tests = tests_q.order_by(Test.created_at.desc()).limit(120).all()
         return [
             {"id": str(test.id), "name": test.title or f"Avaliação {str(test.id)[:8]}"}
             for test in tests
@@ -583,9 +629,18 @@ class MonitoringService:
                 AnswerSheetGabarito.created_at >= bounds[0],
                 AnswerSheetGabarito.created_at <= bounds[1],
             )
+        nome_param = str(filters.get("nome") or "").strip() or None
+        if nome_param:
+            q = q.filter(AnswerSheetGabarito.title.ilike(f"%{nome_param}%"))
+        rows = q.order_by(AnswerSheetGabarito.created_at.desc()).limit(120).all()
+        serie_param = MonitoringService._norm_modal_filtro(filters.get("serie_filtro"))
+        if serie_param:
+            from app.routes.answer_sheet_evaluation_listing import _gabarito_aplica_serie
+
+            rows = [g for g in rows if _gabarito_aplica_serie(g, serie_param, municipio)]
         return [
             {"id": g.id, "name": g.title or f"Gabarito {g.id[:8]}"}
-            for g in q.order_by(AnswerSheetGabarito.created_at.desc()).limit(120).all()
+            for g in rows
         ]
 
     @staticmethod
@@ -1042,6 +1097,12 @@ class MonitoringService:
         lock_escola = user_role in {"diretor", "coordenador"} and bool(default_escola)
         lock_municipio = user_role in {"diretor", "coordenador"} and bool(default_municipio)
 
+        series_disponiveis: List[Dict[str, str]] = []
+        if municipio and not source_id:
+            series_disponiveis = MonitoringService._list_series_disponiveis_monitoring(
+                user, filters, source_type
+            )
+
         return {
             "estados": estados,
             "municipios": municipios,
@@ -1050,6 +1111,7 @@ class MonitoringService:
             "gabaritos": gabaritos,
             "disciplinas": disciplinas,
             "series": series,
+            "series_disponiveis": series_disponiveis,
             "turmas": turmas,
             "coordenadores": coordenadores,
             "defaults": {

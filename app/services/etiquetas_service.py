@@ -170,11 +170,25 @@ class EtiquetasService:
         city_name = str(city.name or "").strip().upper()
         prefeitura_label = f"PREFEITURA MUNICIPAL DE {city_name}"
 
-        from app.utils.class_label_helpers import normalize_shift
+        from app.utils.class_label_helpers import class_context_from_model, normalize_shift
 
         class_shift = str(selected_class.shift or "").strip() if selected_class else ""
         shift = filters["shift"] or class_shift
         turno = normalize_shift(shift) or shift or ""
+
+        serie_label = (
+            str(selected_grade.name or "").strip() if selected_grade else "Todas as séries"
+        )
+        turma_label = "Todas as turmas"
+        if selected_class:
+            class_ctx = class_context_from_model(selected_class)
+            serie_label = class_ctx.get("grade_name") or serie_label
+            turma_label = (
+                class_ctx.get("class_name")
+                or class_ctx.get("turma")
+                or str(selected_class.name or "").strip()
+                or turma_label
+            )
 
         return {
             "municipio": {
@@ -186,8 +200,8 @@ class EtiquetasService:
             "contexto": {
                 "escola": str(selected_school.name or "").strip() if selected_school else "Todas as escolas",
                 "nivel": str(selected_stage.name or "").strip() if selected_stage else "Todos os níveis",
-                "serie": str(selected_grade.name or "").strip() if selected_grade else "Todas as séries",
-                "turma": str(selected_class.name or "").strip() if selected_class else "Todas as turmas",
+                "serie": serie_label,
+                "turma": turma_label,
                 "shift": shift,
                 "turno": turno,
                 "ano": datetime.now().year,

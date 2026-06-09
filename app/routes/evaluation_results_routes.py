@@ -5888,7 +5888,9 @@ def _obter_series_com_aplicacoes_municipio(
         .join(City, School.city_id == City.id)
         .filter(City.id == city.id, excluir_olimpiada)
     )
-    query_series = _apply_class_test_application_period(query_series, periodo_bounds)
+    query_series = _apply_class_test_application_period(
+        query_series, periodo_bounds, apenas_busca_avaliacao=True
+    )
 
     escola_param_norm = _norm_filtro_modal(escola_param)
     if escola_param_norm:
@@ -6000,7 +6002,9 @@ def _obter_avaliacoes_por_municipio(
         test_query = test_query.join(School, School.id == cast(Class.school_id, String))
         test_query = test_query.join(City, School.city_id == City.id)
         test_query = test_query.filter(City.id == city.id, excluir_olimpiada)
-        test_query = _apply_class_test_application_period(test_query, periodo_bounds)
+        test_query = _apply_class_test_application_period(
+            test_query, periodo_bounds, apenas_busca_avaliacao=True
+        )
         if serie_param:
             test_query = test_query.join(Grade, Class.grade_id == Grade.id)
             test_query = test_query.filter(cast(Grade.id, String) == serie_param)
@@ -6020,7 +6024,9 @@ def _obter_avaliacoes_por_municipio(
                             .join(City, School.city_id == City.id)\
                             .filter(City.id == city.id)\
                             .filter(excluir_olimpiada)
-        query_avaliacoes = _apply_class_test_application_period(query_avaliacoes, periodo_bounds)
+        query_avaliacoes = _apply_class_test_application_period(
+            query_avaliacoes, periodo_bounds, apenas_busca_avaliacao=True
+        )
         if serie_param:
             query_avaliacoes = query_avaliacoes.join(Grade, Class.grade_id == Grade.id)
             query_avaliacoes = query_avaliacoes.filter(cast(Grade.id, String) == serie_param)
@@ -6566,11 +6572,23 @@ def _formatar_periodo_br(periodo: Optional[str]) -> Optional[str]:
         return valor
 
 
+def _validar_periodo_query_digital(periodo_raw) -> Optional[str]:
+    """Valida YYYY-MM e devolve o valor limpo (ou None)."""
+    if not periodo_raw or not str(periodo_raw).strip():
+        return None
+    valor = str(periodo_raw).strip()
+    _parse_periodo_bounds(valor)
+    return valor
+
+
 def _apply_class_test_application_period(
     query,
     bounds: Optional[Tuple[datetime, datetime]],
+    *,
+    apenas_busca_avaliacao: bool = False,
 ):
-    if bounds is None:
+    """Restringe por ClassTest.application no mês somente quando `apenas_busca_avaliacao=True`."""
+    if not apenas_busca_avaliacao or bounds is None:
         return query
     dt_inicio, dt_fim = bounds
     d0 = dt_inicio.strftime("%Y-%m-%d")
@@ -7377,9 +7395,6 @@ def mapa_habilidades_avaliacao_online():
         all_students = _obter_alunos_para_mapa_habilidades_test(
             scope_info, nivel_granularidade, user, escopo_calculo
         )
-        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
-            all_students, str(avaliacao), periodo_bounds
-        )
 
         subject_filter = (
             None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
@@ -7532,9 +7547,6 @@ def mapa_habilidades_avaliacao_online_analise_ia():
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
         all_students = _obter_alunos_para_mapa_habilidades_test(
             scope_info, nivel_granularidade, user, escopo_calculo
-        )
-        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
-            all_students, str(avaliacao), periodo_bounds
         )
 
         subject_filter = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
@@ -7721,9 +7733,6 @@ def mapa_habilidades_avaliacao_online_erros():
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
         all_students = _obter_alunos_para_mapa_habilidades_test(
             scope_info, nivel_granularidade, user, escopo_calculo
-        )
-        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
-            all_students, str(avaliacao), periodo_bounds_erros
         )
 
         subject_filter = (
@@ -8063,24 +8072,26 @@ def obter_opcoes_filtros():
                             periodo_bounds,
                         )
                     if avaliacao:
+                        # Com avaliação já selecionada, escola/série/turma = escopo completo (sem recorte por mês).
+                        periodo_bounds_escopo = _periodo_bounds_dados_digital()
                         response["escolas"] = _obter_escolas_por_avaliacao(
-                            avaliacao, municipio, user, permissao, periodo_bounds
+                            avaliacao, municipio, user, permissao, periodo_bounds_escopo
                         )
                         if _escola_param_eh_especifica(escola):
                             response["series"] = _obter_series_por_escola(
-                                avaliacao, escola, municipio, user, permissao, periodo_bounds
+                                avaliacao, escola, municipio, user, permissao, periodo_bounds_escopo
                             )
                             if _serie_param_eh_especifica(serie):
                                 response["turmas"] = _obter_turmas_por_serie(
-                                    avaliacao, escola, serie, municipio, user, permissao, periodo_bounds
+                                    avaliacao, escola, serie, municipio, user, permissao, periodo_bounds_escopo
                                 )
                         else:
                             response["series"] = _obter_series_por_avaliacao_municipio(
-                                avaliacao, municipio, user, permissao, periodo_bounds
+                                avaliacao, municipio, user, permissao, periodo_bounds_escopo
                             )
                             if _serie_param_eh_especifica(serie):
                                 response["turmas"] = _obter_turmas_por_serie_municipio(
-                                    avaliacao, serie, municipio, user, permissao, periodo_bounds
+                                    avaliacao, serie, municipio, user, permissao, periodo_bounds_escopo
                                 )
         
         return jsonify(response), 200

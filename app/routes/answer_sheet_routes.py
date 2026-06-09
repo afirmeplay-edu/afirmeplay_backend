@@ -2675,9 +2675,23 @@ def _periodo_bounds_dados_cartao() -> None:
     return None
 
 
-def _apply_answer_sheet_result_period_filter(query, periodo_bounds: Optional[Tuple[datetime, datetime]]):
-    """Restringe a correções com corrected_at no mês — apenas para descoberta de gabaritos em filtros."""
-    if periodo_bounds is None:
+def _validar_periodo_query_cartao(periodo_raw) -> Optional[str]:
+    """Valida YYYY-MM e devolve o valor limpo (ou None)."""
+    if not periodo_raw or not str(periodo_raw).strip():
+        return None
+    valor = str(periodo_raw).strip()
+    _parse_cartao_periodo_bounds(valor)
+    return valor
+
+
+def _apply_answer_sheet_result_period_filter(
+    query,
+    periodo_bounds: Optional[Tuple[datetime, datetime]],
+    *,
+    apenas_busca_gabarito: bool = False,
+):
+    """Restringe por corrected_at no mês somente quando `apenas_busca_gabarito=True`."""
+    if not apenas_busca_gabarito or periodo_bounds is None:
         return query
     dt_inicio, dt_fim = periodo_bounds
     end_exclusive = dt_fim + timedelta(days=1)
@@ -2735,7 +2749,9 @@ def _school_ids_com_correcao_cartao_no_periodo(
         AnswerSheetResult.gabarito_id == gabarito_id,
         AnswerSheetResult.student_id.in_(stu),
     )
-    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+    _rq = _apply_answer_sheet_result_period_filter(
+        _rq, periodo_bounds, apenas_busca_gabarito=True
+    )
     hit_students = {row[0] for row in _rq.with_entities(AnswerSheetResult.student_id).distinct().all()}
     if not hit_students:
         return set()
@@ -4202,7 +4218,9 @@ def _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user,
         )
         gabaritos = q.distinct().all()
         _rq = AnswerSheetResult.query.join(Student).join(Class).join(School, School.id == cast(Class.school_id, String)).filter(School.city_id == municipio_id)
-        _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+        _rq = _apply_answer_sheet_result_period_filter(
+            _rq, periodo_bounds, apenas_busca_gabarito=True
+        )
         results_for_city = _rq.with_entities(AnswerSheetResult.gabarito_id).distinct().all()
         gabarito_ids_city = list({r[0] for r in results_for_city})
         if periodo_bounds is not None:
@@ -4505,7 +4523,9 @@ def _obter_gabaritos_por_municipio_cartao(
             AnswerSheetResult.gabarito_id == gid,
             AnswerSheetResult.student_id.in_(student_ids_city),
         )
-        _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+        _rq = _apply_answer_sheet_result_period_filter(
+            _rq, periodo_bounds, apenas_busca_gabarito=True
+        )
         if _rq.first():
             kept_ids.add(gid)
     return [g for g in out if g["id"] in kept_ids]

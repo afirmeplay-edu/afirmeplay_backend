@@ -10,6 +10,7 @@ from app.routes.answer_sheet_routes import (
     _periodo_bounds_dados_cartao,
 )
 from app.routes.evaluation_results_routes import (
+    _apply_class_test_application_period,
     _filtrar_alunos_mapa_digital_por_periodo_aplicacao,
     _parse_periodo_bounds,
     _periodo_bounds_dados_digital,
@@ -23,17 +24,37 @@ class TestPeriodoFilterResults(unittest.TestCase):
     def test_periodo_bounds_dados_digital_sempre_none(self):
         self.assertIsNone(_periodo_bounds_dados_digital())
 
-    def test_apply_answer_sheet_result_period_filter_sem_bounds_nao_altera_query(self):
+    def test_apply_answer_sheet_period_sem_flag_nao_filtra_mesmo_com_bounds(self):
         query = MagicMock()
-        self.assertIs(_apply_answer_sheet_result_period_filter(query, None), query)
+        bounds = _parse_cartao_periodo_bounds("2026-05")
+        self.assertIs(_apply_answer_sheet_result_period_filter(query, bounds), query)
         query.filter.assert_not_called()
 
-    def test_apply_answer_sheet_result_period_filter_com_bounds_filtra(self):
+    def test_apply_answer_sheet_period_com_flag_busca_filtra(self):
         query = MagicMock()
         filtered = MagicMock()
         query.filter.return_value = filtered
         bounds = _parse_cartao_periodo_bounds("2026-05")
-        result = _apply_answer_sheet_result_period_filter(query, bounds)
+        result = _apply_answer_sheet_result_period_filter(
+            query, bounds, apenas_busca_gabarito=True
+        )
+        self.assertIs(result, filtered)
+        query.filter.assert_called_once()
+
+    def test_apply_class_test_period_sem_flag_nao_filtra(self):
+        query = MagicMock()
+        bounds = _parse_periodo_bounds("2026-06")
+        self.assertIs(_apply_class_test_application_period(query, bounds), query)
+        query.filter.assert_not_called()
+
+    def test_apply_class_test_period_com_flag_busca_filtra(self):
+        query = MagicMock()
+        filtered = MagicMock()
+        query.filter.return_value = filtered
+        bounds = _parse_periodo_bounds("2026-06")
+        result = _apply_class_test_application_period(
+            query, bounds, apenas_busca_avaliacao=True
+        )
         self.assertIs(result, filtered)
         query.filter.assert_called_once()
 

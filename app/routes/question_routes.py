@@ -136,6 +136,303 @@ def _upload_html_base64_images_to_minio(question_id, html_content):
         new_html = new_html.replace(src, api_url, 1)
     return new_html, images_meta
 
+
+def _sanitize_stored_image_meta(image_obj):
+    """Retorna metadados persistíveis (sem base64/data)."""
+    if not isinstance(image_obj, dict):
+        return None
+    clean = {}
+    for key in ('id', 'type', 'width', 'height', 'minio_bucket', 'minio_object_name', 'size'):
+        val = image_obj.get(key)
+        if val is not None:
+            clean[key] = val
+    return clean if clean.get('id') else None
+
+
+def _decode_image_bytes_and_mime(image_input):
+    """Decodifica bytes e MIME a partir de string data-URL, base64 ou dict com 'data'."""
+    raw = image_input
+    if isinstance(image_input, dict):
+        raw = image_input.get('data') or image_input.get('base64')
+    if not raw or not isinstance(raw, str):
+        return None, None
+    mime = 'image/png'
+    b64 = raw
+    if raw.startswith('data:image'):
+        header, _, payload = raw.partition(',')
+        b64 = payload
+        mime = header.split(';')[0].split(':')[-1].strip() or mime
+    try:
+        image_bytes = base64.b64decode(b64)
+    except Exception as e:
+        logging.warning(f"Decode alternative image base64 failed: {e}")
+        return None, None
+    return image_bytes, mime
+
+
+def _upload_alternative_image(question_id, image_input, existing_by_id=None):
+    """
+    Processa imagem de alternativa: upload MinIO se base64, ou reutiliza metadados existentes.
+    Retorna dict de metadados (sem data) ou None.
+    """
+    if image_input is None:
+        return None
+    if isinstance(image_input, dict) and not image_input:
+        return None
+
+    existing_by_id = existing_by_id or {}
+    from app.services.storage.minio_service import MinIOService
+    bucket_name = MinIOService.BUCKETS['QUESTION_IMAGES']
+
+    if isinstance(image_input, dict):
+        if image_input.get('minio_bucket') and image_input.get('minio_object_name'):
+            image_id = image_input.get('id') or str(uuid.uuid4())
+            meta = _sanitize_stored_image_meta({**image_input, 'id': image_id})
+            if meta and not meta.get('minio_bucket'):
+                meta['minio_bucket'] = bucket_name
+            return meta
+        image_id = image_input.get('id')
+        if image_id and str(image_id) in existing_by_id:
+            return _sanitize_stored_image_meta(existing_by_id[str(image_id)])
+
+    image_bytes, mime = _decode_image_bytes_and_mime(image_input)
+    if not image_bytes:
+        return None
+
+    minio = MinIOService()
+    image_id = str(uuid.uuid4())
+    if isinstance(image_input, dict) and image_input.get('id'):
+        image_id = str(image_input['id'])
+    ext = _mime_to_ext(mime)
+    image_name = f"{image_id}.{ext}"
+    result = minio.upload_question_image(question_id, image_bytes, image_name)
+    if not result:
+        logging.error(f"Upload alternative image failed for question {question_id}")
+        return None
+    try:
+        pil_img = Image.open(io.BytesIO(image_bytes))
+        width, height = pil_img.width, pil_img.height
+    except Exception:
+        width, height = None, None
+    return {
+        'id': image_id,
+        'type': mime,
+        'width': width,
+        'height': height,
+        'minio_bucket': bucket_name,
+        'minio_object_name': result['object_name'],
+        'size': len(image_bytes),
+    }
+
+
+def _alternative_has_content(alt):
+    """Alternativa válida se tiver texto ou imagem."""
+    if not isinstance(alt, dict):
+        return bool(alt)
+    text = (alt.get('text') or alt.get('answer') or '').strip()
+    if text:
+        return True
+    image = alt.get('image')
+    if isinstance(image, str) and image.strip():
+        return True
+    if isinstance(image, dict):
+        return bool(
+            image.get('data') or image.get('base64') or image.get('id')
+            or image.get('minio_object_name')
+        )
+    return False
+
+
+def _validate_multiple_choice_options(options):
+    if not options or not isinstance(options, list):
+        return False, 'Multiple choice questions must have alternatives'
+    for i, alt in enumerate(options):
+        if not _alternative_has_content(alt):
+            return False, f'Alternative at index {i} must have text or image'
+    return True, None
+
+
+def _process_alternatives_images(question_id, alternatives, existing_images=None):
+    """Upload/processa imagens das alternativas. Retorna (alternatives, metadados)."""
+    if not alternatives or not isinstance(alternatives, list):
+        return alternatives, []
+
+    existing_by_id = {}
+    for img in (existing_images or []):
+        if isinstance(img, dict) and img.get('id'):
+            existing_by_id[str(img['id'])] = img
+
+    processed = []
+    images_meta = []
+    for alt in alternatives:
+        if not isinstance(alt, dict):
+            processed.append(alt)
+            continue
+        new_alt = {k: v for k, v in alt.items() if k != 'image'}
+        image_input = alt.get('image')
+        if image_input is not None:
+            meta = _upload_alternative_image(question_id, image_input, existing_by_id)
+            if meta:
+                new_alt['image'] = meta
+                images_meta.append(meta)
+                existing_by_id[str(meta['id'])] = meta
+        processed.append(new_alt)
+    return processed, images_meta
+
+
+def _rebuild_question_images_catalog(
+    question_id,
+    formatted_text,
+    formatted_solution,
+    alternatives,
+    existing_images=None,
+    new_html_metas=None,
+):
+    """Monta question.images a partir de enunciado, solução e alternativas."""
+    existing_by_id = {}
+    for img in (existing_images or []):
+        if isinstance(img, dict) and img.get('id'):
+            existing_by_id[str(img['id'])] = _sanitize_stored_image_meta(img) or img
+
+    for m in (new_html_metas or []):
+        if isinstance(m, dict) and m.get('id'):
+            existing_by_id[str(m['id'])] = m
+
+    all_ids = []
+    for content in (formatted_text or '', formatted_solution or ''):
+        for iid in re.findall(r'/questions/[^/]+/images/([a-f0-9-]{36})', content):
+            if iid not in all_ids:
+                all_ids.append(iid)
+
+    if isinstance(alternatives, list):
+        for alt in alternatives:
+            if isinstance(alt, dict):
+                img = alt.get('image')
+                if isinstance(img, dict) and img.get('id'):
+                    iid = str(img['id'])
+                    if iid not in all_ids:
+                        all_ids.append(iid)
+
+    return [
+        existing_by_id[iid]
+        for iid in all_ids
+        if iid in existing_by_id
+    ]
+
+
+def _apply_question_images_pipeline(question, alternatives_override=None):
+    """
+    Processa imagens do enunciado, solução e alternativas; atualiza question in-place.
+    alternatives_override: lista já atribuída a question.alternatives (após setattr).
+    """
+    question_id = question.id
+    alts = alternatives_override if alternatives_override is not None else question.alternatives
+
+    new_ft = question.formatted_text
+    new_fs = question.formatted_solution
+    html_metas = []
+    if question.formatted_text:
+        new_ft, meta_text = _upload_html_base64_images_to_minio(question_id, question.formatted_text)
+        html_metas.extend(meta_text)
+    if question.formatted_solution:
+        new_fs, meta_solution = _upload_html_base64_images_to_minio(question_id, question.formatted_solution)
+        html_metas.extend(meta_solution)
+
+    processed_alts, alt_metas = _process_alternatives_images(
+        question_id, alts, existing_images=question.images
+    )
+
+    for m in alt_metas:
+        if m.get('id') and str(m['id']) not in {str(x.get('id')) for x in html_metas if isinstance(x, dict)}:
+            html_metas.append(m)
+
+    existing_images = question.images or []
+    for m in alt_metas + html_metas:
+        if isinstance(m, dict) and m.get('id'):
+            existing_images = [
+                img for img in existing_images
+                if not (isinstance(img, dict) and str(img.get('id')) == str(m['id']))
+            ]
+            existing_images.append(m)
+
+    images_list = _rebuild_question_images_catalog(
+        question_id,
+        new_ft,
+        new_fs,
+        processed_alts,
+        existing_images=existing_images,
+        new_html_metas=html_metas,
+    )
+
+    question.formatted_text = new_ft
+    question.formatted_solution = new_fs
+    question.alternatives = processed_alts
+    question.images = images_list
+    return question
+
+
+def _collect_question_image_objects(question):
+    """Coleta pares únicos (bucket, object_name) de question.images e alternatives[].image."""
+    seen = set()
+    objects = []
+
+    def _add(bucket, object_name):
+        if bucket and object_name:
+            key = (bucket, object_name)
+            if key not in seen:
+                seen.add(key)
+                objects.append(key)
+
+    for img in (question.images or []):
+        if isinstance(img, dict):
+            _add(img.get('minio_bucket'), img.get('minio_object_name'))
+
+    alts = question.alternatives or []
+    if isinstance(alts, str):
+        try:
+            import json
+            alts = json.loads(alts)
+        except Exception:
+            alts = []
+
+    if isinstance(alts, list):
+        for alt in alts:
+            if isinstance(alt, dict):
+                img = alt.get('image')
+                if isinstance(img, dict):
+                    _add(img.get('minio_bucket'), img.get('minio_object_name'))
+
+    return objects
+
+
+def _delete_question_images_from_minio(question):
+    """
+    Remove do MinIO todas as imagens da questão (enunciado, solução e alternativas).
+    Usa metadados do banco e, como fallback, apaga tudo sob o prefixo {question_id}/.
+    Falhas no MinIO são logadas mas não impedem a exclusão da questão.
+    """
+    question_id = str(question.id) if question.id else None
+    if not question_id:
+        return
+
+    from app.services.storage.minio_service import MinIOService
+    minio = MinIOService()
+    bucket_name = MinIOService.BUCKETS['QUESTION_IMAGES']
+
+    to_delete = set(_collect_question_image_objects(question))
+    try:
+        for object_name in minio.list_files(bucket_name, prefix=f"{question_id}/"):
+            to_delete.add((bucket_name, object_name))
+    except Exception as e:
+        logging.warning(f"List MinIO files for question {question_id} failed: {e}")
+
+    for bucket, object_name in to_delete:
+        if not minio.delete_file(bucket, object_name):
+            logging.warning(
+                f"Could not delete MinIO object {bucket}/{object_name} for question {question_id}"
+            )
+
+
 @bp.errorhandler(SQLAlchemyError)
 def handle_db_error(error):
     db.session.rollback()
@@ -177,8 +474,9 @@ def create_question():
 
         # Validações específicas por tipo de questão
         if data['type'] == 'multipleChoice':
-            if not data.get('options') or not isinstance(data.get('options'), list):
-                return jsonify({"error": "Multiple choice questions must have alternatives"}), 400
+            ok, err = _validate_multiple_choice_options(data.get('options'))
+            if not ok:
+                return jsonify({"error": err}), 400
             if not any(alt.get('isCorrect') for alt in data['options']):
                 return jsonify({"error": "At least one alternative must be marked as correct"}), 400
 
@@ -244,21 +542,9 @@ def create_question():
         db.session.add(question)
         db.session.commit()
 
-        # Enviar imagens base64 para MinIO e substituir por URL da API
-        new_formatted_text = question.formatted_text
-        new_formatted_solution = question.formatted_solution
-        images_meta = []
-        if question.formatted_text:
-            new_formatted_text, meta_text = _upload_html_base64_images_to_minio(question.id, question.formatted_text)
-            images_meta.extend(meta_text)
-        if question.formatted_solution:
-            new_formatted_solution, meta_solution = _upload_html_base64_images_to_minio(question.id, question.formatted_solution)
-            images_meta.extend(meta_solution)
-        if images_meta:
-            question.formatted_text = new_formatted_text
-            question.formatted_solution = new_formatted_solution
-            question.images = images_meta
-            db.session.commit()
+        # Imagens: enunciado, solução e alternativas → MinIO + catálogo question.images
+        _apply_question_images_pipeline(question)
+        db.session.commit()
 
         return jsonify({
             "message": "Question created successfully",
@@ -607,28 +893,14 @@ def update_question(question_id):
                 # Se vier string, usar diretamente
                 question.skill = skills_input
 
-        # Enviar novas imagens base64 para MinIO e substituir por URL da API
-        if 'formattedText' in data or 'formattedSolution' in data:
-            ft = question.formatted_text or ''
-            fs = question.formatted_solution or ''
-            new_ft, meta_t = _upload_html_base64_images_to_minio(question_id, ft)
-            new_fs, meta_s = _upload_html_base64_images_to_minio(question_id, fs)
-            existing_by_id = {
-                img['id']: img for img in (question.images or [])
-                if isinstance(img, dict) and img.get('minio_object_name')
-            }
-            new_meta_by_id = {m['id']: m for m in meta_t + meta_s}
-            ids_in_ft = re.findall(r'/questions/[^/]+/images/([a-f0-9-]{36})', new_ft)
-            ids_in_fs = re.findall(r'/questions/[^/]+/images/([a-f0-9-]{36})', new_fs)
-            all_ids = list(dict.fromkeys(ids_in_ft + ids_in_fs))
-            images_list = [
-                new_meta_by_id.get(iid) or existing_by_id.get(iid)
-                for iid in all_ids
-                if new_meta_by_id.get(iid) or existing_by_id.get(iid)
-            ]
-            question.formatted_text = new_ft
-            question.formatted_solution = new_fs
-            question.images = images_list
+        if question.question_type == 'multipleChoice' and 'options' in data:
+            ok, err = _validate_multiple_choice_options(data.get('options'))
+            if not ok:
+                return jsonify({"error": err}), 400
+
+        # Imagens: enunciado, solução e/ou alternativas
+        if any(k in data for k in ('formattedText', 'formattedSolution', 'options')):
+            _apply_question_images_pipeline(question)
 
         question.version += 1
 
@@ -771,6 +1043,7 @@ def bulk_delete_questions():
             return jsonify({"error": "None of the provided question IDs were found"}), 404
 
         for question in questions_to_delete:
+            _delete_question_images_from_minio(question)
             db.session.delete(question)
         
         db.session.commit()
@@ -791,6 +1064,7 @@ def delete_question(question_id):
         if not question:
             return jsonify({"error": "Question not found"}), 404
 
+        _delete_question_images_from_minio(question)
         db.session.delete(question)
         db.session.commit()
         return jsonify({'message': 'Question deleted successfully'}), 200

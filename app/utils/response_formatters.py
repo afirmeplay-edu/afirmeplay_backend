@@ -111,7 +111,25 @@ def _get_all_subjects_from_test(test):
     return subjects_list
 
 
-def normalize_alternatives_with_correct(alternatives, correct_answer=None):
+def _format_alternative_image_for_response(image_obj, question_id=None):
+    """Expõe metadados da imagem e imageUrl da API (sem base64)."""
+    if not isinstance(image_obj, dict) or not image_obj.get('id'):
+        return None
+    clean = {
+        'id': image_obj['id'],
+        'type': image_obj.get('type'),
+        'width': image_obj.get('width'),
+        'height': image_obj.get('height'),
+        'minio_bucket': image_obj.get('minio_bucket'),
+        'minio_object_name': image_obj.get('minio_object_name'),
+    }
+    clean = {k: v for k, v in clean.items() if v is not None}
+    if question_id:
+        clean['imageUrl'] = f'/questions/{question_id}/images/{image_obj["id"]}'
+    return clean
+
+
+def normalize_alternatives_with_correct(alternatives, correct_answer=None, question_id=None):
     """
     Garante que todas as alternativas tenham id, text e isCorrect
     """
@@ -158,6 +176,10 @@ def normalize_alternatives_with_correct(alternatives, correct_answer=None):
             "text": text,
             "isCorrect": is_correct
         }
+        if isinstance(alt, dict) and alt.get('image'):
+            img_out = _format_alternative_image_for_response(alt['image'], question_id)
+            if img_out:
+                normalized_alt['image'] = img_out
         normalized.append(normalized_alt)
     
     return normalized
@@ -196,8 +218,10 @@ def format_question_response(q, exclude_fields=None):
     if exclude_fields is None:
         exclude_fields = []
 
-    # Normalizar alternativas com isCorrect
-    normalized_alternatives = normalize_alternatives_with_correct(q.alternatives, q.correct_answer)
+    # Normalizar alternativas com isCorrect (preserva image quando existir)
+    normalized_alternatives = normalize_alternatives_with_correct(
+        q.alternatives, q.correct_answer, question_id=q.id
+    )
     
     response = {
         'id': q.id,

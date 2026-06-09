@@ -981,11 +981,18 @@ class InstitutionalTestWeasyPrintGenerator:
 
         if alternatives_data and isinstance(alternatives_data, list):
             processed_alternatives = []
+            question_id = processed.get('id', '')
             for i, alt in enumerate(alternatives_data):
                 # Alternativas podem ter diferentes formatos
                 if isinstance(alt, dict):
                     alt_content = alt.get('text') or alt.get('content', '')
                     alt_id = alt.get('id', chr(65 + i))
+                    alt_image = alt.get('image')
+                    if isinstance(alt_image, dict) and alt_image.get('id') and question_id:
+                        img_tag = (
+                            f'<img src="/questions/{question_id}/images/{alt_image["id"]}" />'
+                        )
+                        alt_content = f'{alt_content}{img_tag}' if alt_content else img_tag
                 else:
                     alt_content = str(alt)
                     alt_id = chr(65 + i)

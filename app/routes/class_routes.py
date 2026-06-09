@@ -15,6 +15,31 @@ from app.models.grades import Grade
 from app.models.city import City
 from app.models.educationStage import EducationStage
 from app.decorators.role_required import get_current_tenant_id
+from app.services.city_schema_service import ensure_class_shift_column
+from app.utils.tenant_middleware import get_current_tenant_context
+
+
+def _normalize_shift(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+
+def _shift_from_payload(data):
+    """Aceita `shift` (padrão) ou `turno` (legado) no body."""
+    if "shift" in data:
+        return _normalize_shift(data["shift"])
+    if "turno" in data:
+        return _normalize_shift(data["turno"])
+    return None
+
+
+def _ensure_class_shift_schema():
+    ctx = get_current_tenant_context()
+    if ctx and getattr(ctx, "has_tenant_context", False) and ctx.schema and ctx.schema != "public":
+        ensure_class_shift_column(ctx.schema)
+
 
 bp = Blueprint('classes', __name__, url_prefix="/classes")
 
@@ -53,6 +78,7 @@ def get_filtered_classes():
         Lista de turmas filtradas com informações completas
     """
     try:
+        _ensure_class_shift_schema()
         # Extrair parâmetros de filtro
         municipality_id = request.args.get('municipality_id')
         school_id = request.args.get('school_id')
@@ -132,6 +158,7 @@ def get_filtered_classes():
                 "name": class_obj.name,
                 "school_id": class_obj.school_id,
                 "grade_id": str(class_obj.grade_id) if class_obj.grade_id else None,
+                "shift": class_obj.shift,
                 "students_count": students_count,
                 "school": {
                     "id": school.id,
@@ -169,6 +196,7 @@ def get_filtered_classes():
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_classes_by_school(school_id):
     try:
+        _ensure_class_shift_schema()
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
@@ -255,6 +283,7 @@ def get_classes_by_school(school_id):
             "name": c.name,
             "school_id": c.school_id,
             "grade_id": str(c.grade_id) if c.grade_id else None,
+            "shift": c.shift,
             "students_count": students_count,
             "school": {
                 "id": school.id,
@@ -287,6 +316,7 @@ def get_classes_by_school_alias(school_id):
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_classes():
     try:
+        _ensure_class_shift_schema()
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
@@ -355,6 +385,7 @@ def get_classes():
             "name": c.name,
             "school_id": c.school_id,
             "grade_id": str(c.grade_id) if c.grade_id else None,
+            "shift": c.shift,
             "school": {
                 "id": school.id,
                 "name": school.name
@@ -372,6 +403,7 @@ def get_classes():
 @jwt_required()
 def get_class(class_id):
     try:
+        _ensure_class_shift_schema()
         # Converter class_id para UUID (Class.id é UUID)
         class_id_uuid = ensure_uuid(class_id)
         if not class_id_uuid:
@@ -404,6 +436,7 @@ def get_class(class_id):
             "name": class_obj.name,
             "school_id": class_obj.school_id,
             "grade_id": str(class_obj.grade_id) if class_obj.grade_id else None,
+            "shift": class_obj.shift,
             "school": {
                 "id": school.id,
                 "name": school.name
@@ -422,6 +455,7 @@ def get_class(class_id):
 @jwt_required()
 def update_class(class_id):
     try:
+        _ensure_class_shift_schema()
         # Converter class_id para UUID (Class.id é UUID)
         class_id_uuid = ensure_uuid(class_id)
         if not class_id_uuid:
@@ -554,6 +588,9 @@ def update_class(class_id):
             
             class_obj.grade_id = data["grade_id"]
 
+        if "shift" in data or "turno" in data:
+            class_obj.shift = _shift_from_payload(data)
+
         db.session.commit()
         
         # Preparar resposta detalhada
@@ -563,7 +600,8 @@ def update_class(class_id):
                 "id": str(class_obj.id),
                 "name": class_obj.name,
                 "school_id": class_obj.school_id,
-                "grade_id": str(class_obj.grade_id) if class_obj.grade_id else None
+                "grade_id": str(class_obj.grade_id) if class_obj.grade_id else None,
+                "shift": class_obj.shift,
             },
             "changes": {
                 "school_changed": school_changed,
@@ -782,6 +820,7 @@ def delete_class(class_id):
 @jwt_required()
 def create_class():
     try:
+        _ensure_class_shift_schema()
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data provided"}), 400
@@ -832,7 +871,8 @@ def create_class():
         new_class = Class(
             name=data["name"],
             school_id=school_id_uuid,
-            grade_id=grade_id_uuid  # Optional field
+            grade_id=grade_id_uuid,  # Optional field
+            shift=_shift_from_payload(data) if ("shift" in data or "turno" in data) else None,
         )
 
         db.session.add(new_class)
@@ -844,7 +884,8 @@ def create_class():
                 "id": new_class.id,
                 "name": new_class.name,
                 "school_id": new_class.school_id,
-                "grade_id": str(new_class.grade_id) if new_class.grade_id else None
+                "grade_id": str(new_class.grade_id) if new_class.grade_id else None,
+                "shift": new_class.shift,
             }
         }), 201
 
@@ -1233,7 +1274,8 @@ def get_class_teachers(class_id):
             "turma": {
                 "id": class_obj.id,
                 "name": class_obj.name,
-                "school_id": class_obj.school_id
+                "school_id": class_obj.school_id,
+                "shift": class_obj.shift,
             },
             "professores": resultado
         }), 200

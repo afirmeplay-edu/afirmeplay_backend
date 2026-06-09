@@ -114,11 +114,10 @@ def transfer_student_to_class(
     if not to_school:
         raise ValueError("Escola da turma de destino não encontrada.")
 
-    if old_sid and str(old_sid) != str(new_sid):
-        assert_same_municipality_two_schools(sess, str(old_sid), str(new_sid))
-        from app.services.student_password_log_service import delete_password_logs_for_student_at_school
+    same_school = not old_sid or str(old_sid) == str(new_sid)
 
-        delete_password_logs_for_student_at_school(sess, student.id, str(old_sid))
+    if not same_school:
+        assert_same_municipality_two_schools(sess, str(old_sid), str(new_sid))
     else:
         if student.user and student.user.city_id and student.user.city_id != to_school.city_id:
             raise ValueError("A turma de destino deve estar no mesmo município (city_id) do cadastro do aluno.")
@@ -126,12 +125,51 @@ def transfer_student_to_class(
     close_active_enrollment(sess, student.id)
     student.class_id = new_class.id
     student.school_id = new_sid
+    if getattr(new_class, "grade_id", None) is not None:
+        student.grade_id = new_class.grade_id
 
     if update_user_city and student.user and to_school.city_id:
         if student.user.city_id != to_school.city_id:
             student.user.city_id = to_school.city_id
 
     open_enrollment(sess, student.id, school_id=new_sid, class_id=new_class.id)
+
+    if same_school:
+        from app.services.student_password_log_service import (
+            ensure_password_log_for_student_placement,
+            sync_password_logs_with_student_placement,
+        )
+
+        if not sync_password_logs_with_student_placement(sess, student):
+            ensure_password_log_for_student_placement(sess, student)
+    else:
+        from app.services.student_password_log_service import (
+            ensure_password_log_for_student_placement,
+            migrate_password_logs_to_new_school,
+        )
+
+        migrated = migrate_password_logs_to_new_school(
+            sess,
+            student.id,
+            str(old_sid),
+            new_school_id=str(new_sid),
+            class_id=student.class_id,
+            grade_id=student.grade_id,
+            city_id=to_school.city_id,
+        )
+        if migrated:
+            logger.debug(
+                "Migrados %s log(s) de senha do aluno %s: escola %s -> %s",
+                migrated,
+                student.id,
+                old_sid,
+                new_sid,
+            )
+        elif not ensure_password_log_for_student_placement(sess, student):
+            logger.debug(
+                "Nenhum log de senha migrado/criado para o aluno %s após troca de escola",
+                student.id,
+            )
 
 
 def transfer_class_to_school(
@@ -155,7 +193,16 @@ def transfer_class_to_school(
     if not ns:
         raise ValueError("Escola de destino não encontrada.")
 
+    from app.services.student_password_log_service import sync_password_logs_for_class_school_relocation
+
     class_obj.school_id = target_school_id
+    sync_password_logs_for_class_school_relocation(
+        sess,
+        class_obj.id,
+        str(old_school_id),
+        str(target_school_id),
+        city_id=ns.city_id,
+    )
     students = sess.query(Student).filter(Student.class_id == class_obj.id).all()
     for st in students:
         close_active_enrollment(sess, st.id)

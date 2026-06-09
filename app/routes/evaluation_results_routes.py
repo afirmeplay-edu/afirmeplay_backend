@@ -57,6 +57,7 @@ from app.models.grades import Grade
 from app.models.evaluationResult import EvaluationResult
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.decimal_helpers import round_to_two_decimals
+from app.utils.class_label_helpers import normalize_shift, class_filter_option
 from app.utils.school_equal_weight_means import (
     granularidade_to_hierarchical_target,
     hierarchical_mean_grade_and_proficiency,
@@ -600,7 +601,7 @@ def listar_avaliacoes():
     - escola (opcional): ID da escola ou 'all' para todas as escolas
     - serie (opcional): ID da série ou 'all' para todas as séries
     - turma (opcional): ID da turma ou 'all' para todas as turmas
-    - periodo (opcional): YYYY-MM; restringe ClassTest por application (ignorado em report_entity_type=answer_sheet)
+    - periodo (opcional): YYYY-MM; eco no payload (só restringe em opcoes-filtros, não nos resultados)
     - page, per_page: Parâmetros de paginação
     
     Lógica hierárquica com "all":
@@ -625,16 +626,16 @@ def listar_avaliacoes():
             return jsonify({"error": "Usuário não encontrado"}), 401
 
         periodo_raw = request.args.get("periodo")
-        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
         if not is_answer_sheet_report_entity():
             if periodo_raw is not None and str(periodo_raw).strip():
                 try:
-                    periodo_bounds = _parse_periodo_bounds(periodo_raw)
+                    _parse_periodo_bounds(periodo_raw)
                 except ValueError as ve:
                     return jsonify({
                         "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
                         "details": str(ve),
                     }), 400
+        periodo_bounds_dados = _periodo_bounds_dados_digital()
 
         # Extrair parâmetros de filtro
         estado = request.args.get('estado')
@@ -1076,7 +1077,7 @@ def listar_avaliacoes():
                     # Se não é um professor válido, não mostrar nenhuma avaliação
                     query_base = query_base.filter(Test.created_by == user['id']).filter(Test.id == None)
 
-            query_base = _apply_class_test_application_period(query_base, periodo_bounds)
+            query_base = _apply_class_test_application_period(query_base, periodo_bounds_dados)
 
         except Exception as e:
             logging.error(f"Erro ao aplicar filtros: {str(e)}")
@@ -1148,7 +1149,7 @@ def listar_avaliacoes():
                             
                             query_base = query_base.filter(or_(*filters))
 
-                    query_base = _apply_class_test_application_period(query_base, periodo_bounds)
+                    query_base = _apply_class_test_application_period(query_base, periodo_bounds_dados)
 
                     todas_avaliacoes_escopo = query_base.all()
                     logging.info(f"Query executada com nova sessão: {len(todas_avaliacoes_escopo)} avaliações encontradas")
@@ -1250,7 +1251,7 @@ def listar_avaliacoes():
                             # Se não é um professor válido, não mostrar nenhuma avaliação
                             query_base = query_base.filter(Test.created_by == user['id']).filter(Test.id == None)
 
-                    query_base = _apply_class_test_application_period(query_base, periodo_bounds)
+                    query_base = _apply_class_test_application_period(query_base, periodo_bounds_dados)
 
                     total = query_base.count()
                     offset = (page - 1) * per_page
@@ -1279,19 +1280,12 @@ def listar_avaliacoes():
         ranking_alunos = []
         
         restrict_class_ids: Optional[Set[Any]] = None
-        if periodo_bounds is not None and avaliacao and avaliacao.lower() != "all":
-            restrict_class_ids = {
-                ct.class_id for ct in todas_avaliacoes_escopo if str(ct.test_id) == str(avaliacao)
-            }
 
         # Para professor, sempre restringir a tabela/ranking às suas turmas (e ao recorte escola/série/turma).
         if (user.get("role") or "").lower() == "professor":
             if professor_allowed_class_ids is None:
                 professor_allowed_class_ids = set()
-            if restrict_class_ids is None:
-                restrict_class_ids = set(professor_allowed_class_ids)
-            else:
-                restrict_class_ids = set(restrict_class_ids).intersection(set(professor_allowed_class_ids))
+            restrict_class_ids = set(professor_allowed_class_ids)
 
         if avaliacao and avaliacao.lower() != 'all':
             tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
@@ -1507,11 +1501,10 @@ def listar_avaliacoes_analise_ia():
         if not municipio:
             return jsonify({"error": "Município é obrigatório"}), 400
 
-        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
         if not is_answer_sheet_report_entity():
             if periodo_raw is not None and str(periodo_raw).strip():
                 try:
-                    periodo_bounds = _parse_periodo_bounds(periodo_raw)
+                    _parse_periodo_bounds(periodo_raw)
                 except ValueError as ve:
                     return jsonify(
                         {
@@ -1519,6 +1512,7 @@ def listar_avaliacoes_analise_ia():
                             "details": str(ve),
                         }
                     ), 400
+        periodo_bounds_dados = _periodo_bounds_dados_digital()
 
         ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
         prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
@@ -1596,8 +1590,7 @@ def listar_avaliacoes_analise_ia():
         from app.models.classTest import ClassTest
 
         q = ClassTest.query
-        # Restringir por período de aplicação quando aplicável
-        q = _apply_class_test_application_period(q, periodo_bounds)
+        q = _apply_class_test_application_period(q, periodo_bounds_dados)
         if avaliacao and str(avaliacao).lower() != "all":
             q = q.filter(ClassTest.test_id == str(avaliacao))
 
@@ -1769,7 +1762,7 @@ def _gerar_tabela_detalhada_por_disciplina(
     Gera tabela detalhada organizada por disciplina com dados dos alunos
     CORRIGIDA: Agora mostra TODOS os alunos em TODAS as disciplinas com TODAS as questões
 
-    restrict_class_ids: quando definido (ex.: filtro periodo em GET /avaliacoes), só alunos dessas turmas.
+    restrict_class_ids: quando definido (ex.: escopo do professor), só alunos dessas turmas.
     """
     try:
         from app.models.question import Question
@@ -1979,8 +1972,10 @@ def _gerar_tabela_detalhada_por_disciplina(
                 escola_nome = "N/A"
                 escola_id = None
                 
+                turma_shift = ""
                 if student.class_:
                     turma_nome = student.class_.name or "N/A"
+                    turma_shift = normalize_shift(student.class_.shift) or ""
                     if student.class_.grade:
                         serie_nome = student.class_.grade.name or "N/A"
                     sid = getattr(student.class_, 'school_id', None)
@@ -2092,6 +2087,7 @@ def _gerar_tabela_detalhada_por_disciplina(
                     "escola": escola_nome,
                     "serie": serie_nome,
                     "turma": turma_nome,
+                    "shift": turma_shift,
                     "respostas_por_questao": respostas_por_questao,
                     "total_acertos": total_acertos,
                     "total_erros": total_erros,
@@ -3296,7 +3292,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                 
                 if escola_valida and serie_valida:
                     # Ambos são específicos
-                    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+                    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
@@ -3309,7 +3305,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .distinct()
                 elif escola_valida and not serie_valida:
                     # Escola específica, série "all"
-                    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+                    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
@@ -3320,7 +3316,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .distinct()
                 elif not escola_valida and serie_valida:
                     # Escola "all", série específica
-                    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+                    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
@@ -3332,7 +3328,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .distinct()
                 else:
                     # Ambos são "all"
-                    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+                    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
@@ -3346,7 +3342,9 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                     query_turmas = filter_classes_by_user(query_turmas, user)
                 
                 turmas = query_turmas.all()
-                opcoes["turmas"] = [{"id": str(t[0]), "name": t[1] or f"Turma {t[0]}"} for t in turmas]
+                opcoes["turmas"] = [
+                    class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None) for t in turmas
+                ]
         
         return opcoes
         
@@ -5856,12 +5854,113 @@ def _obter_municipios_por_estado(estado: str, user: dict, permissao: dict) -> Li
     return [{"id": str(m.id), "nome": m.name} for m in municipios]
 
 
+def _norm_filtro_modal(val, all_values=("all", "todas", "")):
+    if not val:
+        return None
+    s = str(val).strip()
+    if not s or s.lower() in all_values:
+        return None
+    return s
+
+
+def _obter_series_com_aplicacoes_municipio(
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    escola_param: str = "all",
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
+    """Séries do município com pelo menos uma avaliação aplicada (para filtro do modal de seleção)."""
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    city_id_str = str(city.id) if city.id else ""
+    if permissao["scope"] != "all" and _user_city_id(user) != city_id_str:
+        return []
+
+    excluir_olimpiada = or_(Test.type.is_(None), func.upper(Test.type) != "OLIMPIADA")
+    query_series = (
+        Grade.query.with_entities(Grade.id, Grade.name)
+        .join(Class, Grade.id == Class.grade_id)
+        .join(ClassTest, Class.id == ClassTest.class_id)
+        .join(Test, ClassTest.test_id == Test.id)
+        .join(School, School.id == cast(Class.school_id, String))
+        .join(City, School.city_id == City.id)
+        .filter(City.id == city.id, excluir_olimpiada)
+    )
+    query_series = _apply_class_test_application_period(
+        query_series, periodo_bounds, apenas_busca_avaliacao=True
+    )
+
+    escola_param_norm = _norm_filtro_modal(escola_param)
+    if escola_param_norm:
+        query_series = query_series.filter(School.id == escola_param_norm)
+
+    if permissao["scope"] == "escola" and user.get("role") == "professor":
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+
+        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+        if not teacher:
+            return []
+        teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+        teacher_class_ids = [tc.class_id for tc in teacher_classes]
+        if not teacher_class_ids:
+            return []
+        query_series = query_series.filter(Class.id.in_(teacher_class_ids))
+
+    series = query_series.distinct().order_by(Grade.name.asc()).all()
+    return [{"id": str(s[0]), "nome": s[1], "name": s[1]} for s in series]
+
+
+def _format_avaliacoes_opcoes_filtro(avaliacoes_rows: List) -> List[Dict[str, Any]]:
+    """Inclui todas as disciplinas da avaliação (subjects_info + subject_rel)."""
+    from app.utils.response_formatters import _get_all_subjects_from_test
+
+    if not avaliacoes_rows:
+        return []
+
+    test_ids = [str(row[0]) for row in avaliacoes_rows]
+    tests = (
+        Test.query.filter(Test.id.in_(test_ids))
+        .options(joinedload(Test.subject_rel))
+        .all()
+    )
+    tests_by_id = {str(t.id): t for t in tests}
+
+    result: List[Dict[str, Any]] = []
+    for row in avaliacoes_rows:
+        tid = str(row[0])
+        titulo = row[1]
+        legacy_subject = (row[2] or "").strip() if len(row) > 2 else ""
+
+        disciplinas: List[str] = []
+        test = tests_by_id.get(tid)
+        if test:
+            for subj in _get_all_subjects_from_test(test):
+                name = (subj.get("name") or "").strip()
+                if name and name not in disciplinas:
+                    disciplinas.append(name)
+        if not disciplinas and legacy_subject:
+            disciplinas = [legacy_subject]
+
+        result.append({
+            "id": tid,
+            "titulo": titulo,
+            "disciplina": disciplinas[0] if disciplinas else "",
+            "disciplinas": disciplinas,
+        })
+    return result
+
+
 def _obter_avaliacoes_por_municipio(
     municipio_id: str,
     user: dict,
     permissao: dict,
     escola_param: str = "all",
     periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+    serie_id: Optional[str] = None,
+    nome: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Retorna avaliações aplicadas em um município específico, respeitando permissões.
@@ -5872,6 +5971,8 @@ def _obter_avaliacoes_por_municipio(
         permissao: Dicionário com informações de permissão
         escola_param: Parâmetro de escola ('all' ou ID específico)
         periodo_bounds: Se definido, só inclui provas com ClassTest.application no mês (ver _parse_periodo_bounds).
+        serie_id: Filtro opcional — só avaliações aplicadas em turmas da série.
+        nome: Filtro opcional — busca por trecho do título (case-insensitive).
 
     Returns:
         Lista de avaliações no formato [{"id": "...", "titulo": "...", "disciplina": "..."}]
@@ -5883,6 +5984,10 @@ def _obter_avaliacoes_por_municipio(
     # Verificar se o usuário tem acesso ao município
     if permissao['scope'] != 'all' and user.get('city_id') != city.id:
         return []
+
+    serie_param = _norm_filtro_modal(serie_id)
+    nome_param = str(nome).strip() if nome else None
+    escola_param_norm = _norm_filtro_modal(escola_param)
     
     # Exclui fluxo de olimpíada (StudentTestOlimpics); competições (COMPETICAO) permanecem listadas
     excluir_olimpiada = or_(Test.type.is_(None), func.upper(Test.type) != 'OLIMPIADA')
@@ -5897,7 +6002,16 @@ def _obter_avaliacoes_por_municipio(
         test_query = test_query.join(School, School.id == cast(Class.school_id, String))
         test_query = test_query.join(City, School.city_id == City.id)
         test_query = test_query.filter(City.id == city.id, excluir_olimpiada)
-        test_query = _apply_class_test_application_period(test_query, periodo_bounds)
+        test_query = _apply_class_test_application_period(
+            test_query, periodo_bounds, apenas_busca_avaliacao=True
+        )
+        if serie_param:
+            test_query = test_query.join(Grade, Class.grade_id == Grade.id)
+            test_query = test_query.filter(cast(Grade.id, String) == serie_param)
+        if escola_param_norm:
+            test_query = test_query.filter(School.id == escola_param_norm)
+        if nome_param:
+            test_query = test_query.filter(Test.title.ilike(f"%{nome_param}%"))
 
         avaliacoes = test_query.distinct().all()
     else:
@@ -5910,11 +6024,20 @@ def _obter_avaliacoes_por_municipio(
                             .join(City, School.city_id == City.id)\
                             .filter(City.id == city.id)\
                             .filter(excluir_olimpiada)
-        query_avaliacoes = _apply_class_test_application_period(query_avaliacoes, periodo_bounds)
+        query_avaliacoes = _apply_class_test_application_period(
+            query_avaliacoes, periodo_bounds, apenas_busca_avaliacao=True
+        )
+        if serie_param:
+            query_avaliacoes = query_avaliacoes.join(Grade, Class.grade_id == Grade.id)
+            query_avaliacoes = query_avaliacoes.filter(cast(Grade.id, String) == serie_param)
+        if escola_param_norm:
+            query_avaliacoes = query_avaliacoes.filter(School.id == escola_param_norm)
+        if nome_param:
+            query_avaliacoes = query_avaliacoes.filter(Test.title.ilike(f"%{nome_param}%"))
 
         avaliacoes = query_avaliacoes.distinct().all()
-    
-    return [{"id": str(a[0]), "titulo": a[1], "disciplina": (a[2] or "")} for a in avaliacoes]
+
+    return _format_avaliacoes_opcoes_filtro(avaliacoes)
 
 
 def _obter_escolas_por_avaliacao(
@@ -6066,7 +6189,7 @@ def _obter_turmas_por_serie(
         return []
     
     # Buscar turmas onde a avaliação foi aplicada na escola e série específicas
-    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+    query_turmas = Class.query.with_entities(Class.id, Class.name, Class.shift)\
                          .join(ClassTest, Class.id == ClassTest.class_id)\
                          .join(Test, ClassTest.test_id == Test.id)\
                          .join(School, School.id == cast(Class.school_id, String))\
@@ -6096,7 +6219,9 @@ def _obter_turmas_por_serie(
             return []
     
     turmas = query_turmas.distinct().all()
-    return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+    return [
+        class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None) for t in turmas
+    ]
 
 
 def _escola_param_eh_especifica(escola: Optional[str]) -> bool:
@@ -6185,7 +6310,7 @@ def _obter_turmas_por_serie_municipio(
         return []
 
     query_turmas = (
-        Class.query.with_entities(Class.id, Class.name)
+        Class.query.with_entities(Class.id, Class.name, Class.shift)
         .join(ClassTest, Class.id == ClassTest.class_id)
         .join(Test, ClassTest.test_id == Test.id)
         .join(School, School.id == cast(Class.school_id, String))
@@ -6222,7 +6347,9 @@ def _obter_turmas_por_serie_municipio(
             return []
 
     turmas = query_turmas.distinct().all()
-    return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+    return [
+        class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None) for t in turmas
+    ]
 
 
 # ==================== OPÇÕES DE FILTRO PARA EVOLUÇÃO (Estado → Município → Escola → Série → Turma) ====================
@@ -6356,7 +6483,7 @@ def _obter_turmas_por_serie_evolucao(municipio_id: str, escola_id: str, serie_id
     escola_id_str = str(escola_id).strip()
     serie_id_str = str(serie_id).strip()
     query_turmas = (
-        Class.query.with_entities(Class.id, Class.name)
+        Class.query.with_entities(Class.id, Class.name, Class.shift)
         .join(ClassTest, Class.id == ClassTest.class_id)
         .join(School, School.id == cast(Class.school_id, String))
         .join(City, School.city_id == City.id)
@@ -6378,7 +6505,14 @@ def _obter_turmas_por_serie_evolucao(municipio_id: str, escola_id: str, serie_id
         query_turmas = query_turmas.filter(Class.id.in_(teacher_class_ids))
 
     turmas = query_turmas.distinct().all()
-    return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+    return [
+        {
+            "id": str(t[0]),
+            "nome": t[1] or f"Turma {t[0]}",
+            "shift": normalize_shift(t[2]) or "",
+        }
+        for t in turmas
+    ]
 
 
 def _parse_data_filtro(value: Optional[str]):
@@ -6415,6 +6549,14 @@ def _parse_periodo_bounds(periodo: str) -> Tuple[datetime, datetime]:
     return datetime(year, month, 1), datetime(year, month, last)
 
 
+def _periodo_bounds_dados_digital() -> None:
+    """
+    Período (YYYY-MM) só facilita achar a avaliação em opcoes-filtros.
+    Resultados do instrumento selecionado ignoram o mês de aplicação.
+    """
+    return None
+
+
 def _formatar_periodo_br(periodo: Optional[str]) -> Optional[str]:
     """
     Converte período YYYY-MM para intervalo no formato brasileiro (dd/mm/aaaa - dd/mm/aaaa).
@@ -6430,11 +6572,23 @@ def _formatar_periodo_br(periodo: Optional[str]) -> Optional[str]:
         return valor
 
 
+def _validar_periodo_query_digital(periodo_raw) -> Optional[str]:
+    """Valida YYYY-MM e devolve o valor limpo (ou None)."""
+    if not periodo_raw or not str(periodo_raw).strip():
+        return None
+    valor = str(periodo_raw).strip()
+    _parse_periodo_bounds(valor)
+    return valor
+
+
 def _apply_class_test_application_period(
     query,
     bounds: Optional[Tuple[datetime, datetime]],
+    *,
+    apenas_busca_avaliacao: bool = False,
 ):
-    if bounds is None:
+    """Restringe por ClassTest.application no mês somente quando `apenas_busca_avaliacao=True`."""
+    if not apenas_busca_avaliacao or bounds is None:
         return query
     dt_inicio, dt_fim = bounds
     d0 = dt_inicio.strftime("%Y-%m-%d")
@@ -7137,17 +7291,8 @@ def _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
     avaliacao_id: str,
     periodo_bounds: Optional[Tuple[datetime, datetime]],
 ) -> List[Student]:
-    """Restringe alunos às turmas com ClassTest da avaliação aplicada no mês (periodo YYYY-MM)."""
-    if periodo_bounds is None or not students:
-        return students
-    q = ClassTest.query.filter(ClassTest.test_id == str(avaliacao_id))
-    q = _apply_class_test_application_period(q, periodo_bounds)
-    allowed_class_ids = {str(ct.class_id) for ct in q.all()}
-    return [
-        s
-        for s in students
-        if getattr(s, "class_id", None) and str(s.class_id) in allowed_class_ids
-    ]
+    """Período não restringe alunos após avaliação selecionada (mantido por compatibilidade de assinatura)."""
+    return students
 
 
 @bp.route("/mapa-habilidades", methods=["GET"])
@@ -7249,9 +7394,6 @@ def mapa_habilidades_avaliacao_online():
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
         all_students = _obter_alunos_para_mapa_habilidades_test(
             scope_info, nivel_granularidade, user, escopo_calculo
-        )
-        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
-            all_students, str(avaliacao), periodo_bounds
         )
 
         subject_filter = (
@@ -7405,9 +7547,6 @@ def mapa_habilidades_avaliacao_online_analise_ia():
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
         all_students = _obter_alunos_para_mapa_habilidades_test(
             scope_info, nivel_granularidade, user, escopo_calculo
-        )
-        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
-            all_students, str(avaliacao), periodo_bounds
         )
 
         subject_filter = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
@@ -7594,9 +7733,6 @@ def mapa_habilidades_avaliacao_online_erros():
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
         all_students = _obter_alunos_para_mapa_habilidades_test(
             scope_info, nivel_granularidade, user, escopo_calculo
-        )
-        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
-            all_students, str(avaliacao), periodo_bounds_erros
         )
 
         subject_filter = (
@@ -7864,6 +8000,8 @@ def obter_opcoes_filtros():
         escola = request.args.get('escola')
         serie = request.args.get('serie')
         turma = request.args.get('turma')
+        serie_filtro = request.args.get('serie_filtro')
+        nome_filtro = request.args.get('nome')
         
         response = {}
         
@@ -7880,9 +8018,21 @@ def obter_opcoes_filtros():
                 municipio_str = str(municipio).strip()
                 if is_answer_sheet_report_entity():
                     set_search_path(city_id_to_schema_name(municipio_str))
-                    response["avaliacoes"] = obter_gabaritos_por_municipio(
-                        municipio_str, user, permissao, escola_param
+                    from app.routes.answer_sheet_evaluation_listing import (
+                        obter_series_com_gabaritos_municipio,
                     )
+                    response["avaliacoes"] = obter_gabaritos_por_municipio(
+                        municipio_str,
+                        user,
+                        permissao,
+                        escola_param,
+                        serie_id=serie_filtro,
+                        nome=nome_filtro,
+                    )
+                    if not avaliacao:
+                        response["series_disponiveis"] = obter_series_com_gabaritos_municipio(
+                            municipio_str, user, permissao
+                        )
                     if avaliacao:
                         response["escolas"] = obter_escolas_por_gabarito(
                             avaliacao, municipio_str, user, permissao
@@ -7905,27 +8055,43 @@ def obter_opcoes_filtros():
                                 )
                 else:
                     response["avaliacoes"] = _obter_avaliacoes_por_municipio(
-                        municipio, user, permissao, escola_param, periodo_bounds
+                        municipio,
+                        user,
+                        permissao,
+                        escola_param,
+                        periodo_bounds,
+                        serie_id=serie_filtro,
+                        nome=nome_filtro,
                     )
+                    if not avaliacao:
+                        response["series_disponiveis"] = _obter_series_com_aplicacoes_municipio(
+                            municipio,
+                            user,
+                            permissao,
+                            escola_param,
+                            periodo_bounds,
+                        )
                     if avaliacao:
+                        # Com avaliação já selecionada, escola/série/turma = escopo completo (sem recorte por mês).
+                        periodo_bounds_escopo = _periodo_bounds_dados_digital()
                         response["escolas"] = _obter_escolas_por_avaliacao(
-                            avaliacao, municipio, user, permissao, periodo_bounds
+                            avaliacao, municipio, user, permissao, periodo_bounds_escopo
                         )
                         if _escola_param_eh_especifica(escola):
                             response["series"] = _obter_series_por_escola(
-                                avaliacao, escola, municipio, user, permissao, periodo_bounds
+                                avaliacao, escola, municipio, user, permissao, periodo_bounds_escopo
                             )
                             if _serie_param_eh_especifica(serie):
                                 response["turmas"] = _obter_turmas_por_serie(
-                                    avaliacao, escola, serie, municipio, user, permissao, periodo_bounds
+                                    avaliacao, escola, serie, municipio, user, permissao, periodo_bounds_escopo
                                 )
                         else:
                             response["series"] = _obter_series_por_avaliacao_municipio(
-                                avaliacao, municipio, user, permissao, periodo_bounds
+                                avaliacao, municipio, user, permissao, periodo_bounds_escopo
                             )
                             if _serie_param_eh_especifica(serie):
                                 response["turmas"] = _obter_turmas_por_serie_municipio(
-                                    avaliacao, serie, municipio, user, permissao, periodo_bounds
+                                    avaliacao, serie, municipio, user, permissao, periodo_bounds_escopo
                                 )
         
         return jsonify(response), 200
@@ -8424,7 +8590,7 @@ def _calcular_ranking_global_alunos(
     Calcula o ranking global dos alunos baseado em nota e acertos totais
     para o nível de granularidade especificado
 
-    restrict_class_ids: quando definido (ex.: filtro periodo em GET /avaliacoes), só alunos dessas turmas.
+    restrict_class_ids: quando definido (ex.: escopo do professor), só alunos dessas turmas.
 
     Returns:
         Lista de alunos ordenados por ranking com formato: "Aluno X, Acertos X, Nota X"
@@ -8525,7 +8691,14 @@ def _calcular_ranking_global_alunos(
         class_info_by_id = {}
         if class_ids:
             classes_with_grade = Class.query.options(joinedload(Class.grade)).filter(Class.id.in_(class_ids)).all()
-            class_info_by_id = {c.id: (c.name or "N/A", c.grade.name if c.grade else "N/A") for c in classes_with_grade}
+            class_info_by_id = {
+                c.id: (
+                    c.name or "N/A",
+                    c.grade.name if c.grade else "N/A",
+                    normalize_shift(c.shift) or "",
+                )
+                for c in classes_with_grade
+            }
             school_ids = list({c.school_id for c in classes_with_grade if c.school_id})
             if school_ids:
                 schools = School.query.filter(School.id.in_(school_ids)).all()
@@ -8557,7 +8730,7 @@ def _calcular_ranking_global_alunos(
             # Dados do aluno para ranking
             nota = evaluation_result.grade if evaluation_result else 0.0
             
-            turma_nome, serie_nome = class_info_by_id.get(student.class_id, ("N/A", "N/A"))
+            turma_nome, serie_nome, turma_shift = class_info_by_id.get(student.class_id, ("N/A", "N/A", ""))
             escola_nome = "N/A"
             escola_id = None
             if student.class_id and school_by_class_id.get(student.class_id):
@@ -8571,6 +8744,7 @@ def _calcular_ranking_global_alunos(
                 "escola": escola_nome,
                 "serie": serie_nome,
                 "turma": turma_nome,
+                "shift": turma_shift,
                 "total_acertos": total_acertos,
                 "total_respondidas": total_respondidas,
                 "nota": nota,

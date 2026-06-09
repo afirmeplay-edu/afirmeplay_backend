@@ -1586,6 +1586,7 @@ class RankingReportService:
                 "school_name": row.get("school_name"),
                 "class_name": row.get("class_name"),
                 "serie": row.get("serie"),
+                "shift": row.get("shift") or "",
                 "average_score": row.get("media_nota", row.get("media")),
                 "average_proficiency": row.get("media_proficiencia", row.get("media")),
                 "classification": row.get("classification"),
@@ -2230,6 +2231,7 @@ class RankingReportService:
             db.session.query(
                 Class.id.label("class_id"),
                 Class.name.label("turma"),
+                Class.shift.label("shift"),
                 Class._school_id.label("school_id"),
                 Grade.id.label("grade_id"),
                 Grade.name.label("serie"),
@@ -2250,6 +2252,7 @@ class RankingReportService:
         grouped = grouped_query.group_by(
             Class.id,
             Class.name,
+            Class.shift,
             Class._school_id,
             Grade.id,
             Grade.name,
@@ -2316,6 +2319,7 @@ class RankingReportService:
                     "class_id": class_id,
                     "school_id": str(row.school_id or ""),
                     "turma": row.turma or "Turma",
+                    "shift": (row.shift or "").strip() if getattr(row, "shift", None) else "",
                     "serie": grade_name,
                     "grade_id": str(row.grade_id or ""),
                     "media": round(float(row.media or 0), 1),

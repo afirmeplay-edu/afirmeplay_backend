@@ -354,12 +354,16 @@ def _student_row_dict(st: Student, school_by_id: Optional[Dict[str, Any]] = None
         scid = getattr(st.class_, "school_id", None)
         if scid and school_by_id and scid in school_by_id:
             escola_nome = school_by_id[scid].name or "N/A"
+    shift = ""
+    if st.class_:
+        shift = (st.class_.shift or "").strip() if getattr(st.class_, "shift", None) else ""
     return {
         "id": str(st.id),
         "nome": st.name or "N/A",
         "escola": escola_nome,
         "serie": serie_nome,
         "turma": turma_nome,
+        "shift": shift,
     }
 
 

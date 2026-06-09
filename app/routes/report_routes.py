@@ -47,6 +47,7 @@ from app.models.evaluationResult import EvaluationResult
 from app.services.evaluation_result_snapshot import municipal_evaluation_results_query
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.decimal_helpers import round_to_two_decimals
+from app.utils.class_label_helpers import normalize_shift
 from app import db
 import logging
 from typing import Dict, Any, List, Optional, Union
@@ -657,6 +658,39 @@ def dados_json(evaluation_id: str):
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
+def _build_shift_by_turma_name(class_tests: List[ClassTest]) -> Dict[str, str]:
+    """Mapa turma (Class.name) → turno para enriquecer payloads de relatório."""
+    shift_map: Dict[str, str] = {}
+    for ct in class_tests:
+        obj = Class.query.get(ct.class_id)
+        if not obj or not obj.name:
+            continue
+        name = str(obj.name)
+        if name not in shift_map:
+            shift_map[name] = normalize_shift(obj.shift) or ""
+    return shift_map
+
+
+def _enrich_payload_turma_shift(payload: Any, class_tests: List[ClassTest]) -> Any:
+    """Adiciona campo `shift` em dicts com `turma` sem alterar a chave de agrupamento."""
+    shift_map = _build_shift_by_turma_name(class_tests)
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if "turma" in node and "shift" not in node:
+                turma_key = node.get("turma")
+                if turma_key is not None:
+                    node["shift"] = shift_map.get(str(turma_key), "") or ""
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return payload
+
+
 def _montar_resposta_relatorio(
     evaluation_id: str,
     school_id: str = None,
@@ -793,17 +827,20 @@ def _montar_resposta_relatorio(
     # Carregar logo padrão
     default_logo = _load_default_logo()
     
-    return {
-        "acertos_por_habilidade": acertos_habilidade,
-        "analise_ia": analise_ia,
-        "avaliacao": avaliacao_data,
-        "metadados": metadados,
-        "niveis_aprendizagem": niveis_aprendizagem,
-        "nota_geral": nota_geral,
-        "proficiencia": proficiencia,
-        "total_alunos": total_alunos,
-        "default_logo": default_logo  # Logo padrão para templates
-    }
+    return _enrich_payload_turma_shift(
+        {
+            "acertos_por_habilidade": acertos_habilidade,
+            "analise_ia": analise_ia,
+            "avaliacao": avaliacao_data,
+            "metadados": metadados,
+            "niveis_aprendizagem": niveis_aprendizagem,
+            "nota_geral": nota_geral,
+            "proficiencia": proficiencia,
+            "total_alunos": total_alunos,
+            "default_logo": default_logo,  # Logo padrão para templates
+        },
+        class_tests,
+    )
 
 
 def _montar_resposta_relatorio_por_turmas(
@@ -925,17 +962,20 @@ def _montar_resposta_relatorio_por_turmas(
     # Carregar logo padrão
     default_logo = _load_default_logo()
     
-    return {
-        "acertos_por_habilidade": acertos_habilidade,
-        "analise_ia": analise_ia,
-        "avaliacao": avaliacao_data,
-        "metadados": metadados,
-        "niveis_aprendizagem": niveis_aprendizagem,
-        "nota_geral": nota_geral,
-        "proficiencia": proficiencia,
-        "total_alunos": total_alunos,
-        "default_logo": default_logo  # Logo padrão para templates
-    }
+    return _enrich_payload_turma_shift(
+        {
+            "acertos_por_habilidade": acertos_habilidade,
+            "analise_ia": analise_ia,
+            "avaliacao": avaliacao_data,
+            "metadados": metadados,
+            "niveis_aprendizagem": niveis_aprendizagem,
+            "nota_geral": nota_geral,
+            "proficiencia": proficiencia,
+            "total_alunos": total_alunos,
+            "default_logo": default_logo,  # Logo padrão para templates
+        },
+        class_tests,
+    )
 
 
 def _sanitize_relatorio_pdf_filename(title: str) -> str:

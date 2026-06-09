@@ -39,8 +39,117 @@ def is_answer_sheet_report_entity() -> bool:
     return (request.args.get("report_entity_type") or "").strip().lower() == REPORT_ENTITY_ANSWER_SHEET
 
 
+def _norm_filtro_gabarito(val, all_values=("all", "todas", "")):
+    if not val:
+        return None
+    s = str(val).strip()
+    if not s or s.lower() in all_values:
+        return None
+    return s
+
+
+def _gabarito_aplica_serie(gabarito, serie_id: str, municipio_id: str) -> bool:
+    """True se o gabarito foi aplicado (ou direcionado) a turmas da série informada."""
+    from sqlalchemy import cast, String
+    from app.models.grades import Grade
+
+    serie_str = str(serie_id).strip()
+    if not serie_str:
+        return True
+    if getattr(gabarito, "class_id", None):
+        cls = Class.query.get(gabarito.class_id)
+        return bool(cls and str(cls.grade_id) == serie_str)
+    try:
+        from app.report_analysis.answer_sheet_report_builder import union_target_class_ids_for_gabarito
+
+        class_ids = {str(x) for x in (union_target_class_ids_for_gabarito(gabarito) or set()) if x}
+        if not class_ids:
+            return False
+        match = (
+            Class.query.join(Grade, Class.grade_id == Grade.id)
+            .filter(Class.id.in_(list(class_ids)), cast(Grade.id, String) == serie_str)
+            .first()
+        )
+        return bool(match)
+    except Exception:
+        return False
+
+
+def obter_series_com_gabaritos_municipio(
+    municipio_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Séries do município com cartões-resposta aplicados (para filtro do modal de seleção)."""
+    from sqlalchemy import cast, String
+    from app.models.grades import Grade
+
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    if permissao.get("scope") != "all" and user.get("city_id") != city.id:
+        return []
+
+    school_ids_city = [s[0] for s in db.session.query(School.id).filter(School.city_id == city.id).all()]
+    if not school_ids_city:
+        return []
+
+    class_ids_in_city = db.session.query(Class.id).filter(Class._school_id.in_(school_ids_city))
+    gab_ids_from_results = (
+        db.session.query(AnswerSheetGabarito.id)
+        .join(AnswerSheetResult, AnswerSheetResult.gabarito_id == AnswerSheetGabarito.id)
+        .join(Student, AnswerSheetResult.student_id == Student.id)
+        .join(Class, Student.class_id == Class.id)
+        .join(School, Class._school_id == School.id)
+        .filter(School.city_id == city.id)
+        .distinct()
+    )
+    conds = [
+        AnswerSheetGabarito.school_id.in_(school_ids_city),
+        AnswerSheetGabarito.class_id.in_(class_ids_in_city),
+        AnswerSheetGabarito.id.in_(gab_ids_from_results),
+    ]
+    gab_ids = [
+        r[0]
+        for r in AnswerSheetGabarito.query.filter(or_(*conds))
+        .with_entities(AnswerSheetGabarito.id)
+        .distinct()
+        .all()
+    ]
+    if not gab_ids:
+        return []
+
+    grade_ids: Set[str] = set()
+    for gid in gab_ids:
+        g = AnswerSheetGabarito.query.get(gid)
+        if not g:
+            continue
+        if getattr(g, "class_id", None):
+            cls = Class.query.get(g.class_id)
+            if cls and cls.grade_id:
+                grade_ids.add(str(cls.grade_id))
+            continue
+        try:
+            from app.report_analysis.answer_sheet_report_builder import union_target_class_ids_for_gabarito
+
+            for cid in union_target_class_ids_for_gabarito(g) or set():
+                cls = Class.query.get(cid)
+                if cls and cls.grade_id:
+                    grade_ids.add(str(cls.grade_id))
+        except Exception:
+            pass
+
+    if not grade_ids:
+        return []
+    rows = Grade.query.filter(Grade.id.in_(list(grade_ids))).order_by(Grade.name.asc()).all()
+    return [{"id": str(g.id), "nome": g.name, "name": g.name} for g in rows]
+
+
 def obter_gabaritos_por_municipio(
-    municipio_id: str, user: dict, permissao: dict, escola_param: str = "all"
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    escola_param: str = "all",
+    serie_id: Optional[str] = None,
+    nome: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Cartões-resposta do município com ou sem resultado (não exige AnswerSheetResult).
@@ -79,6 +188,9 @@ def obter_gabaritos_por_municipio(
             Test.evaluation_mode == "physical",
         )
     )
+    nome_param = str(nome).strip() if nome else None
+    if nome_param:
+        q = q.filter(AnswerSheetGabarito.title.ilike(f"%{nome_param}%"))
 
     if escola_param and escola_param.lower() != "all":
         eid = escola_param
@@ -218,6 +330,9 @@ def obter_gabaritos_por_municipio(
         except Exception:
             # Em erro, mantém o filtro existente (mais restritivo).
             pass
+    serie_param = _norm_filtro_gabarito(serie_id)
+    if serie_param:
+        rows = [r for r in rows if _gabarito_aplica_serie(r, serie_param, municipio_id)]
     return [{"id": str(r.id), "titulo": r.title or "Cartão resposta"} for r in rows]
 
 
@@ -296,7 +411,9 @@ def obter_turmas_por_gabarito_escola_serie(
         if str(c.school_id) == str(escola_id) and str(c.grade_id) == str(serie_id)
     ]
     turmas.sort(key=lambda c: (c.name or "") or str(c.id))
-    return [{"id": str(t.id), "name": t.name or f"Turma {t.id}"} for t in turmas]
+    from app.utils.class_label_helpers import class_model_filter_option
+
+    return [class_model_filter_option(t) for t in turmas]
 
 
 def obter_series_por_gabarito_municipio(
@@ -344,7 +461,9 @@ def obter_turmas_por_gabarito_serie_municipio(
     classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
     turmas = [c for c in classes if str(c.grade_id) == str(serie_id)]
     turmas.sort(key=lambda c: (c.name or "") or str(c.id))
-    return [{"id": str(t.id), "name": t.name or f"Turma {t.id}"} for t in turmas]
+    from app.utils.class_label_helpers import class_model_filter_option
+
+    return [class_model_filter_option(t) for t in turmas]
 
 
 def results_for_listing_filters(

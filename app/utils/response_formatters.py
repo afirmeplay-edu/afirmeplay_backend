@@ -509,6 +509,9 @@ def format_test_response(test, questions=None):
         # Determinar se a avaliação foi aplicada baseado na existência de class_tests
         is_applied = len(class_tests_list) > 0 if class_tests_list else False
 
+        from app.utils.test_class_helpers import count_pending_classes
+        pending_classes_count = count_pending_classes(test, class_tests_list)
+
         # Lista de questões para resposta e contagem (evita acessar test.questions duas vezes)
         questions_list = (questions if questions is not None else getattr(test, 'questions', None)) or []
         questions_formatted = [format_question_response(q, exclude_fields=exclude_from_question) for q in questions_list]
@@ -569,6 +572,7 @@ def format_test_response(test, questions=None):
         'is_applied': is_applied,
         'applied_classes': applied_classes_info,
         'applied_classes_count': len(applied_classes_info),
+        'pending_classes_count': pending_classes_count,
         'total_students': total_students,
         'total_questions': total_questions,
         'questions': questions_formatted if questions_formatted is not None else []

@@ -31,6 +31,12 @@ import os
 from PIL import Image
 import io
 from app.utils.response_formatters import format_test_response
+from app.utils.test_class_helpers import (
+    merge_apply_classes_payload,
+    remove_orphaned_class_tests,
+    resolve_test_classes,
+    resolve_test_classes_from_schools,
+)
 from sqlalchemy.orm import joinedload, subqueryload
 from sqlalchemy import cast
 from sqlalchemy.dialects.postgresql import JSONB
@@ -1012,6 +1018,7 @@ def atualizar_avaliacao(test_id):
                     logging.error("Disciplina ou disciplinas ausentes para tipo AVALIACAO")
                     return jsonify({"error": "Subject or subjects array is required for AVALIACAO type"}), 400
 
+        updated_class_ids_uuids = None
         # Validação de turmas se fornecidas
         if 'classes' in data and data.get('classes'):
             if isinstance(data['classes'], list):
@@ -1032,6 +1039,7 @@ def atualizar_avaliacao(test_id):
             from app.utils.uuid_helpers import uuid_list_to_str
             data['schools'] = uuid_list_to_str(school_ids_from_classes) if school_ids_from_classes else []
             data['classes'] = uuid_list_to_str(class_ids_uuids)  # Salvar as classes específicas como strings
+            updated_class_ids_uuids = class_ids_uuids
 
         # Campos que podem ser atualizados
         campos = [
@@ -1168,8 +1176,25 @@ def atualizar_avaliacao(test_id):
                     db.session.add(test_question)
                     logging.info(f"Nova questão criada e associada à avaliação com ordem {order}")
 
+        class_sync_result = None
+        if updated_class_ids_uuids is not None:
+            class_sync_result = remove_orphaned_class_tests(test.id, updated_class_ids_uuids)
+
         db.session.commit()
-        return jsonify({'message': 'Test updated successfully'}), 200
+
+        response = {'message': 'Test updated successfully'}
+        if class_sync_result:
+            if class_sync_result["removed_class_ids"]:
+                response["removed_class_tests"] = class_sync_result["removed_class_ids"]
+            if class_sync_result["kept_with_responses_class_ids"]:
+                response["warnings"] = (
+                    "Algumas turmas removidas da configuração mantiveram aplicação "
+                    "porque já possuem respostas de alunos."
+                )
+                response["kept_class_tests_with_responses"] = (
+                    class_sync_result["kept_with_responses_class_ids"]
+                )
+        return jsonify(response), 200
 
     except ValueError as e:
         return jsonify({"error": "Invalid date format", "details": str(e)}), 400
@@ -1614,12 +1639,25 @@ def aplicar_avaliacao_classe(test_id):
                 }), 403
 
         applied_classes = []
+        created_classes = []
+        updated_classes = []
         errors = []
 
         # Obter timezone do payload (padrão: America/Sao_Paulo)
         timezone = data.get('timezone', 'America/Sao_Paulo')
+
+        sync_configured_classes = data.get('sync_configured_classes', True)
+        classes_to_process, skipped_classes = merge_apply_classes_payload(
+            test,
+            data['classes'],
+            sync_configured_classes=sync_configured_classes,
+        )
+        if skipped_classes:
+            errors.append(
+                f"Turmas ignoradas por falta de datas de referência: {', '.join(skipped_classes)}"
+            )
         
-        for class_data in data['classes']:
+        for class_data in classes_to_process:
             class_id = class_data.get('class_id')
             application = class_data.get('application')
             expiration = class_data.get('expiration')
@@ -1675,7 +1713,9 @@ def aplicar_avaliacao_classe(test_id):
                     # ✅ REGRA 3: Salvar o nome do timezone
                     existing_application.timezone = timezone
                         
-                    applied_classes.append(str(class_id_uuid))
+                    class_id_str = str(class_id_uuid)
+                    applied_classes.append(class_id_str)
+                    updated_classes.append(class_id_str)
                 except ValueError as e:
                     errors.append(f"Invalid date format for class {class_id}: {str(e)}")
                 except Exception as e:
@@ -1714,7 +1754,9 @@ def aplicar_avaliacao_classe(test_id):
                     timezone=timezone
                 )
                 db.session.add(class_test)
-                applied_classes.append(class_id)
+                class_id_str = str(class_id_uuid)
+                applied_classes.append(class_id_str)
+                created_classes.append(class_id_str)
             except ValueError as e:
                 errors.append(f"Invalid date format for class {class_id}: {str(e)}")
             except Exception as e:
@@ -1728,7 +1770,10 @@ def aplicar_avaliacao_classe(test_id):
             
             response = {
                 "message": f"Test applied/updated to {len(applied_classes)} classes successfully",
-                "applied_classes": applied_classes
+                "applied_classes": applied_classes,
+                "created": len(created_classes),
+                "updated": len(updated_classes),
+                "skipped": len(skipped_classes),
             }
             
             if errors:
@@ -1958,150 +2003,12 @@ def listar_classes_avaliacao(test_id):
         if not test:
             return jsonify({"error": "Test not found"}), 404
 
-        # Buscar todas as aplicações da avaliação
         class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
-        
-        classes_info = []
-        
-        # Primeira prioridade: usar class_tests (quando a avaliação foi aplicada)
-        if class_tests:
-            for ct in class_tests:
-                # Buscar informações da classe
-                class_obj = Class.query.get(ct.class_id)
-                if class_obj:
-                    # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
-                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
-                    grade_obj = Grade.query.get(class_obj.grade_id)
-                    
-                    # Contar alunos na turma
-                    students_count = len(class_obj.students) if class_obj.students else 0
-                    
-                    classes_info.append({
-                        "class_test_id": ct.id,
-                        "class": {
-                            "id": class_obj.id,
-                            "name": class_obj.name,
-                            "school": {
-                                "id": school_obj.id,
-                                "name": school_obj.name
-                            } if school_obj else None,
-                            "grade": {
-                                "id": grade_obj.id,
-                                "name": grade_obj.name
-                            } if grade_obj else None
-                        },
-                        "students_count": students_count,
-                        "application": ct.application if ct.application else None,
-                        "expiration": ct.expiration if ct.expiration else None,
-                        "status": "applied"  # Indica que foi aplicada
-                    })
-        
-        # Segunda prioridade: usar classes específicas salvas na criação
-        elif test.classes:
-            logging.info(f"Nenhuma aplicação encontrada, buscando classes específicas do campo classes: {test.classes}")
-            
-            # Converter classes para lista se for string
-            if isinstance(test.classes, str):
-                import json
-                try:
-                    class_ids = json.loads(test.classes)
-                    if not isinstance(class_ids, list):
-                        class_ids = [class_ids]
-                except:
-                    class_ids = [test.classes]
-            elif isinstance(test.classes, list):
-                class_ids = test.classes
-            else:
-                class_ids = []
-            
-            logging.info(f"Class IDs para buscar: {class_ids}")
-            
-            # Buscar apenas as classes específicas
-            if class_ids:
-                specific_classes = Class.query.filter(Class.id.in_(class_ids)).all()
-                logging.info(f"Encontradas {len(specific_classes)} classes específicas")
-                
-                for class_obj in specific_classes:
-                    # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
-                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
-                    grade_obj = Grade.query.get(class_obj.grade_id)
-                    
-                    # Contar alunos na turma
-                    students_count = len(class_obj.students) if class_obj.students else 0
-                    
-                    classes_info.append({
-                        "class_test_id": None,  # Não há registro em ClassTest ainda
-                        "class": {
-                            "id": class_obj.id,
-                            "name": class_obj.name,
-                            "school": {
-                                "id": school_obj.id,
-                                "name": school_obj.name
-                            } if school_obj else None,
-                            "grade": {
-                                "id": grade_obj.id,
-                                "name": grade_obj.name
-                            } if grade_obj else None
-                        },
-                        "students_count": students_count,
-                        "application": None,  # Não foi aplicada ainda
-                        "expiration": None,   # Não foi aplicada ainda
-                        "status": "configured"  # Indica que foi configurada mas não aplicada
-                    })
-        
-        # Terceira prioridade (fallback): usar schools quando não há class_tests nem classes específicas
-        elif test.schools:
-            logging.info(f"Nenhuma aplicação encontrada, buscando turmas do campo schools: {test.schools}")
-            
-            # Converter schools para lista se for string
-            if isinstance(test.schools, str):
-                import json
-                try:
-                    school_ids = json.loads(test.schools)
-                    if not isinstance(school_ids, list):
-                        school_ids = [school_ids]
-                except:
-                    school_ids = [test.schools]
-            elif isinstance(test.schools, list):
-                school_ids = test.schools
-            else:
-                school_ids = []
-            
-            logging.info(f"School IDs para buscar: {school_ids}")
-            
-            # Buscar todas as turmas das escolas especificadas
-            if school_ids:
-                all_classes = Class.query.filter(Class.school_id.in_(school_ids)).all()
-                logging.info(f"Encontradas {len(all_classes)} turmas nas escolas")
-                
-                for class_obj in all_classes:
-                    # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
-                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
-                    grade_obj = Grade.query.get(class_obj.grade_id)
-                    
-                    # Contar alunos na turma
-                    students_count = len(class_obj.students) if class_obj.students else 0
-                    
-                    classes_info.append({
-                        "class_test_id": None,  # Não há registro em ClassTest ainda
-                        "class": {
-                            "id": class_obj.id,
-                            "name": class_obj.name,
-                            "school": {
-                                "id": school_obj.id,
-                                "name": school_obj.name
-                            } if school_obj else None,
-                            "grade": {
-                                "id": grade_obj.id,
-                                "name": grade_obj.name
-                            } if grade_obj else None
-                        },
-                        "students_count": students_count,
-                        "application": None,  # Não foi aplicada ainda
-                        "expiration": None,   # Não foi aplicada ainda
-                        "status": "configured"  # Indica que foi configurada mas não aplicada
-                    })
-        
+        classes_info = resolve_test_classes(test, class_tests)
+
+        if not classes_info:
+            classes_info = resolve_test_classes_from_schools(test)
+
         logging.info(f"Retornando {len(classes_info)} turmas para avaliação {test_id}")
         return jsonify(classes_info), 200
 

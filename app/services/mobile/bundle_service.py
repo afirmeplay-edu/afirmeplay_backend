@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import g
-from sqlalchemy import false as sa_false, func, or_
+from sqlalchemy import func
 
 from app import db
 from app.models.school import School
@@ -21,7 +21,6 @@ from app.services.mobile.student_bundle_serializer import (
     serialize_student_for_bundle,
     student_bundle_query_options,
 )
-from app.services.mobile.student_registration_pin import ensure_students_registration_pins
 from app.utils.response_formatters import _get_all_subjects_from_test
 
 logger = logging.getLogger(__name__)
@@ -94,41 +93,6 @@ def ensure_bundle_generation(
     return row.sync_bundle_version, row.bundle_valid_until, False
 
 
-def _normalize_school_id(school_id: Any) -> Optional[str]:
-    if school_id is None:
-        return None
-    return str(school_id).strip() or None
-
-
-def student_belongs_to_school(student: Student, school_id: str) -> bool:
-    """Verifica vínculo do aluno à escola (school_id ou turma da escola)."""
-    norm = _normalize_school_id(school_id)
-    if not norm:
-        return False
-    if _normalize_school_id(student.school_id) == norm:
-        return True
-    if not student.class_id:
-        return False
-    class_obj = Class.query.get(student.class_id)
-    return bool(class_obj and _normalize_school_id(class_obj.school_id) == norm)
-
-
-def students_for_school_query(school_id: str):
-    """
-    Alunos da escola: por school_id ou por turma da escola.
-    Cobre alunos com school_id desatualizado (ex.: movidos para turma de suporte).
-    """
-    norm = _normalize_school_id(school_id)
-    if not norm:
-        return Student.query.filter(sa_false())
-
-    class_ids = [c.id for c in Class.query.filter_by(school_id=norm).all()]
-    filters = [Student.school_id == norm]
-    if class_ids:
-        filters.append(Student.class_id.in_(class_ids))
-    return Student.query.filter(or_(*filters))
-
-
 def collect_school_scope(school_id: str) -> Tuple[List[str], Dict[str, Test], List[Tuple[str, str]]]:
     school = School.query.get(school_id)
     if not school:
@@ -144,13 +108,12 @@ def collect_school_scope(school_id: str) -> Tuple[List[str], Dict[str, Test], Li
     students_by_class: Dict[str, List[Student]] = {}
     for s in Student.query.filter(Student.class_id.in_(class_ids)).all():
         if s.class_id:
-            class_key = str(s.class_id)
-            students_by_class.setdefault(class_key, []).append(s)
+            students_by_class.setdefault(s.class_id, []).append(s)
 
     student_links: List[Tuple[str, str]] = []
     seen = set()
     for ct in class_tests:
-        for s in students_by_class.get(str(ct.class_id), []):
+        for s in students_by_class.get(ct.class_id, []):
             key = (s.id, ct.test_id)
             if key not in seen:
                 seen.add(key)
@@ -226,12 +189,10 @@ def serialize_students_page(
 ) -> Tuple[List[Dict[str, Any]], int, int]:
     """Lista alunos da escola paginada; total alunos da escola."""
     q = student_bundle_query_options(
-        students_for_school_query(school_id).order_by(Student.name.asc())
+        Student.query.filter_by(school_id=school_id).order_by(Student.name.asc())
     )
     total = q.count()
     items = q.offset((page - 1) * page_size).limit(page_size).all()
-    if ensure_students_registration_pins(items, db.session):
-        db.session.flush()
     out = [serialize_student_for_bundle(s) for s in items]
     total_pages = max(1, (total + page_size - 1) // page_size)
     return out, total, total_pages

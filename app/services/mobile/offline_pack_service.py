@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import qrcode
 
-from sqlalchemy import false as sa_false, or_
+from sqlalchemy import false as sa_false
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import db
@@ -26,14 +26,12 @@ from app.models.mobile_models import (
 from app.models.mobile_offline_pack_registry import MobileOfflinePackRegistry
 from app.models.school import School
 from app.models.student import Student
-from app.models.studentClass import Class
 from app.models.test import Test
 from app.services.mobile.bundle_service import (
     build_tests_questions_payload,
     collect_school_scope,
     ensure_bundle_generation,
 )
-from app.services.mobile.student_registration_pin import ensure_students_registration_pins
 from app.services.mobile.student_bundle_serializer import (
     serialize_student_for_bundle,
     student_bundle_query_options,
@@ -255,44 +253,6 @@ def _optional_id_set(key: str, scope: Dict[str, Any]) -> Optional[Set[str]]:
     return {str(x) for x in raw}
 
 
-def _normalize_school_id(school_id: Any) -> Optional[str]:
-    if school_id is None:
-        return None
-    return str(school_id).strip() or None
-
-
-def collect_pack_students_query(
-    school_ids: List[str],
-    class_ids: Optional[Set[str]],
-    student_ids: Optional[Set[str]],
-):
-    """
-    Alunos elegíveis no pacote (mesmo critério de escopo do GET /sync/bundle):
-    matrícula na escola ou turma da escola, com filtros opcionais.
-    """
-    norm_schools = [
-        sid for sid in (_normalize_school_id(s) for s in school_ids) if sid
-    ]
-    if not norm_schools:
-        return Student.query.filter(sa_false())
-
-    school_class_ids: List[Any] = []
-    for sid in norm_schools:
-        school_class_ids.extend(
-            c.id for c in Class.query.filter_by(school_id=sid).all()
-        )
-    scope_filters = [Student.school_id.in_(norm_schools)]
-    if school_class_ids:
-        scope_filters.append(Student.class_id.in_(school_class_ids))
-    q = Student.query.filter(or_(*scope_filters))
-
-    if class_ids:
-        q = q.filter(Student.class_id.in_(list(class_ids)))
-    if student_ids:
-        q = q.filter(Student.id.in_(list(student_ids)))
-    return q
-
-
 def collect_filtered_scope(
     school_ids: List[str],
     test_ids: Optional[Set[str]],
@@ -325,9 +285,9 @@ def collect_filtered_scope(
         for stu in Student.query.filter(Student.id.in_(all_stu_ids)).all():
             students_by_id[stu.id] = stu
 
-    for _sch_id, stu_id, tid in pending:
+    for sch_id, stu_id, tid in pending:
         stu = students_by_id.get(stu_id)
-        if not stu:
+        if not stu or stu.school_id != sch_id:
             continue
         if class_ids:
             cid = str(stu.class_id) if stu.class_id else None
@@ -684,10 +644,12 @@ def redeem_offline_pack_page(
         tests_map, links = collect_filtered_scope(
             school_ids, test_ids, class_ids, student_ids
         )
+        student_keys = sorted({sid for sid, _ in links})
         schools_touched = _schools_touched_from_links(links, school_ids)
 
         _reserve_device_slot(pack, device_id)
         versions, valid_min = _ensure_pack_bundle_versions(pack, schools_touched)
+        _cache_redeem_student_ids(pack, student_keys)
 
         tests_payload, content_versions, questions_by_test = (
             build_tests_questions_payload(tests_map)
@@ -702,9 +664,16 @@ def redeem_offline_pack_page(
                 "baixe a página 1 deste código neste dispositivo antes das demais páginas"
             )
 
-        school_ids = resolve_school_ids(city_id, user_sc)
-        class_ids = _optional_id_set("class_ids", user_sc)
-        student_ids = _optional_id_set("student_ids", user_sc)
+        student_keys = _cached_redeem_student_ids(pack)
+        if student_keys is None:
+            school_ids = resolve_school_ids(city_id, user_sc)
+            test_ids = _optional_id_set("test_ids", user_sc)
+            class_ids = _optional_id_set("class_ids", user_sc)
+            student_ids = _optional_id_set("student_ids", user_sc)
+            _, links = collect_filtered_scope(
+                school_ids, test_ids, class_ids, student_ids
+            )
+            student_keys = sorted({sid for sid, _ in links})
 
         versions, valid_min = _bundle_versions_from_pack(pack)
         tests_payload = {}
@@ -713,17 +682,20 @@ def redeem_offline_pack_page(
         links_out = []
         aplicadores_payload = []
 
-    eligible_query = student_bundle_query_options(
-        collect_pack_students_query(school_ids, class_ids, student_ids)
-    )
+    if student_keys:
+        eligible_query = student_bundle_query_options(
+            Student.query.filter(Student.id.in_(student_keys))
+        )
+    else:
+        eligible_query = student_bundle_query_options(
+            Student.query.filter(sa_false())
+        )
     eligible_query = eligible_query.order_by(
         Student.school_id.asc(), Student.name.asc()
     )
     total_students = eligible_query.count()
     total_pages = max(1, (total_students + page_size - 1) // page_size)
     rows = eligible_query.offset((page - 1) * page_size).limit(page_size).all()
-    if ensure_students_registration_pins(rows, db.session):
-        db.session.flush()
     students_payload = [serialize_student_for_bundle(s) for s in rows]
 
     sync_single: Optional[int] = None

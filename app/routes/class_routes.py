@@ -957,18 +957,8 @@ def add_student_to_class(class_id):
                     logging.info(f"Atualizando city_id do aluno {student.user.id} para {class_obj.school.city_id}")
                 
                 from app.services.student_enrollment_service import sync_enrollment_from_student_placement
-                from app.services.mobile.student_registration_pin import (
-                    ensure_student_registration_pin,
-                )
-                from app.services.student_password_log_service import (
-                    ensure_password_log_for_student_placement,
-                    sync_password_logs_with_student_placement,
-                )
 
                 sync_enrollment_from_student_placement(db.session, student)
-                ensure_student_registration_pin(student, db.session)
-                if not sync_password_logs_with_student_placement(db.session, student):
-                    ensure_password_log_for_student_placement(db.session, student)
 
                 added_students.append(student_id)
                 logging.info(f"Student {student_id} successfully added to class {class_id}")

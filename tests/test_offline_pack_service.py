@@ -8,56 +8,7 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from app.services.mobile import offline_pack_service as svc
-from app.services.mobile import bundle_service as bundle_svc
 from app.services.mobile.ddl import get_mobile_tables_ddl
-
-
-class TestCollectFilteredScopeSchoolMembership(unittest.TestCase):
-    @patch.object(svc, "collect_school_scope")
-    @patch.object(svc, "Student")
-    def test_includes_student_with_stale_school_id_but_class_in_school(
-        self, mock_student, mock_collect_scope
-    ):
-        stu = MagicMock()
-        stu.id = "stu-1"
-        stu.school_id = "old-school"
-        stu.class_id = "class-b"
-
-        mock_collect_scope.return_value = ([], {}, [("school-b", "stu-1", "test-1")])
-        mock_student.query.filter.return_value.all.return_value = [stu]
-
-        with patch.object(
-            svc,
-            "student_belongs_to_school",
-            side_effect=lambda student, school_id: (
-                str(school_id) == "school-b" and student.id == "stu-1"
-            ),
-        ):
-            tests, links = svc.collect_filtered_scope(["school-b"], None, None, None)
-
-        self.assertEqual(links, [("stu-1", "test-1")])
-        self.assertEqual(tests, {})
-
-
-class TestStudentBelongsToSchool(unittest.TestCase):
-    @patch.object(bundle_svc, "Class")
-    def test_by_class_when_school_id_stale(self, mock_class):
-        stu = MagicMock()
-        stu.school_id = "old-school"
-        stu.class_id = "class-1"
-        cls = MagicMock()
-        cls.school_id = "new-school"
-        mock_class.query.get.return_value = cls
-
-        self.assertTrue(bundle_svc.student_belongs_to_school(stu, "new-school"))
-        self.assertFalse(bundle_svc.student_belongs_to_school(stu, "old-school"))
-
-    def test_by_school_id(self):
-        stu = MagicMock()
-        stu.school_id = "school-a"
-        stu.class_id = None
-
-        self.assertTrue(bundle_svc.student_belongs_to_school(stu, "school-a"))
 
 
 class TestOfflinePackDDL(unittest.TestCase):

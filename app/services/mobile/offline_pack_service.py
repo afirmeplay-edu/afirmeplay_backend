@@ -31,7 +31,6 @@ from app.services.mobile.bundle_service import (
     build_tests_questions_payload,
     collect_school_scope,
     ensure_bundle_generation,
-    student_belongs_to_school,
 )
 from app.services.mobile.student_bundle_serializer import (
     serialize_student_for_bundle,
@@ -288,7 +287,7 @@ def collect_filtered_scope(
 
     for sch_id, stu_id, tid in pending:
         stu = students_by_id.get(stu_id)
-        if not stu or not student_belongs_to_school(stu, sch_id):
+        if not stu or stu.school_id != sch_id:
             continue
         if class_ids:
             cid = str(stu.class_id) if stu.class_id else None

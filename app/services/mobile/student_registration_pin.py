@@ -23,7 +23,6 @@ __all__ = [
     "allocate_unique_pin",
     "assign_registration_pin",
     "collect_used_student_registrations",
-    "ensure_student_registration_pin",
     "generate_pin_candidate",
     "is_valid_pin_format",
     "normalize_registration",
@@ -55,13 +54,3 @@ def assign_registration_pin(student, session: Session, used: Optional[Set[str]] 
     student.registration = pin
     used.add(pin)
     return pin
-
-
-def ensure_student_registration_pin(
-    student, session: Session, used: Optional[Set[str]] = None
-) -> str:
-    """Garante PIN de 4 dígitos em student.registration (gera se ausente ou inválido)."""
-    reg = normalize_registration(getattr(student, "registration", None))
-    if reg and is_valid_pin_format(reg):
-        return reg
-    return assign_registration_pin(student, session, used)

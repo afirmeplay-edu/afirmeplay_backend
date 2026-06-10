@@ -934,13 +934,7 @@ def add_student_to_class(class_id):
         # Processar múltiplos alunos
         added_students = []
         errors = []
-        from app.services.mobile.student_registration_pin import (
-            collect_used_student_registrations,
-            ensure_student_registration_pin,
-        )
-
-        used_pins = collect_used_student_registrations(db.session)
-
+        
         for student_id in student_ids:
             try:
                 student = Student.query.get(student_id)
@@ -965,7 +959,6 @@ def add_student_to_class(class_id):
                 from app.services.student_enrollment_service import sync_enrollment_from_student_placement
 
                 sync_enrollment_from_student_placement(db.session, student)
-                ensure_student_registration_pin(student, db.session, used_pins)
 
                 added_students.append(student_id)
                 logging.info(f"Student {student_id} successfully added to class {class_id}")

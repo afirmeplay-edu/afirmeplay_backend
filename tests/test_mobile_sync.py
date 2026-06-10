@@ -6,7 +6,6 @@ Requer variável DATABASE_URL para testes de integração com DB.
 import os
 import unittest
 import uuid
-from unittest.mock import MagicMock
 
 from app.services.mobile.ddl import get_mobile_tables_ddl
 from app.services.mobile.device_service import is_valid_uuid_v4
@@ -18,7 +17,6 @@ from app.services.mobile.student_registration_pin_core import (
 from app.services.mobile.student_registration_pin import (
     assign_registration_pin,
     collect_used_student_registrations,
-    ensure_student_registration_pin,
 )
 
 
@@ -62,24 +60,6 @@ class TestStudentRegistrationPin(unittest.TestCase):
     def test_pin_unique_in_memory(self):
         used = {allocate_unique_pin(set()) for _ in range(50)}
         self.assertEqual(len(used), 50)
-
-    def test_ensure_pin_keeps_existing_valid(self):
-        student = type("Student", (), {"registration": "1234"})()
-        pin = ensure_student_registration_pin(student, session=MagicMock())
-        self.assertEqual(pin, "1234")
-        self.assertEqual(student.registration, "1234")
-
-    def test_ensure_pin_assigns_when_missing(self):
-        from unittest.mock import MagicMock, patch
-
-        student = type("Student", (), {"registration": None})()
-        with patch(
-            "app.services.mobile.student_registration_pin.assign_registration_pin",
-            return_value="5678",
-        ) as mock_assign:
-            pin = ensure_student_registration_pin(student, session=MagicMock(), used=set())
-        self.assertEqual(pin, "5678")
-        mock_assign.assert_called_once()
 
     @unittest.skipUnless(os.getenv("DATABASE_URL"), "DATABASE_URL não definido")
     def test_assign_pin_on_student(self):

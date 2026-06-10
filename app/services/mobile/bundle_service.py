@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import g
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from app import db
 from app.models.school import School
@@ -24,6 +24,28 @@ from app.services.mobile.student_bundle_serializer import (
 from app.utils.response_formatters import _get_all_subjects_from_test
 
 logger = logging.getLogger(__name__)
+
+
+def school_class_ids(school_id: str) -> List:
+    return [c.id for c in Class.query.filter_by(school_id=school_id).all()]
+
+
+def students_in_school_filter(school_id: str):
+    """Alunos da escola: school_id atual ou matriculados em turma da escola."""
+    class_ids = school_class_ids(school_id)
+    if class_ids:
+        return or_(Student.school_id == school_id, Student.class_id.in_(class_ids))
+    return Student.school_id == school_id
+
+
+def student_belongs_to_school(student: Student, school_id: str) -> bool:
+    sid = str(school_id)
+    if student.school_id and str(student.school_id) == sid:
+        return True
+    if not student.class_id:
+        return False
+    cls = Class.query.get(student.class_id)
+    return bool(cls and cls.school_id and str(cls.school_id) == sid)
 
 
 def _ttl_hours() -> int:
@@ -189,7 +211,9 @@ def serialize_students_page(
 ) -> Tuple[List[Dict[str, Any]], int, int]:
     """Lista alunos da escola paginada; total alunos da escola."""
     q = student_bundle_query_options(
-        Student.query.filter_by(school_id=school_id).order_by(Student.name.asc())
+        Student.query.filter(students_in_school_filter(school_id)).order_by(
+            Student.name.asc()
+        )
     )
     total = q.count()
     items = q.offset((page - 1) * page_size).limit(page_size).all()

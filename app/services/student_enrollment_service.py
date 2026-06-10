@@ -134,6 +134,10 @@ def transfer_student_to_class(
 
     open_enrollment(sess, student.id, school_id=new_sid, class_id=new_class.id)
 
+    from app.services.mobile.student_registration_pin import ensure_student_registration_pin
+
+    ensure_student_registration_pin(student, sess)
+
     if same_school:
         from app.services.student_password_log_service import (
             ensure_password_log_for_student_placement,

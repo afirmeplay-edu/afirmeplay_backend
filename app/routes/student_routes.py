@@ -606,6 +606,13 @@ def atualizar_aluno(student_id, class_id):
             sync_enrollment_from_student_placement(get_orm_session(), aluno)
 
         if class_changed or school_changed:
+            from app.services.mobile.student_registration_pin import (
+                ensure_student_registration_pin,
+            )
+
+            ensure_student_registration_pin(aluno, get_orm_session())
+
+        if class_changed or school_changed:
             from app.services.student_password_log_service import (
                 migrate_password_logs_to_new_school,
                 sync_password_logs_with_student_placement,

@@ -11,7 +11,11 @@ from app.models.studentAnswer import StudentAnswer
 from app.models.testSession import TestSession
 from app.models.mobile_models import MobileSyncSubmission, MobileSyncBundleGeneration
 
-from app.services.mobile.bundle_service import collect_school_scope, build_tests_questions_payload
+from app.services.mobile.bundle_service import (
+    build_tests_questions_payload,
+    collect_school_scope,
+    student_belongs_to_school,
+)
 
 
 def get_bundle_generation(
@@ -112,8 +116,8 @@ def process_one_submission(
             "code": "BUNDLE_EXPIRED",
         }
 
-    stu = Student.query.filter_by(id=student_id, school_id=school_id).first()
-    if not stu:
+    stu = Student.query.get(student_id)
+    if not stu or not student_belongs_to_school(stu, school_id):
         return {
             "submission_id": str(submission_uuid),
             "status": "error",

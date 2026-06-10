@@ -558,15 +558,12 @@ def atualizar_aluno(student_id, class_id):
             if new_class.school_id != old_school_id:
                 school_changed = True
 
-            # Atualizar turma e série da turma de destino
+            # Atualizar turma, escola e série da turma de destino
             aluno.class_id = new_class_id
+            aluno.school_id = new_class.school_id
             class_changed = True
             if getattr(new_class, "grade_id", None) is not None:
                 aluno.grade_id = new_class.grade_id
-
-            # Se a turma pertence a outra escola, atualizar automaticamente
-            if school_changed:
-                aluno.school_id = new_class.school_id
 
                 # Atualizar city_id do usuário
                 new_school = get_orm_session().query(School).get(new_class.school_id)

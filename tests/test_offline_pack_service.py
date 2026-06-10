@@ -118,7 +118,8 @@ class TestUpdateOfflinePackValidation(unittest.TestCase):
 class TestRedeemOfflinePackPageFastPath(unittest.TestCase):
     @patch.object(svc, "serialize_student_for_bundle", return_value={"id": "s1"})
     @patch.object(svc, "student_bundle_query_options")
-    @patch.object(svc, "Student")
+    @patch.object(svc, "collect_pack_students_query")
+    @patch.object(svc, "resolve_school_ids", return_value=["sch-1"])
     @patch.object(svc, "MobileOfflinePackRedeemDevice")
     @patch.object(svc, "build_tests_questions_payload")
     @patch.object(svc, "collect_filtered_scope")
@@ -127,7 +128,8 @@ class TestRedeemOfflinePackPageFastPath(unittest.TestCase):
         mock_scope,
         mock_build_tests,
         mock_redeem_device,
-        mock_student,
+        mock_resolve_schools,
+        mock_pack_students,
         mock_query_opts,
         mock_serialize,
     ):
@@ -140,14 +142,13 @@ class TestRedeemOfflinePackPageFastPath(unittest.TestCase):
             "_resolved": {
                 "sync_bundle_version_by_school": {"sch-1": 3},
                 "bundle_valid_until_min": "2026-12-31T23:59:59Z",
-                "redeem_student_ids": ["s1"],
             },
         }
 
         mock_redeem_device.query.filter_by.return_value.first.return_value = MagicMock()
 
-        base_query = MagicMock()
-        mock_student.query.filter.return_value = base_query
+        pack_query = MagicMock()
+        mock_pack_students.return_value = pack_query
 
         eligible = MagicMock()
         eligible.order_by.return_value = eligible
@@ -165,6 +166,8 @@ class TestRedeemOfflinePackPageFastPath(unittest.TestCase):
 
         mock_build_tests.assert_not_called()
         mock_scope.assert_not_called()
+        mock_resolve_schools.assert_called_once()
+        mock_pack_students.assert_called_once()
         self.assertEqual(body["tests"], {})
         self.assertEqual(body["questions_by_test"], {})
         self.assertEqual(body["student_test_links"], [])

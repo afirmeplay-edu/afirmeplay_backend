@@ -55,10 +55,15 @@ def ensure_bundle_generation(
     since_bundle_version: Optional[int],
     refresh: bool,
     page: int,
+    *,
+    bundle_valid_until: Optional[datetime] = None,
 ) -> Tuple[int, datetime, bool]:
     """
     Retorna (sync_bundle_version, bundle_valid_until, is_unchanged_shortcut).
     Atalho unchanged apenas na página 1 (checagem de snapshot completo).
+
+    bundle_valid_until: quando informado (fluxo offline-pack), usa a validade do
+    código em vez de MOBILE_BUNDLE_TTL_HOURS.
     """
     current = _current_bundle_version(school_id)
     if (
@@ -77,7 +82,10 @@ def ensure_bundle_generation(
 
     if current == 0 or refresh:
         new_v = (current + 1) if current > 0 else 1
-        valid_until = datetime.utcnow() + timedelta(hours=_ttl_hours())
+        if bundle_valid_until is not None:
+            valid_until = bundle_valid_until
+        else:
+            valid_until = datetime.utcnow() + timedelta(hours=_ttl_hours())
         row = MobileSyncBundleGeneration(
             school_id=school_id,
             sync_bundle_version=new_v,

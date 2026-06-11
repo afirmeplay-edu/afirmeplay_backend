@@ -4843,6 +4843,340 @@ def obter_opcoes_filtros_cartao():
         return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
 
 
+def _parse_gabarito_ids_from_body(data: dict, field: str = "gabarito_ids") -> Tuple[Optional[List[str]], Optional[tuple]]:
+    """Valida lista de gabarito_ids no body JSON. Retorna (ids, None) ou (None, (response, status))."""
+    if field not in data:
+        return None, (jsonify({"error": f"Campo '{field}' é obrigatório no body JSON"}), 400)
+    raw = data[field]
+    if not isinstance(raw, list):
+        return None, (jsonify({"error": f"Campo '{field}' deve ser uma lista de strings"}), 400)
+    gabarito_ids = [
+        gid.strip()
+        for gid in raw
+        if gid and isinstance(gid, str) and gid.strip()
+    ]
+    if len(gabarito_ids) < 2:
+        return None, (jsonify({"error": "Mínimo de 2 gabaritos necessário para comparação"}), 400)
+    if len(gabarito_ids) != len(set(gabarito_ids)):
+        return None, (jsonify({"error": "IDs de gabaritos duplicados encontrados"}), 400)
+    return gabarito_ids, None
+
+
+def _validate_gabaritos_compare_access(user: dict, gabarito_ids: List[str]):
+    """
+    Verifica existência, resultados e permissão de acesso aos gabaritos.
+    Retorna (gabaritos, None) ou (None, (response, status)).
+    """
+    from app.permissions import get_user_permission_scope
+    from app.routes.answer_sheet_evaluation_listing import user_can_access_gabarito
+
+    gabaritos = AnswerSheetGabarito.query.filter(
+        AnswerSheetGabarito.id.in_(gabarito_ids)
+    ).all()
+    found = {g.id for g in gabaritos}
+    missing = set(gabarito_ids) - found
+    if missing:
+        return None, (
+            jsonify({"error": f"Gabaritos não encontrados: {list(missing)}"}),
+            404,
+        )
+
+    permissao = get_user_permission_scope(user) if user else {"permitted": True, "scope": "all"}
+    if not permissao.get("permitted"):
+        return None, (jsonify({"error": "Acesso negado"}), 403)
+
+    city_id = str(user.get("city_id") or "") or None
+    unauthorized = []
+    for gab in gabaritos:
+        if not user_can_access_gabarito(user, permissao, gab, city_id):
+            unauthorized.append(gab.id)
+
+    if unauthorized:
+        return None, (
+            jsonify(
+                {
+                    "error": "Você não tem permissão para comparar um ou mais gabaritos",
+                    "unauthorized_ids": unauthorized,
+                }
+            ),
+            403,
+        )
+
+    for gid in gabarito_ids:
+        has_results = AnswerSheetResult.query.filter_by(gabarito_id=gid).first()
+        if not has_results:
+            return None, (
+                jsonify({"error": f"Gabarito {gid} não possui resultados calculados"}),
+                400,
+            )
+
+    return gabaritos, None
+
+
+@bp.route('/compare', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def comparar_gabaritos_cartao():
+    """
+    Compara múltiplos gabaritos (cartões resposta) e mostra evolução sequencial.
+    Body JSON: {"gabarito_ids": ["id1", "id2", "id3"]} — mínimo 2.
+    Retorna comparação geral, por disciplina, por habilidade e participação.
+    """
+    try:
+        from app.services.answer_sheet_comparison_service import AnswerSheetComparisonService
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+
+        gabarito_ids, err = _parse_gabarito_ids_from_body(data)
+        if err:
+            return err
+
+        _, err = _validate_gabaritos_compare_access(user, gabarito_ids)
+        if err:
+            return err
+
+        comparison_result = AnswerSheetComparisonService.compare_gabaritos(gabarito_ids)
+        if not comparison_result:
+            return jsonify({"error": "Erro ao realizar comparação dos gabaritos"}), 500
+
+        return jsonify(comparison_result), 200
+    except Exception as e:
+        ids_log = gabarito_ids if "gabarito_ids" in locals() else "N/A"
+        logging.error("Erro ao comparar gabaritos %s: %s", ids_log, e, exc_info=True)
+        return jsonify({"error": "Erro ao comparar gabaritos", "details": str(e)}), 500
+
+
+@bp.route('/evolution/export-excel', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def export_evolution_excel_cartao():
+    """
+    Exporta relatório de evolução de cartões resposta para Excel.
+    Body JSON: {"gabarito_ids": ["id1", "id2", "id3"]} — mínimo 2.
+    """
+    try:
+        from app.excel_export import ExcelEvolutionExporter
+        from flask import Response
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+
+        gabarito_ids, err = _parse_gabarito_ids_from_body(data)
+        if err:
+            return err
+
+        _, err = _validate_gabaritos_compare_access(user, gabarito_ids)
+        if err:
+            return err
+
+        municipality = data.get("municipality")
+        state = data.get("state")
+        department = data.get("department")
+
+        exporter = ExcelEvolutionExporter()
+        excel_file = exporter.export_answer_sheets(
+            gabarito_ids, municipality, state, department
+        )
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"relatorio_evolucao_cartoes_{timestamp}.xlsx"
+
+        return Response(
+            excel_file.getvalue(),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        ids_log = gabarito_ids if "gabarito_ids" in locals() else "N/A"
+        logging.error("Erro ao exportar Excel cartões %s: %s", ids_log, e, exc_info=True)
+        return jsonify({"error": "Erro ao exportar relatório Excel", "details": str(e)}), 500
+
+
+@bp.route('/student/compare', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+@requires_city_context
+def comparar_gabaritos_aluno_proprio():
+    """
+    Compara evolução do aluno entre múltiplos gabaritos (cartões resposta).
+    Body JSON: {"student_id": "user_id", "gabarito_ids": ["id1", "id2"]}
+    """
+    try:
+        from app.services.answer_sheet_comparison_service import AnswerSheetComparisonService
+        from app.services.skills_map_service import _participating_answer_sheet_result
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+
+        if "student_id" not in data:
+            return jsonify({"error": "Campo 'student_id' é obrigatório no body JSON"}), 400
+
+        student_id = data["student_id"]
+        gabarito_ids, err = _parse_gabarito_ids_from_body(data)
+        if err:
+            return err
+
+        if user["id"] != student_id:
+            return jsonify({"error": "Você só pode comparar seus próprios resultados"}), 403
+
+        student = Student.query.filter_by(user_id=student_id).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+
+        gabaritos = AnswerSheetGabarito.query.filter(
+            AnswerSheetGabarito.id.in_(gabarito_ids)
+        ).all()
+        found = {g.id for g in gabaritos}
+        missing = set(gabarito_ids) - found
+        if missing:
+            return jsonify({"error": f"Gabaritos não encontrados: {list(missing)}"}), 404
+
+        results_exist = AnswerSheetResult.query.filter(
+            AnswerSheetResult.student_id == student.id,
+            AnswerSheetResult.gabarito_id.in_(gabarito_ids),
+        ).all()
+        completed = {
+            r.gabarito_id
+            for r in results_exist
+            if _participating_answer_sheet_result(r)
+        }
+        missing_completed = set(gabarito_ids) - completed
+        if missing_completed:
+            return jsonify(
+                {
+                    "error": f"Você não possui resultado corrigido no gabarito {next(iter(missing_completed))}"
+                }
+            ), 400
+
+        comparison_result = AnswerSheetComparisonService.compare_student_gabaritos_multiple(
+            student_id, gabarito_ids
+        )
+        if not comparison_result:
+            return jsonify({"error": "Erro ao realizar comparação dos seus gabaritos"}), 500
+
+        return jsonify(comparison_result), 200
+    except Exception as e:
+        logging.error(
+            "Erro ao comparar gabaritos do aluno %s: %s",
+            student_id if "student_id" in locals() else "N/A",
+            e,
+            exc_info=True,
+        )
+        return jsonify({"error": "Erro ao comparar seus gabaritos", "details": str(e)}), 500
+
+
+@bp.route('/student/<string:student_id>/compare', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
+@requires_city_context
+def comparar_gabaritos_aluno(student_id):
+    """
+    Compara evolução de um aluno entre múltiplos gabaritos (cartões resposta).
+    Body JSON: {"gabarito_ids": ["id1", "id2", "id3"]}
+    """
+    try:
+        from app.services.answer_sheet_comparison_service import AnswerSheetComparisonService
+        from app.services.skills_map_service import _participating_answer_sheet_result
+        from app.models.teacher import Teacher
+        from app.models.schoolTeacher import SchoolTeacher
+        from app.models.manager import Manager
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        student_obj = Student.query.filter_by(user_id=student_id).first()
+        if not student_obj:
+            student_obj = Student.query.get(student_id)
+        if not student_obj:
+            return jsonify({"error": f"Aluno não encontrado: {student_id}"}), 404
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+
+        gabarito_ids, err = _parse_gabarito_ids_from_body(data)
+        if err:
+            return err
+
+        role = str(user.get("role") or "").lower()
+        if role == "aluno":
+            if student_obj.user_id != user["id"]:
+                return jsonify({"error": "Você só pode comparar seus próprios resultados"}), 403
+        elif role == "professor":
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=teacher.id,
+                school_id=student_obj.school_id,
+            ).first()
+            if not teacher_school:
+                return jsonify({"error": "Você só pode comparar alunos da sua escola"}), 403
+        elif role in ("diretor", "coordenador"):
+            manager = Manager.query.filter_by(user_id=user["id"]).first()
+            if not manager or str(manager.school_id) != str(student_obj.school_id):
+                return jsonify({"error": "Você só pode comparar alunos da sua escola"}), 403
+
+        _, err = _validate_gabaritos_compare_access(user, gabarito_ids)
+        if err:
+            return err
+
+        results_exist = AnswerSheetResult.query.filter(
+            AnswerSheetResult.student_id == student_obj.id,
+            AnswerSheetResult.gabarito_id.in_(gabarito_ids),
+        ).all()
+        completed = {
+            r.gabarito_id
+            for r in results_exist
+            if _participating_answer_sheet_result(r)
+        }
+        missing_completed = set(gabarito_ids) - completed
+        if missing_completed:
+            return jsonify(
+                {
+                    "error": f"Aluno não possui resultado corrigido no gabarito {next(iter(missing_completed))}"
+                }
+            ), 400
+
+        lookup_id = student_obj.user_id or student_obj.id
+        comparison_result = AnswerSheetComparisonService.compare_student_gabaritos_multiple(
+            lookup_id, gabarito_ids
+        )
+        if not comparison_result:
+            return jsonify({"error": "Erro ao realizar comparação do aluno"}), 500
+
+        return jsonify(comparison_result), 200
+    except Exception as e:
+        logging.error(
+            "Erro ao comparar gabaritos do aluno %s: %s", student_id, e, exc_info=True
+        )
+        return jsonify({"error": "Erro ao comparar gabaritos do aluno", "details": str(e)}), 500
+
+
 @bp.route('/resultados-agregados', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")

@@ -18,7 +18,9 @@ from app.excel_export.data_transformer import DataTransformer
 from app.excel_export.formatters import ExcelFormatter
 from app.excel_export.matplotlib_chart_builder import MatplotlibChartBuilder
 from app.services.evaluation_comparison_service import EvaluationComparisonService
+from app.services.answer_sheet_comparison_service import AnswerSheetComparisonService
 from app.models.test import Test
+from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.city import City
 
 logger = logging.getLogger(__name__)
@@ -35,71 +37,96 @@ class ExcelEvolutionExporter:
     def export(self, test_ids: List[str], municipality: Optional[str] = None, 
                state: Optional[str] = None, department: Optional[str] = None) -> BytesIO:
         """
-        Exporta relatório de evolução para Excel
-        
-        Args:
-            test_ids: Lista de IDs das avaliações
-            municipality: Nome do município (opcional)
-            state: Nome do estado (opcional)
-            department: Nome do departamento/secretaria (opcional)
-            
-        Returns:
-            BytesIO com arquivo Excel
+        Exporta relatório de evolução de avaliações online para Excel
         """
+        comparison_data = EvaluationComparisonService.compare_evaluations(test_ids)
+        if not comparison_data:
+            raise ValueError("Não foi possível obter dados de comparação")
+
+        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        if not municipality or not state:
+            municipality, state = self._extract_location_info(tests)
+
+        return self._export_from_comparison_data(
+            comparison_data,
+            municipality=municipality,
+            state=state,
+            department=department,
+            cover_title="RELATÓRIO DE EVOLUÇÃO DAS AVALIAÇÕES",
+        )
+
+    def export_answer_sheets(
+        self,
+        gabarito_ids: List[str],
+        municipality: Optional[str] = None,
+        state: Optional[str] = None,
+        department: Optional[str] = None,
+    ) -> BytesIO:
+        """
+        Exporta relatório de evolução de cartões resposta para Excel
+        """
+        comparison_data = AnswerSheetComparisonService.compare_gabaritos(gabarito_ids)
+        if not comparison_data:
+            raise ValueError("Não foi possível obter dados de comparação dos cartões resposta")
+
+        gabaritos = AnswerSheetGabarito.query.filter(
+            AnswerSheetGabarito.id.in_(gabarito_ids)
+        ).all()
+        if not municipality or not state:
+            municipality, state = self._extract_location_from_gabaritos(gabaritos)
+
+        return self._export_from_comparison_data(
+            comparison_data,
+            municipality=municipality,
+            state=state,
+            department=department,
+            cover_title="RELATÓRIO DE EVOLUÇÃO DOS CARTÕES RESPOSTA",
+        )
+
+    def _export_from_comparison_data(
+        self,
+        comparison_data: Dict[str, Any],
+        municipality: Optional[str] = None,
+        state: Optional[str] = None,
+        department: Optional[str] = None,
+        cover_title: str = "RELATÓRIO DE EVOLUÇÃO DAS AVALIAÇÕES",
+    ) -> BytesIO:
         try:
-            # Buscar dados de comparação
-            comparison_data = EvaluationComparisonService.compare_evaluations(test_ids)
-            if not comparison_data:
-                raise ValueError("Não foi possível obter dados de comparação")
-            
-            # Transformar dados para formato tabular
             self.transformed_data = DataTransformer.transform_comparison_data(comparison_data)
             if not self.transformed_data:
                 raise ValueError("Não foi possível transformar dados")
-            
-            # Criar workbook
+
             self.workbook = Workbook()
-            self.workbook.remove(self.workbook.active)  # Remover sheet padrão
-            
-            # Buscar informações adicionais das avaliações
-            tests = Test.query.filter(Test.id.in_(test_ids)).all()
+            self.workbook.remove(self.workbook.active)
+
             evaluations_info = comparison_data.get('evaluations', [])
-            
-            # Tentar obter município e estado das avaliações se não fornecidos
-            if not municipality or not state:
-                municipality, state = self._extract_location_info(tests)
-            
+
             if not department:
                 department = "SECRETARIA MUNICIPAL DE EDUCAÇÃO"
-            
-            # Criar abas
-            self._create_cover_sheet(municipality, state, department, evaluations_info)
+
+            self._create_cover_sheet(
+                municipality or "SÃO MIGUEL DOS CAMPOS",
+                state or "ALAGOAS",
+                department,
+                evaluations_info,
+                cover_title=cover_title,
+            )
             self._create_general_sheet()
-            
-            # Criar aba de participação
             self._create_participation_sheet()
-            
-            # Criar abas por disciplina
+
             subjects = self.transformed_data.get('subjects', {})
             for subject_name in subjects.keys():
                 self._create_subject_sheet(subject_name)
-            
-            # Criar aba de níveis
+
             self._create_classification_sheet()
-            
-            # Salvar em BytesIO
+
             output = BytesIO()
             self.workbook.save(output)
             output.seek(0)
-            
-            # Limpar arquivos temporários
             self._cleanup_temp_files()
-            
             return output
-            
         except Exception as e:
             logger.error(f"Erro ao exportar relatório Excel: {str(e)}", exc_info=True)
-            # Limpar arquivos temporários mesmo em caso de erro
             self._cleanup_temp_files()
             raise
     
@@ -130,9 +157,23 @@ class ExcelEvolutionExporter:
                     break
         
         return municipality or "SÃO MIGUEL DOS CAMPOS", state or "ALAGOAS"
+
+    def _extract_location_from_gabaritos(
+        self, gabaritos: List[AnswerSheetGabarito]
+    ) -> tuple:
+        municipality = None
+        state = None
+        for gab in gabaritos:
+            if getattr(gab, "municipality", None):
+                municipality = gab.municipality
+            if getattr(gab, "state", None):
+                state = gab.state
+            if municipality and state:
+                break
+        return municipality or "SÃO MIGUEL DOS CAMPOS", state or "ALAGOAS"
     
     def _create_cover_sheet(self, municipality: str, state: str, department: str,
-                          evaluations_info: List[Dict]):
+                          evaluations_info: List[Dict], cover_title: Optional[str] = None):
         """Cria aba de capa"""
         sheet = self.workbook.create_sheet("Capa")
         
@@ -151,7 +192,7 @@ class ExcelEvolutionExporter:
         # Título principal (abaixar para dar espaço ao logo)
         ExcelFormatter.merge_and_center(
             sheet, "A6:H6", 
-            "RELATÓRIO DE EVOLUÇÃO DAS AVALIAÇÕES",
+            cover_title or "RELATÓRIO DE EVOLUÇÃO DAS AVALIAÇÕES",
             font=ExcelFormatter.TITLE_FONT
         )
         

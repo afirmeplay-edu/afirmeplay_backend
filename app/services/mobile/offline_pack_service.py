@@ -337,6 +337,54 @@ def _cached_redeem_student_ids(pack: MobileOfflinePackCode) -> Optional[List[str
     return None
 
 
+def _pack_bundle_valid_until(pack: MobileOfflinePackCode) -> datetime:
+    """Validade de upload alinhada ao expires_at do código offline."""
+    return pack.expires_at
+
+
+def _resolved_versions_map(pack: MobileOfflinePackCode) -> Dict[str, int]:
+    internal = (pack.scope_json or {}).get("_resolved") or {}
+    raw = internal.get("sync_bundle_version_by_school")
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    return {str(k): int(v) for k, v in raw.items()}
+
+
+def _align_generation_to_pack_expiry(
+    school_id: str, sync_version: int, pack_expires_at: datetime
+) -> bool:
+    """Define bundle_valid_until da geração igual ao expires_at do pacote."""
+    gen = MobileSyncBundleGeneration.query.filter_by(
+        school_id=str(school_id),
+        sync_bundle_version=int(sync_version),
+    ).first()
+    if not gen:
+        return False
+    if gen.bundle_valid_until == pack_expires_at:
+        return False
+    gen.bundle_valid_until = pack_expires_at
+    db.session.flush()
+    return True
+
+
+def _sync_cached_pack_generations_to_pack_expiry(pack: MobileOfflinePackCode) -> None:
+    """Alinha gerações do mapa _resolved e bundle_valid_until_min ao expires_at do código."""
+    versions = _resolved_versions_map(pack)
+    if not versions:
+        return
+    pack_valid = _pack_bundle_valid_until(pack)
+    for school_id, sync_version in versions.items():
+        _align_generation_to_pack_expiry(school_id, sync_version, pack_valid)
+
+    scope = dict(pack.scope_json or {})
+    internal = dict(scope.get("_resolved") or {})
+    internal["bundle_valid_until_min"] = pack_valid.isoformat() + "Z"
+    scope["_resolved"] = internal
+    pack.scope_json = scope
+    flag_modified(pack, "scope_json")
+    db.session.flush()
+
+
 def _bundle_versions_from_pack(
     pack: MobileOfflinePackCode,
 ) -> Tuple[Dict[str, int], datetime]:
@@ -358,7 +406,11 @@ def _ensure_pack_bundle_versions(
     Garante mobile_sync_bundle_generation para cada escola do pacote e grava
     versões em scope_json._resolved. Escolas novas recebem nova geração; escolas
     já mapeadas reutilizam a versão em cache.
+
+    bundle_valid_until de cada geração e bundle_valid_until_min do pacote seguem
+    pack.expires_at (validade do código), não MOBILE_BUNDLE_TTL_HOURS.
     """
+    pack_valid = _pack_bundle_valid_until(pack)
     scope = dict(pack.scope_json or {})
     internal = dict(scope.get("_resolved") or {})
     existing = internal.get("sync_bundle_version_by_school")
@@ -366,51 +418,29 @@ def _ensure_pack_bundle_versions(
     if isinstance(existing, dict) and existing:
         versions = {str(k): int(v) for k, v in existing.items()}
 
-    min_valid: Optional[datetime] = None
-    raw_min = internal.get("bundle_valid_until_min")
-    if raw_min:
-        min_valid = _parse_iso_naive(raw_min)
-
-    changed = False
     for sch_id in sorted(school_ids_for_bundle):
         key = str(sch_id)
         if key in versions:
             continue
-        v, valid_until, _ = ensure_bundle_generation(sch_id, None, True, 1)
+        v, _, _ = ensure_bundle_generation(
+            sch_id,
+            None,
+            True,
+            1,
+            bundle_valid_until=pack_valid,
+        )
         versions[key] = int(v)
-        changed = True
-        if min_valid is None or valid_until < min_valid:
-            min_valid = valid_until
 
-    if not versions:
-        min_valid = min_valid or datetime.utcnow()
-        internal["sync_bundle_version_by_school"] = versions
-        internal["bundle_valid_until_min"] = min_valid.isoformat() + "Z"
-        scope["_resolved"] = internal
-        pack.scope_json = scope
-        flag_modified(pack, "scope_json")
-        db.session.flush()
-        return versions, min_valid
-
-    if changed or not raw_min:
-        min_valid = None
-        for key, ver in versions.items():
-            gen = MobileSyncBundleGeneration.query.filter_by(
-                school_id=key, sync_bundle_version=ver
-            ).first()
-            if gen and (min_valid is None or gen.bundle_valid_until < min_valid):
-                min_valid = gen.bundle_valid_until
-
-    if not min_valid:
-        min_valid = datetime.utcnow()
+    for key, ver in versions.items():
+        _align_generation_to_pack_expiry(key, ver, pack_valid)
 
     internal["sync_bundle_version_by_school"] = versions
-    internal["bundle_valid_until_min"] = min_valid.isoformat() + "Z"
+    internal["bundle_valid_until_min"] = pack_valid.isoformat() + "Z"
     scope["_resolved"] = internal
     pack.scope_json = scope
     flag_modified(pack, "scope_json")
     db.session.flush()
-    return versions, min_valid
+    return versions, pack_valid
 
 
 def _parse_iso_naive(raw: str) -> datetime:
@@ -507,6 +537,7 @@ def update_offline_pack(
         if ttl_hours < 1 or ttl_hours > 24 * 14:
             raise ValueError("ttl_hours deve estar entre 1 e 336")
         pack.expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+        _sync_cached_pack_generations_to_pack_expiry(pack)
 
     if max_redemptions is not None:
         if max_redemptions < 1 or max_redemptions > 10_000:

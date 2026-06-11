@@ -96,9 +96,10 @@ class TestUpdateOfflinePackValidation(unittest.TestCase):
 
     @patch.object(svc, "resolve_school_ids")
     @patch.object(svc, "invalidate_pack_bundle_cache")
+    @patch.object(svc, "_sync_cached_pack_generations_to_pack_expiry")
     @patch.object(svc, "db")
     def test_scope_update_invalidates_cache(
-        self, mock_db, mock_invalidate, mock_resolve
+        self, mock_db, mock_sync_expiry, mock_invalidate, mock_resolve
     ):
         pack = MagicMock()
         pack.revoked_at = None
@@ -113,6 +114,21 @@ class TestUpdateOfflinePackValidation(unittest.TestCase):
         mock_resolve.assert_called_once()
         mock_invalidate.assert_called_once_with(pack)
         self.assertEqual(pack.scope_json, new_scope)
+        mock_sync_expiry.assert_not_called()
+
+    @patch.object(svc, "db")
+    def test_ttl_update_syncs_bundle_generations(self, mock_db):
+        pack = MagicMock()
+        pack.revoked_at = None
+        pack.expires_at = datetime.utcnow() + timedelta(hours=72)
+        pack.scope_json = {"type": "municipality"}
+        with patch.object(svc, "_sync_cached_pack_generations_to_pack_expiry") as mock_sync:
+            svc.update_offline_pack(
+                pack=pack,
+                city_id="city-1",
+                ttl_hours=96,
+            )
+            mock_sync.assert_called_once_with(pack)
 
 
 class TestRedeemOfflinePackPageFastPath(unittest.TestCase):

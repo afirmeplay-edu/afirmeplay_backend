@@ -7,13 +7,15 @@ continuam a usar o universo de alunos atual (class_id/school_id) como fallback.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import and_, cast, or_
 from sqlalchemy.dialects.postgresql import VARCHAR
+from sqlalchemy.orm import joinedload
 
 from app import db
 from app.models.evaluationResult import EvaluationResult
+from app.models.grades import Grade
 from app.models.school import School
 from app.models.student import Student
 from app.models.studentClass import Class
@@ -212,6 +214,172 @@ def municipal_evaluation_results_query(city_id: str, evaluation_id: str) -> Any:
             ),
         ),
     )
+
+
+def class_ids_for_evaluation_in_scope(
+    evaluation_id: str,
+    escopo_calculo: Dict[str, Any],
+    restrict_class_ids: Optional[Set[Any]] = None,
+) -> List[Any]:
+    """Turmas (ClassTest) onde a avaliação foi aplicada, respeitando o escopo hierárquico."""
+    from app.models.classTest import ClassTest
+
+    effective_restrict = restrict_class_ids
+    if effective_restrict is None:
+        effective_restrict = escopo_calculo.get("restrict_class_ids")
+
+    q = ClassTest.query.filter(ClassTest.test_id == str(evaluation_id))
+    if effective_restrict is not None:
+        if not effective_restrict:
+            return []
+        q = q.filter(ClassTest.class_id.in_(list(effective_restrict)))
+
+    tipo = escopo_calculo.get("tipo")
+    if tipo == "turma" and escopo_calculo.get("turma_id"):
+        q = q.filter(ClassTest.class_id == escopo_calculo["turma_id"])
+    elif tipo in ("serie", "escola", "municipio"):
+        q = q.join(Class, ClassTest.class_id == Class.id)
+        if tipo == "serie" and escopo_calculo.get("serie_id"):
+            q = q.filter(Class.grade_id == escopo_calculo["serie_id"])
+            if escopo_calculo.get("escola_id"):
+                q = q.filter(
+                    cast(Class._school_id, VARCHAR) == cast(str(escopo_calculo["escola_id"]), VARCHAR)
+                )
+        elif tipo == "escola" and escopo_calculo.get("escola_id"):
+            q = q.filter(
+                cast(Class._school_id, VARCHAR) == cast(str(escopo_calculo["escola_id"]), VARCHAR)
+            )
+        elif tipo == "municipio" and escopo_calculo.get("municipio_id"):
+            q = q.join(
+                School,
+                cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR),
+            ).filter(School.city_id == escopo_calculo["municipio_id"])
+
+    return list({ct.class_id for ct in q.all() if ct.class_id})
+
+
+def prefetch_placement_from_results(
+    evaluation_results: List[Any],
+) -> Tuple[Dict[str, School], Dict[Any, Class], Dict[Any, Grade]]:
+    """Carrega escolas/turmas/séries referenciadas nos snapshots (em lote)."""
+    school_ids: Set[str] = set()
+    class_ids: Set[Any] = set()
+    grade_ids: Set[Any] = set()
+    for er in evaluation_results or []:
+        if getattr(er, "school_id_snapshot", None):
+            school_ids.add(str(er.school_id_snapshot))
+        if getattr(er, "class_id_snapshot", None):
+            class_ids.add(er.class_id_snapshot)
+        if getattr(er, "grade_id_snapshot", None):
+            grade_ids.add(er.grade_id_snapshot)
+
+    schools_by_id: Dict[str, School] = {}
+    if school_ids:
+        schools_by_id = {
+            str(s.id): s for s in School.query.filter(School.id.in_(school_ids)).all()
+        }
+
+    classes_by_id: Dict[Any, Class] = {}
+    if class_ids:
+        for c in (
+            Class.query.options(joinedload(Class.grade))
+            .filter(Class.id.in_(class_ids))
+            .all()
+        ):
+            classes_by_id[c.id] = c
+            if getattr(c, "grade_id", None):
+                grade_ids.add(c.grade_id)
+
+    grades_by_id: Dict[Any, Grade] = {}
+    if grade_ids:
+        grades_by_id = {g.id: g for g in Grade.query.filter(Grade.id.in_(grade_ids)).all()}
+
+    return schools_by_id, classes_by_id, grades_by_id
+
+
+def resolve_participant_display_context(
+    student: Optional[Student],
+    evaluation_result: EvaluationResult,
+    schools_by_id: Dict[str, School],
+    classes_by_id: Dict[Any, Class],
+    grades_by_id: Optional[Dict[Any, Grade]] = None,
+) -> Dict[str, Any]:
+    """
+    Nome do aluno (Student) e colocação escolar preferindo snapshots do resultado.
+    """
+    from app.utils.class_label_helpers import normalize_shift
+
+    nome = (getattr(student, "name", None) or "").strip() or "N/A"
+    grades_by_id = grades_by_id or {}
+
+    has_snapshot = bool(
+        getattr(evaluation_result, "school_id_snapshot", None)
+        or getattr(evaluation_result, "class_id_snapshot", None)
+    )
+
+    if has_snapshot:
+        escola_id = (
+            str(evaluation_result.school_id_snapshot)
+            if evaluation_result.school_id_snapshot
+            else None
+        )
+        escola_nome = "N/A"
+        if escola_id and escola_id in schools_by_id:
+            escola_nome = schools_by_id[escola_id].name or "N/A"
+
+        turma_nome = "N/A"
+        serie_nome = "N/A"
+        turma_shift = ""
+        cid = evaluation_result.class_id_snapshot
+        if cid and cid in classes_by_id:
+            cls_obj = classes_by_id[cid]
+            turma_nome = cls_obj.name or "N/A"
+            turma_shift = normalize_shift(getattr(cls_obj, "shift", None)) or ""
+            if cls_obj.grade:
+                serie_nome = cls_obj.grade.name or "N/A"
+            elif getattr(cls_obj, "grade_id", None) and cls_obj.grade_id in grades_by_id:
+                serie_nome = grades_by_id[cls_obj.grade_id].name or "N/A"
+        elif evaluation_result.grade_id_snapshot and evaluation_result.grade_id_snapshot in grades_by_id:
+            serie_nome = grades_by_id[evaluation_result.grade_id_snapshot].name or "N/A"
+
+        return {
+            "nome": nome,
+            "escola_id": escola_id,
+            "escola": escola_nome,
+            "serie": serie_nome,
+            "turma": turma_nome,
+            "shift": turma_shift,
+            "contexto_colocacao": "snapshot",
+        }
+
+    turma_nome = "N/A"
+    serie_nome = "N/A"
+    escola_nome = "N/A"
+    escola_id = None
+    turma_shift = ""
+    if student and getattr(student, "class_", None):
+        turma_nome = student.class_.name or "N/A"
+        turma_shift = normalize_shift(getattr(student.class_, "shift", None)) or ""
+        if student.class_.grade:
+            serie_nome = student.class_.grade.name or "N/A"
+        sid = getattr(student.class_, "school_id", None)
+        if sid:
+            escola_id = str(sid)
+            school = schools_by_id.get(escola_id)
+            if not school:
+                school = School.query.get(escola_id)
+            if school:
+                escola_nome = school.name or "N/A"
+
+    return {
+        "nome": nome,
+        "escola_id": escola_id,
+        "escola": escola_nome,
+        "serie": serie_nome,
+        "turma": turma_nome,
+        "shift": turma_shift,
+        "contexto_colocacao": "atual",
+    }
 
 
 def student_ids_for_class_group_with_snapshots(

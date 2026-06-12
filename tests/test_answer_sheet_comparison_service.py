@@ -76,5 +76,36 @@ class TestAnswerSheetSubjectComparison(unittest.TestCase):
         self.assertEqual(out["Matemática"]["average_grade"]["evaluation_2"], 4.0)
 
 
+class TestGradeInfoResolution(unittest.TestCase):
+    def test_resolve_test_grade_info_from_class_test(self):
+        test = MagicMock(
+            id="test-1",
+            grade_id=None,
+            grade=None,
+            title="Prova",
+        )
+        class_obj = MagicMock(grade_id="grade-uuid-1", id="class-uuid-1", name="Turma A")
+        grade_obj = MagicMock(name="5º Ano")
+
+        with patch("app.models.classTest.ClassTest") as mock_ct, patch(
+            "app.models.studentClass.Class"
+        ) as mock_class, patch("app.models.grades.Grade") as mock_grade:
+            mock_ct.query.filter_by.return_value.all.return_value = [
+                MagicMock(class_id="class-uuid-1")
+            ]
+            mock_class.query.filter.return_value.all.return_value = [class_obj]
+            mock_grade.query.get.return_value = grade_obj
+
+            info = EvaluationComparisonService._resolve_test_grade_info(test)
+
+        self.assertEqual(info["grade_id"], "grade-uuid-1")
+        self.assertEqual(info["grade_name"], "5º Ano")
+        self.assertEqual(info["grade_names"], ["5º Ano"])
+        self.assertEqual(
+            info["classes"],
+            [{"id": "class-uuid-1", "name": "Turma A"}],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

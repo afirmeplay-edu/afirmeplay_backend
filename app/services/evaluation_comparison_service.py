@@ -95,17 +95,23 @@ class EvaluationComparisonService:
             
             results_time = time.time() - results_start
             
+            grade_info_by_test = {
+                test.id: EvaluationComparisonService._resolve_test_grade_info(test)
+                for test in ordered_tests
+            }
+
             # Preparar dados básicos das avaliações ordenadas
             evaluations_data = []
             for i, item in enumerate(tests_with_dates):
                 test = item['test']
-                evaluations_data.append({
-                    "order": i + 1,
-                    "id": test.id,
-                    "title": test.title,
-                    "created_at": test.created_at.isoformat() if test.created_at else None,
-                    "application_date": item['application_date'].isoformat() if item['application_date'] else None
-                })
+                evaluations_data.append(
+                    EvaluationComparisonService._build_test_evaluation_entry(
+                        test,
+                        i + 1,
+                        item['application_date'],
+                        grade_info_by_test.get(test.id),
+                    )
+                )
             
             # Fazer comparações sequenciais (1→2, 2→3, 3→4, etc.)
             comparisons_start = time.time()
@@ -136,16 +142,12 @@ class EvaluationComparisonService:
                 skills_time = time.time() - skills_start
                 
                 comparisons.append({
-                    "from_evaluation": {
-                        "id": test_from.id,
-                        "title": test_from.title,
-                        "order": i + 1
-                    },
-                    "to_evaluation": {
-                        "id": test_to.id,
-                        "title": test_to.title,
-                        "order": i + 2
-                    },
+                    "from_evaluation": EvaluationComparisonService._build_test_evaluation_ref(
+                        test_from, i + 1, grade_info_by_test.get(test_from.id)
+                    ),
+                    "to_evaluation": EvaluationComparisonService._build_test_evaluation_ref(
+                        test_to, i + 2, grade_info_by_test.get(test_to.id)
+                    ),
                     "general_comparison": general_comparison,
                     "subject_comparison": subject_comparison,
                     "skills_comparison": skills_comparison
@@ -711,6 +713,103 @@ class EvaluationComparisonService:
             return None
     
     @staticmethod
+    def _resolve_test_grade_info(test: Test) -> Dict[str, Any]:
+        """Série(s) e turma(s) em que a avaliação foi aplicada (ClassTest → Class)."""
+        from app.models.classTest import ClassTest
+        from app.models.studentClass import Class
+        from app.models.grades import Grade
+
+        grade_id_by_str: Dict[str, str] = {}
+        classes_list: List[Dict[str, str]] = []
+        class_tests = ClassTest.query.filter_by(test_id=str(test.id)).all()
+        class_ids = [ct.class_id for ct in class_tests if ct.class_id]
+        if class_ids:
+            for class_obj in Class.query.filter(Class.id.in_(class_ids)).all():
+                classes_list.append(
+                    {
+                        "id": str(class_obj.id),
+                        "name": class_obj.name or f"Turma {class_obj.id}",
+                    }
+                )
+                if not class_obj.grade_id:
+                    continue
+                gid = str(class_obj.grade_id)
+                if gid in grade_id_by_str:
+                    continue
+                grade_obj = Grade.query.get(class_obj.grade_id)
+                grade_id_by_str[gid] = grade_obj.name if grade_obj and grade_obj.name else gid
+
+        classes_list.sort(key=lambda item: (item.get("name") or "").lower())
+
+        grade_names = sorted({name for name in grade_id_by_str.values() if name})
+        grade_ids = sorted(grade_id_by_str.keys())
+
+        grade_id = None
+        grade_name = None
+        if getattr(test, "grade_id", None):
+            grade_id = str(test.grade_id)
+            if getattr(test, "grade", None) and test.grade.name:
+                grade_name = test.grade.name
+            else:
+                grade_obj = Grade.query.get(test.grade_id)
+                grade_name = grade_obj.name if grade_obj and grade_obj.name else None
+
+        if grade_ids:
+            if grade_id and grade_id in grade_ids and grade_name:
+                pass
+            elif grade_id and grade_id in grade_ids:
+                grade_name = grade_id_by_str.get(grade_id) or grade_name
+            else:
+                grade_id = grade_ids[0]
+                grade_name = grade_id_by_str.get(grade_id) or grade_name
+        elif grade_id and not grade_name:
+            grade_obj = Grade.query.get(test.grade_id)
+            grade_name = grade_obj.name if grade_obj and grade_obj.name else None
+
+        if grade_names and not grade_name:
+            grade_name = grade_names[0]
+        if grade_id and grade_name and grade_name not in grade_names:
+            grade_names = sorted(set(grade_names) | {grade_name})
+
+        return {
+            "grade_id": grade_id,
+            "grade_name": grade_name,
+            "grade_names": grade_names,
+            "classes": classes_list,
+        }
+
+    @staticmethod
+    def _build_test_evaluation_entry(
+        test: Test,
+        order: int,
+        application_date,
+        grade_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        info = grade_info or EvaluationComparisonService._resolve_test_grade_info(test)
+        return {
+            "order": order,
+            "id": test.id,
+            "title": test.title,
+            "created_at": test.created_at.isoformat() if test.created_at else None,
+            "application_date": application_date.isoformat() if application_date else None,
+            **info,
+        }
+
+    @staticmethod
+    def _build_test_evaluation_ref(
+        test: Test,
+        order: int,
+        grade_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        info = grade_info or EvaluationComparisonService._resolve_test_grade_info(test)
+        return {
+            "id": test.id,
+            "title": test.title,
+            "order": order,
+            **info,
+        }
+
+    @staticmethod
     def _calculate_evolution_percentage(old_value: float, new_value: float) -> Dict[str, Any]:
         """Calcula percentual de evolução entre dois valores"""
         try:
@@ -830,17 +929,23 @@ class EvaluationComparisonService:
                 logging.warning(f"Aluno {actual_student_id} não completou avaliações: {missing}")
                 return None
             
+            grade_info_by_test = {
+                test.id: EvaluationComparisonService._resolve_test_grade_info(test)
+                for test in ordered_tests
+            }
+
             # Preparar dados básicos das avaliações ordenadas
             evaluations_data = []
             for i, item in enumerate(tests_with_dates):
                 test = item['test']
-                evaluations_data.append({
-                    "order": i + 1,
-                    "id": test.id,
-                    "title": test.title,
-                    "created_at": test.created_at.isoformat() if test.created_at else None,
-                    "application_date": item['application_date'].isoformat() if item['application_date'] else None
-                })
+                evaluations_data.append(
+                    EvaluationComparisonService._build_test_evaluation_entry(
+                        test,
+                        i + 1,
+                        item['application_date'],
+                        grade_info_by_test.get(test.id),
+                    )
+                )
             
             # Cache em lote para evitar N queries (questões, respostas, disciplinas); se falhar, segue sem cache
             comparison_cache = None
@@ -875,16 +980,12 @@ class EvaluationComparisonService:
                         actual_student_id, test_from, test_to, cache=comparison_cache
                     )
                     comparisons.append({
-                        "from_evaluation": {
-                            "id": test_from.id,
-                            "title": test_from.title,
-                            "order": i + 1
-                        },
-                        "to_evaluation": {
-                            "id": test_to.id,
-                            "title": test_to.title,
-                            "order": i + 2
-                        },
+                        "from_evaluation": EvaluationComparisonService._build_test_evaluation_ref(
+                            test_from, i + 1, grade_info_by_test.get(test_from.id)
+                        ),
+                        "to_evaluation": EvaluationComparisonService._build_test_evaluation_ref(
+                            test_to, i + 2, grade_info_by_test.get(test_to.id)
+                        ),
                         "general_comparison": general_comparison,
                         "subject_comparison": subject_comparison or {},
                         "skills_comparison": skills_comparison or {}
@@ -971,19 +1072,24 @@ class EvaluationComparisonService:
                 logging.warning(f"Aluno {actual_student_id} não completou avaliação {test_id_2}")
                 return None
             
+            grade_info_1 = EvaluationComparisonService._resolve_test_grade_info(test_1)
+            grade_info_2 = EvaluationComparisonService._resolve_test_grade_info(test_2)
+
             # Preparar dados básicos das avaliações
             evaluation_1_data = {
                 "id": test_1.id,
                 "title": test_1.title,
                 "created_at": test_1.created_at.isoformat() if test_1.created_at else None,
-                "completed_at": result_1.calculated_at.isoformat() if result_1.calculated_at else None
+                "completed_at": result_1.calculated_at.isoformat() if result_1.calculated_at else None,
+                **grade_info_1,
             }
             
             evaluation_2_data = {
                 "id": test_2.id,
                 "title": test_2.title,
                 "created_at": test_2.created_at.isoformat() if test_2.created_at else None,
-                "completed_at": result_2.calculated_at.isoformat() if result_2.calculated_at else None
+                "completed_at": result_2.calculated_at.isoformat() if result_2.calculated_at else None,
+                **grade_info_2,
             }
             
             # Comparação geral do aluno

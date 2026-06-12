@@ -47,7 +47,8 @@ from app.models.skill import Skill
 from app.utils.decimal_helpers import round_to_two_decimals
 from typing import Dict, Optional, List, Any, Tuple, Set
 from collections import defaultdict
-from sqlalchemy import cast, String, desc
+from sqlalchemy import cast, String, desc, func, or_, and_
+import dateutil.parser
 from sqlalchemy.orm import joinedload
 from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
     AnswerSheetGabaritoGeneration,
@@ -4841,6 +4842,472 @@ def obter_opcoes_filtros_cartao():
     except Exception as e:
         logging.error(f"Erro ao obter opções de filtros (cartão resposta): {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
+
+
+# ==================== EVOLUÇÃO: OPÇÕES DE FILTRO (Estado → Município → Escola → Série → Turma) ====================
+
+def _user_city_id_cartao(user: dict) -> str:
+    return str((user.get("city_id") or user.get("tenant_id")) or "").strip()
+
+
+def _cartao_resposta_only_gabarito_filter(query):
+    """Exclui gabaritos vinculados a prova online virtual."""
+    return query.outerjoin(Test, AnswerSheetGabarito.test_id == Test.id).filter(
+        or_(
+            AnswerSheetGabarito.test_id.is_(None),
+            Test.evaluation_mode == "physical",
+        )
+    )
+
+
+def _obter_escolas_por_municipio_evolucao_cartao(
+    municipio_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Escolas do município com ao menos um cartão resposta corrigido (AnswerSheetResult)."""
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    city_id_str = str(city.id) if city.id else ""
+    if permissao["scope"] != "all" and _user_city_id_cartao(user) != city_id_str:
+        return []
+
+    school_rows = (
+        db.session.query(School.id, School.name)
+        .join(Class, School.id == Class.school_id)
+        .join(Student, Student.class_id == Class.id)
+        .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+        .join(AnswerSheetGabarito, AnswerSheetGabarito.id == AnswerSheetResult.gabarito_id)
+        .filter(School.city_id == city.id)
+    )
+    school_rows = _cartao_resposta_only_gabarito_filter(school_rows).distinct().all()
+
+    if permissao["scope"] == "escola":
+        user_role = str(user.get("role") or "").lower()
+        if user_role in ("diretor", "coordenador"):
+            from app.models.manager import Manager
+
+            manager = Manager.query.filter_by(user_id=user["id"]).first()
+            if manager and manager.school_id:
+                school_rows = [
+                    (s[0], s[1])
+                    for s in school_rows
+                    if str(s[0]) == str(manager.school_id)
+                ]
+            else:
+                return []
+        elif user_role == "professor":
+            from app.models.teacher import Teacher
+            from app.models.teacherClass import TeacherClass
+
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if not teacher:
+                return []
+            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            teacher_class_ids = [tc.class_id for tc in teacher_classes]
+            if not teacher_class_ids:
+                return []
+            sid_set = {
+                str(s[0])
+                for s in db.session.query(Class.school_id)
+                .filter(Class.id.in_(teacher_class_ids))
+                .distinct()
+                .all()
+                if s[0]
+            }
+            school_rows = [(s[0], s[1]) for s in school_rows if str(s[0]) in sid_set]
+
+    return [{"id": str(e[0]), "nome": e[1] or ""} for e in school_rows]
+
+
+def _obter_series_por_escola_evolucao_cartao(
+    municipio_id: str, escola_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Séries da escola com ao menos um cartão resposta corrigido."""
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    city_id_str = str(city.id) if city.id else ""
+    if permissao["scope"] != "all" and _user_city_id_cartao(user) != city_id_str:
+        return []
+
+    escola_id_str = str(escola_id).strip()
+    query_series = (
+        Grade.query.with_entities(Grade.id, Grade.name)
+        .join(Class, Grade.id == Class.grade_id)
+        .join(Student, Student.class_id == Class.id)
+        .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+        .join(AnswerSheetGabarito, AnswerSheetGabarito.id == AnswerSheetResult.gabarito_id)
+        .join(School, School.id == Class.school_id)
+        .filter(School.city_id == city.id)
+        .filter(School.id == escola_id_str)
+    )
+    query_series = _cartao_resposta_only_gabarito_filter(query_series)
+
+    if permissao["scope"] == "escola" and str(user.get("role") or "").lower() == "professor":
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+
+        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+        if not teacher:
+            return []
+        teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+        teacher_class_ids = [tc.class_id for tc in teacher_classes]
+        if not teacher_class_ids:
+            return []
+        query_series = query_series.filter(Class.id.in_(teacher_class_ids))
+
+    series = query_series.distinct().all()
+    return [{"id": str(s[0]), "nome": s[1]} for s in series]
+
+
+def _obter_turmas_por_serie_evolucao_cartao(
+    municipio_id: str, escola_id: str, serie_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Turmas da escola/série com ao menos um cartão resposta corrigido."""
+    from app.utils.class_label_helpers import normalize_shift
+
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    city_id_str = str(city.id) if city.id else ""
+    if permissao["scope"] != "all" and _user_city_id_cartao(user) != city_id_str:
+        return []
+
+    escola_id_str = str(escola_id).strip()
+    serie_id_str = str(serie_id).strip()
+    query_turmas = (
+        Class.query.with_entities(Class.id, Class.name, Class.shift)
+        .join(Student, Student.class_id == Class.id)
+        .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+        .join(AnswerSheetGabarito, AnswerSheetGabarito.id == AnswerSheetResult.gabarito_id)
+        .join(School, School.id == Class.school_id)
+        .join(Grade, Class.grade_id == Grade.id)
+        .filter(School.city_id == city.id)
+        .filter(School.id == escola_id_str)
+        .filter(cast(Grade.id, String) == serie_id_str)
+    )
+    query_turmas = _cartao_resposta_only_gabarito_filter(query_turmas)
+
+    if permissao["scope"] == "escola" and str(user.get("role") or "").lower() == "professor":
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+
+        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+        if not teacher:
+            return []
+        teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+        teacher_class_ids = [tc.class_id for tc in teacher_classes]
+        if not teacher_class_ids:
+            return []
+        query_turmas = query_turmas.filter(Class.id.in_(teacher_class_ids))
+
+    turmas = query_turmas.distinct().all()
+    return [
+        {
+            "id": str(t[0]),
+            "nome": t[1] or f"Turma {t[0]}",
+            "shift": normalize_shift(t[2]) or "",
+        }
+        for t in turmas
+    ]
+
+
+def _parse_data_filtro_evolucao_cartao(value: Optional[str]):
+    if not value or not str(value).strip():
+        return None
+    value = str(value).strip()
+    try:
+        if re.match(r"\d{1,2}/\d{1,2}/\d{4}", value):
+            return datetime.strptime(value, "%d/%m/%Y")
+        return dateutil.parser.parse(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _formatar_data_evolucao_cartao(val) -> Optional[str]:
+    if val is None:
+        return None
+    if isinstance(val, str) and not val.strip():
+        return None
+    try:
+        if isinstance(val, str):
+            if re.match(r"^\d{4}-\d{2}-\d{2}", val):
+                dt = dateutil.parser.parse(val[:10])
+                return dt.strftime("%d/%m/%Y")
+            return dateutil.parser.parse(val).strftime("%d/%m/%Y")
+        if hasattr(val, "strftime"):
+            return val.strftime("%d/%m/%Y")
+        return str(val)[:10] if len(str(val)) >= 10 else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _obter_gabaritos_evolucao_cartao(
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    escola_id: Optional[str] = None,
+    serie_id: Optional[str] = None,
+    turma_id: Optional[str] = None,
+    data_inicio: Optional[str] = None,
+    data_fim: Optional[str] = None,
+    nome: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Gabaritos com resultados no recorte geo/filtros — espelha _obter_avaliacoes_evolucao."""
+    from app.routes.answer_sheet_evaluation_listing import user_can_access_gabarito
+
+    municipio_str = str(municipio_id).strip() if municipio_id else ""
+    city = City.query.get(municipio_str) if municipio_str else None
+    if not city:
+        return []
+
+    city_id_str = str(city.id) if city.id else ""
+    if permissao["scope"] != "all" and _user_city_id_cartao(user) != city_id_str:
+        return []
+
+    escola_param = (escola_id or "all").strip() if escola_id else "all"
+    if escola_param.lower() == "all":
+        escola_param = "all"
+
+    def _norm_filtro(val, all_values):
+        if not val:
+            return None
+        s = str(val).strip()
+        if not s or s.lower() in all_values:
+            return None
+        return s
+
+    serie_param = _norm_filtro(serie_id, ("all",))
+    turma_param = _norm_filtro(turma_id, ("all", "todas"))
+
+    query = (
+        AnswerSheetGabarito.query.with_entities(
+            AnswerSheetGabarito.id,
+            AnswerSheetGabarito.title,
+            func.min(AnswerSheetResult.corrected_at).label("data_correcao"),
+            AnswerSheetGabarito.created_at,
+        )
+        .join(AnswerSheetResult, AnswerSheetResult.gabarito_id == AnswerSheetGabarito.id)
+        .join(Student, AnswerSheetResult.student_id == Student.id)
+        .join(Class, Student.class_id == Class.id)
+        .join(School, Class.school_id == School.id)
+        .filter(School.city_id == city_id_str)
+    )
+    query = _cartao_resposta_only_gabarito_filter(query)
+
+    if escola_param.lower() != "all":
+        query = query.filter(School.id == str(escola_param))
+
+    if serie_param:
+        query = query.join(Grade, Class.grade_id == Grade.id)
+        query = query.filter(cast(Grade.id, String) == serie_param)
+
+    if turma_param:
+        query = query.filter(cast(Class.id, String) == turma_param)
+
+    dt_inicio = _parse_data_filtro_evolucao_cartao(data_inicio)
+    dt_fim = _parse_data_filtro_evolucao_cartao(data_fim)
+    if dt_inicio is not None:
+        query = query.filter(AnswerSheetResult.corrected_at >= dt_inicio)
+    if dt_fim is not None:
+        query = query.filter(
+            AnswerSheetResult.corrected_at
+            <= datetime(dt_fim.year, dt_fim.month, dt_fim.day, 23, 59, 59)
+        )
+
+    if nome and str(nome).strip():
+        query = query.filter(AnswerSheetGabarito.title.ilike(f"%{nome.strip()}%"))
+
+    if permissao["scope"] == "escola":
+        user_role = str(user.get("role") or "").lower()
+        if user_role in ("diretor", "coordenador"):
+            from app.models.manager import Manager
+
+            manager = Manager.query.filter_by(user_id=user["id"]).first()
+            if manager and manager.school_id:
+                query = query.filter(School.id == manager.school_id)
+            else:
+                return []
+        elif user_role == "professor":
+            from app.models.teacher import Teacher
+            from app.models.teacherClass import TeacherClass
+
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if not teacher:
+                return []
+            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            teacher_class_ids = [tc.class_id for tc in teacher_classes]
+            if not teacher_class_ids:
+                return []
+            query = query.filter(Class.id.in_(teacher_class_ids))
+
+    query = query.group_by(
+        AnswerSheetGabarito.id,
+        AnswerSheetGabarito.title,
+        AnswerSheetGabarito.created_at,
+    )
+    rows = query.all()
+
+    city_id = str(user.get("city_id") or "") or None
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        gab_id, title, data_corr, created_at = row[0], row[1], row[2], row[3]
+        gab = AnswerSheetGabarito.query.get(gab_id)
+        if not gab or not user_can_access_gabarito(user, permissao, gab, city_id):
+            continue
+        data_exibir = _formatar_data_evolucao_cartao(data_corr)
+        if data_exibir is None:
+            data_exibir = _formatar_data_evolucao_cartao(created_at)
+        result.append(
+            {
+                "id": str(gab_id),
+                "titulo": title or "",
+                "data": data_exibir,
+            }
+        )
+    return result
+
+
+@bp.route("/evolucao/opcoes-filtros", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def obter_opcoes_filtros_evolucao_cartao():
+    """
+    Opções de filtro para a tela de Evolução (cartão resposta).
+    Hierarquia: Estado → Município → Escola → Série → Turma.
+    Gabaritos vêm depois via GET /answer-sheets/evolucao/gabaritos.
+    """
+    try:
+        from app.permissions import get_user_permission_scope
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        permissao = get_user_permission_scope(user)
+        if not permissao.get("permitted"):
+            return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+
+        user_city = _user_city_id_cartao(user)
+        if permissao["scope"] != "all" and municipio and str(municipio).strip() != user_city:
+            return jsonify({
+                "error": "Você só pode visualizar dados de evolução do seu município."
+            }), 403
+
+        response: Dict[str, Any] = {}
+        response["estados"] = _obter_estados_disponiveis_cartao(user, permissao)
+
+        if estado:
+            response["municipios"] = _obter_municipios_por_estado_cartao(estado, user, permissao)
+            if municipio:
+                municipio_str = str(municipio).strip()
+                set_search_path(city_id_to_schema_name(municipio_str))
+                response["escolas"] = _obter_escolas_por_municipio_evolucao_cartao(
+                    municipio_str, user, permissao
+                )
+                if escola and str(escola).strip().lower() != "all":
+                    response["series"] = _obter_series_por_escola_evolucao_cartao(
+                        municipio_str, escola, user, permissao
+                    )
+                    if serie and str(serie).strip().lower() != "all":
+                        response["turmas"] = _obter_turmas_por_serie_evolucao_cartao(
+                            municipio_str, escola, serie, user, permissao
+                        )
+
+        return jsonify(response), 200
+    except Exception as e:
+        logging.error(
+            "Erro ao obter opções de filtros Evolução (cartão resposta): %s",
+            e,
+            exc_info=True,
+        )
+        return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
+
+
+@bp.route("/evolucao/gabaritos", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def listar_gabaritos_evolucao_cartao():
+    """
+    Lista gabaritos disponíveis para comparação na tela de Evolução (cartão resposta).
+    Espelha GET /evaluation-results/evolucao/avaliacoes.
+
+    Query params:
+    - estado (obrigatório)
+    - municipio (obrigatório)
+    - escola, serie, turma (opcionais; 'all' para todas)
+    - data_inicio, data_fim (opcionais; dd/mm/aaaa ou ISO)
+    - nome (opcional): busca no título do gabarito
+    """
+    try:
+        from app.permissions import get_user_permission_scope
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        permissao = get_user_permission_scope(user)
+        if not permissao.get("permitted"):
+            return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
+
+        estado = request.args.get("estado") or ""
+        municipio = request.args.get("municipio") or ""
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        data_inicio = request.args.get("data_inicio")
+        data_fim = request.args.get("data_fim")
+        nome = request.args.get("nome")
+
+        if not estado.strip() or not municipio.strip():
+            return jsonify({
+                "error": "Os parâmetros 'estado' e 'municipio' são obrigatórios para Evolução."
+            }), 400
+
+        municipio_id = str(municipio).strip()
+        user_city = _user_city_id_cartao(user)
+        if permissao["scope"] != "all" and user_city != municipio_id:
+            return jsonify({
+                "error": "Você só pode listar gabaritos de evolução do seu município."
+            }), 403
+
+        city = City.query.get(municipio_id)
+        if not city:
+            return jsonify({"error": "Município não encontrado"}), 404
+        if estado and city.state and str(city.state).strip().upper() != str(estado).strip().upper():
+            return jsonify({"error": "Município não pertence ao estado informado"}), 400
+
+        set_search_path(city_id_to_schema_name(municipio_id))
+
+        gabaritos = _obter_gabaritos_evolucao_cartao(
+            municipio_id=municipio_id,
+            user=user,
+            permissao=permissao,
+            escola_id=escola,
+            serie_id=serie,
+            turma_id=turma,
+            data_inicio=data_inicio,
+            data_fim=data_fim,
+            nome=nome,
+        )
+
+        return jsonify({
+            "source_type": "cartao_resposta",
+            "gabaritos": gabaritos,
+            "total": len(gabaritos),
+        }), 200
+    except Exception as e:
+        logging.error(
+            "Erro ao listar gabaritos para Evolução (cartão resposta): %s",
+            e,
+            exc_info=True,
+        )
+        return jsonify({"error": "Erro ao listar gabaritos", "details": str(e)}), 500
 
 
 def _parse_gabarito_ids_from_body(data: dict, field: str = "gabarito_ids") -> Tuple[Optional[List[str]], Optional[tuple]]:

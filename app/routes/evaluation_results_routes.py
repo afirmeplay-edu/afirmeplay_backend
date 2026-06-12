@@ -886,6 +886,7 @@ def listar_avaliacoes():
                     "alunos_participantes": 0,
                     "alunos_pendentes": 0,
                     "alunos_ausentes": 0,
+                    "percentual_comparecimento": 0.0,
                     "media_nota_geral": 0.0,
                     "media_proficiencia_geral": 0.0,
                     "distribuicao_classificacao_geral": {
@@ -1834,73 +1835,47 @@ def _gerar_tabela_detalhada_por_disciplina(
         # Mapa question_id -> question (evita Question.query.get no loop)
         questions_map = {q.id: q for tq in test_questions for q in [tq.question]}
 
-        # Determinar escopo de alunos baseado na granularidade
-        # CORRIGIDO: Usar a lógica correta de filtros hierárquicos
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
         logging.info(f"Escopo de cálculo para tabela detalhada: {escopo_calculo}")
-        
-        # Buscar alunos usando a função corrigida
-        # Para o caso "escola", usar a lógica específica baseada no usuário
-        if nivel_granularidade == "escola" and user:
-            if user.get('role') == 'professor':
-                # ✅ CORRIGIDO: Professor: buscar alunos das TURMAS onde está vinculado
-                from app.models.teacher import Teacher
-                from app.models.teacherClass import TeacherClass
-                
-                teacher = Teacher.query.filter_by(user_id=user['id']).first()
-                if teacher:
-                    # Buscar turmas onde o professor está vinculado (via TeacherClass)
-                    teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-                    teacher_class_ids = [tc.class_id for tc in teacher_classes]
-                    
-                    if teacher_class_ids:
-                        all_students = Student.query.filter(Student.class_id.in_(teacher_class_ids)).all()
-                    else:
-                        all_students = []
-                else:
-                    all_students = []
-            elif user.get('role') in ['diretor', 'coordenador']:
-                # Diretor/Coordenador: buscar alunos apenas da sua escola
-                from app.models.manager import Manager
-                manager = Manager.query.filter_by(user_id=user['id']).first()
-                if manager and manager.school_id:
-                    turmas_escola = Class.query.filter(Class.school_id == manager.school_id).all()
-                    turma_ids_escola = [t.id for t in turmas_escola]
-                    all_students = Student.query.filter(Student.class_id.in_(turma_ids_escola)).all()
-                else:
-                    all_students = []
-            else:
-                # Admin/Tecadm (e outros roles): respeitar o filtro de escola do escopo calculado
-                all_students = _buscar_alunos_por_escopo(escopo_calculo)
-        else:
-            all_students = _buscar_alunos_por_escopo(escopo_calculo)
 
-        if restrict_class_ids is not None:
-            if not restrict_class_ids:
-                all_students = []
-            else:
-                all_students = [s for s in all_students if s.class_id in restrict_class_ids]
-        
-        if not all_students:
-            logging.warning("Nenhum aluno encontrado para o escopo especificado")
-            return {"disciplinas": list(questoes_por_disciplina.values())}
+        resultados_participantes, students_by_id = _carregar_participantes_avaliacao_escopo(
+            avaliacao_id, escopo_calculo, nivel_granularidade, user, restrict_class_ids
+        )
+        if not resultados_participantes:
+            logging.warning("Nenhum aluno com dados para a avaliação no escopo (tabela detalhada)")
+            payload = {"disciplinas": list(questoes_por_disciplina.values())}
+            if nivel_granularidade != "turma":
+                payload["geral"] = {"alunos": []}
+            return payload
 
-        # Eager load class + grade; carregar escolas em uma query (Class.school é property = N+1)
-        all_students = Student.query.options(
-            joinedload(Student.class_).joinedload(Class.grade)
-        ).filter(Student.id.in_([s.id for s in all_students])).all()
-        school_ids = list({s.class_.school_id for s in all_students if s.class_ and getattr(s.class_, 'school_id', None)})
-        school_by_id = {}
-        if school_ids:
-            # Normaliza chave em string para evitar mismatch UUID vs str.
-            school_by_id = {str(s.id): s for s in School.query.filter(School.id.in_(school_ids)).all()}
+        from app.services.evaluation_result_snapshot import (
+            prefetch_placement_from_results,
+            resolve_participant_display_context,
+        )
 
-        # Curso da avaliação (uma vez; evita query por aluno)
+        schools_by_id, classes_by_id, grades_by_id = prefetch_placement_from_results(
+            resultados_participantes
+        )
+        display_ctx_by_student = {
+            er.student_id: resolve_participant_display_context(
+                students_by_id.get(er.student_id),
+                er,
+                schools_by_id,
+                classes_by_id,
+                grades_by_id,
+            )
+            for er in resultados_participantes
+            if er.student_id
+        }
+        results_dict = {er.student_id: er for er in resultados_participantes}
+        participant_ids = list(results_dict.keys())
+
         course_name = "Anos Iniciais"
-        if getattr(test, 'course', None):
+        if getattr(test, "course", None):
             try:
                 from app.models.educationStage import EducationStage
                 import uuid as _uuid
+
                 course_uuid = _uuid.UUID(test.course)
                 course_obj = EducationStage.query.get(course_uuid)
                 if course_obj:
@@ -1908,84 +1883,37 @@ def _gerar_tabela_detalhada_por_disciplina(
             except (ValueError, TypeError, Exception):
                 pass
 
-        use_simple_calculation = getattr(test, 'grade_calculation_type', None) == 'simple'
+        use_simple_calculation = getattr(test, "grade_calculation_type", None) == "simple"
 
-        # Log para debug
-        logging.debug("Tabela detalhada: %d alunos encontrados", len(all_students))
-
-        # Buscar resultados pré-calculados (apenas dos alunos do escopo)
-        if all_students:
-            student_ids = [aluno.id for aluno in all_students]
-            evaluation_results = EvaluationResult.query.filter(
-                EvaluationResult.test_id == avaliacao_id,
-                EvaluationResult.student_id.in_(student_ids)
-            ).all()
-        else:
-            evaluation_results = []
-        
-        results_dict = {er.student_id: er for er in evaluation_results}
-
-        if all_students:
-            all_student_answers = StudentAnswer.query.filter(
-                StudentAnswer.test_id == avaliacao_id,
-                StudentAnswer.student_id.in_(student_ids)
-            ).all()
-        else:
-            all_student_answers = []
-        respostas_por_aluno = {}
+        all_student_answers = StudentAnswer.query.filter(
+            StudentAnswer.test_id == avaliacao_id,
+            StudentAnswer.student_id.in_(participant_ids),
+        ).all()
+        respostas_por_aluno: Dict[Any, Dict[Any, Any]] = {}
         for resposta in all_student_answers:
             if resposta.student_id not in respostas_por_aluno:
                 respostas_por_aluno[resposta.student_id] = {}
             respostas_por_aluno[resposta.student_id][resposta.question_id] = resposta
 
-        # Somente alunos com entrega oficial da avaliação (EvaluationResult persistido)
-        # Presença operacional de sessão não entra aqui: ranking usa envio oficial.
-        participating_student_ids = _collect_participating_student_ids(
-            test_id=avaliacao_id,
-            student_ids=student_ids,
-            results_dict=results_dict,
-            respostas_por_aluno=respostas_por_aluno,
-        )
-        all_students = [s for s in all_students if s.id in participating_student_ids]
-        if not all_students:
-            logging.warning("Nenhum aluno com dados para a avaliação no escopo (tabela detalhada)")
-            payload = {"disciplinas": list(questoes_por_disciplina.values())}
-            if nivel_granularidade != "turma":
-                payload["geral"] = {"alunos": []}
-            return payload
-
         logging.debug(
-            "Tabela detalhada: %d alunos com dados, %d resultados, %d respostas",
-            len(all_students),
-            len(evaluation_results),
+            "Tabela detalhada: %d participantes, %d respostas",
+            len(resultados_participantes),
             len(all_student_answers),
         )
 
         for subject_id, disciplina_data in questoes_por_disciplina.items():
             alunos_disciplina = []
             
-            # Para cada aluno, verificar TODAS as questões desta disciplina
-            for student in all_students:
-                # Buscar informações da turma e escola com verificação mais robusta
-                turma_nome = "N/A"
-                serie_nome = "N/A"
-                escola_nome = "N/A"
-                escola_id = None
-                
-                turma_shift = ""
-                if student.class_:
-                    turma_nome = student.class_.name or "N/A"
-                    turma_shift = normalize_shift(student.class_.shift) or ""
-                    if student.class_.grade:
-                        serie_nome = student.class_.grade.name or "N/A"
-                    sid = getattr(student.class_, 'school_id', None)
-                    if sid:
-                        escola_id = str(sid)
-                        school = school_by_id.get(escola_id)
-                        if school:
-                            escola_nome = school.name or "N/A"
-
-                evaluation_result = results_dict.get(student.id)
+            # Para cada participante, verificar TODAS as questões desta disciplina
+            for evaluation_result in resultados_participantes:
+                student_id = evaluation_result.student_id
+                student = students_by_id.get(student_id)
+                ctx = display_ctx_by_student.get(student_id, {})
+                turma_nome = ctx.get("turma", "N/A")
+                serie_nome = ctx.get("serie", "N/A")
+                escola_nome = ctx.get("escola", "N/A")
+                escola_id = ctx.get("escola_id")
+                turma_shift = ctx.get("shift", "")
 
                 respostas_por_questao = []
                 total_acertos = 0
@@ -1999,7 +1927,7 @@ def _gerar_tabela_detalhada_por_disciplina(
 
                     if question:
                         # Verificar se o aluno respondeu esta questão
-                        resposta_aluno = respostas_por_aluno.get(student.id, {}).get(question.id)
+                        resposta_aluno = respostas_por_aluno.get(student_id, {}).get(question.id)
                         
                         if resposta_aluno:
                             total_respondidas += 1
@@ -2028,9 +1956,6 @@ def _gerar_tabela_detalhada_por_disciplina(
                                 "resposta": None
                             })
 
-                # Buscar resultado pré-calculado do aluno
-                evaluation_result = results_dict.get(student.id)
-                
                 # Tentar buscar dados por disciplina do campo JSON
                 disciplina_nota = 0.0
                 disciplina_proficiencia = 0.0
@@ -2051,7 +1976,7 @@ def _gerar_tabela_detalhada_por_disciplina(
                     else:
                         # Fallback: calcular se não houver dados salvos
                         if total_respondidas > 0:
-                            logging.warning(f"Resultado por disciplina não encontrado no JSON para aluno {student.id}, disciplina {subject_id}. Recalculando...")
+                            logging.warning(f"Resultado por disciplina não encontrado no JSON para aluno {student_id}, disciplina {subject_id}. Recalculando...")
                             from app.services.evaluation_calculator import EvaluationCalculator
                             result = EvaluationCalculator.calculate_complete_evaluation(
                                 correct_answers=total_acertos,
@@ -2065,7 +1990,7 @@ def _gerar_tabela_detalhada_por_disciplina(
                             disciplina_classificacao = result['classification']
                 elif total_respondidas > 0:
                     # Fallback: calcular se não houver evaluation_result
-                    logging.warning(f"EvaluationResult não encontrado para aluno {student.id}. Recalculando...")
+                    logging.warning(f"EvaluationResult não encontrado para aluno {student_id}. Recalculando...")
                     from app.services.evaluation_calculator import EvaluationCalculator
                     result = EvaluationCalculator.calculate_complete_evaluation(
                         correct_answers=total_acertos,
@@ -2081,13 +2006,14 @@ def _gerar_tabela_detalhada_por_disciplina(
                 status = "concluida" if total_respondidas > 0 else "pendente"
 
                 aluno_disciplina = {
-                    "id": student.id,
-                    "nome": student.name,
+                    "id": student_id,
+                    "nome": ctx.get("nome") or (student.name if student else "N/A"),
                     "escola_id": escola_id,
                     "escola": escola_nome,
                     "serie": serie_nome,
                     "turma": turma_nome,
                     "shift": turma_shift,
+                    "contexto_colocacao": ctx.get("contexto_colocacao"),
                     "respostas_por_questao": respostas_por_questao,
                     "total_acertos": total_acertos,
                     "total_erros": total_erros,
@@ -3094,6 +3020,7 @@ def _get_empty_statistics_gerais(scope_info, nivel_granularidade):
         "alunos_pendentes": 0,
         "alunos_pendentes_detalhe": [],
         "alunos_ausentes": 0,
+        "percentual_comparecimento": 0.0,
         "media_nota_geral": 0.0,
         "media_proficiencia_geral": 0.0,
         "distribuicao_classificacao_geral": {
@@ -8303,6 +8230,10 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             f"alunos_ausentes={alunos_ausentes}, alunos_pendentes_lista={alunos_pendentes}"
         )
 
+        percentual_comparecimento = (
+            round(100.0 * alunos_participantes / total_alunos, 2) if total_alunos else 0.0
+        )
+
         return {
             "tipo": nivel_granularidade,
             "nome": _get_nome_granularidade(nivel_granularidade, scope_info, escola_info, serie_info),
@@ -8319,6 +8250,7 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             "alunos_pendentes": alunos_pendentes,
             "alunos_pendentes_detalhe": alunos_pendentes_detalhe,
             "alunos_ausentes": alunos_ausentes,
+            "percentual_comparecimento": percentual_comparecimento,
             "media_nota_geral": round(media_nota, 2),
             "media_proficiencia_geral": format_decimal_two_places(media_proficiencia),
             "distribuicao_classificacao_geral": distribuicao_geral
@@ -8542,6 +8474,86 @@ def _obter_alunos_para_mapa_habilidades_test(
     )
 
 
+def _obter_alunos_base_escopo_relatorio(
+    escopo_calculo: Dict[str, Any],
+    nivel_granularidade: str,
+    user: Dict,
+    restrict_class_ids: Optional[Set[Any]] = None,
+) -> List[Student]:
+    """Alunos do recorte atual (matrícula vigente) para relatório/ranking."""
+    if nivel_granularidade == "escola" and user:
+        if user.get("role") == "professor":
+            from app.models.teacher import Teacher
+            from app.models.teacherClass import TeacherClass
+
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if teacher:
+                teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                teacher_class_ids = [tc.class_id for tc in teacher_classes]
+                all_students = (
+                    Student.query.filter(Student.class_id.in_(teacher_class_ids)).all()
+                    if teacher_class_ids
+                    else []
+                )
+            else:
+                all_students = []
+        elif user.get("role") in ["diretor", "coordenador"]:
+            from app.models.manager import Manager
+
+            manager = Manager.query.filter_by(user_id=user["id"]).first()
+            if manager and manager.school_id:
+                turmas_escola = Class.query.filter(Class.school_id == manager.school_id).all()
+                turma_ids_escola = [t.id for t in turmas_escola]
+                all_students = Student.query.filter(Student.class_id.in_(turma_ids_escola)).all()
+            else:
+                all_students = []
+        else:
+            all_students = _buscar_alunos_por_escopo(escopo_calculo)
+    else:
+        all_students = _buscar_alunos_por_escopo(escopo_calculo)
+
+    if restrict_class_ids is not None:
+        if not restrict_class_ids:
+            return []
+        all_students = [s for s in all_students if s.class_id in restrict_class_ids]
+    return all_students
+
+
+def _carregar_participantes_avaliacao_escopo(
+    avaliacao_id: str,
+    escopo_calculo: Dict[str, Any],
+    nivel_granularidade: str,
+    user: Dict,
+    restrict_class_ids: Optional[Set[Any]] = None,
+) -> Tuple[List[Any], Dict[str, Student]]:
+    """
+    Participantes oficiais da avaliação no escopo (mesmo critério das estatísticas gerais).
+    Inclui alunos transferidos com snapshot no município/escola/turma da aplicação.
+    """
+    from app.services.evaluation_result_snapshot import (
+        class_ids_for_evaluation_in_scope,
+        query_evaluation_results_for_stats,
+    )
+
+    base_students = _obter_alunos_base_escopo_relatorio(
+        escopo_calculo, nivel_granularidade, user, restrict_class_ids
+    )
+    base_orig_ids = [a.id for a in base_students]
+    class_ids = class_ids_for_evaluation_in_scope(
+        avaliacao_id, escopo_calculo, restrict_class_ids
+    )
+    resultados_escopo = query_evaluation_results_for_stats(
+        [str(avaliacao_id)], escopo_calculo, class_ids, base_orig_ids
+    ).all()
+    resultados = _dedupe_evaluation_results_by_student(resultados_escopo)
+    participant_ids = [r.student_id for r in resultados if getattr(r, "student_id", None)]
+    students_by_id: Dict[str, Student] = {}
+    if participant_ids:
+        for s in Student.query.filter(Student.id.in_(participant_ids)).all():
+            students_by_id[s.id] = s
+    return resultados, students_by_id
+
+
 def _collect_participating_student_ids(
     test_id: str,
     student_ids: List[Any],
@@ -8596,162 +8608,95 @@ def _calcular_ranking_global_alunos(
         Lista de alunos ordenados por ranking com formato: "Aluno X, Acertos X, Nota X"
     """
     try:
-        from app.models.evaluationResult import EvaluationResult
-        
-        # Determinar escopo de alunos baseado na granularidade
-        # CORRIGIDO: Usar a lógica correta de filtros hierárquicos
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
         logging.info(f"Escopo de cálculo para ranking: {escopo_calculo}")
-        
-        # Buscar alunos usando a função corrigida
-        # Para o caso "escola", usar a lógica específica baseada no usuário
-        if nivel_granularidade == "escola" and user:
-            if user.get('role') == 'professor':
-                # ✅ CORRIGIDO: Professor: buscar alunos das TURMAS onde está vinculado
-                from app.models.teacher import Teacher
-                from app.models.teacherClass import TeacherClass
-                
-                teacher = Teacher.query.filter_by(user_id=user['id']).first()
-                if teacher:
-                    # Buscar turmas onde o professor está vinculado (via TeacherClass)
-                    teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-                    teacher_class_ids = [tc.class_id for tc in teacher_classes]
-                    
-                    if teacher_class_ids:
-                        all_students = Student.query.filter(Student.class_id.in_(teacher_class_ids)).all()
-                    else:
-                        all_students = []
-                else:
-                    all_students = []
-            elif user.get('role') in ['diretor', 'coordenador']:
-                # Diretor/Coordenador: buscar alunos apenas da sua escola
-                from app.models.manager import Manager
-                manager = Manager.query.filter_by(user_id=user['id']).first()
-                if manager and manager.school_id:
-                    turmas_escola = Class.query.filter(Class.school_id == manager.school_id).all()
-                    turma_ids_escola = [t.id for t in turmas_escola]
-                    all_students = Student.query.filter(Student.class_id.in_(turma_ids_escola)).all()
-                else:
-                    all_students = []
-            else:
-                # Admin/tecadm (e demais papéis válidos nesta rota) devem usar o
-                # mesmo escopo filtrado já calculado para escola/série/turma.
-                all_students = _buscar_alunos_por_escopo(escopo_calculo)
-        else:
-            all_students = _buscar_alunos_por_escopo(escopo_calculo)
 
-        if restrict_class_ids is not None:
-            if not restrict_class_ids:
-                all_students = []
-            else:
-                all_students = [s for s in all_students if s.class_id in restrict_class_ids]
-        
-        if not all_students:
+        resultados_participantes, students_by_id = _carregar_participantes_avaliacao_escopo(
+            avaliacao_id, escopo_calculo, nivel_granularidade, user, restrict_class_ids
+        )
+        if not resultados_participantes:
             return []
 
-        student_ids = [aluno.id for aluno in all_students]
+        from app.services.evaluation_result_snapshot import (
+            prefetch_placement_from_results,
+            resolve_participant_display_context,
+        )
 
-        # Questões da avaliação em uma única query (evita N× Question.query.get no loop)
+        schools_by_id, classes_by_id, grades_by_id = prefetch_placement_from_results(
+            resultados_participantes
+        )
+        participant_ids = [r.student_id for r in resultados_participantes if r.student_id]
+
         from app.models.testQuestion import TestQuestion
         test_questions_ranking = TestQuestion.query.filter_by(test_id=avaliacao_id).join(Question).options(
             joinedload(TestQuestion.question)
         ).all()
         questions_map_ranking = {tq.question.id: tq.question for tq in test_questions_ranking}
 
-        # Buscar resultados pré-calculados
-        evaluation_results = EvaluationResult.query.filter(
-            EvaluationResult.test_id == avaliacao_id,
-            EvaluationResult.student_id.in_(student_ids)
-        ).all()
-        results_dict = {er.student_id: er for er in evaluation_results}
-
-        # Respostas em lote
         all_student_answers = StudentAnswer.query.filter(
             StudentAnswer.test_id == avaliacao_id,
-            StudentAnswer.student_id.in_(student_ids)
+            StudentAnswer.student_id.in_(participant_ids),
         ).all()
-        respostas_por_aluno = {}
+        respostas_por_aluno: Dict[Any, Dict[Any, Any]] = {}
         for resposta in all_student_answers:
             if resposta.student_id not in respostas_por_aluno:
                 respostas_por_aluno[resposta.student_id] = {}
             respostas_por_aluno[resposta.student_id][resposta.question_id] = resposta
 
-        participating_student_ids = _collect_participating_student_ids(
-            test_id=avaliacao_id,
-            student_ids=student_ids,
-            results_dict=results_dict,
-            respostas_por_aluno=respostas_por_aluno,
-        )
-        all_students = [s for s in all_students if s.id in participating_student_ids]
-        if not all_students:
-            return []
-
-        class_ids = list({s.class_id for s in all_students if s.class_id})
-        school_by_class_id = {}
-        class_info_by_id = {}
-        if class_ids:
-            classes_with_grade = Class.query.options(joinedload(Class.grade)).filter(Class.id.in_(class_ids)).all()
-            class_info_by_id = {
-                c.id: (
-                    c.name or "N/A",
-                    c.grade.name if c.grade else "N/A",
-                    normalize_shift(c.shift) or "",
-                )
-                for c in classes_with_grade
-            }
-            school_ids = list({c.school_id for c in classes_with_grade if c.school_id})
-            if school_ids:
-                schools = School.query.filter(School.id.in_(school_ids)).all()
-                school_by_id = {str(s.id): s for s in schools}
-                school_by_class_id = {c.id: school_by_id.get(str(c.school_id)) for c in classes_with_grade if c.school_id}
-
         alunos_ranking = []
-        for student in all_students:
-            evaluation_result = results_dict.get(student.id)
+        for evaluation_result in resultados_participantes:
+            student_id = evaluation_result.student_id
+            student = students_by_id.get(student_id)
             total_acertos = 0
             total_respondidas = 0
 
-            if student.id in respostas_por_aluno:
-                for question_id, resposta in respostas_por_aluno[student.id].items():
+            answers_map = respostas_por_aluno.get(student_id) or {}
+            if answers_map:
+                for question_id, resposta in answers_map.items():
                     question = questions_map_ranking.get(question_id)
                     if question:
                         total_respondidas += 1
-                        
-                        # Verificar se acertou
                         acertou = False
-                        if question.question_type == 'multiple_choice':
-                            acertou = EvaluationResultService.check_multiple_choice_answer(resposta.answer, question.correct_answer)
+                        if question.question_type == "multiple_choice":
+                            acertou = EvaluationResultService.check_multiple_choice_answer(
+                                resposta.answer, question.correct_answer
+                            )
                         else:
-                            acertou = str(resposta.answer).strip().lower() == str(question.correct_answer).strip().lower()
-                        
+                            acertou = (
+                                str(resposta.answer).strip().lower()
+                                == str(question.correct_answer).strip().lower()
+                            )
                         if acertou:
                             total_acertos += 1
-            
-            # Dados do aluno para ranking
+            else:
+                total_acertos = int(getattr(evaluation_result, "correct_answers", 0) or 0)
+                total_respondidas = int(getattr(evaluation_result, "total_questions", 0) or 0)
+
+            ctx = resolve_participant_display_context(
+                student,
+                evaluation_result,
+                schools_by_id,
+                classes_by_id,
+                grades_by_id,
+            )
             nota = evaluation_result.grade if evaluation_result else 0.0
-            
-            turma_nome, serie_nome, turma_shift = class_info_by_id.get(student.class_id, ("N/A", "N/A", ""))
-            escola_nome = "N/A"
-            escola_id = None
-            if student.class_id and school_by_class_id.get(student.class_id):
-                school_obj = school_by_class_id[student.class_id]
-                escola_id = str(getattr(school_obj, "id", "") or "") or None
-                escola_nome = school_obj.name or "N/A"
             aluno_ranking = {
-                "id": student.id,
-                "nome": student.name,
-                "escola_id": escola_id,
-                "escola": escola_nome,
-                "serie": serie_nome,
-                "turma": turma_nome,
-                "shift": turma_shift,
+                "id": student_id,
+                "nome": ctx["nome"],
+                "escola_id": ctx["escola_id"],
+                "escola": ctx["escola"],
+                "serie": ctx["serie"],
+                "turma": ctx["turma"],
+                "shift": ctx["shift"],
+                "contexto_colocacao": ctx["contexto_colocacao"],
                 "total_acertos": total_acertos,
                 "total_respondidas": total_respondidas,
                 "nota": nota,
-                "proficiencia": format_decimal_two_places(evaluation_result.proficiency) if evaluation_result else 0.0,
-                "nivel_proficiencia": evaluation_result.classification if evaluation_result else None
+                "proficiencia": format_decimal_two_places(evaluation_result.proficiency)
+                if evaluation_result
+                else 0.0,
+                "nivel_proficiencia": evaluation_result.classification if evaluation_result else None,
             }
-            
             alunos_ranking.append(aluno_ranking)
         
         # Calcular pontuação para ranking (nota * 100 + acertos * 10 + respondidas)
@@ -8912,6 +8857,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "alunos_participantes": stats_grupo['alunos_participantes'],
                     "alunos_pendentes": stats_grupo['alunos_pendentes'],
                     "alunos_ausentes": stats_grupo['alunos_ausentes'],
+                    "percentual_comparecimento": stats_grupo['percentual_comparecimento'],
                     "media_nota": stats_grupo['media_nota'],
                     "media_proficiencia": stats_grupo['media_proficiencia'],
                     "distribuicao_classificacao": stats_grupo['distribuicao_classificacao']
@@ -8943,6 +8889,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "alunos_participantes": stats_grupo['alunos_participantes'],
                     "alunos_pendentes": stats_grupo['alunos_pendentes'],
                     "alunos_ausentes": stats_grupo['alunos_ausentes'],
+                    "percentual_comparecimento": stats_grupo['percentual_comparecimento'],
                     "media_nota": stats_grupo['media_nota'],
                     "media_proficiencia": stats_grupo['media_proficiencia'],
                     "distribuicao_classificacao": stats_grupo['distribuicao_classificacao']
@@ -8970,6 +8917,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "alunos_participantes": stats_grupo['alunos_participantes'],
                     "alunos_pendentes": stats_grupo['alunos_pendentes'],
                     "alunos_ausentes": stats_grupo['alunos_ausentes'],
+                    "percentual_comparecimento": stats_grupo['percentual_comparecimento'],
                     "media_nota": stats_grupo['media_nota'],
                     "media_proficiencia": stats_grupo['media_proficiencia'],
                     "distribuicao_classificacao": stats_grupo['distribuicao_classificacao']
@@ -9001,6 +8949,7 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
                 'alunos_participantes': 0,
                 'alunos_pendentes': 0,
                 'alunos_ausentes': 0,
+                'percentual_comparecimento': 0.0,
                 'media_nota': 0.0,
                 'media_proficiencia': 0.0,
                 'distribuicao_classificacao': {
@@ -9065,11 +9014,16 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
                 elif resultado.classification == "Avançado":
                     distribuicao['avancado'] += 1
         
+        percentual_comparecimento = (
+            round(100.0 * alunos_participantes / total_alunos, 2) if total_alunos else 0.0
+        )
+
         return {
             'total_alunos': total_alunos,
             'alunos_participantes': alunos_participantes,
             'alunos_pendentes': alunos_pendentes,
             'alunos_ausentes': alunos_ausentes,
+            'percentual_comparecimento': percentual_comparecimento,
             'media_nota': format_decimal_two_places(media_nota),
             'media_proficiencia': format_decimal_two_places(media_proficiencia),
             'distribuicao_classificacao': distribuicao
@@ -9082,6 +9036,7 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
             'alunos_participantes': 0,
             'alunos_pendentes': 0,
             'alunos_ausentes': 0,
+            'percentual_comparecimento': 0.0,
             'media_nota': 0.0,
             'media_proficiencia': 0.0,
             'distribuicao_classificacao': {

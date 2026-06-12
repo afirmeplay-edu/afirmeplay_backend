@@ -71,19 +71,21 @@ class AnswerSheetComparisonService:
                     return None
                 all_results[gab.id] = participating
 
+            grade_info_by_gabarito = {
+                gab.id: AnswerSheetComparisonService._resolve_gabarito_grade_info(gab)
+                for gab in ordered_gabaritos
+            }
+
             evaluations_data = []
             for i, item in enumerate(gabaritos_with_dates):
                 gab = item["gabarito"]
                 evaluations_data.append(
-                    {
-                        "order": i + 1,
-                        "id": gab.id,
-                        "title": gab.title or "Cartão resposta",
-                        "created_at": gab.created_at.isoformat() if gab.created_at else None,
-                        "application_date": item["application_date"].isoformat()
-                        if item["application_date"]
-                        else None,
-                    }
+                    AnswerSheetComparisonService._build_gabarito_evaluation_entry(
+                        gab,
+                        i + 1,
+                        item["application_date"],
+                        grade_info_by_gabarito.get(gab.id),
+                    )
                 )
 
             comparisons = []
@@ -95,16 +97,12 @@ class AnswerSheetComparisonService:
 
                 comparisons.append(
                     {
-                        "from_evaluation": {
-                            "id": gab_from.id,
-                            "title": gab_from.title or "Cartão resposta",
-                            "order": i + 1,
-                        },
-                        "to_evaluation": {
-                            "id": gab_to.id,
-                            "title": gab_to.title or "Cartão resposta",
-                            "order": i + 2,
-                        },
+                        "from_evaluation": AnswerSheetComparisonService._build_gabarito_evaluation_ref(
+                            gab_from, i + 1, grade_info_by_gabarito.get(gab_from.id)
+                        ),
+                        "to_evaluation": AnswerSheetComparisonService._build_gabarito_evaluation_ref(
+                            gab_to, i + 2, grade_info_by_gabarito.get(gab_to.id)
+                        ),
                         "general_comparison": AnswerSheetComparisonService._get_general_comparison(
                             results_from, results_to
                         ),
@@ -193,19 +191,21 @@ class AnswerSheetComparisonService:
                 )
                 return None
 
+            grade_info_by_gabarito = {
+                gab.id: AnswerSheetComparisonService._resolve_gabarito_grade_info(gab)
+                for gab in ordered_gabaritos
+            }
+
             evaluations_data = []
             for i, item in enumerate(gabaritos_with_dates):
                 gab = item["gabarito"]
                 evaluations_data.append(
-                    {
-                        "order": i + 1,
-                        "id": gab.id,
-                        "title": gab.title or "Cartão resposta",
-                        "created_at": gab.created_at.isoformat() if gab.created_at else None,
-                        "application_date": item["application_date"].isoformat()
-                        if item["application_date"]
-                        else None,
-                    }
+                    AnswerSheetComparisonService._build_gabarito_evaluation_entry(
+                        gab,
+                        i + 1,
+                        item["application_date"],
+                        grade_info_by_gabarito.get(gab.id),
+                    )
                 )
 
             comparisons = []
@@ -219,16 +219,12 @@ class AnswerSheetComparisonService:
 
                 comparisons.append(
                     {
-                        "from_evaluation": {
-                            "id": gab_from.id,
-                            "title": gab_from.title or "Cartão resposta",
-                            "order": i + 1,
-                        },
-                        "to_evaluation": {
-                            "id": gab_to.id,
-                            "title": gab_to.title or "Cartão resposta",
-                            "order": i + 2,
-                        },
+                        "from_evaluation": AnswerSheetComparisonService._build_gabarito_evaluation_ref(
+                            gab_from, i + 1, grade_info_by_gabarito.get(gab_from.id)
+                        ),
+                        "to_evaluation": AnswerSheetComparisonService._build_gabarito_evaluation_ref(
+                            gab_to, i + 2, grade_info_by_gabarito.get(gab_to.id)
+                        ),
                         "general_comparison": AnswerSheetComparisonService._get_student_general_comparison(
                             result_from, result_to
                         ),
@@ -838,3 +834,115 @@ class AnswerSheetComparisonService:
             if subject_out:
                 out[name] = subject_out
         return out
+
+    @staticmethod
+    def _resolve_gabarito_grade_info(gabarito: AnswerSheetGabarito) -> Dict[str, Any]:
+        """Série(s) e turma(s) do gabarito (turmas-alvo / grade_id / grade_name)."""
+        from uuid import UUID
+
+        from app.models.grades import Grade
+
+        grade_id_by_str: Dict[str, str] = {}
+        class_id_set: Set[str] = set()
+        classes_list: List[Dict[str, str]] = []
+
+        stored_name = (getattr(gabarito, "grade_name", None) or "").strip()
+        if getattr(gabarito, "grade_id", None):
+            gid = str(gabarito.grade_id)
+            if stored_name:
+                grade_id_by_str[gid] = stored_name
+            else:
+                grade_obj = Grade.query.get(gabarito.grade_id)
+                grade_id_by_str[gid] = grade_obj.name if grade_obj and grade_obj.name else gid
+
+        if getattr(gabarito, "class_id", None):
+            class_id_set.add(str(gabarito.class_id))
+
+        try:
+            class_id_set |= {str(x) for x in (union_target_class_ids_for_gabarito(gabarito) or set()) if x}
+        except Exception:
+            pass
+
+        if class_id_set:
+            uuid_ids = []
+            for cid in class_id_set:
+                try:
+                    uuid_ids.append(UUID(str(cid)))
+                except ValueError:
+                    continue
+            if uuid_ids:
+                for class_obj in Class.query.filter(Class.id.in_(uuid_ids)).all():
+                    classes_list.append(
+                        {
+                            "id": str(class_obj.id),
+                            "name": class_obj.name or f"Turma {class_obj.id}",
+                        }
+                    )
+                    if not class_obj.grade_id:
+                        continue
+                    gid = str(class_obj.grade_id)
+                    if gid in grade_id_by_str:
+                        continue
+                    grade_obj = Grade.query.get(class_obj.grade_id)
+                    grade_id_by_str[gid] = grade_obj.name if grade_obj and grade_obj.name else gid
+
+        classes_list.sort(key=lambda item: (item.get("name") or "").lower())
+
+        grade_names = sorted({name for name in grade_id_by_str.values() if name})
+        grade_ids = sorted(grade_id_by_str.keys())
+
+        grade_id = str(gabarito.grade_id) if getattr(gabarito, "grade_id", None) else None
+        grade_name = stored_name or None
+
+        if grade_ids:
+            if grade_id and grade_id in grade_ids:
+                grade_name = grade_name or grade_id_by_str.get(grade_id)
+            else:
+                grade_id = grade_ids[0]
+                grade_name = grade_id_by_str.get(grade_id) or grade_name
+        elif grade_id and not grade_name:
+            grade_obj = Grade.query.get(gabarito.grade_id)
+            grade_name = grade_obj.name if grade_obj and grade_obj.name else None
+
+        if grade_names and not grade_name:
+            grade_name = grade_names[0]
+        if grade_name and grade_name not in grade_names:
+            grade_names = sorted(set(grade_names) | {grade_name})
+
+        return {
+            "grade_id": grade_id,
+            "grade_name": grade_name,
+            "grade_names": grade_names,
+            "classes": classes_list,
+        }
+
+    @staticmethod
+    def _build_gabarito_evaluation_entry(
+        gabarito: AnswerSheetGabarito,
+        order: int,
+        application_date,
+        grade_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        info = grade_info or AnswerSheetComparisonService._resolve_gabarito_grade_info(gabarito)
+        return {
+            "order": order,
+            "id": gabarito.id,
+            "title": gabarito.title or "Cartão resposta",
+            "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
+            "application_date": application_date.isoformat() if application_date else None,
+            **info,
+        }
+
+    @staticmethod
+    def _build_gabarito_evaluation_ref(
+        gabarito: AnswerSheetGabarito,
+        order: int,
+        grade_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        info = grade_info or AnswerSheetComparisonService._resolve_gabarito_grade_info(gabarito)
+        return {
+            "id": gabarito.id,
+            "title": gabarito.title or "Cartão resposta",
+            "order": order,
+            **info,
+        }

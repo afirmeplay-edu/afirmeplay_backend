@@ -7,6 +7,7 @@ import re
 import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import Float, String, and_, case, cast, func, or_
@@ -46,6 +47,14 @@ class RankingReportService:
     def _normalize_text(value: str) -> str:
         normalized = unicodedata.normalize("NFD", str(value or ""))
         return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn").strip().lower()
+
+    @staticmethod
+    def _hierarchical_mean_values(values: List[Any]) -> float:
+        """Média com peso igual entre unidades do mesmo nível (sem ponderação por tamanho)."""
+        nums = [float(v) for v in values if v is not None]
+        if not nums:
+            return 0.0
+        return sum(nums) / len(nums)
 
     @staticmethod
     def _format_grade_class_label(grade_name: Any, class_name: Any = None) -> str:
@@ -525,15 +534,18 @@ class RankingReportService:
                 )
                 if total_students < participating_students:
                     total_students = participating_students
-                weighted_score = sum(
-                    float(item.get("average_score") or 0) * int(item.get("students_count") or 0) for item in course_series
+                average_score = round(
+                    cls._hierarchical_mean_values(
+                        [float(item.get("average_score") or 0) for item in course_series]
+                    ),
+                    1,
                 )
-                weighted_prof = sum(
-                    float(item.get("average_proficiency") or 0) * int(item.get("students_count") or 0) for item in course_series
+                average_proficiency = round(
+                    cls._hierarchical_mean_values(
+                        [float(item.get("average_proficiency") or 0) for item in course_series]
+                    ),
+                    1,
                 )
-
-                average_score = round((weighted_score / students_with_results), 1) if students_with_results > 0 else 0.0
-                average_proficiency = round((weighted_prof / students_with_results), 1) if students_with_results > 0 else 0.0
                 classification = cls._classification_from_proficiency(
                     average_proficiency,
                     course_label=course_label,
@@ -1766,12 +1778,13 @@ class RankingReportService:
         score_expr = subject_score_expr if use_discipline_metrics else results_model.grade
         prof_expr = subject_prof_expr if use_discipline_metrics else results_model.proficiency
 
-        query = (
+        turma_query = (
             db.session.query(
                 School.id.label("school_id"),
                 School.name.label("school_name"),
                 grade_ref.label("grade_id"),
                 Grade.name.label("grade_name"),
+                Class.id.label("class_id"),
                 db.func.avg(score_expr).label("average_score"),
                 db.func.avg(prof_expr).label("average_proficiency"),
                 db.func.count(db.func.distinct(Student.id)).label("students_count"),
@@ -1782,14 +1795,57 @@ class RankingReportService:
             .outerjoin(Class, Class.id == Student.class_id)
             .outerjoin(Grade, Grade.id == grade_ref)
         )
-        query = _apply_entity_filter(query, results_model)
+        turma_query = _apply_entity_filter(turma_query, results_model)
         if use_discipline_metrics and subject_prof_expr is not None:
-            query = query.filter(subject_prof_expr.isnot(None))
-        query = _apply_common_student_filters(query)
+            turma_query = turma_query.filter(subject_prof_expr.isnot(None))
+        turma_query = _apply_common_student_filters(turma_query)
 
-        grouped = query.group_by(School.id, School.name, grade_ref, Grade.name).all()
-        if not grouped:
+        turma_rows = turma_query.group_by(
+            School.id,
+            School.name,
+            grade_ref,
+            Grade.name,
+            Class.id,
+        ).all()
+        if not turma_rows:
             return []
+
+        grouped: List[Any] = []
+        series_buckets: Dict[tuple, Dict[str, Any]] = {}
+        for turma_row in turma_rows:
+            school_id = str(turma_row.school_id or "")
+            if not school_id:
+                continue
+            grade_id = str(turma_row.grade_id or "")
+            key = (school_id, grade_id)
+            bucket = series_buckets.get(key)
+            if not bucket:
+                bucket = {
+                    "school_id": school_id,
+                    "school_name": turma_row.school_name or "Escola sem nome",
+                    "grade_id": grade_id,
+                    "grade_name": str(turma_row.grade_name or "Sem série"),
+                    "turma_scores": [],
+                    "turma_profs": [],
+                    "students_count": 0,
+                }
+                series_buckets[key] = bucket
+            bucket["turma_scores"].append(float(turma_row.average_score or 0))
+            bucket["turma_profs"].append(float(turma_row.average_proficiency or 0))
+            bucket["students_count"] += int(turma_row.students_count or 0)
+
+        for bucket in series_buckets.values():
+            grouped.append(
+                SimpleNamespace(
+                    school_id=bucket["school_id"],
+                    school_name=bucket["school_name"],
+                    grade_id=bucket["grade_id"],
+                    grade_name=bucket["grade_name"],
+                    average_score=cls._hierarchical_mean_values(bucket["turma_scores"]),
+                    average_proficiency=cls._hierarchical_mean_values(bucket["turma_profs"]),
+                    students_count=bucket["students_count"],
+                )
+            )
 
         totals_query = (
             db.session.query(
@@ -2060,19 +2116,17 @@ class RankingReportService:
             school["participation_rate"] = round((participating_students / total_students) * 100, 1) if total_students > 0 else 0.0
 
             if students_with_results > 0:
-                weighted_score = sum(float(item["average_score"]) * int(item["students_count"]) for item in series)
-                weighted_prof = sum(float(item["average_proficiency"]) * int(item["students_count"]) for item in series)
-                school["average_score"] = round(weighted_score / students_with_results, 1)
-                school["average_proficiency"] = round(weighted_prof / students_with_results, 1)
-            else:
                 school["average_score"] = round(
-                    sum(float(item["average_score"]) for item in series) / len(series),
+                    cls._hierarchical_mean_values([float(item["average_score"]) for item in series]),
                     1,
                 )
                 school["average_proficiency"] = round(
-                    sum(float(item["average_proficiency"]) for item in series) / len(series),
+                    cls._hierarchical_mean_values([float(item["average_proficiency"]) for item in series]),
                     1,
                 )
+            else:
+                school["average_score"] = 0.0
+                school["average_proficiency"] = 0.0
             dominant_course = "Anos Iniciais"
             if series:
                 dominant_series = max(series, key=lambda item: int(item.get("students_count") or 0))
@@ -2419,22 +2473,28 @@ class RankingReportService:
     ) -> List[Dict[str, Any]]:
         if not schools:
             return []
-        bucket: Dict[str, Dict[str, float]] = defaultdict(lambda: {"score_total": 0.0, "prof_total": 0.0, "students": 0.0})
+        bucket: Dict[str, List[tuple]] = defaultdict(list)
         for school in schools:
             for series in school.get("series", []):
                 label = str(series.get("grade_name") or "Sem série")
-                students = float(series.get("students_count") or 0)
-                if students <= 0:
-                    students = 1.0
-                bucket[label]["score_total"] += float(series.get("average_score") or 0) * students
-                bucket[label]["prof_total"] += float(series.get("average_proficiency") or 0) * students
-                bucket[label]["students"] += students
+                bucket[label].append(
+                    (
+                        float(series.get("average_score") or 0),
+                        float(series.get("average_proficiency") or 0),
+                    )
+                )
 
         result: List[Dict[str, Any]] = []
         for label in sorted(bucket.keys()):
-            total_students = bucket[label]["students"] or 1.0
-            average_score = round(bucket[label]["score_total"] / total_students, 1)
-            average_proficiency = round(bucket[label]["prof_total"] / total_students, 1)
+            pairs = bucket[label]
+            average_score = round(
+                cls._hierarchical_mean_values([score for score, _prof in pairs]),
+                1,
+            )
+            average_proficiency = round(
+                cls._hierarchical_mean_values([prof for _score, prof in pairs]),
+                1,
+            )
             course_label = cls._derive_course_label(label)
             result.append(
                 {

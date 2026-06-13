@@ -165,7 +165,7 @@ Ou seja: para auditar, use a **média** exibida (`media_proficiencia`) + curso +
 
 ### 4.4 Município (consolidado)
 
-- **Médias** (`media_nota_geral`, `media_proficiencia_geral`): média dos valores **já persistidos** nos resultados dos participantes no escopo.
+- **Médias** (`media_nota_geral`, `media_proficiencia_geral`): agregação hierárquica via `hierarchical_mean_grade_and_proficiency` sobre os resultados dos participantes no escopo — **não** é média aritmética simples de todos os alunos nem média ponderada por tamanho de turma/série/escola.
 - **Distribuição** (`distribuicao_classificacao_geral`): contagem de alunos em cada faixa usando o campo `classification` de cada resultado (regra por substring no código), alinhada ao evaluation quando aplicável.
 
 ---
@@ -188,7 +188,49 @@ Ou seja: para auditar, use a **média** exibida (`media_proficiencia`) + curso +
 | Cartão: por disciplina / curso do gabarito | `app/services/cartao_resposta/proficiency_by_subject.py`, `course_name_resolver.py` |
 | Rotas agregadas cartão | `app/routes/answer_sheet_routes.py` |
 | Rotas agregadas avaliação online | `app/routes/evaluation_results_routes.py`, `app/services/evaluation_result_service.py` |
+| Médias hierárquicas (peso igual) | `app/utils/school_equal_weight_means.py` |
+| Ranking (auditar conformidade) | `app/services/ranking_report_service.py`, `app/services/dashboard_service.py` |
 
 ---
 
-*Última revisão: alinhada à leitura de `evaluation_calculator.py` no repositório; revisar após alterações nas constantes ou em `determine_classification`.*
+## 7. REGRA OBRIGATÓRIA — médias agregadas (nota e proficiência)
+
+### 7.1 Proibido
+
+**NÃO EXISTE média ponderada neste sistema.**
+
+Proibido em qualquer endpoint, serviço, ranking, dashboard ou relatório:
+
+- ponderar médias pelo número de alunos (`sum(media × n) / sum(n)`);
+- usar `SQL AVG(grade)` / `SQL AVG(proficiency)` agrupado acima do nível **turma** para representar escola, série ou município;
+- implementar “média geral dos alunos” quando o nível de exibição for escola ou superior.
+
+### 7.2 Obrigatório — média hierárquica com peso igual
+
+Implementação canônica: `app/utils/school_equal_weight_means.py` → `hierarchical_mean_grade_and_proficiency(results, target_level)`.
+
+| Nível exibido | Regra |
+|---------------|--------|
+| Turma | Média aritmética dos alunos da turma |
+| Série | Média das médias das turmas (peso igual por turma) |
+| Escola | Média das médias das séries (peso igual por série) |
+| Município | Média das médias das escolas (peso igual por escola) |
+
+**Referência correta:** `GET /evaluation-results/avaliacoes` — `_calcular_estatisticas_grupo` + `hierarchical_mean_grade_and_proficiency`.
+
+**Exemplo auditável (Pedro Ribeiro, 3 turmas na mesma série):**
+
+| Turma | Alunos | Nota média |
+|-------|--------|------------|
+| A | 6 | 4,10 |
+| B | 5 | 6,01 |
+| C | 19 | 6,16 |
+
+- ❌ Média ponderada / `AVG` de todos os alunos: **5,72**
+- ✅ Média hierárquica (escola = média das 3 turmas): **(4,10 + 6,01 + 6,16) / 3 = 5,42**
+
+Rotas de ranking devem usar a mesma regra (ver `RankingReportService._hierarchical_mean_values` e `app/services/ranking_report_service.py`).
+
+---
+
+*Última revisão: inclui §7 (médias hierárquicas obrigatórias); revisar após alterações em agregações ou em `determine_classification`.*

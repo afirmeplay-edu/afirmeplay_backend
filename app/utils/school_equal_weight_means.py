@@ -1,11 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-Médias de nota e proficiência com agregação hierárquica e peso igual entre unidades do mesmo nível:
+REGRA OBRIGATÓRIA DO PROJETO — agregação de nota e proficiência.
 
-- **Município**: média das médias **escolares** (cada escola calculada como abaixo).
-- **Escola**: média das médias de **série**; cada série = média das médias de **turma**.
+**NÃO EXISTE média ponderada neste sistema.** Não implemente sum(media × n) / sum(n),
+SQL AVG acima do nível turma para consolidar escola/série/município, nem qualquer peso
+por quantidade de alunos entre turmas, séries ou escolas.
+
+Única forma válida de agregar acima da turma: média hierárquica com peso igual entre
+unidades do mesmo nível (implementação canônica neste módulo).
+
+Hierarquia:
+
+- **Turma**: média aritmética dos **alunos** da turma.
 - **Série**: média das médias de **turma** (peso igual por turma).
-- **Turma**: média dos **alunos**.
+- **Escola**: média das médias de **série** (peso igual por série).
+- **Município**: média das médias **escolares** (peso igual por escola).
+
+Referência de uso correto: ``evaluation_results_routes._calcular_estatisticas_grupo`` e
+``GET /evaluation-results/avaliacoes``. Documentação: ``docs/FONTE_DA_VERDADE_CALCULOS_RESULTADOS.md`` (§7).
 
 Objetos em ``results`` devem expor ``student_id``, ``grade`` e ``proficiency`` (AnswerSheetResult,
 EvaluationResult ou SimpleNamespace equivalente).

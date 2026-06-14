@@ -505,6 +505,80 @@ class TestAdequadoAvancadoClassification(unittest.TestCase):
         self.assertFalse(RankingReportService._is_adequado_or_avancado_classification(None))
 
 
+class TestHierarchicalMeanCalculations(unittest.TestCase):
+    def test_hierarchical_mean_equal_weight_per_turma_pedro_ribeiro(self):
+        turma_means = [4.10, 6.01, 6.16]
+        turma_profs = [161.7, 216.4, 220.2]
+        self.assertAlmostEqual(
+            RankingReportService._hierarchical_mean_values(turma_means),
+            5.42,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            RankingReportService._hierarchical_mean_values(turma_profs),
+            199.43,
+            places=1,
+        )
+
+    def test_hierarchical_mean_escola_equal_weight_per_serie(self):
+        series_scores = [5.42, 6.80]
+        self.assertAlmostEqual(
+            RankingReportService._hierarchical_mean_values(series_scores),
+            6.11,
+            places=2,
+        )
+
+    def test_build_network_series_averages_uses_equal_weight_per_school(self):
+        schools = [
+            {
+                "series": [
+                    {"grade_name": "5º Ano", "average_score": 4.0, "average_proficiency": 150.0},
+                ]
+            },
+            {
+                "series": [
+                    {"grade_name": "5º Ano", "average_score": 8.0, "average_proficiency": 250.0},
+                ]
+            },
+        ]
+        result = RankingReportService._build_network_series_averages(schools)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["grade_name"], "5º Ano")
+        self.assertAlmostEqual(result[0]["average_score"], 6.0, places=1)
+        self.assertAlmostEqual(result[0]["average_proficiency"], 200.0, places=1)
+
+    def test_build_general_course_sections_uses_equal_weight_per_serie(self):
+        school_rows = [
+            {
+                "school_id": "s1",
+                "school_name": "Escola A",
+                "series": [
+                    {
+                        "grade_name": "4º Ano",
+                        "average_score": 4.0,
+                        "average_proficiency": 150.0,
+                        "students_count": 20,
+                        "participating_students": 18,
+                        "total_students": 22,
+                    },
+                    {
+                        "grade_name": "5º Ano",
+                        "average_score": 8.0,
+                        "average_proficiency": 250.0,
+                        "students_count": 5,
+                        "participating_students": 5,
+                        "total_students": 8,
+                    },
+                ],
+            }
+        ]
+        sections = RankingReportService._build_general_course_sections(school_rows)
+        self.assertEqual(len(sections), 1)
+        school_entry = sections[0]["items"][0]
+        self.assertAlmostEqual(school_entry["average_score"], 6.0, places=1)
+        self.assertAlmostEqual(school_entry["average_proficiency"], 200.0, places=1)
+
+
 class TestRankingRoutesValidation(unittest.TestCase):
     def test_requires_estado(self):
         with self.assertRaisesRegex(ValueError, "Estado é obrigatório"):

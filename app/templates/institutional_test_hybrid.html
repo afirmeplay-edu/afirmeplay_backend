@@ -419,7 +419,6 @@
 		   remanescente (data: URLs do editor podem trazer style inline). */
 		.question-content img,
 		.question-prompt img,
-		.alternative-content img,
 		.question-instruction-text img,
 		.question-title img {
 				max-width: 100% !important;
@@ -428,6 +427,24 @@
 				display: block !important;
 				margin-left: auto !important;
 				margin-right: auto !important;
+			}
+
+		/* Fórmulas renderizadas (LaTeX → PNG): inline no fluxo do texto */
+		img.math-inline-img {
+				display: inline !important;
+				width: auto !important;
+				max-width: none !important;
+				height: 1.15em !important;
+				margin: 0 2px 0 0 !important;
+				vertical-align: middle !important;
+			}
+
+		img.math-display-img {
+				display: block !important;
+				width: auto !important;
+				max-width: 100% !important;
+				height: auto !important;
+				margin: 6px auto !important;
 			}
 
 		/* ── Grade de proteção horizontal ──────────────────────────────────────
@@ -519,11 +536,15 @@
 				flex: 1;
 			}
 
-			.alternative-content img {
+			.alternative-content img:not(.math-inline-img):not(.math-display-img) {
 				max-width: 100%;
 				height: auto;
 				display: block;
-				margin: 8px auto;
+				margin: 8px 0;
+			}
+
+			.alternative-content img.math-display-img {
+				margin: 6px 0 !important;
 			}
 
 			/* ========================================

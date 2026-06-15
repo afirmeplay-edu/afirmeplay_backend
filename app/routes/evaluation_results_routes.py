@@ -1843,10 +1843,10 @@ def _gerar_tabela_detalhada_por_disciplina(
         )
         if not resultados_participantes:
             logging.warning("Nenhum aluno com dados para a avaliação no escopo (tabela detalhada)")
-            payload = {"disciplinas": list(questoes_por_disciplina.values())}
-            if nivel_granularidade != "turma":
-                payload["geral"] = {"alunos": []}
-            return payload
+            return {
+                "disciplinas": list(questoes_por_disciplina.values()),
+                "geral": {"alunos": []},
+            }
 
         from app.services.evaluation_result_snapshot import (
             prefetch_placement_from_results,
@@ -2032,24 +2032,47 @@ def _gerar_tabela_detalhada_por_disciplina(
             disciplina_data["alunos"] = alunos_disciplina
             logging.debug("Disciplina %s: %d alunos processados", disciplina_data['nome'], len(alunos_disciplina))
 
-        dados_gerais = _calcular_dados_gerais_alunos(questoes_por_disciplina, course_name)
-        payload = {"disciplinas": list(questoes_por_disciplina.values())}
-        if nivel_granularidade != "turma":
-            payload["geral"] = dados_gerais
-        return payload
+        dados_gerais = _calcular_dados_gerais_alunos(
+            questoes_por_disciplina, course_name, results_dict
+        )
+        return {
+            "disciplinas": list(questoes_por_disciplina.values()),
+            "geral": dados_gerais,
+        }
         
     except Exception as e:
         logging.error(f"Erro ao gerar tabela detalhada por disciplina: {str(e)}", exc_info=True)
-        payload_erro = {"disciplinas": [], "error": str(e)}
-        if nivel_granularidade != "turma":
-            payload_erro["geral"] = {"alunos": []}
-        return payload_erro
+        return {"disciplinas": [], "geral": {"alunos": []}, "error": str(e)}
 
 
-def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: str = "Anos Iniciais") -> dict:
+def _classificar_proficiencia_geral(proficiencia_media: float, course_name: str) -> Optional[str]:
+    """Fallback de classificação geral quando não há EvaluationResult.classification."""
+    if "finais" in course_name.lower() or "médio" in course_name.lower() or "medio" in course_name.lower():
+        if proficiencia_media >= 340:
+            return "Avançado"
+        if proficiencia_media >= 290:
+            return "Adequado"
+        if proficiencia_media >= 212.50:
+            return "Básico"
+        return "Abaixo do Básico"
+
+    if proficiencia_media >= 263:
+        return "Avançado"
+    if proficiencia_media >= 213:
+        return "Adequado"
+    if proficiencia_media >= 163:
+        return "Básico"
+    return "Abaixo do Básico"
+
+
+def _calcular_dados_gerais_alunos(
+    questoes_por_disciplina: dict,
+    course_name: str = "Anos Iniciais",
+    results_dict: Optional[Dict[Any, Any]] = None,
+) -> dict:
     """
-    Calcula dados gerais (média de todas as disciplinas) para cada aluno
-    ATUALIZADO: Usa dados pré-calculados por disciplina (já arredondados para 2 casas decimais)
+    Consolida totais gerais por aluno a partir das disciplinas.
+    Nota, proficiência e classificação gerais vêm de EvaluationResult quando disponível.
     """
     try:
         # Criar dicionário para armazenar dados consolidados por aluno
@@ -2083,19 +2106,32 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: st
                 dados_alunos[aluno_id]["total_questoes_geral"] += aluno_data["total_questoes_disciplina"]
                 dados_alunos[aluno_id]["total_respondidas_geral"] += aluno_data["total_respondidas"]
         
-        # Calcular médias e classificação geral para cada aluno
+        # Calcular nota/proficiência geral e totais para cada aluno
         alunos_gerais = []
         for aluno_id, dados in dados_alunos.items():
-            # Calcular médias (usando dados já arredondados para 2 casas decimais)
-            if dados["notas_disciplinas"]:
-                nota_geral = sum(dados["notas_disciplinas"]) / len(dados["notas_disciplinas"])
-                proficiencia_geral = sum(dados["proficiencias_disciplinas"]) / len(dados["proficiencias_disciplinas"])
-                # Arredondar as médias para 2 casas decimais
-                nota_geral = round_to_two_decimals(nota_geral)
-                proficiencia_geral = round_to_two_decimals(proficiencia_geral)
+            evaluation_result = (results_dict or {}).get(aluno_id)
+
+            if evaluation_result is not None and evaluation_result.grade is not None:
+                nota_geral = round_to_two_decimals(float(evaluation_result.grade))
+                proficiencia_geral = round_to_two_decimals(
+                    float(evaluation_result.proficiency or 0)
+                )
+                nivel_proficiencia_geral = evaluation_result.classification
+            elif dados["notas_disciplinas"]:
+                nota_geral = round_to_two_decimals(
+                    sum(dados["notas_disciplinas"]) / len(dados["notas_disciplinas"])
+                )
+                proficiencia_geral = round_to_two_decimals(
+                    sum(dados["proficiencias_disciplinas"]) / len(dados["proficiencias_disciplinas"])
+                )
+                nivel_proficiencia_geral = _classificar_proficiencia_geral(
+                    sum(dados["proficiencias_disciplinas"]) / len(dados["proficiencias_disciplinas"]),
+                    course_name,
+                )
             else:
                 nota_geral = 0.0
                 proficiencia_geral = 0.0
+                nivel_proficiencia_geral = None
             
             # Calcular percentual geral
             if dados["total_questoes_geral"] > 0:
@@ -2103,44 +2139,6 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: st
                 percentual_acertos_geral = round_to_two_decimals(percentual_acertos_geral)
             else:
                 percentual_acertos_geral = 0.0
-            
-            # CORREÇÃO: Usar parâmetros específicos para classificação de MÉDIA GERAL
-            if dados["notas_disciplinas"] and dados["proficiencias_disciplinas"]:
-                # Usar média das proficiências para determinar classificação geral
-                proficiencia_media = sum(dados["proficiencias_disciplinas"]) / len(dados["proficiencias_disciplinas"])
-                
-                # Determinar classificação baseada nos parâmetros específicos para MÉDIA GERAL
-                if "finais" in course_name.lower() or "médio" in course_name.lower() or "medio" in course_name.lower():
-                    # Média Geral (Anos Finais/Ensino Médio):
-                    # - Abaixo do Básico: 0-212.49
-                    # - Básico: 212,50-289.99
-                    # - Adequado: 290-339.99
-                    # - Avançado: 340-425
-                    if proficiencia_media >= 340:
-                        nivel_proficiencia_geral = "Avançado"
-                    elif proficiencia_media >= 290:
-                        nivel_proficiencia_geral = "Adequado"
-                    elif proficiencia_media >= 212.50:
-                        nivel_proficiencia_geral = "Básico"
-                    else:
-                        nivel_proficiencia_geral = "Abaixo do Básico"
-                else:
-                    # Média Geral (Educação Infantil/Anos Iniciais/EJA):
-                    # - Abaixo do Básico: 0-162
-                    # - Básico: 163-212
-                    # - Adequado: 213-262
-                    # - Avançado: 263-375
-                    if proficiencia_media >= 263:
-                        nivel_proficiencia_geral = "Avançado"
-                    elif proficiencia_media >= 213:
-                        nivel_proficiencia_geral = "Adequado"
-                    elif proficiencia_media >= 163:
-                        nivel_proficiencia_geral = "Básico"
-                    else:
-                        nivel_proficiencia_geral = "Abaixo do Básico"
-            else:
-                # Aluno não fez a avaliação - não classificar
-                nivel_proficiencia_geral = None
             
             # Determinar status geral
             status_geral = "concluida" if dados["total_respondidas_geral"] > 0 else "pendente"

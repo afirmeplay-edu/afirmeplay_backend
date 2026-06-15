@@ -60,6 +60,61 @@ class TestEvaluationResultsParticipation(unittest.TestCase):
         self.assertEqual(result["alunos"][0]["escola_id"], "escola-a")
         self.assertEqual(result["alunos"][0]["escola"], "Escola A")
 
+    def test_calcular_dados_gerais_usa_evaluation_result_grade(self):
+        questoes_por_disciplina = {
+            "matematica": {
+                "alunos": [
+                    {
+                        "id": "aluno-1",
+                        "nome": "Aluno 1",
+                        "escola_id": "escola-a",
+                        "escola": "Escola A",
+                        "serie": "9º Ano",
+                        "turma": "A",
+                        "nota": 2.66,
+                        "proficiencia": 179.81,
+                        "total_acertos": 11,
+                        "total_respondidas": 26,
+                        "total_questoes_disciplina": 26,
+                    }
+                ]
+            },
+            "portugues": {
+                "alunos": [
+                    {
+                        "id": "aluno-1",
+                        "nome": "Aluno 1",
+                        "escola_id": "escola-a",
+                        "escola": "Escola A",
+                        "serie": "9º Ano",
+                        "turma": "A",
+                        "nota": 5.90,
+                        "proficiencia": 276.93,
+                        "total_acertos": 18,
+                        "total_respondidas": 26,
+                        "total_questoes_disciplina": 26,
+                    }
+                ]
+            },
+        }
+        evaluation_result = MagicMock(
+            grade=4.28,
+            proficiency=228.37,
+            classification="Básico",
+        )
+        results_dict = {"aluno-1": evaluation_result}
+
+        result = _calcular_dados_gerais_alunos(
+            questoes_por_disciplina, "Anos Finais", results_dict
+        )
+
+        aluno = result["alunos"][0]
+        self.assertEqual(aluno["nota_geral"], 4.28)
+        self.assertEqual(aluno["proficiencia_geral"], 228.37)
+        self.assertEqual(aluno["nivel_proficiencia_geral"], "Básico")
+        self.assertEqual(aluno["total_acertos_geral"], 29)
+        self.assertEqual(aluno["total_questoes_geral"], 52)
+
 
 if __name__ == "__main__":
     unittest.main()

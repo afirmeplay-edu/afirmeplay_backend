@@ -7,6 +7,7 @@ Permite uso completo de HTML e CSS sem as limitações do ReportLab
 from weasyprint import HTML, CSS
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
+from app.utils.render_math import render_math_in_html, render_math_in_text
 import os
 import io
 import base64
@@ -961,13 +962,15 @@ class InstitutionalTestWeasyPrintGenerator:
         processed['instruction'] = instruction
         processed['title'] = title
         main_content_inlined = self._inline_question_images_html(main_content, images_meta)
-        processed['content'] = self._process_html_content(main_content_inlined)
+        main_content_with_math = render_math_in_html(main_content_inlined)
+        processed['content'] = self._process_html_content(main_content_with_math)
 
         # Processar secondstatement como pergunta/objetivo (aparece APÓS content e ANTES de alternatives)
         prompt = processed.get('secondstatement', '')
         if prompt:
             prompt_inlined = self._inline_question_images_html(prompt, images_meta)
-            processed['prompt'] = self._process_html_content(prompt_inlined)
+            prompt_with_math = render_math_in_html(prompt_inlined)
+            processed['prompt'] = self._process_html_content(prompt_with_math)
         else:
             processed['prompt'] = None
 
@@ -998,9 +1001,14 @@ class InstitutionalTestWeasyPrintGenerator:
                     alt_id = chr(65 + i)
 
                 alt_content_inlined = self._inline_question_images_html(alt_content, images_meta)
+                alt_with_math = (
+                    render_math_in_html(alt_content_inlined)
+                    if '<' in alt_content_inlined
+                    else render_math_in_text(alt_content_inlined)
+                )
                 processed_alt = {
                     'letter': chr(65 + i),  # A, B, C, D...
-                    'content': self._process_html_content(alt_content_inlined),
+                    'content': self._process_html_content(alt_with_math),
                     'id': alt_id
                 }
                 processed_alternatives.append(processed_alt)

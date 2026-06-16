@@ -21,6 +21,9 @@ from app.models.student import Student
 from app.models.studentClass import Class
 
 
+from app.utils.uuid_helpers import ensure_uuid
+
+
 def build_placement_snapshots_from_student(student: Student) -> Dict[str, Any]:
     """
     Lê a colocação atual do aluno (e matrícula vigente) para gravar em novo EvaluationResult.
@@ -69,8 +72,9 @@ def snapshot_scope_filter_expression(
     parts = []
 
     if tipo == "turma" and escopo_calculo.get("turma_id"):
-        tid = escopo_calculo["turma_id"]
-        parts.append(EvaluationResult.class_id_snapshot == tid)
+        tid = ensure_uuid(escopo_calculo["turma_id"])
+        if tid:
+            parts.append(EvaluationResult.class_id_snapshot == tid)
 
     elif tipo == "serie" and escopo_calculo.get("serie_id"):
         # Turmas da série na escola (quando informada)
@@ -236,7 +240,9 @@ def class_ids_for_evaluation_in_scope(
 
     tipo = escopo_calculo.get("tipo")
     if tipo == "turma" and escopo_calculo.get("turma_id"):
-        q = q.filter(ClassTest.class_id == escopo_calculo["turma_id"])
+        turma_uuid = ensure_uuid(escopo_calculo["turma_id"])
+        if turma_uuid:
+            q = q.filter(ClassTest.class_id == turma_uuid)
     elif tipo in ("serie", "escola", "municipio"):
         q = q.join(Class, ClassTest.class_id == Class.id)
         if tipo == "serie" and escopo_calculo.get("serie_id"):

@@ -46,6 +46,28 @@ def ensure_uuid(value: Any) -> Optional[uuid.UUID]:
         return None
 
 
+def uuid_in_collection(value: Any, members: Union[List[Any], set, None]) -> bool:
+    """
+    Verifica se value (string ou UUID) corresponde a algum membro da coleção,
+    comparando sempre como UUID.
+    """
+    target = ensure_uuid(value)
+    if target is None or not members:
+        return False
+    for member in members:
+        member_uuid = ensure_uuid(member)
+        if member_uuid is not None and member_uuid == target:
+            return True
+    return False
+
+
+def normalize_uuid_set(values: Union[List[Any], set, None]) -> set:
+    """Converte coleção de IDs em set de UUID (ignora valores inválidos)."""
+    if not values:
+        return set()
+    return {u for u in (ensure_uuid(v) for v in values) if u is not None}
+
+
 def ensure_uuid_list(values: Union[List[Any], None]) -> List[uuid.UUID]:
     """
     Garante que lista de valores seja UUIDs, converte strings se necessário.

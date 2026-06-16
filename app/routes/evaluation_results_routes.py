@@ -55,7 +55,7 @@ from app.models.city import City
 from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.evaluationResult import EvaluationResult
-from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list, normalize_uuid_set, uuid_in_collection
 from app.utils.decimal_helpers import round_to_two_decimals
 from app.utils.class_label_helpers import normalize_shift, class_filter_option
 from app.utils.school_equal_weight_means import (
@@ -659,12 +659,12 @@ def listar_avaliacoes():
                 if not teacher_class_ids:
                     professor_allowed_class_ids = set()
                 else:
-                    allowed = set(teacher_class_ids)
+                    allowed = normalize_uuid_set(teacher_class_ids)
 
                     # Se o usuário selecionou uma turma específica, ela precisa estar no escopo do professor.
                     if turma and str(turma).lower() != "all":
-                        turma_id = turma
-                        allowed = {turma_id} if turma_id in allowed else set()
+                        turma_uuid = ensure_uuid(turma)
+                        allowed = {turma_uuid} if turma_uuid and turma_uuid in allowed else set()
 
                     # Se selecionou escola e/ou série, restringir às turmas do professor que pertencem a esse recorte.
                     if allowed and ((escola and str(escola).lower() != "all") or (serie and str(serie).lower() != "all")):
@@ -672,8 +672,10 @@ def listar_avaliacoes():
                         if escola and str(escola).lower() != "all":
                             q_classes = q_classes.filter(Class.school_id == escola)
                         if serie and str(serie).lower() != "all":
-                            q_classes = q_classes.filter(Class.grade_id == serie)
-                        allowed = {row[0] for row in q_classes.all()}
+                            serie_uuid = ensure_uuid(serie)
+                            if serie_uuid:
+                                q_classes = q_classes.filter(Class.grade_id == serie_uuid)
+                        allowed = normalize_uuid_set([row[0] for row in q_classes.all()])
 
                     professor_allowed_class_ids = allowed
             except Exception:
@@ -1033,17 +1035,25 @@ def listar_avaliacoes():
             
             if serie and serie.lower() != 'all':
                 # Tentar filtrar por ID primeiro, depois por nome
-                grade_filter = Grade.query.get(serie)
-                if grade_filter:
-                    query_base = query_base.filter(Grade.id == serie)
+                serie_uuid = ensure_uuid(serie)
+                if serie_uuid:
+                    grade_filter = Grade.query.get(serie_uuid)
+                    if grade_filter:
+                        query_base = query_base.filter(Grade.id == serie_uuid)
+                    else:
+                        query_base = query_base.filter(Grade.name.ilike(f"%{serie}%"))
                 else:
                     query_base = query_base.filter(Grade.name.ilike(f"%{serie}%"))
             
             if turma and turma.lower() != 'all':
                 # Tentar filtrar por ID primeiro, depois por nome
-                class_filter = Class.query.get(turma)
-                if class_filter:
-                    query_base = query_base.filter(Class.id == turma)
+                turma_uuid = ensure_uuid(turma)
+                if turma_uuid:
+                    class_filter = Class.query.get(turma_uuid)
+                    if class_filter:
+                        query_base = query_base.filter(Class.id == turma_uuid)
+                    else:
+                        query_base = query_base.filter(Class.name.ilike(f"%{turma}%"))
                 else:
                     query_base = query_base.filter(Class.name.ilike(f"%{turma}%"))
             
@@ -8391,21 +8401,24 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
         
         elif escopo_calculo['tipo'] == "turma":
             # Todos os alunos da turma (sempre retornar, mesmo se não fez avaliação)
-            query = Student.query.filter(Student.class_id == escopo_calculo['turma_id'])
+            turma_uuid = ensure_uuid(escopo_calculo.get('turma_id'))
+            if not turma_uuid:
+                return []
+            query = Student.query.filter(Student.class_id == turma_uuid)
 
             if restrict_class_ids is not None:
                 if not restrict_class_ids:
                     return []
                 # Se a turma específica não estiver dentro da restrição, nada a retornar.
-                if escopo_calculo["turma_id"] not in set(restrict_class_ids):
+                if not uuid_in_collection(turma_uuid, restrict_class_ids):
                     return []
             
             # Se há avaliação específica, verificar se a turma aplicou a avaliação
             if escopo_calculo.get('avaliacao_id'):
                 from app.models.classTest import ClassTest
                 class_test = ClassTest.query.filter_by(
-                    test_id=escopo_calculo['avaliacao_id'],
-                    class_id=escopo_calculo['turma_id']
+                    test_id=str(escopo_calculo['avaliacao_id']),
+                    class_id=turma_uuid,
                 ).first()
                 if not class_test:
                     # Turma não aplicou a avaliação, mas retornar alunos para dados zerados
@@ -8513,7 +8526,11 @@ def _obter_alunos_base_escopo_relatorio(
     if restrict_class_ids is not None:
         if not restrict_class_ids:
             return []
-        all_students = [s for s in all_students if s.class_id in restrict_class_ids]
+        restrict_uuids = normalize_uuid_set(restrict_class_ids)
+        all_students = [
+            s for s in all_students
+            if ensure_uuid(s.class_id) in restrict_uuids
+        ]
     return all_students
 
 

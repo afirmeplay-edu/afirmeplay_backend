@@ -8,6 +8,11 @@ from weasyprint import HTML, CSS
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 from app.utils.render_math import render_math_in_html, render_math_in_text
+from app.utils.afirme_cover_layout import (
+    load_afirme_cover_layout,
+    student_max_chars,
+    student_overlay_coords_pt,
+)
 import os
 import io
 import base64
@@ -55,7 +60,15 @@ class InstitutionalTestWeasyPrintGenerator:
                 public_api_base_url = "http://localhost:5000"
         return public_api_base_url
 
+    def _get_afirme_cover_layout(self) -> Dict[str, Any]:
+        return load_afirme_cover_layout()
+
     def _render_template(self, template_name: str, template_data: Dict[str, Any]) -> str:
+        if 'afirme_cover_layout' not in template_data:
+            template_data = {
+                **template_data,
+                'afirme_cover_layout': self._get_afirme_cover_layout(),
+            }
         template = self.env.get_template(template_name)
         return template.render(**template_data)
 
@@ -269,6 +282,8 @@ class InstitutionalTestWeasyPrintGenerator:
                                 alt['content'] = Markup(self._inline_question_images_html(str(alt['content']), q.get('images') or []))
 
         default_logo_base64 = self._load_default_logo()
+        afirme_cover_base64 = self._load_afirme_cover_base64()
+        cover_year = self._cover_year_from_test_data(test_data)
 
         # ════════════════════════════════════════════════════════════════
         # ETAPA 2: Gerar PDF QUESTÕES (sem capa) - 1× compartilhado
@@ -387,6 +402,8 @@ class InstitutionalTestWeasyPrintGenerator:
                 'datetime': datetime,
                 'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
                 'default_logo': default_logo_base64,
+                'afirme_cover_base64': afirme_cover_base64,
+                'cover_year': cover_year,
                 'include_cover': True,
                 'include_questions': False,
                 'include_answer_sheet': False,
@@ -447,7 +464,16 @@ class InstitutionalTestWeasyPrintGenerator:
                     raise RuntimeError("Nenhuma capa disponível")
                 
                 cover_reader = PdfReader(io.BytesIO(cover_pdf_bytes))
-                
+
+                cover_page = cover_reader.pages[0]
+                if afirme_cover_base64:
+                    cover_student_overlay = self._generate_afirme_cover_student_overlay_pdf(
+                        student, test_data
+                    )
+                    if cover_student_overlay:
+                        cover_overlay_reader = PdfReader(io.BytesIO(cover_student_overlay))
+                        cover_page.merge_page(cover_overlay_reader.pages[0])
+
                 omr_overlay_bytes = self._generate_student_overlay_pdf(student, test_data)
                 if not omr_overlay_bytes:
                     raise RuntimeError("Falha ao gerar overlay OMR")
@@ -459,8 +485,7 @@ class InstitutionalTestWeasyPrintGenerator:
 
                 writer = PdfWriter()
                 
-                for page in cover_reader.pages:
-                    writer.add_page(page)
+                writer.add_page(cover_page)
                 
                 for page in questions_reader.pages:
                     writer.add_page(page)
@@ -698,6 +723,8 @@ class InstitutionalTestWeasyPrintGenerator:
             
             # Carregar logo padrão (afirme_logo.png) se não houver logo do município
             default_logo_base64 = self._load_default_logo()
+            afirme_cover_base64 = self._load_afirme_cover_base64()
+            cover_year = self._cover_year_from_test_data(test_data)
             
             # Gerar questions_map: mapear número da questão para lista de letras das alternativas
             # Formato: {1: ["A", "B", "C"], 2: ["A", "B", "C", "D"], ...}
@@ -744,14 +771,15 @@ class InstitutionalTestWeasyPrintGenerator:
                 'total_questions': total_questions,
                 'datetime': datetime,
                 'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
-                'default_logo': default_logo_base64  # Logo padrão (afirme_logo.png)
+                'default_logo': default_logo_base64,
+                'afirme_cover_base64': afirme_cover_base64,
+                'cover_year': cover_year,
             }
             
 
             # Template OFICIAL em produção (ver cabeçalho em institutional_test_hybrid.html)
             # Legado: institutional_test.html — não usar
-            template = self.env.get_template('institutional_test_hybrid.html')
-            html_content = template.render(**template_data)
+            html_content = self._render_template('institutional_test_hybrid.html', template_data)
 
             # Gerar PDF com WeasyPrint
             pdf_buffer = io.BytesIO()
@@ -772,8 +800,12 @@ class InstitutionalTestWeasyPrintGenerator:
 
             html_obj.write_pdf(pdf_buffer)
             pdf_buffer.seek(0)
+            pdf_bytes = pdf_buffer.read()
 
-            return pdf_buffer.read()
+            if afirme_cover_base64:
+                pdf_bytes = self._apply_afirme_cover_student_overlay(pdf_bytes, student, test_data)
+
+            return pdf_bytes
 
         except Exception as e:
             logging.error(f"Erro ao gerar PDF individual WeasyPrint: {str(e)}")
@@ -1407,6 +1439,97 @@ class InstitutionalTestWeasyPrintGenerator:
         except Exception as e:
             logging.error(f"Erro ao carregar logo padrão: {str(e)}")
             return None
+
+    def _load_afirme_cover_base64(self) -> Optional[str]:
+        """Carrega capalimpa.png (capa Afirme) como base64 para WeasyPrint."""
+        try:
+            assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets')
+            cover_path = os.path.join(assets_dir, 'capalimpa.png')
+            if os.path.exists(cover_path):
+                with open(cover_path, 'rb') as cover_file:
+                    return base64.b64encode(cover_file.read()).decode('utf-8')
+            logging.warning(f"Capa Afirme não encontrada em: {cover_path}")
+            return None
+        except Exception as e:
+            logging.error(f"Erro ao carregar capa Afirme: {str(e)}")
+            return None
+
+    def _cover_year_from_test_data(self, test_data: Optional[Dict]) -> int:
+        """Ano exibido no subtítulo da capa (ex.: 9º ANO — 2026)."""
+        test_data = test_data or {}
+        for key in ('year', 'application_year', 'school_year'):
+            value = test_data.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    pass
+        return datetime.now().year
+
+    def _generate_afirme_cover_student_overlay_pdf(
+        self, student: Dict, test_data: Dict
+    ) -> Optional[bytes]:
+        """
+        Overlay ReportLab: nome do aluno no campo ALUNO(A) da capa Afirme.
+        Coordenadas calibradas sobre capalimpa.png (@page afirme-cover, A4 21×29,7 cm).
+        """
+        try:
+            from reportlab.pdfgen.canvas import Canvas
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.colors import HexColor
+
+            student_name = (student.get('name') or student.get('nome') or '').strip()
+            if not student_name:
+                return None
+
+            layout = self._get_afirme_cover_layout()
+            x_pt, y_pt, font_pt = student_overlay_coords_pt(layout)
+            max_chars = student_max_chars(layout)
+
+            FONT_NAME = 'Helvetica-Bold'
+            FONT_COLOR = HexColor('#5b2d8e')
+
+            if len(student_name) > max_chars:
+                student_name = student_name[: max_chars - 1] + '…'
+
+            buffer = io.BytesIO()
+            c = Canvas(buffer, pagesize=A4)
+            c.setPageSize(A4)
+            c.setFont(FONT_NAME, font_pt)
+            c.setFillColor(FONT_COLOR)
+            c.drawString(x_pt, y_pt, student_name.upper())
+            c.save()
+            buffer.seek(0)
+            return buffer.read()
+        except Exception as e:
+            logging.error(
+                f"Erro ao gerar overlay da capa Afirme para aluno {student.get('id', 'N/A')}: {str(e)}",
+                exc_info=True,
+            )
+            return None
+
+    def _apply_afirme_cover_student_overlay(
+        self, pdf_bytes: bytes, student: Dict, test_data: Dict
+    ) -> bytes:
+        """Aplica overlay do nome do aluno na primeira página (capa)."""
+        overlay_bytes = self._generate_afirme_cover_student_overlay_pdf(student, test_data)
+        if not overlay_bytes:
+            return pdf_bytes
+        try:
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            if not reader.pages:
+                return pdf_bytes
+            overlay_reader = PdfReader(io.BytesIO(overlay_bytes))
+            reader.pages[0].merge_page(overlay_reader.pages[0])
+            out = io.BytesIO()
+            writer = PdfWriter()
+            for page in reader.pages:
+                writer.add_page(page)
+            writer.write(out)
+            return out.getvalue()
+        except Exception as e:
+            logging.error(f"Erro ao aplicar overlay na capa: {str(e)}", exc_info=True)
+            return pdf_bytes
 
     def _generate_qr_code_with_metadata(self, student_id: str, test_id: str, gabarito_id: str = None) -> dict:
         """

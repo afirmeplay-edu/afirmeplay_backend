@@ -64,6 +64,119 @@
 			/* Sem rodapé no cartão resposta */
 		}
 
+		/* Capa Afirme (capalimpa.png) — full bleed A4, sem margem @page */
+		@page afirme-cover {
+			size: A4 portrait;
+			margin: 0;
+		}
+
+		.afirme-cover-page {
+			page: afirme-cover;
+			position: relative;
+			width: 21cm;
+			height: 29.7cm;
+			page-break-after: always;
+			overflow: hidden;
+		}
+
+		.afirme-cover-bg {
+			position: absolute;
+			top: 0;
+			left: 0;
+			width: 21cm;
+			height: 29.7cm;
+			object-fit: fill;
+			z-index: 0;
+		}
+
+		.afirme-cover-overlay {
+			position: absolute;
+			top: 0;
+			left: 0;
+			width: 21cm;
+			height: 29.7cm;
+			z-index: 1;
+			pointer-events: none;
+		}
+
+		/* Título e subtítulo (coordenadas: app/assets/afirme_cover_layout.json) */
+		.afirme-cover-title {
+			position: absolute;
+			top: {{ afirme_cover_layout.title.top_cm | default(2.6) }}cm;
+			left: {{ afirme_cover_layout.title.left_cm | default(1.4) }}cm;
+			right: {{ afirme_cover_layout.title.right_cm | default(1.4) }}cm;
+			text-align: center;
+			font-family: "Times New Roman", Times, serif;
+			font-size: {{ afirme_cover_layout.title.font_pt | default(21) }}pt;
+			font-weight: bold;
+			color: #5b2d8e;
+			text-transform: uppercase;
+			line-height: 1.15;
+			letter-spacing: 0.5px;
+		}
+
+		.afirme-cover-subtitle {
+			position: absolute;
+			top: {{ afirme_cover_layout.subtitle.top_cm | default(5.1) }}cm;
+			left: {{ afirme_cover_layout.subtitle.left_cm | default(1.4) }}cm;
+			right: {{ afirme_cover_layout.subtitle.right_cm | default(1.4) }}cm;
+			text-align: center;
+			font-family: "Helvetica", Arial, sans-serif;
+			font-size: {{ afirme_cover_layout.subtitle.font_pt | default(12.5) }}pt;
+			font-weight: bold;
+			color: #6d28d9;
+			text-transform: uppercase;
+			letter-spacing: 0.3px;
+		}
+
+		.afirme-cover-field-institution {
+			position: absolute;
+			top: {{ afirme_cover_layout.institution.top_cm | default(13.55) }}cm;
+			left: {{ afirme_cover_layout.institution.left_cm | default(5.05) }}cm;
+			right: {{ afirme_cover_layout.institution.right_cm | default(2.6) }}cm;
+			font-family: "Helvetica", Arial, sans-serif;
+			font-size: {{ afirme_cover_layout.institution.font_pt | default(10) }}pt;
+			font-weight: 600;
+			color: #5b2d8e;
+			text-transform: uppercase;
+			line-height: 1.25;
+			white-space: normal;
+			overflow-wrap: break-word;
+			word-wrap: break-word;
+		}
+
+		.afirme-cover-field-grade {
+			position: absolute;
+			top: {{ afirme_cover_layout.grade.top_cm | default(15.05) }}cm;
+			left: {{ afirme_cover_layout.grade.left_cm | default(3.25) }}cm;
+			width: {{ afirme_cover_layout.grade.width_cm | default(5.8) }}cm;
+			font-family: "Helvetica", Arial, sans-serif;
+			font-size: {{ afirme_cover_layout.grade.font_pt | default(10) }}pt;
+			font-weight: 600;
+			color: #5b2d8e;
+			text-transform: uppercase;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		.afirme-cover-field-class {
+			position: absolute;
+			top: {{ afirme_cover_layout.class.top_cm | default(15.05) }}cm;
+			left: {{ afirme_cover_layout.class.left_cm | default(11.55) }}cm;
+			width: {{ afirme_cover_layout.class.width_cm | default(5.8) }}cm;
+			font-family: "Helvetica", Arial, sans-serif;
+			font-size: {{ afirme_cover_layout.class.font_pt | default(10) }}pt;
+			font-weight: 600;
+			color: #5b2d8e;
+			text-transform: uppercase;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		/* ALUNO(A): preenchido via overlay ReportLab por aluno */
+
 			* {
 				margin: 0;
 				padding: 0;
@@ -434,7 +547,7 @@
 				display: inline !important;
 				width: auto !important;
 				max-width: none !important;
-				height: 1.15em !important;
+				height: 1.55em !important;
 				margin: 0 2px 0 0 !important;
 				vertical-align: middle !important;
 			}
@@ -1118,6 +1231,32 @@
 
 		<!-- Capa Institucional -->
 		{% if include_cover %}
+		{% if afirme_cover_base64 %}
+		<div class="afirme-cover-page">
+			<img
+				class="afirme-cover-bg"
+				src="data:image/png;base64,{{ afirme_cover_base64 }}"
+				alt="" />
+			<div class="afirme-cover-overlay">
+				<div class="afirme-cover-title">
+					{{ test_data.title or 'TÍTULO DA AVALIAÇÃO' }}
+				</div>
+				<div class="afirme-cover-subtitle">
+					{% if test_data.grade_name %}{{ test_data.grade_name }} —
+					{% endif %}{{ cover_year or '' }}
+				</div>
+				<div class="afirme-cover-field-institution">
+					{{ student.school_name or test_data.institution or '' }}
+				</div>
+				<div class="afirme-cover-field-grade">
+					{{ test_data.grade_name or '' }}
+				</div>
+				<div class="afirme-cover-field-class">
+					{{ student.class_name or '' }}
+				</div>
+			</div>
+		</div>
+		{% else %}
 		<div class="institutional-cover{% if lh %} letterhead-bg{% endif %}">
 			<div class="cover-header">
 				{# Logo da capa desativado temporariamente.
@@ -1192,6 +1331,7 @@
 				</div>
 			</div>
 		</div>
+		{% endif %}
 		{% endif %}
 
 		<!-- Disciplinas e Questões -->

@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 MATH_PATTERN = re.compile(r'\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$')
 HTML_TAG_OR_TEXT = re.compile(r'(<[^>]+>)|([^<]+)', re.DOTALL)
 
-_MATH_FONT_SIZE = 16
+_MATH_FONT_SIZE = 24
 _MATH_DPI = 200
 
 
@@ -98,7 +98,7 @@ def _build_math_img_tag(latex: str, display_mode: bool) -> str:
     return (
         f'<img src="data:image/png;base64,{b64}" '
         'class="math-rendered math-inline-img" '
-        'style="display:inline;vertical-align:middle;height:1.55em;" '
+        'style="display:inline;vertical-align:middle;height:2.4em;" '
         f'alt="{alt}" />'
     )
 

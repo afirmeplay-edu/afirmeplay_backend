@@ -43,8 +43,10 @@ BASIC_FEATURES: FrozenSet[str] = frozenset({
     "filters",
 })
 
-# Exclusivas do plus — vazio até novos módulos serem cadastrados aqui.
-PLUS_ONLY_FEATURES: FrozenSet[str] = frozenset()
+# Exclusivas do plus
+PLUS_ONLY_FEATURES: FrozenSet[str] = frozenset({
+    "afirme_reading",
+})
 
 ALL_KNOWN_FEATURES: FrozenSet[str] = BASIC_FEATURES | PLUS_ONLY_FEATURES
 

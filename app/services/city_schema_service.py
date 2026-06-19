@@ -10,6 +10,7 @@ import logging
 from app import db
 from app.utils.tenant_middleware import city_id_to_schema_name
 from app.services.mobile.ddl import get_mobile_tables_ddl
+from app.afirme_ler.ddl import get_afirme_ler_evaluation_tables_ddl
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +272,24 @@ CREATE INDEX IF NOT EXISTS idx_saved_ata_sala_school_updated ON "{schema}".saved
 CREATE INDEX IF NOT EXISTS idx_saved_ata_sala_city_updated ON "{schema}".saved_ata_sala(city_id, updated_at);
 COMMENT ON TABLE "{schema}".saved_ata_sala IS 'Atas de sala salvas por usuário (visibilidade por escola/município)';
 """
+
+
+def provision_afirme_ler_for_city_schema(schema_name: str) -> None:
+    """Aplica DDL de avaliações Afirme Ler em um schema city_* existente (idempotente)."""
+    if not schema_name.replace("_", "").isalnum() or not schema_name.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema_name}")
+
+    raw_conn = db.engine.raw_connection()
+    try:
+        raw_conn.set_isolation_level(0)
+        cursor = raw_conn.cursor()
+        cursor.execute(get_afirme_ler_evaluation_tables_ddl(schema_name))
+        logger.info("Afirme Ler evaluation DDL aplicado em schema %s", schema_name)
+    except Exception as e:
+        logger.exception("Falha ao aplicar Afirme Ler em %s: %s", schema_name, e)
+        raise
+    finally:
+        raw_conn.close()
 
 
 def provision_plantao_online_for_city_schema(schema_name: str) -> None:
@@ -812,6 +831,7 @@ def _get_city_tables_ddl(schema: str) -> str:
     ideb_meta_block = get_ideb_meta_tables_ddl(schema)
     monitoring_block = get_monitoring_tables_ddl(schema)
     saved_ata_block = get_saved_ata_sala_tables_ddl(schema)
+    afirme_ler_block = get_afirme_ler_evaluation_tables_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
 CREATE TABLE IF NOT EXISTS "{schema}".school (
@@ -1520,7 +1540,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".form_result_cache (
 COMMENT ON TABLE "{schema}".form_result_cache IS 'Cache de resultados de formulários';
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_form_type ON "{schema}".form_result_cache(form_id, report_type);
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_dirty ON "{schema}".form_result_cache(is_dirty);
-""" + play_tv_block + plantao_online_block + ideb_meta_block + monitoring_block + saved_ata_block + f"""
+""" + play_tv_block + plantao_online_block + ideb_meta_block + monitoring_block + saved_ata_block + afirme_ler_block + f"""
 CREATE TABLE IF NOT EXISTS "{schema}".certificate_templates (
     id VARCHAR PRIMARY KEY,
     evaluation_id VARCHAR REFERENCES "{schema}".test(id),

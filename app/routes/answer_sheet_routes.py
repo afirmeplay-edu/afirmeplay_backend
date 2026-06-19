@@ -7734,3 +7734,109 @@ def get_next_filter_options():
     except Exception as e:
         logging.error(f"Erro ao buscar opções de filtro: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao buscar opções"}), 500
+
+
+# ==================== RELATÓRIO CONSOLIDADO MULTI-SELEÇÃO (CARTÃO) ====================
+
+
+@bp.route('/relatorio-consolidado/opcoes-filtros', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
+def relatorio_consolidado_opcoes_filtros_cartao():
+    """
+    Opções de filtro para relatório consolidado de cartões resposta (multi-seleção).
+
+    Query params: estado, municipio, escola (opcional/all).
+    """
+    try:
+        from app.services.consolidated_report_service import get_answer_sheet_filter_options
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        from app.permissions import get_user_permission_scope
+
+        permissao = get_user_permission_scope(user)
+        if not permissao.get("permitted"):
+            return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+
+        if municipio:
+            set_search_path(city_id_to_schema_name(str(municipio).strip()))
+
+        response = get_answer_sheet_filter_options(
+            estado,
+            municipio,
+            escola,
+            user,
+            permissao,
+            list_estados_fn=_obter_estados_disponiveis_cartao,
+            list_municipios_fn=_obter_municipios_por_estado_cartao,
+        )
+        return jsonify(response), 200
+    except Exception as e:
+        logging.error("Erro opcoes-filtros relatorio consolidado cartao: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
+
+
+@bp.route('/relatorio-consolidado', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
+def relatorio_consolidado_cartao():
+    """
+    Relatório consolidado de um ou mais cartões resposta (gabaritos).
+
+    Query params obrigatórios: municipio, gabarito_ids (CSV).
+    Opcional: escola (uuid ou all).
+    """
+    try:
+        from app.services.consolidated_report_service import (
+            build_answer_sheet_consolidated_report,
+            parse_csv_ids,
+        )
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        from app.permissions import get_user_permission_scope
+
+        permissao = get_user_permission_scope(user)
+        if not permissao.get("permitted"):
+            return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
+
+        municipio = request.args.get("municipio")
+        if not municipio:
+            return jsonify({"error": "Parâmetro municipio é obrigatório"}), 400
+
+        set_search_path(city_id_to_schema_name(str(municipio).strip()))
+
+        try:
+            gabarito_ids = parse_csv_ids(request.args.get("gabarito_ids"), "gabarito_ids")
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
+        escola = request.args.get("escola")
+
+        try:
+            payload = build_answer_sheet_consolidated_report(
+                str(municipio).strip(),
+                escola,
+                gabarito_ids,
+                user,
+                permissao,
+            )
+        except PermissionError as pe:
+            return jsonify({"error": str(pe)}), 403
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
+        return jsonify(payload), 200
+    except Exception as e:
+        logging.error("Erro relatorio consolidado cartao: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao gerar relatório consolidado", "details": str(e)}), 500
+

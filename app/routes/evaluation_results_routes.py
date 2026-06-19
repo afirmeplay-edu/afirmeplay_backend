@@ -9372,3 +9372,106 @@ def obter_opcoes_filtros_comparacao():
     except Exception as e:
         logging.error(f"Erro ao obter opções de filtros para comparação: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
+
+
+# ==================== RELATÓRIO CONSOLIDADO MULTI-SELEÇÃO ====================
+
+
+@bp.route('/relatorio-consolidado/opcoes-filtros', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def relatorio_consolidado_opcoes_filtros():
+    """
+    Opções de filtro para relatório consolidado (multi-seleção de avaliações).
+
+    Hierarquia: Estado → Município → Escola (opcional/all) → lista de avaliações.
+    Query params: estado, municipio, escola (opcional, default all).
+    """
+    try:
+        from app.services.consolidated_report_service import get_digital_filter_options
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        permissao = verificar_permissao_filtros(user)
+        if not permissao.get("permitted"):
+            return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+
+        if municipio:
+            set_search_path(city_id_to_schema_name(str(municipio).strip()))
+
+        response = get_digital_filter_options(
+            estado,
+            municipio,
+            escola,
+            user,
+            permissao,
+            list_avaliacoes_fn=_obter_avaliacoes_por_municipio,
+            list_estados_fn=_obter_estados_disponiveis,
+            list_municipios_fn=_obter_municipios_por_estado,
+        )
+        return jsonify(response), 200
+    except Exception as e:
+        logging.error("Erro opcoes-filtros relatorio consolidado: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
+
+
+@bp.route('/relatorio-consolidado', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def relatorio_consolidado():
+    """
+    Relatório consolidado de uma ou mais avaliações digitais.
+
+    Query params obrigatórios: municipio, avaliacao_ids (CSV).
+    Opcionais: estado, escola (uuid ou all).
+    """
+    try:
+        from app.services.consolidated_report_service import (
+            build_digital_consolidated_report,
+            parse_csv_ids,
+        )
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        permissao = verificar_permissao_filtros(user)
+        if not permissao.get("permitted"):
+            return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
+
+        municipio = request.args.get("municipio")
+        if not municipio:
+            return jsonify({"error": "Parâmetro municipio é obrigatório"}), 400
+
+        set_search_path(city_id_to_schema_name(str(municipio).strip()))
+
+        try:
+            test_ids = parse_csv_ids(request.args.get("avaliacao_ids"), "avaliacao_ids")
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
+        escola = request.args.get("escola")
+
+        try:
+            payload = build_digital_consolidated_report(
+                str(municipio).strip(),
+                escola,
+                test_ids,
+                user,
+                permissao,
+            )
+        except PermissionError as pe:
+            return jsonify({"error": str(pe)}), 403
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
+        return jsonify(payload), 200
+    except Exception as e:
+        logging.error("Erro relatorio consolidado digital: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao gerar relatório consolidado", "details": str(e)}), 500

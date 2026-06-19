@@ -153,7 +153,7 @@ def create_teacher_class():
 
 @teacher_class_bp.route('/teacher-class', methods=['GET'])
 @jwt_required()
-@role_required('admin', 'tecadm')
+@role_required('admin', 'tecadm', 'diretor', 'coordenador', 'professor', 'aplicador')
 def get_teacher_classes():
     try:
         # Buscar todos os vínculos professor-turma

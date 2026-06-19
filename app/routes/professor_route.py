@@ -35,7 +35,7 @@ def handle_generic_error(error):
 
 @bp.route('', methods=['POST'])
 @jwt_required()
-@role_required("admin", "diretor", "tecadm")
+@role_required("admin", "diretor", "coordenador", "tecadm")
 def criar_professor():
     try:
         logging.info("Iniciando criação de usuário/professor combinada")
@@ -64,7 +64,7 @@ def criar_professor():
             if not city_id:
                 return jsonify({"erro": "city_id é obrigatório para admin criando professores"}), 400
         else:
-            # Diretor usa seu próprio city_id
+            # Diretor/coordenador/tecadm usam o city_id do próprio usuário
             city_id = current_user.get("city_id")
             if not city_id:
                 return jsonify({"erro": "Usuário não tem city_id atribuído"}), 400

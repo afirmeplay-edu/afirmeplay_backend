@@ -7746,9 +7746,10 @@ def relatorio_consolidado_opcoes_filtros_cartao():
     """
     Opções de filtro para relatório consolidado de cartões resposta (multi-seleção).
 
-    Query params: estado, municipio, escola (opcional/all).
+    Query params: estado, municipio, escola (opcional/all), periodo (opcional, YYYY-MM).
     """
     try:
+        from app.routes.answer_sheet_evaluation_listing import obter_gabaritos_por_municipio
         from app.services.consolidated_report_service import get_answer_sheet_filter_options
 
         user = get_current_user_from_token()
@@ -7764,9 +7765,26 @@ def relatorio_consolidado_opcoes_filtros_cartao():
         estado = request.args.get("estado")
         municipio = request.args.get("municipio")
         escola = request.args.get("escola")
+        periodo_raw = request.args.get("periodo")
+        periodo_bounds = None
+        periodo_iso = None
+        if periodo_raw is not None and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_cartao_periodo_bounds(periodo_raw)
+                periodo_iso = str(periodo_raw).strip()
+            except ValueError as ve:
+                return jsonify({
+                    "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-06).",
+                    "details": str(ve),
+                }), 400
 
         if municipio:
             set_search_path(city_id_to_schema_name(str(municipio).strip()))
+
+        def _list_gabaritos(municipio_id: str, u: dict, p: dict, escola_param: str):
+            return obter_gabaritos_por_municipio(
+                municipio_id, u, p, escola_param, periodo_bounds=periodo_bounds
+            )
 
         response = get_answer_sheet_filter_options(
             estado,
@@ -7776,6 +7794,8 @@ def relatorio_consolidado_opcoes_filtros_cartao():
             permissao,
             list_estados_fn=_obter_estados_disponiveis_cartao,
             list_municipios_fn=_obter_municipios_por_estado_cartao,
+            list_gabaritos_fn=_list_gabaritos,
+            periodo_iso=periodo_iso,
         )
         return jsonify(response), 200
     except Exception as e:

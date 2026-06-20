@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import cast
@@ -35,7 +36,6 @@ from app.report_analysis.answer_sheet_report_builder import (
 )
 from app.routes.answer_sheet_evaluation_listing import (
     answer_sheet_target_classes_visible_for_user,
-    obter_gabaritos_por_municipio,
 )
 from app.routes.report_routes import _obter_disciplinas_avaliacao
 from app.services.evaluation_calculator import EvaluationCalculator
@@ -51,9 +51,9 @@ from app.utils.school_equal_weight_means import (
 
 logger = logging.getLogger(__name__)
 
-MAX_SELECTED_IDS = 20
 GERAL_KEY = "GERAL"
 FAIXAS = ("abaixo_do_basico", "basico", "adequado", "avancado")
+_SUBJECT_NAME_CACHE: Dict[str, str] = {}
 
 
 def parse_csv_ids(raw: Optional[str], param_name: str = "ids") -> List[str]:
@@ -62,8 +62,6 @@ def parse_csv_ids(raw: Optional[str], param_name: str = "ids") -> List[str]:
     ids = [x.strip() for x in str(raw).split(",") if x.strip()]
     if not ids:
         raise ValueError(f"Parâmetro {param_name} inválido.")
-    if len(ids) > MAX_SELECTED_IDS:
-        raise ValueError(f"Máximo de {MAX_SELECTED_IDS} itens por relatório.")
     return ids
 
 
@@ -151,13 +149,27 @@ def _subject_id_to_name_map(test: Test) -> Dict[str, str]:
     out: Dict[str, str] = {}
     if test.subject_rel and test.subject:
         out[str(test.subject)] = test.subject_rel.name
-    if test.subjects_info and isinstance(test.subjects_info, dict):
-        for name, info in test.subjects_info.items():
+    raw = test.subjects_info
+
+    # Formato legado/esperado: {"Português": {"id": "..."}}
+    if raw and isinstance(raw, dict):
+        for name, info in raw.items():
             out[str(name)] = str(name)
             if isinstance(info, dict):
                 sid = info.get("id") or info.get("subject_id")
                 if sid:
                     out[str(sid)] = str(name)
+
+    # Formato observado em produção: ["<subject_id>", "<subject_id>"]
+    elif raw and isinstance(raw, list):
+        subject_ids = [str(x).strip() for x in raw if x is not None and str(x).strip()]
+        miss_ids = [sid for sid in subject_ids if sid not in _SUBJECT_NAME_CACHE]
+        if miss_ids:
+            for subj in Subject.query.filter(Subject.id.in_(miss_ids)).all():
+                _SUBJECT_NAME_CACHE[str(subj.id)] = subj.name
+        for sid in subject_ids:
+            if sid in _SUBJECT_NAME_CACHE:
+                out[sid] = _SUBJECT_NAME_CACHE[sid]
     return out
 
 
@@ -983,7 +995,7 @@ def _build_distribuicao_section_answer_sheet(
 
 
 # ---------------------------------------------------------------------------
-# Acertos por habilidade: matriz + lista municipal
+# Acertos por habilidade: matriz + lista por série
 # ---------------------------------------------------------------------------
 
 
@@ -1005,6 +1017,33 @@ def _habilidades_list_from_agg(agg: Dict[str, Dict[str, Any]]) -> List[Dict[str,
             }
         )
     return rows
+
+
+def _habilidades_por_serie_blocks(
+    series_colunas: List[Dict[str, str]],
+    agg_by_serie: Dict[str, Dict[str, Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Uma lista de habilidades por série (mesmo código pode repetir entre séries)."""
+    return [
+        {
+            "serie_id": col["serie_id"],
+            "serie_nome": col["serie_nome"],
+            "habilidades": _habilidades_list_from_agg(dict(agg_by_serie.get(col["serie_id"], {}))),
+        }
+        for col in series_colunas
+    ]
+
+
+def _habilidades_por_serie_for_discipline(
+    series_colunas: List[Dict[str, str]],
+    agg_by_serie_disc: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]],
+    discipline: str,
+) -> List[Dict[str, Any]]:
+    per_serie: Dict[str, Dict[str, Dict[str, Any]]] = {
+        col["serie_id"]: dict(agg_by_serie_disc.get(col["serie_id"], {}).get(discipline, {}))
+        for col in series_colunas
+    }
+    return _habilidades_por_serie_blocks(series_colunas, per_serie)
 
 
 def _answer_is_correct(question: Question, answer: StudentAnswer) -> bool:
@@ -1029,22 +1068,26 @@ def _digital_acertos_aggregate(
     class_ids: List[Any],
     all_disciplines: Set[str],
 ) -> Tuple[
-    Dict[str, Dict[str, Any]],
     Dict[str, Dict[str, Dict[str, Any]]],
+    Dict[str, Dict[str, Dict[str, Dict[str, Any]]]],
     Dict[Optional[str], Dict[Tuple[str, str], List[int]]],
 ]:
-    agg_global: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
-    )
-    agg_by_disc: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(
+    agg_by_serie: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(
         lambda: defaultdict(
             lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
+        )
+    )
+    agg_by_serie_disc: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
+            )
         )
     )
     cell_totals: Dict[Optional[str], Dict[Tuple[str, str], List[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
 
     if not class_ids:
-        return dict(agg_global), dict(agg_by_disc), dict(cell_totals)
+        return dict(agg_by_serie), dict(agg_by_serie_disc), dict(cell_totals)
 
     class_id_set = {str(c) for c in class_ids}
 
@@ -1093,8 +1136,9 @@ def _digital_acertos_aggregate(
                 cell = scope.class_to_cell.get(str(st.class_id))
                 if not cell:
                     continue
+                _eid, serie_id = cell
                 key = str(code)
-                b = agg_global[key]
+                b = agg_by_serie[serie_id][key]
                 b["codigo"] = code
                 b["descricao"] = desc
                 b["disciplina"] = disciplina
@@ -1103,7 +1147,7 @@ def _digital_acertos_aggregate(
                     b["acertos"] += 1
                 b["itens_origem"].add(str(tid))
                 if disciplina in all_disciplines:
-                    bd = agg_by_disc[disciplina][key]
+                    bd = agg_by_serie_disc[serie_id][disciplina][key]
                     bd["codigo"] = code
                     bd["descricao"] = desc
                     bd["disciplina"] = disciplina
@@ -1118,7 +1162,7 @@ def _digital_acertos_aggregate(
                         if ok:
                             ct[0] += 1
 
-    return dict(agg_global), dict(agg_by_disc), dict(cell_totals)
+    return dict(agg_by_serie), dict(agg_by_serie_disc), dict(cell_totals)
 
 
 def _digital_acertos_data(
@@ -1129,15 +1173,15 @@ def _digital_acertos_data(
     class_ids_rede: List[Any],
     all_disciplines: Set[str],
 ) -> Dict[str, Any]:
-    _agg_l, _agg_by_disc_l, totals_l = _digital_acertos_aggregate(
+    agg_by_serie_l, agg_by_serie_disc_l, totals_l = _digital_acertos_aggregate(
         ctx.scope_linhas, tests_by_id, test_ids, class_ids_linhas, all_disciplines
     )
     if ctx.comparativo_municipio:
-        agg_r, agg_by_disc_r, totals_r = _digital_acertos_aggregate(
+        _, _, totals_r = _digital_acertos_aggregate(
             ctx.scope_rede, tests_by_id, test_ids, class_ids_rede, all_disciplines
         )
     else:
-        agg_r, agg_by_disc_r, totals_r = _agg_l, _agg_by_disc_l, totals_l
+        totals_r = totals_l
 
     mk = _matriz_kwargs(ctx)
 
@@ -1168,11 +1212,17 @@ def _digital_acertos_data(
         return _build_numeric_matriz(ctx.scope_linhas, _cell, **kw)
 
     por_disc = {
-        d: {"matriz": _matriz_for(d), "habilidades": _habilidades_list_from_agg(dict(agg_by_disc_r.get(d, {})))}
+        d: {
+            "matriz": _matriz_for(d),
+            "por_serie": _habilidades_por_serie_for_discipline(ctx.series_colunas, agg_by_serie_disc_l, d),
+        }
         for d in sorted(all_disciplines)
     }
     return {
-        GERAL_KEY: {"matriz": _matriz_for(None), "habilidades": _habilidades_list_from_agg(dict(agg_r))},
+        GERAL_KEY: {
+            "matriz": _matriz_for(None),
+            "por_serie": _habilidades_por_serie_blocks(ctx.series_colunas, agg_by_serie_l),
+        },
         "por_disciplina": por_disc,
     }
 
@@ -1184,8 +1234,8 @@ def _answer_sheet_acertos_aggregate(
     results: List[AnswerSheetResult],
     all_disciplines: Set[str],
 ) -> Tuple[
-    Dict[str, Dict[str, Any]],
     Dict[str, Dict[str, Dict[str, Any]]],
+    Dict[str, Dict[str, Dict[str, Dict[str, Any]]]],
     Dict[Optional[str], Dict[Tuple[str, str], List[int]]],
 ]:
     from app.report_analysis.answer_sheet_report_builder import (
@@ -1193,12 +1243,16 @@ def _answer_sheet_acertos_aggregate(
         _norm_skill_uuid_key,
     )
 
-    agg_global: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
-    )
-    agg_by_disc: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(
+    agg_by_serie: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(
         lambda: defaultdict(
             lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
+        )
+    )
+    agg_by_serie_disc: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
+            )
         )
     )
     cell_totals: Dict[Optional[str], Dict[Tuple[str, str], List[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
@@ -1241,6 +1295,7 @@ def _answer_sheet_acertos_aggregate(
             cell = scope.class_to_cell.get(str(st.class_id))
             if not cell:
                 continue
+            _eid, serie_id = cell
             detected = res.detected_answers or {}
             for qn, ca in gab_map.items():
                 disciplina = subject_by_q.get(qn, "Disciplina Geral")
@@ -1254,14 +1309,14 @@ def _answer_sheet_acertos_aggregate(
                 st_ans = str(raw).upper() if raw else ""
                 ok = bool(ca and st_ans and st_ans == ca)
                 key = str(code_out)
-                b = agg_global[key]
+                b = agg_by_serie[serie_id][key]
                 b.update({"codigo": code_out, "descricao": desc_out, "disciplina": disciplina})
                 b["total"] += 1
                 if ok:
                     b["acertos"] += 1
                 b["itens_origem"].add(str(gid))
                 if disciplina in all_disciplines:
-                    bd = agg_by_disc[disciplina][key]
+                    bd = agg_by_serie_disc[serie_id][disciplina][key]
                     bd.update({"codigo": code_out, "descricao": desc_out, "disciplina": disciplina})
                     bd["total"] += 1
                     if ok:
@@ -1274,7 +1329,7 @@ def _answer_sheet_acertos_aggregate(
                         if ok:
                             ct[0] += 1
 
-    return dict(agg_global), dict(agg_by_disc), dict(cell_totals)
+    return dict(agg_by_serie), dict(agg_by_serie_disc), dict(cell_totals)
 
 
 def _answer_sheet_acertos_data(
@@ -1285,15 +1340,15 @@ def _answer_sheet_acertos_data(
     results_rede: List[AnswerSheetResult],
     all_disciplines: Set[str],
 ) -> Dict[str, Any]:
-    _agg_l, _agg_by_disc_l, totals_l = _answer_sheet_acertos_aggregate(
+    agg_by_serie_l, agg_by_serie_disc_l, totals_l = _answer_sheet_acertos_aggregate(
         ctx.scope_linhas, gabs_by_id, gabarito_ids, results_linhas, all_disciplines
     )
     if ctx.comparativo_municipio:
-        agg_r, agg_by_disc_r, totals_r = _answer_sheet_acertos_aggregate(
+        _, _, totals_r = _answer_sheet_acertos_aggregate(
             ctx.scope_rede, gabs_by_id, gabarito_ids, results_rede, all_disciplines
         )
     else:
-        agg_r, agg_by_disc_r, totals_r = _agg_l, _agg_by_disc_l, totals_l
+        totals_r = totals_l
 
     mk = _matriz_kwargs(ctx)
 
@@ -1324,11 +1379,17 @@ def _answer_sheet_acertos_data(
         return _build_numeric_matriz(ctx.scope_linhas, _cell, **kw)
 
     por_disc = {
-        d: {"matriz": _matriz_for(d), "habilidades": _habilidades_list_from_agg(dict(agg_by_disc_r.get(d, {})))}
+        d: {
+            "matriz": _matriz_for(d),
+            "por_serie": _habilidades_por_serie_for_discipline(ctx.series_colunas, agg_by_serie_disc_l, d),
+        }
         for d in sorted(all_disciplines)
     }
     return {
-        GERAL_KEY: {"matriz": _matriz_for(None), "habilidades": _habilidades_list_from_agg(dict(agg_r))},
+        GERAL_KEY: {
+            "matriz": _matriz_for(None),
+            "por_serie": _habilidades_por_serie_blocks(ctx.series_colunas, agg_by_serie_l),
+        },
         "por_disciplina": por_disc,
     }
 
@@ -1392,7 +1453,7 @@ def _empty_matriz_section() -> Dict[str, Any]:
 
 def _empty_acertos_section() -> Dict[str, Any]:
     return {
-        GERAL_KEY: {"matriz": _empty_matriz(), "habilidades": []},
+        GERAL_KEY: {"matriz": _empty_matriz(), "por_serie": []},
         "por_disciplina": {},
     }
 
@@ -1781,6 +1842,19 @@ def _escolas_municipio_digital(municipio_id: str, user: dict, permissao: dict) -
     return [{"id": str(s.id), "nome": s.name} for s in q.order_by(School.name).all()]
 
 
+def _periodo_response_fields(periodo_iso: Optional[str]) -> Dict[str, Any]:
+    if not periodo_iso:
+        return {}
+    label: Optional[str] = periodo_iso
+    try:
+        from app.routes.evaluation_results_routes import _formatar_periodo_br
+
+        label = _formatar_periodo_br(periodo_iso)
+    except Exception:
+        pass
+    return {"periodo": periodo_iso, "periodo_label": label}
+
+
 def get_digital_filter_options(
     estado: Optional[str],
     municipio: Optional[str],
@@ -1790,13 +1864,19 @@ def get_digital_filter_options(
     list_avaliacoes_fn,
     list_estados_fn,
     list_municipios_fn,
+    *,
+    periodo_iso: Optional[str] = None,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
 ) -> Dict[str, Any]:
     response: Dict[str, Any] = {"estados": list_estados_fn(user, permissao)}
+    response.update(_periodo_response_fields(periodo_iso))
     if estado:
         response["municipios"] = list_municipios_fn(estado, user, permissao)
         if municipio:
             response["escolas"] = _escolas_municipio_digital(municipio, user, permissao)
-            response["avaliacoes"] = list_avaliacoes_fn(municipio, user, permissao, escola or "all")
+            response["avaliacoes"] = list_avaliacoes_fn(
+                municipio, user, permissao, escola or "all", periodo_bounds
+            )
     return response
 
 
@@ -1808,13 +1888,17 @@ def get_answer_sheet_filter_options(
     permissao: dict,
     list_estados_fn,
     list_municipios_fn,
+    list_gabaritos_fn,
+    *,
+    periodo_iso: Optional[str] = None,
 ) -> Dict[str, Any]:
     response: Dict[str, Any] = {"estados": list_estados_fn(user, permissao)}
+    response.update(_periodo_response_fields(periodo_iso))
     if estado:
         response["municipios"] = list_municipios_fn(estado, user, permissao)
         if municipio:
             response["escolas"] = _escolas_municipio_digital(municipio, user, permissao)
-            response["gabaritos"] = obter_gabaritos_por_municipio(
+            response["gabaritos"] = list_gabaritos_fn(
                 str(municipio).strip(), user, permissao, escola or "all"
             )
     return response

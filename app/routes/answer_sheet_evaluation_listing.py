@@ -148,6 +148,7 @@ def obter_gabaritos_por_municipio(
     user: dict,
     permissao: dict,
     escola_param: str = "all",
+    periodo_bounds: Optional[Tuple[Any, Any]] = None,
     serie_id: Optional[str] = None,
     nome: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
@@ -333,7 +334,33 @@ def obter_gabaritos_por_municipio(
     serie_param = _norm_filtro_gabarito(serie_id)
     if serie_param:
         rows = [r for r in rows if _gabarito_aplica_serie(r, serie_param, municipio_id)]
-    return [{"id": str(r.id), "titulo": r.title or "Cartão resposta"} for r in rows]
+    out = [{"id": str(r.id), "titulo": r.title or "Cartão resposta"} for r in rows]
+    if not periodo_bounds or not out:
+        return out
+    school_ids_city = [s[0] for s in db.session.query(School.id).filter(School.city_id == city.id).all()]
+    if not school_ids_city:
+        return []
+    class_ids_city = [c[0] for c in db.session.query(Class.id).filter(Class._school_id.in_(school_ids_city)).all()]
+    if not class_ids_city:
+        return []
+    student_ids_city = [s[0] for s in db.session.query(Student.id).filter(Student.class_id.in_(class_ids_city)).all()]
+    if not student_ids_city:
+        return []
+    from app.routes.answer_sheet_routes import _apply_answer_sheet_result_period_filter
+
+    kept_ids: Set[str] = set()
+    for item in out:
+        gid = item["id"]
+        _rq = AnswerSheetResult.query.filter(
+            AnswerSheetResult.gabarito_id == gid,
+            AnswerSheetResult.student_id.in_(student_ids_city),
+        )
+        _rq = _apply_answer_sheet_result_period_filter(
+            _rq, periodo_bounds, apenas_busca_gabarito=True
+        )
+        if _rq.first():
+            kept_ids.add(gid)
+    return [g for g in out if g["id"] in kept_ids]
 
 
 def obter_escolas_por_gabarito(

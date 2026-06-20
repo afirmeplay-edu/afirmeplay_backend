@@ -9384,8 +9384,8 @@ def relatorio_consolidado_opcoes_filtros():
     """
     Opções de filtro para relatório consolidado (multi-seleção de avaliações).
 
-    Hierarquia: Estado → Município → Escola (opcional/all) → lista de avaliações.
-    Query params: estado, municipio, escola (opcional, default all).
+    Hierarquia: Estado → Município → Escola (opcional/all) → Período (opcional) → lista de avaliações.
+    Query params: estado, municipio, escola (opcional, default all), periodo (opcional, YYYY-MM).
     """
     try:
         from app.services.consolidated_report_service import get_digital_filter_options
@@ -9401,6 +9401,18 @@ def relatorio_consolidado_opcoes_filtros():
         estado = request.args.get("estado")
         municipio = request.args.get("municipio")
         escola = request.args.get("escola")
+        periodo_raw = request.args.get("periodo")
+        periodo_bounds = None
+        periodo_iso = None
+        if periodo_raw is not None and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_periodo_bounds(periodo_raw)
+                periodo_iso = str(periodo_raw).strip()
+            except ValueError as ve:
+                return jsonify({
+                    "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-06).",
+                    "details": str(ve),
+                }), 400
 
         if municipio:
             set_search_path(city_id_to_schema_name(str(municipio).strip()))
@@ -9414,6 +9426,8 @@ def relatorio_consolidado_opcoes_filtros():
             list_avaliacoes_fn=_obter_avaliacoes_por_municipio,
             list_estados_fn=_obter_estados_disponiveis,
             list_municipios_fn=_obter_municipios_por_estado,
+            periodo_iso=periodo_iso,
+            periodo_bounds=periodo_bounds,
         )
         return jsonify(response), 200
     except Exception as e:

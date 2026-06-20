@@ -192,6 +192,17 @@ class ScopeIndex:
     series_items: List[Tuple[str, str, str, str, str]] = field(default_factory=list)
 
 
+@dataclass
+class ConsolidatedScopeContext:
+    """Escopo da escola (linhas) vs município (medias_da_rede) para comparativo."""
+
+    scope_linhas: ScopeIndex
+    scope_rede: ScopeIndex
+    series_colunas: List[Dict[str, str]]
+    comparativo_municipio: bool
+    escola_id: Optional[str] = None
+
+
 def _build_scope_index(
     classes: List[Class],
     students_by_class: Dict[str, List[Student]],
@@ -289,22 +300,28 @@ def _empty_matriz() -> Dict[str, Any]:
 
 
 def _build_numeric_matriz(
-    scope: ScopeIndex,
+    scope_linhas: ScopeIndex,
     cell_fn: Callable[[str, str], Optional[float]],
+    *,
+    scope_rede: Optional[ScopeIndex] = None,
+    cell_fn_rede: Optional[Callable[[str, str], Optional[float]]] = None,
+    series_colunas: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
-    if not scope.escolas or not scope.series_colunas:
+    cols = series_colunas or scope_linhas.series_colunas
+    rede_scope = scope_rede or scope_linhas
+    rede_fn = cell_fn_rede or cell_fn
+
+    if not scope_linhas.escolas or not cols:
         return _empty_matriz()
 
     linhas: List[Dict[str, Any]] = []
-    row_totals: List[float] = []
-
-    for esc in scope.escolas:
+    for esc in scope_linhas.escolas:
         eid = esc["escola_id"]
         valores: List[Optional[float]] = []
         row_nums: List[float] = []
-        for col in scope.series_colunas:
+        for col in cols:
             sid = col["serie_id"]
-            if (eid, sid) not in scope.classes_by_cell:
+            if (eid, sid) not in scope_linhas.classes_by_cell:
                 valores.append(None)
                 continue
             val = cell_fn(eid, sid)
@@ -314,26 +331,38 @@ def _build_numeric_matriz(
                 fv = float(val)
                 valores.append(fv)
                 row_nums.append(fv)
-        taxa = _mean_numeric(row_nums)
-        row_totals.append(taxa)
         linhas.append(
             {
                 "escola_id": eid,
                 "escola_nome": esc["escola_nome"],
                 "valores_por_serie": valores,
-                "taxa_geral_escola": taxa,
+                "taxa_geral_escola": _mean_numeric(row_nums),
             }
         )
 
+    rede_row_totals: List[float] = []
+    for esc in rede_scope.escolas:
+        eid = esc["escola_id"]
+        row_nums: List[float] = []
+        for col in cols:
+            sid = col["serie_id"]
+            if (eid, sid) not in rede_scope.classes_by_cell:
+                continue
+            v = rede_fn(eid, sid)
+            if v is not None:
+                row_nums.append(float(v))
+        if row_nums:
+            rede_row_totals.append(_mean_numeric(row_nums))
+
     por_serie: List[Optional[float]] = []
-    for col in scope.series_colunas:
+    for col in cols:
         sid = col["serie_id"]
         col_vals: List[float] = []
-        for esc in scope.escolas:
+        for esc in rede_scope.escolas:
             eid = esc["escola_id"]
-            if (eid, sid) not in scope.classes_by_cell:
+            if (eid, sid) not in rede_scope.classes_by_cell:
                 continue
-            v = cell_fn(eid, sid)
+            v = rede_fn(eid, sid)
             if v is not None:
                 col_vals.append(float(v))
         por_serie.append(_mean_numeric(col_vals) if col_vals else None)
@@ -342,7 +371,7 @@ def _build_numeric_matriz(
         "linhas": linhas,
         "medias_da_rede": {
             "por_serie": por_serie,
-            "taxa_geral": _mean_numeric(row_totals),
+            "taxa_geral": _mean_numeric(rede_row_totals),
         },
     }
 
@@ -361,30 +390,65 @@ def _mean_distrib_percentuais(dists: List[Dict[str, int]]) -> Dict[str, float]:
     return {k: _mean_numeric([p[k] for p in pcts_list]) for k in FAIXAS}
 
 
-def _build_distribuicao_matriz(
-    scope: ScopeIndex,
+def _school_row_dists_for_rede(
+    rede_scope: ScopeIndex,
+    cols: List[Dict[str, str]],
     cell_fn: Callable[[str, str], Optional[Dict[str, int]]],
+) -> List[Dict[str, int]]:
+    """Uma distribuição agregada por escola (média das % por faixa entre séries)."""
+    out: List[Dict[str, int]] = []
+    for esc in rede_scope.escolas:
+        eid = esc["escola_id"]
+        cell_dists: List[Dict[str, int]] = []
+        for col in cols:
+            sid = col["serie_id"]
+            if (eid, sid) not in rede_scope.classes_by_cell:
+                continue
+            d = cell_fn(eid, sid)
+            if d and sum(d.values()) > 0:
+                cell_dists.append(d)
+        if not cell_dists:
+            continue
+        merged = _empty_distribution()
+        for d in cell_dists:
+            for k in FAIXAS:
+                merged[k] += d.get(k, 0)
+        out.append(merged)
+    return out
+
+
+def _build_distribuicao_matriz(
+    scope_linhas: ScopeIndex,
+    cell_fn: Callable[[str, str], Optional[Dict[str, int]]],
+    *,
+    scope_rede: Optional[ScopeIndex] = None,
+    cell_fn_rede: Optional[Callable[[str, str], Optional[Dict[str, int]]]] = None,
+    series_colunas: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
-    if not scope.escolas or not scope.series_colunas:
-        return {
-            "linhas": [],
-            "medias_da_rede": {
-                "por_serie": [],
-                "taxa_geral": {"percentuais": {k: 0.0 for k in FAIXAS}, "contagens": _empty_distribution(), "total_registros": 0},
-                "media_da_rede_nivel": None,
-            },
-        }
+    cols = series_colunas or scope_linhas.series_colunas
+    rede_scope = scope_rede or scope_linhas
+    rede_fn = cell_fn_rede or cell_fn
+    empty_rede = {
+        "por_serie": [],
+        "taxa_geral": {
+            "percentuais": {k: 0.0 for k in FAIXAS},
+            "contagens": _empty_distribution(),
+            "total_registros": 0,
+        },
+        "media_da_rede_nivel": None,
+    }
+
+    if not scope_linhas.escolas or not cols:
+        return {"linhas": [], "medias_da_rede": empty_rede}
 
     linhas: List[Dict[str, Any]] = []
-    row_dists_for_rede: List[Dict[str, int]] = []
-
-    for esc in scope.escolas:
+    for esc in scope_linhas.escolas:
         eid = esc["escola_id"]
         valores: List[Optional[Dict[str, Any]]] = []
         cell_dists: List[Dict[str, int]] = []
-        for col in scope.series_colunas:
+        for col in cols:
             sid = col["serie_id"]
-            if (eid, sid) not in scope.classes_by_cell:
+            if (eid, sid) not in scope_linhas.classes_by_cell:
                 valores.append(None)
                 continue
             dist = cell_fn(eid, sid)
@@ -417,18 +481,16 @@ def _build_distribuicao_matriz(
                 },
             }
         )
-        if cell_dists:
-            row_dists_for_rede.append(merged)
 
     por_serie: List[Optional[Dict[str, Any]]] = []
-    for col in scope.series_colunas:
+    for col in cols:
         sid = col["serie_id"]
         col_dists: List[Dict[str, int]] = []
-        for esc in scope.escolas:
+        for esc in rede_scope.escolas:
             eid = esc["escola_id"]
-            if (eid, sid) not in scope.classes_by_cell:
+            if (eid, sid) not in rede_scope.classes_by_cell:
                 continue
-            d = cell_fn(eid, sid)
+            d = rede_fn(eid, sid)
             if d and sum(d.values()) > 0:
                 col_dists.append(d)
         if not col_dists:
@@ -446,9 +508,10 @@ def _build_distribuicao_matriz(
                 }
             )
 
-    taxa_rede_pct = _mean_distrib_percentuais(row_dists_for_rede)
+    rede_school_dists = _school_row_dists_for_rede(rede_scope, cols, rede_fn)
+    taxa_rede_pct = _mean_distrib_percentuais(rede_school_dists)
     rede_merged = _empty_distribution()
-    for d in row_dists_for_rede:
+    for d in rede_school_dists:
         for k in FAIXAS:
             rede_merged[k] += d.get(k, 0)
 
@@ -466,13 +529,46 @@ def _build_distribuicao_matriz(
     }
 
 
+def _matriz_kwargs(ctx: ConsolidatedScopeContext) -> Dict[str, Any]:
+    if not ctx.comparativo_municipio:
+        return {}
+    return {
+        "scope_rede": ctx.scope_rede,
+        "series_colunas": ctx.series_colunas,
+    }
+
+
 def _section_geral_e_disciplinas(
-    scope: ScopeIndex,
+    ctx: ConsolidatedScopeContext,
     all_disciplines: Set[str],
     build_for_discipline: Callable[[Optional[str]], Dict[str, Any]],
 ) -> Dict[str, Any]:
     por_disc = {d: build_for_discipline(d) for d in sorted(all_disciplines)}
     return {GERAL_KEY: build_for_discipline(None), "por_disciplina": por_disc}
+
+
+def _scope_context_from_single(scope: ScopeIndex, escola_id: Optional[str] = None) -> ConsolidatedScopeContext:
+    return ConsolidatedScopeContext(
+        scope_linhas=scope,
+        scope_rede=scope,
+        series_colunas=scope.series_colunas,
+        comparativo_municipio=False,
+        escola_id=escola_id,
+    )
+
+
+def _scope_context_dual(
+    scope_linhas: ScopeIndex,
+    scope_rede: ScopeIndex,
+    escola_id: str,
+) -> ConsolidatedScopeContext:
+    return ConsolidatedScopeContext(
+        scope_linhas=scope_linhas,
+        scope_rede=scope_rede,
+        series_colunas=scope_rede.series_colunas,
+        comparativo_municipio=True,
+        escola_id=escola_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -517,16 +613,22 @@ def _digital_participants_in_cell(
 
 
 def _build_frequencia_section_digital(
-    scope: ScopeIndex,
-    results: List[EvaluationResult],
+    ctx: ConsolidatedScopeContext,
+    results_linhas: List[EvaluationResult],
+    results_rede: List[EvaluationResult],
     tests_by_id: Dict[str, Test],
     all_disciplines: Set[str],
 ) -> Dict[str, Any]:
-    subject_has_disc: Dict[str, Set[str]] = {}
-    for tid, test in tests_by_id.items():
-        subject_has_disc[tid] = _disciplinas_from_test(test)
+    subject_has_disc: Dict[str, Set[str]] = {tid: _disciplinas_from_test(t) for tid, t in tests_by_id.items()}
+    mk = _matriz_kwargs(ctx)
 
-    def _cell(escola_id: str, serie_id: str, discipline: Optional[str]) -> Optional[float]:
+    def _freq_cell(
+        scope: ScopeIndex,
+        results: List[EvaluationResult],
+        escola_id: str,
+        serie_id: str,
+        discipline: Optional[str],
+    ) -> Optional[float]:
         if (escola_id, serie_id) not in scope.classes_by_cell:
             return None
         mat = len(_students_in_cell(scope, escola_id, serie_id))
@@ -539,19 +641,34 @@ def _build_frequencia_section_digital(
         )
         return round_to_two_decimals(100.0 * part / mat)
 
-    return _section_geral_e_disciplinas(
-        scope,
-        all_disciplines,
-        lambda disc: _build_numeric_matriz(scope, lambda e, s: _cell(e, s, disc)),
-    )
+    def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
+        kw = dict(mk)
+        if ctx.comparativo_municipio:
+            kw["cell_fn_rede"] = lambda e, s: _freq_cell(ctx.scope_rede, results_rede, e, s, discipline)
+        return _build_numeric_matriz(
+            ctx.scope_linhas,
+            lambda e, s: _freq_cell(ctx.scope_linhas, results_linhas, e, s, discipline),
+            **kw,
+        )
+
+    return _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
 
 
 def _build_frequencia_section_answer_sheet(
-    scope: ScopeIndex,
-    results: List[AnswerSheetResult],
+    ctx: ConsolidatedScopeContext,
+    results_linhas: List[AnswerSheetResult],
+    results_rede: List[AnswerSheetResult],
     all_disciplines: Set[str],
 ) -> Dict[str, Any]:
-    def _participants(escola_id: str, serie_id: str, discipline: Optional[str]) -> Set[str]:
+    mk = _matriz_kwargs(ctx)
+
+    def _participants(
+        scope: ScopeIndex,
+        results: List[AnswerSheetResult],
+        escola_id: str,
+        serie_id: str,
+        discipline: Optional[str],
+    ) -> Set[str]:
         cids = _class_ids_in_cell(scope, escola_id, serie_id)
         out: Set[str] = set()
         for r in results:
@@ -569,20 +686,32 @@ def _build_frequencia_section_answer_sheet(
                         break
         return out
 
-    def _cell(escola_id: str, serie_id: str, discipline: Optional[str]) -> Optional[float]:
+    def _freq_cell(
+        scope: ScopeIndex,
+        results: List[AnswerSheetResult],
+        escola_id: str,
+        serie_id: str,
+        discipline: Optional[str],
+    ) -> Optional[float]:
         if (escola_id, serie_id) not in scope.classes_by_cell:
             return None
         mat = len(_students_in_cell(scope, escola_id, serie_id))
         if mat == 0:
             return None
-        part = len(_participants(escola_id, serie_id, discipline))
+        part = len(_participants(scope, results, escola_id, serie_id, discipline))
         return round_to_two_decimals(100.0 * part / mat)
 
-    return _section_geral_e_disciplinas(
-        scope,
-        all_disciplines,
-        lambda disc: _build_numeric_matriz(scope, lambda e, s: _cell(e, s, disc)),
-    )
+    def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
+        kw = dict(mk)
+        if ctx.comparativo_municipio:
+            kw["cell_fn_rede"] = lambda e, s: _freq_cell(ctx.scope_rede, results_rede, e, s, discipline)
+        return _build_numeric_matriz(
+            ctx.scope_linhas,
+            lambda e, s: _freq_cell(ctx.scope_linhas, results_linhas, e, s, discipline),
+            **kw,
+        )
+
+    return _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
 
 
 def _filter_digital_results_in_cell(
@@ -660,13 +789,22 @@ def _subject_rows_from_answer_sheet(
 
 
 def _build_medias_section_digital(
-    scope: ScopeIndex,
-    results: List[EvaluationResult],
+    ctx: ConsolidatedScopeContext,
+    results_linhas: List[EvaluationResult],
+    results_rede: List[EvaluationResult],
     tests_by_id: Dict[str, Test],
     all_disciplines: Set[str],
     field: str,
 ) -> Dict[str, Any]:
-    def _cell(escola_id: str, serie_id: str, discipline: Optional[str]) -> Optional[float]:
+    mk = _matriz_kwargs(ctx)
+
+    def _media_cell(
+        scope: ScopeIndex,
+        results: List[EvaluationResult],
+        escola_id: str,
+        serie_id: str,
+        discipline: Optional[str],
+    ) -> Optional[float]:
         cell_results = _filter_digital_results_in_cell(scope, results, escola_id, serie_id)
         if not cell_results:
             return None
@@ -682,20 +820,35 @@ def _build_medias_section_digital(
         mg, mp, _ = hierarchical_mean_from_subject_rows(srows, "turma")
         return round_to_two_decimals(mg if field == "grade" else mp)
 
-    return _section_geral_e_disciplinas(
-        scope,
-        all_disciplines,
-        lambda disc: _build_numeric_matriz(scope, lambda e, s: _cell(e, s, disc)),
-    )
+    def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
+        kw = dict(mk)
+        if ctx.comparativo_municipio:
+            kw["cell_fn_rede"] = lambda e, s: _media_cell(ctx.scope_rede, results_rede, e, s, discipline)
+        return _build_numeric_matriz(
+            ctx.scope_linhas,
+            lambda e, s: _media_cell(ctx.scope_linhas, results_linhas, e, s, discipline),
+            **kw,
+        )
+
+    return _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
 
 
 def _build_medias_section_answer_sheet(
-    scope: ScopeIndex,
-    results: List[AnswerSheetResult],
+    ctx: ConsolidatedScopeContext,
+    results_linhas: List[AnswerSheetResult],
+    results_rede: List[AnswerSheetResult],
     all_disciplines: Set[str],
     field: str,
 ) -> Dict[str, Any]:
-    def _cell(escola_id: str, serie_id: str, discipline: Optional[str]) -> Optional[float]:
+    mk = _matriz_kwargs(ctx)
+
+    def _media_cell(
+        scope: ScopeIndex,
+        results: List[AnswerSheetResult],
+        escola_id: str,
+        serie_id: str,
+        discipline: Optional[str],
+    ) -> Optional[float]:
         cell_results = _filter_answer_sheet_in_cell(scope, results, escola_id, serie_id)
         if not cell_results:
             return None
@@ -710,22 +863,37 @@ def _build_medias_section_answer_sheet(
         mg, mp, _ = hierarchical_mean_from_subject_rows(srows, "turma")
         return round_to_two_decimals(mg if field == "grade" else mp)
 
-    return _section_geral_e_disciplinas(
-        scope,
-        all_disciplines,
-        lambda disc: _build_numeric_matriz(scope, lambda e, s: _cell(e, s, disc)),
-    )
+    def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
+        kw = dict(mk)
+        if ctx.comparativo_municipio:
+            kw["cell_fn_rede"] = lambda e, s: _media_cell(ctx.scope_rede, results_rede, e, s, discipline)
+        return _build_numeric_matriz(
+            ctx.scope_linhas,
+            lambda e, s: _media_cell(ctx.scope_linhas, results_linhas, e, s, discipline),
+            **kw,
+        )
+
+    return _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
 
 
 def _build_distribuicao_section_digital(
-    scope: ScopeIndex,
-    results: List[EvaluationResult],
+    ctx: ConsolidatedScopeContext,
+    results_linhas: List[EvaluationResult],
+    results_rede: List[EvaluationResult],
     tests_by_id: Dict[str, Test],
     all_disciplines: Set[str],
     course_name: str,
     has_matematica: bool,
 ) -> Dict[str, Any]:
-    def _cell_dist(escola_id: str, serie_id: str, discipline: Optional[str]) -> Optional[Dict[str, int]]:
+    mk = _matriz_kwargs(ctx)
+
+    def _cell_dist(
+        scope: ScopeIndex,
+        results: List[EvaluationResult],
+        escola_id: str,
+        serie_id: str,
+        discipline: Optional[str],
+    ) -> Optional[Dict[str, int]]:
         cell_results = _filter_digital_results_in_cell(scope, results, escola_id, serie_id)
         if not cell_results:
             return None
@@ -742,29 +910,43 @@ def _build_distribuicao_section_digital(
                         dist[_classification_bucket(block.get("classification"))] += 1
         return dist if sum(dist.values()) > 0 else None
 
-    out = _section_geral_e_disciplinas(
-        scope,
-        all_disciplines,
-        lambda disc: _build_distribuicao_matriz(scope, lambda e, s: _cell_dist(e, s, disc)),
-    )
-    geral_results = results
-    _, mp = hierarchical_mean_grade_and_proficiency(geral_results, "municipio") if geral_results else (0.0, 0.0)
+    def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
+        kw = dict(mk)
+        if ctx.comparativo_municipio:
+            kw["cell_fn_rede"] = lambda e, s: _cell_dist(ctx.scope_rede, results_rede, e, s, discipline)
+        return _build_distribuicao_matriz(
+            ctx.scope_linhas,
+            lambda e, s: _cell_dist(ctx.scope_linhas, results_linhas, e, s, discipline),
+            **kw,
+        )
+
+    out = _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
+    _, mp = hierarchical_mean_grade_and_proficiency(results_rede, "municipio") if results_rede else (0.0, 0.0)
     out[GERAL_KEY]["medias_da_rede"]["media_da_rede_nivel"] = (
         EvaluationCalculator.determine_classification(mp, course_name, GERAL_KEY, has_matematica=has_matematica)
-        if geral_results
+        if results_rede
         else None
     )
     return out
 
 
 def _build_distribuicao_section_answer_sheet(
-    scope: ScopeIndex,
-    results: List[AnswerSheetResult],
+    ctx: ConsolidatedScopeContext,
+    results_linhas: List[AnswerSheetResult],
+    results_rede: List[AnswerSheetResult],
     all_disciplines: Set[str],
     course_name: str,
     has_matematica: bool,
 ) -> Dict[str, Any]:
-    def _cell_dist(escola_id: str, serie_id: str, discipline: Optional[str]) -> Optional[Dict[str, int]]:
+    mk = _matriz_kwargs(ctx)
+
+    def _cell_dist(
+        scope: ScopeIndex,
+        results: List[AnswerSheetResult],
+        escola_id: str,
+        serie_id: str,
+        discipline: Optional[str],
+    ) -> Optional[Dict[str, int]]:
         cell_results = _filter_answer_sheet_in_cell(scope, results, escola_id, serie_id)
         if not cell_results:
             return None
@@ -780,15 +962,21 @@ def _build_distribuicao_section_answer_sheet(
                         dist[_classification_bucket(block.get("classification"))] += 1
         return dist if sum(dist.values()) > 0 else None
 
-    out = _section_geral_e_disciplinas(
-        scope,
-        all_disciplines,
-        lambda disc: _build_distribuicao_matriz(scope, lambda e, s: _cell_dist(e, s, disc)),
-    )
-    _, mp = hierarchical_mean_grade_and_proficiency(results, "municipio") if results else (0.0, 0.0)
+    def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
+        kw = dict(mk)
+        if ctx.comparativo_municipio:
+            kw["cell_fn_rede"] = lambda e, s: _cell_dist(ctx.scope_rede, results_rede, e, s, discipline)
+        return _build_distribuicao_matriz(
+            ctx.scope_linhas,
+            lambda e, s: _cell_dist(ctx.scope_linhas, results_linhas, e, s, discipline),
+            **kw,
+        )
+
+    out = _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
+    _, mp = hierarchical_mean_grade_and_proficiency(results_rede, "municipio") if results_rede else (0.0, 0.0)
     out[GERAL_KEY]["medias_da_rede"]["media_da_rede_nivel"] = (
         EvaluationCalculator.determine_classification(mp, course_name, GERAL_KEY, has_matematica=has_matematica)
-        if results
+        if results_rede
         else None
     )
     return out
@@ -834,13 +1022,17 @@ def _answer_is_correct(question: Question, answer: StudentAnswer) -> bool:
     )
 
 
-def _digital_acertos_data(
+def _digital_acertos_aggregate(
     scope: ScopeIndex,
     tests_by_id: Dict[str, Test],
     test_ids: List[str],
     class_ids: List[Any],
     all_disciplines: Set[str],
-) -> Dict[str, Any]:
+) -> Tuple[
+    Dict[str, Dict[str, Any]],
+    Dict[str, Dict[str, Dict[str, Any]]],
+    Dict[Optional[str], Dict[Tuple[str, str], List[int]]],
+]:
     agg_global: Dict[str, Dict[str, Any]] = defaultdict(
         lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
     )
@@ -852,8 +1044,7 @@ def _digital_acertos_data(
     cell_totals: Dict[Optional[str], Dict[Tuple[str, str], List[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
 
     if not class_ids:
-        empty = {GERAL_KEY: {"matriz": _empty_matriz(), "habilidades": []}, "por_disciplina": {}}
-        return empty
+        return dict(agg_global), dict(agg_by_disc), dict(cell_totals)
 
     class_id_set = {str(c) for c in class_ids}
 
@@ -903,15 +1094,14 @@ def _digital_acertos_data(
                 if not cell:
                     continue
                 key = str(code)
-                for bucket, disc_key in ((agg_global, None),):
-                    b = bucket[key]
-                    b["codigo"] = code
-                    b["descricao"] = desc
-                    b["disciplina"] = disciplina
-                    b["total"] += 1
-                    if ok:
-                        b["acertos"] += 1
-                    b["itens_origem"].add(str(tid))
+                b = agg_global[key]
+                b["codigo"] = code
+                b["descricao"] = desc
+                b["disciplina"] = disciplina
+                b["total"] += 1
+                if ok:
+                    b["acertos"] += 1
+                b["itens_origem"].add(str(tid))
                 if disciplina in all_disciplines:
                     bd = agg_by_disc[disciplina][key]
                     bd["codigo"] = code
@@ -928,39 +1118,76 @@ def _digital_acertos_data(
                         if ok:
                             ct[0] += 1
 
+    return dict(agg_global), dict(agg_by_disc), dict(cell_totals)
+
+
+def _digital_acertos_data(
+    ctx: ConsolidatedScopeContext,
+    tests_by_id: Dict[str, Test],
+    test_ids: List[str],
+    class_ids_linhas: List[Any],
+    class_ids_rede: List[Any],
+    all_disciplines: Set[str],
+) -> Dict[str, Any]:
+    _agg_l, _agg_by_disc_l, totals_l = _digital_acertos_aggregate(
+        ctx.scope_linhas, tests_by_id, test_ids, class_ids_linhas, all_disciplines
+    )
+    if ctx.comparativo_municipio:
+        agg_r, agg_by_disc_r, totals_r = _digital_acertos_aggregate(
+            ctx.scope_rede, tests_by_id, test_ids, class_ids_rede, all_disciplines
+        )
+    else:
+        agg_r, agg_by_disc_r, totals_r = _agg_l, _agg_by_disc_l, totals_l
+
+    mk = _matriz_kwargs(ctx)
+
     def _matriz_for(discipline: Optional[str]) -> Dict[str, Any]:
-        totals = cell_totals.get(discipline, {})
+        totals_d = totals_l.get(discipline, {})
 
         def _cell(e: str, s: str) -> Optional[float]:
-            if (e, s) not in scope.classes_by_cell:
+            if (e, s) not in ctx.scope_linhas.classes_by_cell:
                 return None
-            pair = totals.get((e, s))
+            pair = totals_d.get((e, s))
             if not pair or pair[1] == 0:
                 return None
             return round_to_two_decimals(100.0 * pair[0] / pair[1])
 
-        return _build_numeric_matriz(scope, _cell)
+        kw = dict(mk)
+        if ctx.comparativo_municipio:
+            totals_rd = totals_r.get(discipline, {})
 
-    por_disc = {}
-    for d in sorted(all_disciplines):
-        por_disc[d] = {
-            "matriz": _matriz_for(d),
-            "habilidades": _habilidades_list_from_agg(dict(agg_by_disc.get(d, {}))),
-        }
+            def _cell_rede(e: str, s: str) -> Optional[float]:
+                if (e, s) not in ctx.scope_rede.classes_by_cell:
+                    return None
+                pair = totals_rd.get((e, s))
+                if not pair or pair[1] == 0:
+                    return None
+                return round_to_two_decimals(100.0 * pair[0] / pair[1])
 
+            kw["cell_fn_rede"] = _cell_rede
+        return _build_numeric_matriz(ctx.scope_linhas, _cell, **kw)
+
+    por_disc = {
+        d: {"matriz": _matriz_for(d), "habilidades": _habilidades_list_from_agg(dict(agg_by_disc_r.get(d, {})))}
+        for d in sorted(all_disciplines)
+    }
     return {
-        GERAL_KEY: {"matriz": _matriz_for(None), "habilidades": _habilidades_list_from_agg(dict(agg_global))},
+        GERAL_KEY: {"matriz": _matriz_for(None), "habilidades": _habilidades_list_from_agg(dict(agg_r))},
         "por_disciplina": por_disc,
     }
 
 
-def _answer_sheet_acertos_data(
+def _answer_sheet_acertos_aggregate(
     scope: ScopeIndex,
     gabs_by_id: Dict[str, AnswerSheetGabarito],
     gabarito_ids: List[str],
     results: List[AnswerSheetResult],
     all_disciplines: Set[str],
-) -> Dict[str, Any]:
+) -> Tuple[
+    Dict[str, Dict[str, Any]],
+    Dict[str, Dict[str, Dict[str, Any]]],
+    Dict[Optional[str], Dict[Tuple[str, str], List[int]]],
+]:
     from app.report_analysis.answer_sheet_report_builder import (
         _fetch_skill_code_description_by_ids,
         _norm_skill_uuid_key,
@@ -1047,25 +1274,61 @@ def _answer_sheet_acertos_data(
                         if ok:
                             ct[0] += 1
 
+    return dict(agg_global), dict(agg_by_disc), dict(cell_totals)
+
+
+def _answer_sheet_acertos_data(
+    ctx: ConsolidatedScopeContext,
+    gabs_by_id: Dict[str, AnswerSheetGabarito],
+    gabarito_ids: List[str],
+    results_linhas: List[AnswerSheetResult],
+    results_rede: List[AnswerSheetResult],
+    all_disciplines: Set[str],
+) -> Dict[str, Any]:
+    _agg_l, _agg_by_disc_l, totals_l = _answer_sheet_acertos_aggregate(
+        ctx.scope_linhas, gabs_by_id, gabarito_ids, results_linhas, all_disciplines
+    )
+    if ctx.comparativo_municipio:
+        agg_r, agg_by_disc_r, totals_r = _answer_sheet_acertos_aggregate(
+            ctx.scope_rede, gabs_by_id, gabarito_ids, results_rede, all_disciplines
+        )
+    else:
+        agg_r, agg_by_disc_r, totals_r = _agg_l, _agg_by_disc_l, totals_l
+
+    mk = _matriz_kwargs(ctx)
+
     def _matriz_for(discipline: Optional[str]) -> Dict[str, Any]:
-        totals = cell_totals.get(discipline, {})
+        totals_d = totals_l.get(discipline, {})
 
         def _cell(e: str, s: str) -> Optional[float]:
-            if (e, s) not in scope.classes_by_cell:
+            if (e, s) not in ctx.scope_linhas.classes_by_cell:
                 return None
-            pair = totals.get((e, s))
+            pair = totals_d.get((e, s))
             if not pair or pair[1] == 0:
                 return None
             return round_to_two_decimals(100.0 * pair[0] / pair[1])
 
-        return _build_numeric_matriz(scope, _cell)
+        kw = dict(mk)
+        if ctx.comparativo_municipio:
+            totals_rd = totals_r.get(discipline, {})
+
+            def _cell_rede(e: str, s: str) -> Optional[float]:
+                if (e, s) not in ctx.scope_rede.classes_by_cell:
+                    return None
+                pair = totals_rd.get((e, s))
+                if not pair or pair[1] == 0:
+                    return None
+                return round_to_two_decimals(100.0 * pair[0] / pair[1])
+
+            kw["cell_fn_rede"] = _cell_rede
+        return _build_numeric_matriz(ctx.scope_linhas, _cell, **kw)
 
     por_disc = {
-        d: {"matriz": _matriz_for(d), "habilidades": _habilidades_list_from_agg(dict(agg_by_disc.get(d, {})))}
+        d: {"matriz": _matriz_for(d), "habilidades": _habilidades_list_from_agg(dict(agg_by_disc_r.get(d, {})))}
         for d in sorted(all_disciplines)
     }
     return {
-        GERAL_KEY: {"matriz": _matriz_for(None), "habilidades": _habilidades_list_from_agg(dict(agg_global))},
+        GERAL_KEY: {"matriz": _matriz_for(None), "habilidades": _habilidades_list_from_agg(dict(agg_r))},
         "por_disciplina": por_disc,
     }
 
@@ -1081,7 +1344,7 @@ def _assemble_payload(
     filtros: Dict[str, Any],
     itens_selecionados: List[Dict[str, Any]],
     discipline_list: List[str],
-    scope: ScopeIndex,
+    ctx: ConsolidatedScopeContext,
     series_aplicadas: List[Dict[str, Any]],
     consolidado_frequencia: Dict[str, Any],
     consolidado_medias_nota: Dict[str, Any],
@@ -1089,12 +1352,12 @@ def _assemble_payload(
     acertos_por_habilidade: Dict[str, Any],
     distribuicao_niveis_proficiencia: Dict[str, Any],
 ) -> Dict[str, Any]:
-    return {
+    payload: Dict[str, Any] = {
         "tipo_entidade": tipo_entidade,
         "filtros": filtros,
         "itens_selecionados": itens_selecionados,
         "disciplinas_disponiveis": discipline_list,
-        "series_colunas": scope.series_colunas,
+        "series_colunas": ctx.series_colunas,
         "series_aplicadas": series_aplicadas,
         "consolidado_frequencia": consolidado_frequencia,
         "consideracoes_gerais": {
@@ -1104,6 +1367,23 @@ def _assemble_payload(
         },
         "distribuicao_niveis_proficiencia": distribuicao_niveis_proficiencia,
     }
+    if ctx.comparativo_municipio:
+        payload["comparativo"] = {
+            "ativo": True,
+            "referencia_rede": "municipio",
+            "escola_id": ctx.escola_id,
+        }
+    return payload
+
+
+def _empty_ctx() -> ConsolidatedScopeContext:
+    empty_scope = ScopeIndex([], [], {}, {}, {})
+    return ConsolidatedScopeContext(
+        scope_linhas=empty_scope,
+        scope_rede=empty_scope,
+        series_colunas=[],
+        comparativo_municipio=False,
+    )
 
 
 def _empty_matriz_section() -> Dict[str, Any]:
@@ -1145,7 +1425,7 @@ def _empty_payload(
         filtros=filtros,
         itens_selecionados=itens,
         discipline_list=[GERAL_KEY],
-        scope=ScopeIndex([], [], {}, {}, {}),
+        ctx=_empty_ctx(),
         series_aplicadas=[],
         consolidado_frequencia=_empty_matriz_section(),
         consolidado_medias_nota=_empty_matriz_section(),
@@ -1179,6 +1459,40 @@ def _fetch_digital_class_tests(
             return []
         q = q.filter(ClassTest.class_id.in_(list(restrict_class_ids)))
     return q.options(joinedload(ClassTest.class_).joinedload(Class.grade)).all()
+
+
+def _students_by_class_for_digital(
+    test_ids: List[str],
+    escopo: Dict[str, Any],
+    class_ids: List[Any],
+) -> Dict[str, List[Student]]:
+    base_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    base_ids = {str(s.id) for s in base_students}
+    merged_ids = merge_participant_student_ids([str(t) for t in test_ids], escopo, class_ids, base_ids)
+    all_students = (
+        Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
+        .filter(Student.id.in_(merged_ids))
+        .all()
+        if merged_ids
+        else []
+    )
+    students_by_class: Dict[str, List[Student]] = defaultdict(list)
+    for st in all_students:
+        if st.class_id:
+            students_by_class[str(st.class_id)].append(st)
+    return students_by_class
+
+
+def _digital_results_for_scope(
+    test_ids: List[str],
+    escopo: Dict[str, Any],
+    class_ids: List[Any],
+) -> List[EvaluationResult]:
+    base_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    base_ids = {str(s.id) for s in base_students}
+    return _dedupe_digital_by_test_student(
+        query_evaluation_results_for_stats([str(t) for t in test_ids], escopo, class_ids, list(base_ids)).all()
+    )
 
 
 def build_digital_consolidated_report(
@@ -1216,37 +1530,40 @@ def build_digital_consolidated_report(
         for t in tests
     ]
 
-    class_tests = _fetch_digital_class_tests(test_ids, municipio_id, escola_id, restrict)
-    if not class_tests:
+    class_tests_linhas = _fetch_digital_class_tests(test_ids, municipio_id, escola_id, restrict)
+    if not class_tests_linhas:
         return _empty_payload("avaliacao", filtros, itens)
 
-    escopo = _build_escopo_calculo(municipio_id, escola_id)
+    escopo_linhas = _build_escopo_calculo(municipio_id, escola_id)
     if restrict is not None:
-        escopo["restrict_class_ids"] = restrict
+        escopo_linhas["restrict_class_ids"] = restrict
 
-    class_ids = list({ct.class_id for ct in class_tests})
-    base_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
-    base_ids = {str(s.id) for s in base_students}
-    merged_ids = merge_participant_student_ids([str(t) for t in test_ids], escopo, class_ids, base_ids)
-    all_students = (
-        Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
-        .filter(Student.id.in_(merged_ids))
-        .all()
-        if merged_ids
-        else []
-    )
-    students_by_class: Dict[str, List[Student]] = defaultdict(list)
-    for st in all_students:
-        if st.class_id:
-            students_by_class[str(st.class_id)].append(st)
+    class_ids_linhas = list({ct.class_id for ct in class_tests_linhas})
+    students_linhas = _students_by_class_for_digital(test_ids, escopo_linhas, class_ids_linhas)
+    item_by_class_linhas = {str(ct.class_id): str(ct.test_id) for ct in class_tests_linhas}
+    classes_linhas = [ct.class_ for ct in class_tests_linhas if ct.class_]
+    scope_linhas = _build_scope_index(classes_linhas, students_linhas, item_by_class_linhas)
+    results_linhas = _digital_results_for_scope(test_ids, escopo_linhas, class_ids_linhas)
 
-    item_by_class = {str(ct.class_id): str(ct.test_id) for ct in class_tests}
-    classes = [ct.class_ for ct in class_tests if ct.class_]
-    scope = _build_scope_index(classes, students_by_class, item_by_class)
-
-    results = _dedupe_digital_by_test_student(
-        query_evaluation_results_for_stats([str(t) for t in test_ids], escopo, class_ids, list(base_ids)).all()
-    )
+    if escola_id:
+        class_tests_rede = _fetch_digital_class_tests(test_ids, municipio_id, None, restrict)
+        escopo_rede = _build_escopo_calculo(municipio_id, None)
+        if restrict is not None:
+            escopo_rede["restrict_class_ids"] = restrict
+        class_ids_rede = list({ct.class_id for ct in class_tests_rede})
+        students_rede = _students_by_class_for_digital(test_ids, escopo_rede, class_ids_rede)
+        item_by_class_rede = {str(ct.class_id): str(ct.test_id) for ct in class_tests_rede}
+        classes_rede = [ct.class_ for ct in class_tests_rede if ct.class_]
+        scope_rede = _build_scope_index(classes_rede, students_rede, item_by_class_rede)
+        results_rede = _digital_results_for_scope(test_ids, escopo_rede, class_ids_rede)
+        ctx = _scope_context_dual(scope_linhas, scope_rede, escola_id)
+        series_aplicadas = _build_series_aplicadas(scope_rede.series_items)
+    else:
+        ctx = _scope_context_from_single(scope_linhas)
+        scope_rede = scope_linhas
+        class_ids_rede = class_ids_linhas
+        results_rede = results_linhas
+        series_aplicadas = _build_series_aplicadas(scope_linhas.series_items)
 
     all_disciplines: Set[str] = set()
     for t in tests:
@@ -1260,16 +1577,22 @@ def build_digital_consolidated_report(
         filtros=filtros,
         itens_selecionados=itens,
         discipline_list=discipline_list,
-        scope=scope,
-        series_aplicadas=_build_series_aplicadas(scope.series_items),
-        consolidado_frequencia=_build_frequencia_section_digital(scope, results, tests_by_id, all_disciplines),
-        consolidado_medias_nota=_build_medias_section_digital(scope, results, tests_by_id, all_disciplines, "grade"),
-        consolidado_medias_proficiencia=_build_medias_section_digital(
-            scope, results, tests_by_id, all_disciplines, "proficiency"
+        ctx=ctx,
+        series_aplicadas=series_aplicadas,
+        consolidado_frequencia=_build_frequencia_section_digital(
+            ctx, results_linhas, results_rede, tests_by_id, all_disciplines
         ),
-        acertos_por_habilidade=_digital_acertos_data(scope, tests_by_id, test_ids, class_ids, all_disciplines),
+        consolidado_medias_nota=_build_medias_section_digital(
+            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, "grade"
+        ),
+        consolidado_medias_proficiencia=_build_medias_section_digital(
+            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, "proficiency"
+        ),
+        acertos_por_habilidade=_digital_acertos_data(
+            ctx, tests_by_id, test_ids, class_ids_linhas, class_ids_rede, all_disciplines
+        ),
         distribuicao_niveis_proficiencia=_build_distribuicao_section_digital(
-            scope, results, tests_by_id, all_disciplines, course_name, has_mat
+            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, course_name, has_mat
         ),
     )
 
@@ -1302,6 +1625,18 @@ def _fetch_answer_sheet_scope(
     return gabs, all_classes, classes_by_gab
 
 
+def _answer_sheet_results_for_classes(gabarito_ids: List[str], class_ids: List[Any]) -> List[AnswerSheetResult]:
+    if not class_ids:
+        return []
+    return _dedupe_answer_sheet_by_gabarito_student(
+        AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id.in_([str(g) for g in gabarito_ids]))
+        .options(joinedload(AnswerSheetResult.student).joinedload(Student.class_).joinedload(Class.grade))
+        .join(Student, AnswerSheetResult.student_id == Student.id)
+        .filter(Student.class_id.in_(class_ids))
+        .all()
+    )
+
+
 def build_answer_sheet_consolidated_report(
     municipio_id: str,
     escola_param: Optional[str],
@@ -1323,64 +1658,89 @@ def build_answer_sheet_consolidated_report(
         "gabarito_ids": [str(g) for g in gabarito_ids],
     }
 
-    gabs, all_classes, classes_by_gab = _fetch_answer_sheet_scope(gabarito_ids, municipio_id, escola_id, user, permissao)
-    found = {str(g.id) for g in gabs}
+    gabs_linhas, all_classes_linhas, classes_by_gab_linhas = _fetch_answer_sheet_scope(
+        gabarito_ids, municipio_id, escola_id, user, permissao
+    )
+    found = {str(g.id) for g in gabs_linhas}
     missing = [g for g in gabarito_ids if str(g) not in found]
     if missing:
         raise ValueError(f"Gabaritos não encontrados: {', '.join(missing)}")
-    gabs_by_id = {str(g.id): g for g in gabs}
+    gabs_by_id = {str(g.id): g for g in gabs_linhas}
     itens = [
         {"id": str(g.id), "titulo": g.title, "disciplinas": sorted(_disciplinas_from_gabarito(g)), "serie": g.grade_name}
-        for g in gabs
+        for g in gabs_linhas
     ]
 
-    if not all_classes:
+    if not all_classes_linhas:
         return _empty_payload("cartao_resposta", filtros, itens)
 
-    class_ids = [c.id for c in all_classes]
-    students_by_class: Dict[str, List[Student]] = defaultdict(list)
-    for st in Student.query.filter(Student.class_id.in_(class_ids)).all():
+    class_ids_linhas = [c.id for c in all_classes_linhas]
+    students_linhas: Dict[str, List[Student]] = defaultdict(list)
+    for st in Student.query.filter(Student.class_id.in_(class_ids_linhas)).all():
         if st.class_id:
-            students_by_class[str(st.class_id)].append(st)
+            students_linhas[str(st.class_id)].append(st)
 
-    item_by_class: Dict[str, str] = {}
-    for gid, cls_list in classes_by_gab.items():
+    item_by_class_linhas: Dict[str, str] = {}
+    for gid, cls_list in classes_by_gab_linhas.items():
         for c in cls_list:
-            item_by_class[str(c.id)] = str(gid)
+            item_by_class_linhas[str(c.id)] = str(gid)
 
-    scope = _build_scope_index(all_classes, students_by_class, item_by_class)
-    results = _dedupe_answer_sheet_by_gabarito_student(
-        AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id.in_([str(g) for g in gabarito_ids]))
-        .options(joinedload(AnswerSheetResult.student).joinedload(Student.class_).joinedload(Class.grade))
-        .join(Student, AnswerSheetResult.student_id == Student.id)
-        .filter(Student.class_id.in_(class_ids))
-        .all()
-    )
+    scope_linhas = _build_scope_index(all_classes_linhas, students_linhas, item_by_class_linhas)
+    results_linhas = _answer_sheet_results_for_classes(gabarito_ids, class_ids_linhas)
+
+    if escola_id:
+        _gabs_rede, all_classes_rede, classes_by_gab_rede = _fetch_answer_sheet_scope(
+            gabarito_ids, municipio_id, None, user, permissao
+        )
+        class_ids_rede = [c.id for c in all_classes_rede]
+        students_rede: Dict[str, List[Student]] = defaultdict(list)
+        for st in Student.query.filter(Student.class_id.in_(class_ids_rede)).all():
+            if st.class_id:
+                students_rede[str(st.class_id)].append(st)
+        item_by_class_rede: Dict[str, str] = {}
+        for gid, cls_list in classes_by_gab_rede.items():
+            for c in cls_list:
+                item_by_class_rede[str(c.id)] = str(gid)
+        scope_rede = _build_scope_index(all_classes_rede, students_rede, item_by_class_rede)
+        results_rede = _answer_sheet_results_for_classes(gabarito_ids, class_ids_rede)
+        ctx = _scope_context_dual(scope_linhas, scope_rede, escola_id)
+        series_aplicadas = _build_series_aplicadas(scope_rede.series_items)
+    else:
+        ctx = _scope_context_from_single(scope_linhas)
+        class_ids_rede = class_ids_linhas
+        results_rede = results_linhas
+        series_aplicadas = _build_series_aplicadas(scope_linhas.series_items)
 
     all_disciplines: Set[str] = set()
-    for g in gabs:
+    for g in gabs_linhas:
         all_disciplines |= _disciplinas_from_gabarito(g)
     discipline_list = sorted(all_disciplines) + [GERAL_KEY]
 
     from app.services.cartao_resposta.proficiency_by_subject import course_name_and_has_matematica_for_gabarito
 
-    course_name, has_mat = course_name_and_has_matematica_for_gabarito(str(gabs[0].id))
+    course_name, has_mat = course_name_and_has_matematica_for_gabarito(str(gabs_linhas[0].id))
 
     return _assemble_payload(
         tipo_entidade="cartao_resposta",
         filtros=filtros,
         itens_selecionados=itens,
         discipline_list=discipline_list,
-        scope=scope,
-        series_aplicadas=_build_series_aplicadas(scope.series_items),
-        consolidado_frequencia=_build_frequencia_section_answer_sheet(scope, results, all_disciplines),
-        consolidado_medias_nota=_build_medias_section_answer_sheet(scope, results, all_disciplines, "grade"),
-        consolidado_medias_proficiencia=_build_medias_section_answer_sheet(
-            scope, results, all_disciplines, "proficiency"
+        ctx=ctx,
+        series_aplicadas=series_aplicadas,
+        consolidado_frequencia=_build_frequencia_section_answer_sheet(
+            ctx, results_linhas, results_rede, all_disciplines
         ),
-        acertos_por_habilidade=_answer_sheet_acertos_data(scope, gabs_by_id, gabarito_ids, results, all_disciplines),
+        consolidado_medias_nota=_build_medias_section_answer_sheet(
+            ctx, results_linhas, results_rede, all_disciplines, "grade"
+        ),
+        consolidado_medias_proficiencia=_build_medias_section_answer_sheet(
+            ctx, results_linhas, results_rede, all_disciplines, "proficiency"
+        ),
+        acertos_por_habilidade=_answer_sheet_acertos_data(
+            ctx, gabs_by_id, gabarito_ids, results_linhas, results_rede, all_disciplines
+        ),
         distribuicao_niveis_proficiencia=_build_distribuicao_section_answer_sheet(
-            scope, results, all_disciplines, course_name, has_mat
+            ctx, results_linhas, results_rede, all_disciplines, course_name, has_mat
         ),
     )
 

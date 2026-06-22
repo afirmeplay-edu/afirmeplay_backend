@@ -4,6 +4,34 @@ Relatório consolidado multi-seleção — contrato matricial escola × série.
 
 Todas as sessões usam o mesmo padrão:
   linhas = escolas | colunas = series_colunas (root) | TX. GERAL por linha | MÉDIAS DA REDE.
+
+═══════════════════════════════════════════════════════════════════════════════
+⚠️⚠️⚠️ REGRA OBRIGATÓRIA: NÃO EXISTE MÉDIA PONDERADA NESTE SISTEMA ⚠️⚠️⚠️
+═══════════════════════════════════════════════════════════════════════════════
+
+TODA agregação de valores (nota, proficiência, distribuição, taxa de participação)
+acima do nível TURMA deve usar MÉDIA HIERÁRQUICA com PESO IGUAL entre unidades
+do mesmo nível.
+
+Hierarquia (sempre esta ordem):
+1. TURMA → média aritmética dos alunos da turma
+2. SÉRIE → média das médias das turmas (peso igual por turma)
+3. ESCOLA → média das médias das séries (peso igual por série)
+4. MUNICÍPIO → média das médias das escolas (peso igual por escola)
+
+NUNCA:
+- Somar contagens e dividir pelo total (média ponderada por número de alunos)
+- Ponderar pelo número de turmas, alunos ou escolas
+- Usar AVG SQL para consolidar acima do nível turma
+
+SEMPRE:
+- Calcular percentuais/médias por unidade
+- Tirar média aritmética simples dos percentuais/médias
+
+Referência: hierarchical_mean_grade_and_proficiency (school_equal_weight_means.py)
+Documentação: docs/FONTE_DA_VERDADE_CALCULOS_RESULTADOS.md (§7)
+
+═══════════════════════════════════════════════════════════════════════════════
 """
 from __future__ import annotations
 
@@ -319,6 +347,20 @@ def _build_numeric_matriz(
     cell_fn_rede: Optional[Callable[[str, str], Optional[float]]] = None,
     series_colunas: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
+    """
+    ⚠️ HIERARQUIA CORRETA PARA TAXA_GERAL MUNICIPAL ⚠️
+    
+    Constrói matriz numérica (nota/proficiência/taxa participação) com hierarquia:
+    
+    1. CÉLULA (escola × série) → cell_fn retorna média da turma/célula
+    2. LINHA (escola) → taxa_geral_escola = média das séries (peso igual por série)
+    3. COLUNA (série) → por_serie = média das escolas (peso igual por escola)
+    4. REDE → taxa_geral = MÉDIA DAS COLUNAS (por_serie), NÃO das linhas
+    
+    CORRETO: taxa_geral = média de por_serie (hierarquia série → município)
+    ERRADO:  taxa_geral = média das escolas (hierarquia escola → município)
+              ↑ daria mais peso a escolas com mais séries (média ponderada)
+    """
     cols = series_colunas or scope_linhas.series_colunas
     rede_scope = scope_rede or scope_linhas
     rede_fn = cell_fn_rede or cell_fn
@@ -348,24 +390,12 @@ def _build_numeric_matriz(
                 "escola_id": eid,
                 "escola_nome": esc["escola_nome"],
                 "valores_por_serie": valores,
+                # ✅ CORRETO: taxa_geral_escola = média hierárquica das séries (peso igual)
                 "taxa_geral_escola": _mean_numeric(row_nums),
             }
         )
 
-    rede_row_totals: List[float] = []
-    for esc in rede_scope.escolas:
-        eid = esc["escola_id"]
-        row_nums: List[float] = []
-        for col in cols:
-            sid = col["serie_id"]
-            if (eid, sid) not in rede_scope.classes_by_cell:
-                continue
-            v = rede_fn(eid, sid)
-            if v is not None:
-                row_nums.append(float(v))
-        if row_nums:
-            rede_row_totals.append(_mean_numeric(row_nums))
-
+    # ✅ CORRETO: por_serie = média das escolas por cada série (peso igual por escola)
     por_serie: List[Optional[float]] = []
     for col in cols:
         sid = col["serie_id"]
@@ -379,11 +409,16 @@ def _build_numeric_matriz(
                 col_vals.append(float(v))
         por_serie.append(_mean_numeric(col_vals) if col_vals else None)
 
+    # ✅ CORRETO: taxa_geral = média hierárquica das séries (peso igual por série)
+    # Hierarquia: Série → Município (não Escola → Município)
+    # Isso garante que cada série tenha peso igual, independente de quantas escolas têm aquela série
+    taxa_geral_municipal = _mean_numeric([v for v in por_serie if v is not None])
+
     return {
         "linhas": linhas,
         "medias_da_rede": {
             "por_serie": por_serie,
-            "taxa_geral": _mean_numeric(rede_row_totals),
+            "taxa_geral": taxa_geral_municipal,
         },
     }
 
@@ -396,19 +431,43 @@ def _dist_to_percentuais(dist: Dict[str, int]) -> Dict[str, float]:
 
 
 def _mean_distrib_percentuais(dists: List[Dict[str, int]]) -> Dict[str, float]:
+    """
+    ⚠️ REGRA OBRIGATÓRIA: NÃO EXISTE MÉDIA PONDERADA NESTE SISTEMA ⚠️
+    
+    Calcula média HIERÁRQUICA dos percentuais de distribuição.
+    Cada distribuição (série ou escola) tem PESO IGUAL, independente do número de alunos.
+    
+    Processo:
+    1. Converte cada distribuição de contagens para percentuais
+    2. Tira média aritmética simples dos percentuais por faixa
+    
+    Nunca some contagens antes de calcular percentuais - isso gera média ponderada!
+    """
     if not dists:
         return {k: 0.0 for k in FAIXAS}
     pcts_list = [_dist_to_percentuais(d) for d in dists]
     return {k: _mean_numeric([p[k] for p in pcts_list]) for k in FAIXAS}
 
 
-def _school_row_dists_for_rede(
+def _school_row_percentuais_for_rede(
     rede_scope: ScopeIndex,
     cols: List[Dict[str, str]],
     cell_fn: Callable[[str, str], Optional[Dict[str, int]]],
-) -> List[Dict[str, int]]:
-    """Uma distribuição agregada por escola (média das % por faixa entre séries)."""
-    out: List[Dict[str, int]] = []
+) -> List[Dict[str, float]]:
+    """
+    ⚠️ REGRA OBRIGATÓRIA: NÃO EXISTE MÉDIA PONDERADA NESTE SISTEMA ⚠️
+    
+    Retorna PERCENTUAIS médios por escola (não contagens somadas).
+    
+    Para cada escola:
+    1. Coleta distribuições de cada série
+    2. Converte cada série em percentuais
+    3. Calcula média dos percentuais (peso igual por série)
+    
+    NUNCA retorna contagens somadas - isso geraria média ponderada pelo número de alunos.
+    Hierarquia: série → escola (peso igual entre séries da mesma escola).
+    """
+    out: List[Dict[str, float]] = []
     for esc in rede_scope.escolas:
         eid = esc["escola_id"]
         cell_dists: List[Dict[str, int]] = []
@@ -421,11 +480,9 @@ def _school_row_dists_for_rede(
                 cell_dists.append(d)
         if not cell_dists:
             continue
-        merged = _empty_distribution()
-        for d in cell_dists:
-            for k in FAIXAS:
-                merged[k] += d.get(k, 0)
-        out.append(merged)
+        # ✅ CORRETO: média dos percentuais (peso igual por série)
+        escola_pct = _mean_distrib_percentuais(cell_dists)
+        out.append(escola_pct)
     return out
 
 
@@ -476,7 +533,9 @@ def _build_distribuicao_matriz(
                 }
             )
             cell_dists.append(dist)
+        # ✅ CORRETO: média hierárquica dos percentuais (peso igual por série)
         taxa_pct = _mean_distrib_percentuais(cell_dists)
+        # Calcular contagens totais da escola (apenas para exibição, NÃO para calcular percentuais)
         merged = _empty_distribution()
         for d in cell_dists:
             for k in FAIXAS:
@@ -508,24 +567,36 @@ def _build_distribuicao_matriz(
         if not col_dists:
             por_serie.append(None)
         else:
+            # Calcular contagens totais da série (apenas para exibição, NÃO para calcular percentuais)
             merged = _empty_distribution()
             for d in col_dists:
                 for k in FAIXAS:
                     merged[k] += d.get(k, 0)
             por_serie.append(
                 {
+                    # ✅ CORRETO: média hierárquica dos percentuais (peso igual por escola)
                     "percentuais": _mean_distrib_percentuais(col_dists),
                     "contagens": merged,
                     "total_registros": sum(merged.values()),
                 }
             )
 
-    rede_school_dists = _school_row_dists_for_rede(rede_scope, cols, rede_fn)
-    taxa_rede_pct = _mean_distrib_percentuais(rede_school_dists)
+    rede_school_pcts = _school_row_percentuais_for_rede(rede_scope, cols, rede_fn)
+    # ✅ CORRETO: média dos percentuais médios por escola (peso igual por escola)
+    taxa_rede_pct = {k: _mean_numeric([p[k] for p in rede_school_pcts]) for k in FAIXAS} if rede_school_pcts else {k: 0.0 for k in FAIXAS}
+    
+    # Calcular contagens totais da rede (apenas para exibição, NÃO para calcular percentuais)
     rede_merged = _empty_distribution()
-    for d in rede_school_dists:
-        for k in FAIXAS:
-            rede_merged[k] += d.get(k, 0)
+    for esc in rede_scope.escolas:
+        eid = esc["escola_id"]
+        for col in cols:
+            sid = col["serie_id"]
+            if (eid, sid) not in rede_scope.classes_by_cell:
+                continue
+            d = rede_fn(eid, sid)
+            if d and sum(d.values()) > 0:
+                for k in FAIXAS:
+                    rede_merged[k] += d.get(k, 0)
 
     return {
         "linhas": linhas,
@@ -808,6 +879,17 @@ def _build_medias_section_digital(
     all_disciplines: Set[str],
     field: str,
 ) -> Dict[str, Any]:
+    """
+    ⚠️ MÉDIA HIERÁRQUICA (NÃO PONDERADA) ⚠️
+    
+    Hierarquia para medias_da_rede.taxa_geral:
+    1. TURMA → média dos alunos (via hierarchical_mean_grade_and_proficiency)
+    2. SÉRIE → média das turmas/escolas (peso igual por escola que tem a série)
+    3. MUNICÍPIO → média das séries (peso igual por série)
+    
+    NUNCA calcular média das escolas para obter taxa_geral, pois escolas com mais
+    séries teriam mais peso (média ponderada).
+    """
     mk = _matriz_kwargs(ctx)
 
     def _media_cell(
@@ -852,6 +934,17 @@ def _build_medias_section_answer_sheet(
     all_disciplines: Set[str],
     field: str,
 ) -> Dict[str, Any]:
+    """
+    ⚠️ MÉDIA HIERÁRQUICA (NÃO PONDERADA) ⚠️
+    
+    Hierarquia para medias_da_rede.taxa_geral:
+    1. TURMA → média dos alunos (via hierarchical_mean_grade_and_proficiency)
+    2. SÉRIE → média das turmas/escolas (peso igual por escola que tem a série)
+    3. MUNICÍPIO → média das séries (peso igual por série)
+    
+    NUNCA calcular média das escolas para obter taxa_geral, pois escolas com mais
+    séries teriam mais peso (média ponderada).
+    """
     mk = _matriz_kwargs(ctx)
 
     def _media_cell(
@@ -995,18 +1088,83 @@ def _build_distribuicao_section_answer_sheet(
 
 
 # ---------------------------------------------------------------------------
-# Acertos por habilidade: matriz + lista por série
+# Acertos por habilidade: matriz + lista por série (uma entrada por questão)
 # ---------------------------------------------------------------------------
+
+
+def _series_ids_by_item(scope: ScopeIndex) -> Dict[str, Set[str]]:
+    out: Dict[str, Set[str]] = defaultdict(set)
+    for _eid, _en, serie_id, _sn, item_id in scope.series_items:
+        if item_id:
+            out[str(item_id)].add(str(serie_id))
+    return dict(out)
+
+
+def _question_agg_key(item_id: str, question_ref: str) -> str:
+    return f"{item_id}:{question_ref}"
+
+
+def _seed_question_agg_bucket(
+    bucket: Dict[str, Any],
+    *,
+    item_id: str,
+    codigo: str,
+    descricao: str,
+    disciplina: str,
+    ordem_original: int,
+    numero_questao: Any,
+) -> None:
+    if bucket.get("codigo"):
+        return
+    bucket["codigo"] = codigo
+    bucket["descricao"] = descricao
+    bucket["disciplina"] = disciplina
+    bucket["ordem_original"] = ordem_original
+    bucket["numero_questao"] = numero_questao
+    bucket.setdefault("itens_origem", set()).add(str(item_id))
+
+
+def _digital_question_meta(
+    question: Question, test: Test, skills_dict: Dict[str, Skill]
+) -> Tuple[str, str, str]:
+    clean_skill = str(question.skill or "").replace("{", "").replace("}", "").strip()
+    skill_obj = skills_dict.get(clean_skill) if clean_skill and clean_skill != "{}" else None
+    if skill_obj:
+        code = skill_obj.code or clean_skill
+        desc = skill_obj.description or f"Habilidade {code}"
+        if skill_obj.subject_id:
+            subj = Subject.query.get(skill_obj.subject_id)
+            disciplina = subj.name if subj else "Disciplina Geral"
+        else:
+            disciplina = "Disciplina Geral"
+    else:
+        code = f"Q{question.number or question.id}"
+        desc = f"Questão {question.number or 'N/A'}"
+        disciplina = test.subject_rel.name if test.subject_rel else "Disciplina Geral"
+    return code, desc, disciplina
 
 
 def _habilidades_list_from_agg(agg: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    for _key, data in sorted(agg.items(), key=lambda x: (x[1].get("disciplina") or "", x[1].get("codigo") or "")):
+    for _key, data in sorted(
+        agg.items(),
+        key=lambda x: (
+            str(x[0]).split(":", 1)[0],
+            x[1].get("ordem_original") if x[1].get("ordem_original") is not None else 999999,
+            str(x[0]),
+        ),
+    ):
         total = int(data.get("total") or 0)
         acertos = int(data.get("acertos") or 0)
         pct = round_to_two_decimals((acertos / total * 100) if total > 0 else 0.0)
+        ordem = data.get("ordem_original")
+        numero = data.get("numero_questao")
+        if numero is None:
+            numero = ordem
         rows.append(
             {
+                "numero_questao": numero,
+                "ordem_original": ordem,
                 "codigo": data.get("codigo") or "—",
                 "descricao": data.get("descricao") or "",
                 "disciplina": data.get("disciplina") or "Disciplina Geral",
@@ -1023,7 +1181,7 @@ def _habilidades_por_serie_blocks(
     series_colunas: List[Dict[str, str]],
     agg_by_serie: Dict[str, Dict[str, Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
-    """Uma lista de habilidades por série (mesmo código pode repetir entre séries)."""
+    """Uma lista por questão em cada série (mesma habilidade pode repetir entre questões)."""
     return [
         {
             "serie_id": col["serie_id"],
@@ -1074,13 +1232,31 @@ def _digital_acertos_aggregate(
 ]:
     agg_by_serie: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(
         lambda: defaultdict(
-            lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
+            lambda: {
+                "acertos": 0,
+                "total": 0,
+                "codigo": "",
+                "descricao": "",
+                "disciplina": "",
+                "ordem_original": None,
+                "numero_questao": None,
+                "itens_origem": set(),
+            }
         )
     )
     agg_by_serie_disc: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(
-                lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
+                lambda: {
+                    "acertos": 0,
+                    "total": 0,
+                    "codigo": "",
+                    "descricao": "",
+                    "disciplina": "",
+                    "ordem_original": None,
+                    "numero_questao": None,
+                    "itens_origem": set(),
+                }
             )
         )
     )
@@ -1090,6 +1266,7 @@ def _digital_acertos_aggregate(
         return dict(agg_by_serie), dict(agg_by_serie_disc), dict(cell_totals)
 
     class_id_set = {str(c) for c in class_ids}
+    series_by_item = _series_ids_by_item(scope)
 
     for tid in test_ids:
         test = tests_by_id.get(str(tid))
@@ -1111,21 +1288,33 @@ def _digital_acertos_aggregate(
         for a in answers:
             by_q[str(a.question_id)].append(a)
 
-        for question in test.questions:
-            clean_skill = str(question.skill or "").replace("{", "").replace("}", "").strip()
-            skill_obj = skills_dict.get(clean_skill) if clean_skill and clean_skill != "{}" else None
-            if skill_obj:
-                code = skill_obj.code or clean_skill
-                desc = skill_obj.description or f"Habilidade {code}"
-                if skill_obj.subject_id:
-                    subj = Subject.query.get(skill_obj.subject_id)
-                    disciplina = subj.name if subj else "Disciplina Geral"
-                else:
-                    disciplina = "Disciplina Geral"
-            else:
-                code = f"Q{question.number or question.id}"
-                desc = f"Questão {question.number or 'N/A'}"
-                disciplina = test.subject_rel.name if test.subject_rel else "Disciplina Geral"
+        serie_ids = series_by_item.get(str(tid), set())
+
+        for idx, question in enumerate(test.questions, start=1):
+            code, desc, disciplina = _digital_question_meta(question, test, skills_dict)
+            numero = question.number if question.number is not None else idx
+            agg_key = _question_agg_key(str(tid), str(question.id))
+
+            for serie_id in serie_ids:
+                _seed_question_agg_bucket(
+                    agg_by_serie[serie_id][agg_key],
+                    item_id=str(tid),
+                    codigo=code,
+                    descricao=desc,
+                    disciplina=disciplina,
+                    ordem_original=idx,
+                    numero_questao=numero,
+                )
+                if disciplina in all_disciplines:
+                    _seed_question_agg_bucket(
+                        agg_by_serie_disc[serie_id][disciplina][agg_key],
+                        item_id=str(tid),
+                        codigo=code,
+                        descricao=desc,
+                        disciplina=disciplina,
+                        ordem_original=idx,
+                        numero_questao=numero,
+                    )
 
             q_answers = by_q.get(str(question.id), [])
             for ans in q_answers:
@@ -1137,20 +1326,31 @@ def _digital_acertos_aggregate(
                 if not cell:
                     continue
                 _eid, serie_id = cell
-                key = str(code)
-                b = agg_by_serie[serie_id][key]
-                b["codigo"] = code
-                b["descricao"] = desc
-                b["disciplina"] = disciplina
+                b = agg_by_serie[serie_id][agg_key]
+                _seed_question_agg_bucket(
+                    b,
+                    item_id=str(tid),
+                    codigo=code,
+                    descricao=desc,
+                    disciplina=disciplina,
+                    ordem_original=idx,
+                    numero_questao=numero,
+                )
                 b["total"] += 1
                 if ok:
                     b["acertos"] += 1
                 b["itens_origem"].add(str(tid))
                 if disciplina in all_disciplines:
-                    bd = agg_by_serie_disc[serie_id][disciplina][key]
-                    bd["codigo"] = code
-                    bd["descricao"] = desc
-                    bd["disciplina"] = disciplina
+                    bd = agg_by_serie_disc[serie_id][disciplina][agg_key]
+                    _seed_question_agg_bucket(
+                        bd,
+                        item_id=str(tid),
+                        codigo=code,
+                        descricao=desc,
+                        disciplina=disciplina,
+                        ordem_original=idx,
+                        numero_questao=numero,
+                    )
                     bd["total"] += 1
                     if ok:
                         bd["acertos"] += 1
@@ -1245,17 +1445,36 @@ def _answer_sheet_acertos_aggregate(
 
     agg_by_serie: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(
         lambda: defaultdict(
-            lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
+            lambda: {
+                "acertos": 0,
+                "total": 0,
+                "codigo": "",
+                "descricao": "",
+                "disciplina": "",
+                "ordem_original": None,
+                "numero_questao": None,
+                "itens_origem": set(),
+            }
         )
     )
     agg_by_serie_disc: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(
-                lambda: {"acertos": 0, "total": 0, "codigo": "", "descricao": "", "disciplina": "", "itens_origem": set()}
+                lambda: {
+                    "acertos": 0,
+                    "total": 0,
+                    "codigo": "",
+                    "descricao": "",
+                    "disciplina": "",
+                    "ordem_original": None,
+                    "numero_questao": None,
+                    "itens_origem": set(),
+                }
             )
         )
     )
     cell_totals: Dict[Optional[str], Dict[Tuple[str, str], List[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    series_by_item = _series_ids_by_item(scope)
 
     for gid in gabarito_ids:
         gab = gabs_by_id.get(str(gid))
@@ -1288,6 +1507,42 @@ def _answer_sheet_acertos_aggregate(
                 except (TypeError, ValueError):
                     pass
 
+        serie_ids = series_by_item.get(str(gid), set())
+
+        def _meta_for_qn(qn: int) -> Tuple[str, str, str]:
+            disciplina = subject_by_q.get(qn, "Disciplina Geral")
+            sids = q_skills.get(qn) or []
+            first = str(sids[0]).strip() if sids else ""
+            nk = _norm_skill_uuid_key(first) if first else ""
+            code, desc = code_map.get(nk, (None, None)) if first else (None, None)
+            code_out = (code or "").strip() or (first if first else f"Q{qn}")
+            desc_out = (desc or "").strip() or f"Questão {qn}"
+            return code_out, desc_out, disciplina
+
+        for qn in sorted(gab_map.keys()):
+            code_out, desc_out, disciplina = _meta_for_qn(qn)
+            agg_key = _question_agg_key(str(gid), str(qn))
+            for serie_id in serie_ids:
+                _seed_question_agg_bucket(
+                    agg_by_serie[serie_id][agg_key],
+                    item_id=str(gid),
+                    codigo=code_out,
+                    descricao=desc_out,
+                    disciplina=disciplina,
+                    ordem_original=qn,
+                    numero_questao=qn,
+                )
+                if disciplina in all_disciplines:
+                    _seed_question_agg_bucket(
+                        agg_by_serie_disc[serie_id][disciplina][agg_key],
+                        item_id=str(gid),
+                        codigo=code_out,
+                        descricao=desc_out,
+                        disciplina=disciplina,
+                        ordem_original=qn,
+                        numero_questao=qn,
+                    )
+
         for res in [r for r in results if str(r.gabarito_id) == str(gid)]:
             st = res.student
             if not st or not st.class_id:
@@ -1298,26 +1553,36 @@ def _answer_sheet_acertos_aggregate(
             _eid, serie_id = cell
             detected = res.detected_answers or {}
             for qn, ca in gab_map.items():
-                disciplina = subject_by_q.get(qn, "Disciplina Geral")
-                sids = q_skills.get(qn) or []
-                first = str(sids[0]).strip() if sids else ""
-                nk = _norm_skill_uuid_key(first) if first else ""
-                code, desc = code_map.get(nk, (None, None)) if first else (None, None)
-                code_out = (code or "").strip() or (first if first else f"Q{qn}")
-                desc_out = (desc or "").strip() or f"Questão {qn}"
+                code_out, desc_out, disciplina = _meta_for_qn(qn)
+                agg_key = _question_agg_key(str(gid), str(qn))
                 raw = detected.get(str(qn), detected.get(qn))
                 st_ans = str(raw).upper() if raw else ""
                 ok = bool(ca and st_ans and st_ans == ca)
-                key = str(code_out)
-                b = agg_by_serie[serie_id][key]
-                b.update({"codigo": code_out, "descricao": desc_out, "disciplina": disciplina})
+                b = agg_by_serie[serie_id][agg_key]
+                _seed_question_agg_bucket(
+                    b,
+                    item_id=str(gid),
+                    codigo=code_out,
+                    descricao=desc_out,
+                    disciplina=disciplina,
+                    ordem_original=qn,
+                    numero_questao=qn,
+                )
                 b["total"] += 1
                 if ok:
                     b["acertos"] += 1
                 b["itens_origem"].add(str(gid))
                 if disciplina in all_disciplines:
-                    bd = agg_by_serie_disc[serie_id][disciplina][key]
-                    bd.update({"codigo": code_out, "descricao": desc_out, "disciplina": disciplina})
+                    bd = agg_by_serie_disc[serie_id][disciplina][agg_key]
+                    _seed_question_agg_bucket(
+                        bd,
+                        item_id=str(gid),
+                        codigo=code_out,
+                        descricao=desc_out,
+                        disciplina=disciplina,
+                        ordem_original=qn,
+                        numero_questao=qn,
+                    )
                     bd["total"] += 1
                     if ok:
                         bd["acertos"] += 1

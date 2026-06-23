@@ -96,6 +96,43 @@ def _user_can_read_gabarito(user: dict, gabarito: AnswerSheetGabarito) -> bool:
     return str(gabarito.created_by) == str(user.get("id"))
 
 
+def _user_can_edit_gabarito(user: dict, gabarito: AnswerSheetGabarito) -> bool:
+    """
+    Verifica se o usuário pode editar o gabarito.
+    
+    Regras:
+    - Admin: pode editar QUALQUER gabarito
+    - Tecadm: pode editar gabaritos do SEU city_id
+    - Outros roles (professor, coordenador, diretor, aplicador): apenas gabaritos que criaram
+    - Aluno: não pode editar (já bloqueado no @role_required)
+    
+    Args:
+        user: dict com dados do usuário (id, role, etc.)
+        gabarito: instância do AnswerSheetGabarito
+    
+    Returns:
+        bool: True se pode editar, False caso contrário
+    """
+    user_role = str(user.get("role") or "").lower()
+    
+    # Admin pode editar qualquer gabarito
+    if user_role == "admin":
+        return True
+    
+    # Tecadm pode editar gabaritos do seu city_id
+    if user_role == "tecadm":
+        # Gabarito está no schema do tenant (city_xxx), se conseguiu buscar, está no contexto correto
+        # O middleware de tenant já garantiu que estamos no schema certo via X-City-Context
+        return True
+    
+    # Outros roles: apenas gabaritos que criaram
+    if not gabarito.created_by:
+        # Gabarito sem criador: por segurança, não permite edição
+        return False
+    
+    return str(gabarito.created_by) == str(user.get("id"))
+
+
 def _validate_blocks_config(blocks: List, total_questions: int) -> Optional[str]:
     """
     Valida configuração de blocos personalizados
@@ -1773,6 +1810,11 @@ def delete_all_answer_sheet_generations(gabarito_id):
 def get_gabarito(gabarito_id):
     """
     Busca um gabarito com o mesmo histórico **generations** da listagem (todas as gerações / ZIPs).
+    
+    Retorna também mapas achatados para facilitar edição no frontend:
+    - question_skills: mapa questão → UUIDs de habilidades
+    - questions_options: mapa questão → alternativas
+    - skill_codes: mapa UUID → código BNCC da habilidade
     """
     try:
         user = get_current_user_from_token()
@@ -1808,6 +1850,49 @@ def get_gabarito(gabarito_id):
         except Exception as gen_err:
             logging.warning("get_gabarito generations: %s", gen_err, exc_info=True)
         
+        # Extrair question_skills e questions_options de blocks_config.topology
+        question_skills_map = {}
+        questions_options_map = {}
+        all_skill_uuids = set()
+        
+        blocks_config = gabarito.blocks_config or {}
+        topology = blocks_config.get('topology', {})
+        topology_blocks = topology.get('blocks', [])
+        
+        for block in topology_blocks:
+            questions = block.get('questions', [])
+            for q_data in questions:
+                q_num = q_data.get('q')
+                if q_num is None:
+                    continue
+                
+                # Habilidades da questão
+                skills = q_data.get('skills', [])
+                question_skills_map[str(q_num)] = skills
+                all_skill_uuids.update(skills)
+                
+                # Alternativas da questão
+                alternatives = q_data.get('alternatives', ['A', 'B', 'C', 'D'])
+                questions_options_map[str(q_num)] = alternatives
+        
+        # Garantir que todas as questões estejam no mapa (mesmo sem habilidades)
+        for q_num in range(1, (gabarito.num_questions or 0) + 1):
+            q_str = str(q_num)
+            if q_str not in question_skills_map:
+                question_skills_map[q_str] = []
+            if q_str not in questions_options_map:
+                questions_options_map[q_str] = ['A', 'B', 'C', 'D']
+        
+        # Buscar códigos BNCC das habilidades
+        skill_codes_map = {}
+        if all_skill_uuids:
+            try:
+                skills_in_db = Skill.query.filter(Skill.id.in_(all_skill_uuids)).all()
+                for skill in skills_in_db:
+                    skill_codes_map[str(skill.id)] = skill.code
+            except Exception as skill_err:
+                logging.warning(f"Erro ao buscar códigos de habilidades: {skill_err}")
+        
         return jsonify({
             "id": gabarito.id,
             "test_id": gabarito.test_id,
@@ -1821,11 +1906,234 @@ def get_gabarito(gabarito_id):
             "latest_generation_job_id": gabarito.last_generation_job_id,
             "generations": generations_list,
             "generations_count": len(generations_list),
+            # Novos campos para facilitar edição no frontend
+            "question_skills": question_skills_map,
+            "questions_options": questions_options_map,
+            "skill_codes": skill_codes_map,
         }), 200
         
     except Exception as e:
         logging.error(f"Erro ao buscar gabarito: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao buscar gabarito: {str(e)}"}), 500
+
+
+@bp.route('/gabarito/<string:gabarito_id>/structure', methods=['PATCH'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def patch_gabarito_structure(gabarito_id: str):
+    """
+    Edita a ESTRUTURA do cartão resposta: num_questions, blocks_config, question_skills.
+    
+    ⚠️ REGRAS DE NEGÓCIO:
+    - ❌ BLOQUEADO se já existem correções (AnswerSheetResult)
+    - ✅ PERMITIDO se gerado mas não corrigido (com aviso de regeneração)
+    - ✅ PERMITIDO se apenas criado (sem avisos)
+    
+    Body (todos os campos são opcionais, envie apenas o que deseja alterar):
+        {
+            "num_questions": 30,                    # Nova quantidade de questões
+            "blocks_config": {                      # Nova configuração de blocos
+                "blocks": [
+                    {
+                        "block_id": 1,
+                        "subject_id": "uuid-disciplina",
+                        "subject_name": "Matemática",
+                        "start_question": 1,
+                        "end_question": 15,
+                        "questions_count": 15
+                    },
+                    ...
+                ]
+            },
+            "question_skills": {                    # Habilidades por questão
+                "1": ["EF05MA01", "uuid-habilidade"],
+                "2": ["EF05LP02"]
+            },
+            "questions_options": {                  # Alternativas customizadas (opcional)
+                "1": ["A", "B", "C", "D"],
+                "2": ["A", "B", "C"]
+            }
+        }
+    
+    Returns (200 em sucesso):
+        {
+            "success": true,
+            "gabarito_id": "uuid",
+            "message": "Estrutura atualizada com sucesso",
+            "warning": "os cartões em PDF já gerados não refletem..." (se aplicável),
+            "changes": {
+                "num_questions": {"old": 20, "new": 30},
+                "blocks_count": {"old": 2, "new": 3},
+                "skills_updated": true
+            }
+        }
+    
+    Returns (422 se bloqueado por correções):
+        {
+            "error": "Este cartão resposta não pode ser editado...",
+            "reason": "has_corrections",
+            "corrections_count": 15
+        }
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # 1. Buscar gabarito
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            return jsonify({"error": "Gabarito não encontrado"}), 404
+
+        # 2. Verificar permissão (admin = qualquer; tecadm = seu city; outros = apenas criador)
+        if not _user_can_edit_gabarito(user, gabarito):
+            return jsonify({"error": "Você não tem permissão para editar este gabarito"}), 403
+
+        # 3. Verificar se tem correções (BLOQUEIO TOTAL)
+        corrections_count = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).count()
+        if corrections_count > 0:
+            return jsonify({
+                "error": "Este cartão resposta não pode ser editado porque já existem correções registradas. Editar agora poderia causar inconsistências nos resultados já calculados. Para fazer alterações, crie um novo cartão resposta.",
+                "reason": "has_corrections",
+                "corrections_count": corrections_count
+            }), 422
+
+        # 4. Verificar se foi gerado (para avisar)
+        has_generations = bool(
+            gabarito.minio_url or 
+            gabarito.last_generation_job_id or
+            AnswerSheetGenerationJob.query.filter_by(gabarito_id=gabarito_id).first()
+        )
+
+        # 5. Processar payload
+        data = request.get_json() or {}
+        if not data:
+            return jsonify({"error": "Nenhum dado fornecido para edição"}), 400
+
+        changes = {}
+        
+        # Valores atuais
+        old_num_questions = gabarito.num_questions
+        old_blocks_count = len(gabarito.blocks_config.get('blocks', [])) if gabarito.blocks_config else 0
+        
+        # Nova quantidade de questões
+        new_num_questions = data.get('num_questions', old_num_questions)
+        if new_num_questions <= 0:
+            return jsonify({"error": "num_questions deve ser maior que 0"}), 400
+        if new_num_questions > 104:
+            return jsonify({"error": "Máximo de 104 questões permitidas"}), 400
+        
+        if new_num_questions != old_num_questions:
+            changes['num_questions'] = {'old': old_num_questions, 'new': new_num_questions}
+        
+        # Nova configuração de blocos
+        new_blocks_config = gabarito.blocks_config.copy() if gabarito.blocks_config else {}
+        
+        if 'blocks_config' in data:
+            blocks_config_payload = data['blocks_config']
+            custom_blocks = blocks_config_payload.get('blocks', [])
+            
+            if custom_blocks:
+                # Validar blocos personalizados
+                validation_error = _validate_blocks_config(custom_blocks, new_num_questions)
+                if validation_error:
+                    return jsonify({"error": validation_error}), 400
+                
+                new_blocks_config['blocks'] = custom_blocks
+                new_blocks_config['num_blocks'] = len(custom_blocks)
+                new_blocks_config['questions_per_block'] = custom_blocks[0].get('questions_count', 12) if custom_blocks else 12
+                new_blocks_config['use_blocks'] = data.get('use_blocks', gabarito.use_blocks)
+                new_blocks_config['separate_by_subject'] = not new_blocks_config['use_blocks']
+                
+                new_blocks_count = len(custom_blocks)
+                if new_blocks_count != old_blocks_count:
+                    changes['blocks_count'] = {'old': old_blocks_count, 'new': new_blocks_count}
+        
+        # Habilidades das questões
+        question_skills_raw = data.get('question_skills', {})
+        question_skills_ids = _resolve_question_skills_to_ids(question_skills_raw) if question_skills_raw else None
+        
+        if question_skills_ids:
+            changes['skills_updated'] = True
+        
+        # Alternativas customizadas (opcional)
+        questions_options = data.get('questions_options', {})
+        
+        # 6. Regenerar estrutura completa
+        use_blocks = new_blocks_config.get('use_blocks', gabarito.use_blocks)
+        complete_structure = _generate_complete_structure(
+            num_questions=new_num_questions,
+            use_blocks=use_blocks,
+            blocks_config=new_blocks_config,
+            questions_options=questions_options if questions_options else {},
+            question_skills=question_skills_ids
+        )
+        new_blocks_config['topology'] = complete_structure
+        
+        # 7. Regenerar coordenadas
+        try:
+            from app.services.cartao_resposta.coordinate_generator import CoordinateGenerator
+            coord_generator = CoordinateGenerator()
+            new_coordinates = coord_generator.generate_coordinates(
+                num_questions=new_num_questions,
+                use_blocks=use_blocks,
+                blocks_config=new_blocks_config,
+                questions_options=questions_options if questions_options else {}
+            )
+        except Exception as coord_err:
+            logging.error(f"Erro ao regenerar coordenadas: {str(coord_err)}", exc_info=True)
+            return jsonify({"error": f"Erro ao regenerar coordenadas: {str(coord_err)}"}), 500
+        
+        # 8. Atualizar gabarito
+        gabarito.num_questions = new_num_questions
+        gabarito.use_blocks = use_blocks
+        gabarito.blocks_config = new_blocks_config
+        gabarito.coordinates = new_coordinates
+        
+        # 9. Invalidar templates de blocos (forçar regeneração)
+        gabarito.template_block_1 = None
+        gabarito.template_block_2 = None
+        gabarito.template_block_3 = None
+        gabarito.template_block_4 = None
+        gabarito.template_generated_at = None
+        
+        # 10. Atualizar correct_answers se necessário (expandir ou reduzir)
+        if new_num_questions != old_num_questions:
+            current_answers = gabarito.correct_answers or {}
+            new_correct_answers = {}
+            
+            # Copiar respostas existentes até o limite
+            for q in range(1, new_num_questions + 1):
+                q_str = str(q)
+                if q <= old_num_questions and q_str in current_answers:
+                    new_correct_answers[q_str] = current_answers[q_str]
+                else:
+                    # Questões novas recebem valor padrão "A"
+                    new_correct_answers[q_str] = "A"
+            
+            gabarito.correct_answers = new_correct_answers
+        
+        db.session.commit()
+        
+        # 11. Preparar resposta
+        response_data = {
+            "success": True,
+            "gabarito_id": str(gabarito_id),
+            "message": "Estrutura do cartão resposta atualizada com sucesso",
+            "changes": changes if changes else None
+        }
+        
+        # Adicionar aviso se já foi gerado
+        if has_generations:
+            response_data["warning"] = "Atenção: os cartões em PDF já gerados não refletem as alterações. É necessário gerar os cartões novamente para que as mudanças apareçam nos documentos impressos."
+        
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao editar estrutura do gabarito {gabarito_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao editar estrutura do gabarito"}), 500
 
 
 @bp.route('/gabaritos/<string:gabarito_id>', methods=['PATCH', 'POST'])
@@ -1860,11 +2168,9 @@ def patch_gabarito_correct_answers(gabarito_id: str):
         if not gabarito:
             return jsonify({"error": "Gabarito não encontrado"}), 404
 
-        # Permissão: apenas criador (padrão já adotado em outras rotas do módulo)
-        if gabarito.created_by and str(gabarito.created_by) != str(user.get("id")):
+        # Permissão: admin = qualquer; tecadm = seu city; outros = apenas criador
+        if not _user_can_edit_gabarito(user, gabarito):
             return jsonify({"error": "Você não tem permissão para editar este gabarito"}), 403
-        if not gabarito.created_by:
-            return jsonify({"error": "Gabarito sem criador definido não pode ser editado"}), 403
 
         data = request.get_json() or {}
         if "correct_answers" not in data:
@@ -2063,8 +2369,8 @@ def delete_gabarito(gabarito_id):
         if not gabarito:
             return jsonify({"error": "Gabarito não encontrado"}), 404
         
-        # Verificar se o gabarito foi criado pelo usuário atual
-        if gabarito.created_by != str(user['id']):
+        # Verificar permissão (admin = qualquer; tecadm = seu city; outros = apenas criador)
+        if not _user_can_edit_gabarito(user, gabarito):
             return jsonify({"error": "Você não tem permissão para excluir este gabarito"}), 403
         
         # Excluir resultados relacionados primeiro
@@ -2358,11 +2664,13 @@ def bulk_delete_gabaritos():
         if not gabarito_ids:
             return jsonify({"message": "Nenhum ID de gabarito fornecido para exclusão"}), 200
         
-        # Buscar gabaritos que pertencem ao usuário
-        gabaritos_to_delete = AnswerSheetGabarito.query.filter(
-            AnswerSheetGabarito.id.in_(gabarito_ids),
-            AnswerSheetGabarito.created_by == str(user['id'])
+        # Buscar gabaritos
+        gabaritos = AnswerSheetGabarito.query.filter(
+            AnswerSheetGabarito.id.in_(gabarito_ids)
         ).all()
+        
+        # Filtrar apenas os gabaritos que o usuário pode editar (admin = todos; tecadm = seu city; outros = criador)
+        gabaritos_to_delete = [g for g in gabaritos if _user_can_edit_gabarito(user, g)]
         
         if not gabaritos_to_delete:
             return jsonify({

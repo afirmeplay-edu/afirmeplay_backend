@@ -1848,7 +1848,7 @@ class MonitoringService:
             return empty
 
         discipline_filter = (filters.get("disciplina") or "").strip()
-        rows = MonitoringService._build_rows(user, filters, expand_disciplines=True)
+        rows = MonitoringService._build_rows(user, filters)
         relatorio_rows = MonitoringService._consolidate_student_rows(
             [row for row in rows if MonitoringService._include_in_student_detail(row)],
             discipline_filter,

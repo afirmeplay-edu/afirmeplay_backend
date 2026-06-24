@@ -136,6 +136,7 @@ class RankingReportService:
             for idx, raw in enumerate(school_classes):
                 grade_name = str(raw.get("serie") or raw.get("grade_name") or "Sem série")
                 turma = str(raw.get("turma") or raw.get("class_name") or "Turma").strip() or "Turma"
+                class_id = str(raw.get("class_id") or "").strip()
                 course_label = cls._derive_course_label(grade_name)
                 participating = int(raw.get("participating_students") or raw.get("alunos") or 0)
                 total_students = int(raw.get("total_students") or participating)
@@ -156,7 +157,7 @@ class RankingReportService:
                         "series_class_name": cls._format_grade_class_label(grade_name, turma),
                         "grade_name": grade_name,
                         "class_name": turma,
-                        "teacher_name": school_grade_teachers.get((school_id, grade_name), "N/A"),
+                        "teacher_name": school_grade_teachers.get((school_id, class_id), "N/A"),
                         "participation_rate": participation_rate,
                         "participating_students": participating,
                         "total_students": total_students,
@@ -1109,7 +1110,7 @@ class RankingReportService:
         query = (
             db.session.query(
                 Class._school_id.label("school_id"),
-                Grade.name.label("grade_name"),
+                Class.id.label("class_id"),
                 Teacher.name.label("teacher_name"),
             )
             .select_from(TeacherClass)
@@ -1129,11 +1130,11 @@ class RankingReportService:
         bucket: Dict[tuple[str, str], List[str]] = defaultdict(list)
         for row in query.all():
             sid = str(getattr(row, "school_id", "") or "")
-            grade_name = str(getattr(row, "grade_name", "") or "").strip()
+            class_id = str(getattr(row, "class_id", "") or "").strip()
             teacher_name = str(getattr(row, "teacher_name", "") or "").strip()
-            if not sid or not grade_name or not teacher_name:
+            if not sid or not class_id or not teacher_name:
                 continue
-            key = (sid, grade_name)
+            key = (sid, class_id)
             if teacher_name not in bucket[key]:
                 bucket[key].append(teacher_name)
 

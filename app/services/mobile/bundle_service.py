@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from flask import g
 from sqlalchemy import func
@@ -20,6 +20,9 @@ from app.services.mobile.content_hash import compute_test_content_version, quest
 from app.services.mobile.student_bundle_serializer import (
     serialize_student_for_bundle,
     student_bundle_query_options,
+)
+from app.services.mobile.answer_sheet_mobile_service import (
+    collect_gabaritos_for_school,
 )
 from app.utils.response_formatters import _get_all_subjects_from_test
 
@@ -101,15 +104,31 @@ def ensure_bundle_generation(
     return row.sync_bundle_version, row.bundle_valid_until, False
 
 
-def collect_school_scope(school_id: str) -> Tuple[List[str], Dict[str, Test], List[Tuple[str, str]]]:
+def collect_school_scope(
+    school_id: str,
+    gabarito_ids_filter: Optional[Set[str]] = None,
+    class_ids_filter: Optional[Set[str]] = None,
+) -> Tuple[List[str], Dict[str, Test], List[Tuple[str, str]], Dict[str, Dict[str, Any]], List[Tuple[str, str]]]:
+    """
+    Coleta escopo completo de uma escola: testes online + gabaritos de cartões resposta.
+    
+    Args:
+        school_id: ID da escola
+        gabarito_ids_filter: IDs específicos de gabaritos a incluir (opcional)
+        class_ids_filter: IDs de turmas para filtrar (opcional)
+    
+    Returns:
+        Tupla (test_ids, tests_map, student_test_links, gabaritos_map, student_gabarito_links)
+    """
     school = School.query.get(school_id)
     if not school:
         raise ValueError("escola não encontrada")
 
     class_ids = [c.id for c in Class.query.filter_by(school_id=school_id).all()]
     if not class_ids:
-        return [], {}, []
+        return [], {}, [], {}, []
 
+    # Coletar testes online (já existente)
     class_tests = ClassTest.query.filter(ClassTest.class_id.in_(class_ids)).all()
     test_ids = list({ct.test_id for ct in class_tests})
 
@@ -118,20 +137,28 @@ def collect_school_scope(school_id: str) -> Tuple[List[str], Dict[str, Test], Li
         if s.class_id:
             students_by_class.setdefault(s.class_id, []).append(s)
 
-    student_links: List[Tuple[str, str]] = []
+    student_test_links: List[Tuple[str, str]] = []
     seen = set()
     for ct in class_tests:
         for s in students_by_class.get(ct.class_id, []):
             key = (s.id, ct.test_id)
             if key not in seen:
                 seen.add(key)
-                student_links.append((s.id, ct.test_id))
+                student_test_links.append((s.id, ct.test_id))
 
     tests: Dict[str, Test] = {}
     if test_ids:
         for t in Test.query.filter(Test.id.in_(test_ids)).all():
             tests[t.id] = t
-    return test_ids, tests, student_links
+    
+    # Coletar gabaritos de cartões resposta (com filtros)
+    gabaritos_map, student_gabarito_links = collect_gabaritos_for_school(
+        school_id,
+        gabarito_ids=gabarito_ids_filter,
+        class_ids=class_ids_filter,
+    )
+    
+    return test_ids, tests, student_test_links, gabaritos_map, student_gabarito_links
 
 
 def build_tests_questions_payload(
@@ -229,14 +256,17 @@ def build_bundle_response(
             "questions_by_test": {},
             "test_content_version": {},
             "student_test_links": [],
+            "answer_sheet_gabaritos": {},
+            "student_gabarito_links": [],
         }
 
     if page == 1:
-        _, tests_map, student_links = collect_school_scope(school_id)
+        _, tests_map, student_links, gabaritos_map, student_gabarito_links = collect_school_scope(school_id)
         tests_payload, content_versions, questions_by_test = (
             build_tests_questions_payload(tests_map)
         )
         links_out = [{"student_id": a, "test_id": b} for a, b in student_links]
+        gabarito_links_out = [{"student_id": a, "gabarito_id": b} for a, b in student_gabarito_links]
         students, total_students, total_pages = serialize_students_page(
             school_id, page, page_size
         )
@@ -254,6 +284,8 @@ def build_bundle_response(
             "questions_by_test": questions_by_test,
             "test_content_version": content_versions,
             "student_test_links": links_out,
+            "answer_sheet_gabaritos": gabaritos_map,
+            "student_gabarito_links": gabarito_links_out,
         }
 
     students, total_students, total_pages = serialize_students_page(
@@ -273,5 +305,7 @@ def build_bundle_response(
         "questions_by_test": {},
         "test_content_version": {},
         "student_test_links": [],
+        "answer_sheet_gabaritos": {},
+        "student_gabarito_links": [],
         "includes_full_payload": False,
     }

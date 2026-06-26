@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import logging
 import os
 import secrets
 from datetime import datetime, timedelta
@@ -36,8 +37,14 @@ from app.services.mobile.student_bundle_serializer import (
     serialize_student_for_bundle,
     student_bundle_query_options,
 )
+from app.services.mobile.answer_sheet_mobile_service import (
+    collect_gabaritos_for_school,
+)
 
 from app.services.aplicador_user_service import collect_aplicadores_for_city
+
+
+logger = logging.getLogger(__name__)
 
 
 _CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
@@ -258,19 +265,33 @@ def collect_filtered_scope(
     test_ids: Optional[Set[str]],
     class_ids: Optional[Set[str]],
     student_ids: Optional[Set[str]],
-) -> Tuple[Dict[str, Test], List[Tuple[str, str]]]:
-    """Agrega provas e vínculos aluno–prova conforme filtros."""
+    gabarito_ids: Optional[Set[str]],
+) -> Tuple[Dict[str, Test], List[Tuple[str, str]], Dict[str, Dict[str, Any]], List[Tuple[str, str]]]:
+    """
+    Agrega provas online e gabaritos de cartões conforme filtros.
+    
+    Returns:
+        Tupla (all_tests, test_links, gabaritos_map, gabarito_links)
+    """
     all_tests: Dict[str, Test] = {}
     links_out: List[Tuple[str, str]] = []
     seen: Set[Tuple[str, str]] = set()
     pending: List[Tuple[str, str, str]] = []
     all_stu_ids: Set[str] = set()
+    
+    # Coletar gabaritos de todas as escolas
+    all_gabaritos: Dict[str, Dict[str, Any]] = {}
+    all_gabarito_links: List[Tuple[str, str]] = []
 
     for sch_id in school_ids:
         try:
-            _, tests_map, school_links = collect_school_scope(sch_id)
+            _, tests_map, school_links, gabaritos_map, gabarito_links = collect_school_scope(
+                sch_id, gabarito_ids_filter=gabarito_ids, class_ids_filter=class_ids
+            )
         except ValueError:
             continue
+        
+        # Processar testes online (código existente)
         for stu_id, tid in school_links:
             if test_ids and tid not in test_ids:
                 continue
@@ -279,12 +300,20 @@ def collect_filtered_scope(
             t = tests_map.get(tid)
             if t:
                 all_tests[tid] = t
+        
+        # Processar gabaritos de cartões (com filtros aplicados)
+        for gab_id, gab_data in gabaritos_map.items():
+            all_gabaritos[gab_id] = gab_data
+        for stu_id, gab_id in gabarito_links:
+            all_stu_ids.add(stu_id)
+            all_gabarito_links.append((stu_id, gab_id))
 
     students_by_id: Dict[str, Student] = {}
     if all_stu_ids:
         for stu in Student.query.filter(Student.id.in_(all_stu_ids)).all():
             students_by_id[stu.id] = stu
 
+    # Filtrar vínculos de testes online (código existente)
     for sch_id, stu_id, tid in pending:
         stu = students_by_id.get(stu_id)
         if not stu or stu.school_id != sch_id:
@@ -300,8 +329,24 @@ def collect_filtered_scope(
             continue
         seen.add(key)
         links_out.append(key)
+    
+    # Filtrar vínculos de gabaritos (aplicar student_ids se especificado)
+    filtered_gabarito_links: List[Tuple[str, str]] = []
+    seen_gab: Set[Tuple[str, str]] = set()
+    for stu_id, gab_id in all_gabarito_links:
+        stu = students_by_id.get(stu_id)
+        if not stu:
+            continue
+        # class_ids já foi filtrado em collect_gabaritos_for_school
+        if student_ids and stu_id not in student_ids:
+            continue
+        key = (stu_id, gab_id)
+        if key in seen_gab:
+            continue
+        seen_gab.add(key)
+        filtered_gabarito_links.append(key)
 
-    return all_tests, links_out
+    return all_tests, links_out, all_gabaritos, filtered_gabarito_links
 
 
 def _schools_touched_from_links(
@@ -671,11 +716,25 @@ def redeem_offline_pack_page(
         test_ids = _optional_id_set("test_ids", user_sc)
         class_ids = _optional_id_set("class_ids", user_sc)
         student_ids = _optional_id_set("student_ids", user_sc)
+        gabarito_ids = _optional_id_set("gabarito_ids", user_sc)
 
-        tests_map, links = collect_filtered_scope(
-            school_ids, test_ids, class_ids, student_ids
+        logger.info(
+            f"[OFFLINE-PACK-REDEEM] Filtros aplicados: "
+            f"schools={len(school_ids)} tests={len(test_ids) if test_ids else 0} "
+            f"classes={len(class_ids) if class_ids else 0} gabaritos={len(gabarito_ids) if gabarito_ids else 0}"
         )
-        student_keys = sorted({sid for sid, _ in links})
+
+        tests_map, links, gabaritos_map, gabarito_links = collect_filtered_scope(
+            school_ids, test_ids, class_ids, student_ids, gabarito_ids
+        )
+        
+        logger.info(
+            f"[OFFLINE-PACK-REDEEM] Resultado: "
+            f"tests={len(tests_map)} test_links={len(links)} "
+            f"gabaritos={len(gabaritos_map)} gabarito_links={len(gabarito_links)}"
+        )
+        
+        student_keys = sorted({sid for sid, _ in links} | {sid for sid, _ in gabarito_links})
         schools_touched = _schools_touched_from_links(links, school_ids)
 
         _reserve_device_slot(pack, device_id)
@@ -686,6 +745,7 @@ def redeem_offline_pack_page(
             build_tests_questions_payload(tests_map)
         )
         links_out = [{"student_id": a, "test_id": b} for a, b in links]
+        gabarito_links_out = [{"student_id": a, "gabarito_id": b} for a, b in gabarito_links]
         aplicadores_payload = collect_aplicadores_for_city(city_id)
     else:
         if not MobileOfflinePackRedeemDevice.query.filter_by(
@@ -701,16 +761,19 @@ def redeem_offline_pack_page(
             test_ids = _optional_id_set("test_ids", user_sc)
             class_ids = _optional_id_set("class_ids", user_sc)
             student_ids = _optional_id_set("student_ids", user_sc)
-            _, links = collect_filtered_scope(
-                school_ids, test_ids, class_ids, student_ids
+            gabarito_ids = _optional_id_set("gabarito_ids", user_sc)
+            _, links, _, gabarito_links = collect_filtered_scope(
+                school_ids, test_ids, class_ids, student_ids, gabarito_ids
             )
-            student_keys = sorted({sid for sid, _ in links})
+            student_keys = sorted({sid for sid, _ in links} | {sid for sid, _ in gabarito_links})
 
         versions, valid_min = _bundle_versions_from_pack(pack)
         tests_payload = {}
         content_versions = {}
         questions_by_test = {}
         links_out = []
+        gabarito_links_out = []
+        gabaritos_map = {}
         aplicadores_payload = []
 
     if student_keys:
@@ -751,6 +814,8 @@ def redeem_offline_pack_page(
         "tests": tests_payload if include_full else {},
         "questions_by_test": questions_by_test if include_full else {},
         "test_content_version": content_versions if include_full else {},
+        "answer_sheet_gabaritos": gabaritos_map if include_full else {},
+        "student_gabarito_links": gabarito_links_out if include_full else [],
     }
     if not include_full:
         body["includes_full_payload"] = False

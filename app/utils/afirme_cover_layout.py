@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Layout da capa Afirme (capalimpa.png).
+Layout da capa Afirme (nova_capa.jpeg).
 
 Fonte única de coordenadas para WeasyPrint (cm) e overlay ReportLab (aluno).
 Arquivo: app/assets/afirme_cover_layout.json
@@ -17,12 +17,57 @@ A4_HEIGHT_PT = 841.89
 CM_TO_PT = 72.0 / 2.54
 
 DEFAULT_LAYOUT: Dict[str, Any] = {
-    "title": {"top_cm": 4.5, "left_cm": 1.4, "right_cm": 1.4, "font_pt": 21},
-    "subtitle": {"top_cm": 7.1, "left_cm": 1.4, "right_cm": 1.4, "font_pt": 12.5},
-    "institution": {"top_cm": 17.2, "left_cm": 8.0, "right_cm": 2.2, "font_pt": 10},
-    "grade": {"top_cm": 19.3, "left_cm": 6.5, "width_cm": 4.5, "font_pt": 10},
-    "class": {"top_cm": 19.3, "left_cm": 16.5, "width_cm": 4.5, "font_pt": 10},
-    "student": {"top_cm": 21.8, "left_cm": 7.5, "font_pt": 10, "max_chars": 42},
+    "municipality_logo": {
+        "top_cm": 0.7,
+        "left_cm": 0.6,
+        "width_cm": 6.5,
+        "height_cm": 2.0,
+    },
+    "company_logo": {
+        "top_cm": 9.5,
+        "left_cm": 2.4,
+        "width_cm": 7.5,
+        "height_cm": 7.5,
+    },
+    "title": {
+        "top_cm": 15.5,
+        "left_cm": 10.0,
+        "width_cm": 10.8,
+        "font_pt": 15,
+    },
+    "grade_subjects": {
+        "top_cm": 19.2,
+        "left_cm": 12.8,
+        "width_cm": 7.8,
+        "grade_num_font_pt": 42,
+        "grade_label_font_pt": 14,
+        "subjects_font_pt": 11,
+    },
+    "student": {
+        "top_cm": 26.8,
+        "left_cm": 4.3,
+        "width_cm": 15.5,
+        "height_cm": 0.9,
+        "font_pt": 9,
+        "baseline_offset_cm": 0.3,
+        "max_chars": 55,
+    },
+    "school": {
+        "top_cm": 27.8,
+        "left_cm": 3.5,
+        "width_cm": 9.2,
+        "height_cm": 0.9,
+        "font_pt": 9,
+        "max_chars": 38,
+    },
+    "class": {
+        "top_cm": 28.2,
+        "left_cm": 16.4,
+        "width_cm": 4.8,
+        "height_cm": 0.88,
+        "font_pt": 9,
+        "max_chars": 22,
+    },
 }
 
 
@@ -58,13 +103,14 @@ def load_afirme_cover_layout(path: Optional[str] = None) -> Dict[str, Any]:
 def student_overlay_coords_pt(layout: Dict[str, Any]) -> Tuple[float, float, int]:
     """Converte posição do aluno (cm do topo) para ReportLab (pt, origem inferior)."""
     student = layout.get("student") or {}
-    left_cm = float(student.get("left_cm", 7.5))
-    top_cm = float(student.get("top_cm", 21.8))
-    font_pt = int(student.get("font_pt", 10))
+    left_cm = float(student.get("left_cm", 4.3))
+    top_cm = float(student.get("top_cm", 26.8))
+    font_pt = int(student.get("font_pt", 9))
+    baseline_offset_cm = float(student.get("baseline_offset_cm", 0.3))
     x_pt = left_cm * CM_TO_PT
-    y_pt = A4_HEIGHT_PT - (top_cm * CM_TO_PT)
+    y_pt = A4_HEIGHT_PT - ((top_cm + baseline_offset_cm) * CM_TO_PT)
     return x_pt, y_pt, font_pt
 
 
 def student_max_chars(layout: Dict[str, Any]) -> int:
-    return int((layout.get("student") or {}).get("max_chars", 42))
+    return int((layout.get("student") or {}).get("max_chars", 55))

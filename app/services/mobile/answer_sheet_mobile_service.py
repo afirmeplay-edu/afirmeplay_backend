@@ -20,6 +20,49 @@ from app.report_analysis.answer_sheet_report_builder import (
 
 logger = logging.getLogger(__name__)
 
+_BROAD_GABARITO_SCOPE_TYPES = ("city", "school")
+
+
+def _load_gabaritos_for_school(
+    school_id: str,
+    gabarito_ids: Optional[Set[str]] = None,
+) -> List[AnswerSheetGabarito]:
+    """
+    Gabaritos com school_id na linha + escopo municipal/escola (school_id nulo).
+    Com gabarito_ids, inclui IDs explícitos do pacote mesmo sem school_id.
+    """
+    by_id: Dict[str, AnswerSheetGabarito] = {}
+
+    school_query = AnswerSheetGabarito.query.filter(
+        AnswerSheetGabarito.school_id == school_id,
+    )
+    if gabarito_ids:
+        school_query = school_query.filter(
+            AnswerSheetGabarito.id.in_(list(gabarito_ids))
+        )
+    for gab in school_query.order_by(AnswerSheetGabarito.created_at.desc()).limit(50).all():
+        by_id[str(gab.id)] = gab
+
+    if gabarito_ids:
+        missing = gabarito_ids - set(by_id.keys())
+        if missing:
+            for gab in AnswerSheetGabarito.query.filter(
+                AnswerSheetGabarito.id.in_(list(missing))
+            ).all():
+                by_id[str(gab.id)] = gab
+    else:
+        broad_query = AnswerSheetGabarito.query.filter(
+            AnswerSheetGabarito.school_id.is_(None),
+            AnswerSheetGabarito.scope_type.in_(_BROAD_GABARITO_SCOPE_TYPES),
+        )
+        for gab in broad_query.order_by(
+            AnswerSheetGabarito.created_at.desc()
+        ).limit(50).all():
+            by_id.setdefault(str(gab.id), gab)
+
+    ordered = sorted(by_id.values(), key=lambda g: g.created_at or "", reverse=True)
+    return ordered[:50]
+
 
 def serialize_gabarito_for_mobile(gabarito: AnswerSheetGabarito) -> Dict[str, Any]:
     """
@@ -107,77 +150,59 @@ def collect_gabaritos_for_school(
         - gabaritos_dict: {gabarito_id: dados_serializados}
         - student_gabarito_links: [(student_id, gabarito_id), ...]
     """
-    print(f"\n🎯 collect_gabaritos_for_school CHAMADA")
-    print(f"   School: {school_id}")
-    print(f"   Gabarito IDs filter: {gabarito_ids}")
-    print(f"   Class IDs filter: {class_ids}")
-    
-    # Buscar gabaritos da escola
-    query = AnswerSheetGabarito.query.filter(
-        AnswerSheetGabarito.school_id == school_id,
-    )
-    
-    # Filtrar por gabarito_ids específicos se fornecido
-    if gabarito_ids:
-        query = query.filter(AnswerSheetGabarito.id.in_(list(gabarito_ids)))
-    
-    gabaritos = query.order_by(AnswerSheetGabarito.created_at.desc()).limit(50).all()
-    print(f"   Gabaritos encontrados: {len(gabaritos)}")
-    
+    gabaritos = _load_gabaritos_for_school(school_id, gabarito_ids)
     if not gabaritos:
-        print(f"   ⚠️ Nenhum gabarito encontrado!")
         return {}, []
-    
+
     gabaritos_dict: Dict[str, Dict[str, Any]] = {}
     student_links: List[Tuple[str, str]] = []
-    
+
     for gabarito in gabaritos:
         gabarito_id = str(gabarito.id)
-        print(f"\n   📝 Processando gabarito {gabarito_id}: {gabarito.title}")
-        print(f"      Scope type: {gabarito.scope_type}")
         gabaritos_dict[gabarito_id] = serialize_gabarito_for_mobile(gabarito)
-        
-        # Buscar turmas-alvo do gabarito (via report scope)
+
         try:
             turmas_alvo = get_answer_sheet_target_classes_for_report(
                 gabarito, "school", school_id
             )
-            print(f"      ✅ Turmas-alvo: {len(turmas_alvo)}")
-            for t in turmas_alvo:
-                print(f"         - {t.id}: {t.name}")
         except Exception as e:
-            print(f"      ❌ ERRO ao buscar turmas: {e}")
-            import traceback
-            traceback.print_exc()
-            logger.warning(f"Erro ao buscar turmas-alvo para gabarito {gabarito_id}: {e}")
+            logger.warning(
+                "Erro ao buscar turmas-alvo para gabarito %s: %s",
+                gabarito_id,
+                e,
+            )
             turmas_alvo = []
-        
+
         if not turmas_alvo:
-            print(f"      ⚠️ SEM turmas-alvo, pulando este gabarito")
-            logger.warning(f"Gabarito {gabarito_id} sem turmas-alvo para escola {school_id}")
+            logger.warning(
+                "Gabarito %s sem turmas-alvo para escola %s",
+                gabarito_id,
+                school_id,
+            )
             continue
-        
-        # Filtrar turmas se class_ids foi especificado
+
         if class_ids:
-            turmas_antes = len(turmas_alvo)
             turmas_alvo = [t for t in turmas_alvo if str(t.id) in class_ids]
-            print(f"      🔍 Filtro class_ids aplicado: {turmas_antes} → {len(turmas_alvo)}")
-        
+
         if not turmas_alvo:
-            print(f"      ⚠️ SEM turmas após filtro class_ids!")
-            logger.warning(f"Gabarito {gabarito_id} sem turmas após filtro de class_ids")
+            logger.warning(
+                "Gabarito %s sem turmas após filtro de class_ids",
+                gabarito_id,
+            )
             continue
-        
-        # Buscar alunos das turmas-alvo
+
         turma_ids = [c.id for c in turmas_alvo]
         if turma_ids:
             alunos = Student.query.filter(Student.class_id.in_(turma_ids)).all()
-            print(f"      👥 Alunos encontrados: {len(alunos)}")
-            logger.info(f"Gabarito {gabarito_id}: {len(alunos)} alunos em {len(turma_ids)} turmas")
+            logger.info(
+                "Gabarito %s: %s alunos em %s turmas",
+                gabarito_id,
+                len(alunos),
+                len(turma_ids),
+            )
             for aluno in alunos:
                 student_links.append((str(aluno.id), gabarito_id))
-    
-    print(f"\n   ✅ RETORNO: {len(gabaritos_dict)} gabaritos, {len(student_links)} vínculos\n")
+
     return gabaritos_dict, student_links
 
 

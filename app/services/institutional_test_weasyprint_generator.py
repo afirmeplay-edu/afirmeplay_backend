@@ -20,7 +20,7 @@ import logging
 import json
 import gc
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from PIL import Image as PILImage
 from pypdf import PdfReader, PdfWriter
 
@@ -282,7 +282,7 @@ class InstitutionalTestWeasyPrintGenerator:
                                 alt['content'] = Markup(self._inline_question_images_html(str(alt['content']), q.get('images') or []))
 
         default_logo_base64 = self._load_default_logo()
-        afirme_cover_base64 = self._load_afirme_cover_base64()
+        afirme_cover_base64, afirme_cover_mime = self._load_afirme_cover_asset()
         cover_year = self._cover_year_from_test_data(test_data)
 
         # ════════════════════════════════════════════════════════════════
@@ -403,6 +403,7 @@ class InstitutionalTestWeasyPrintGenerator:
                 'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
                 'default_logo': default_logo_base64,
                 'afirme_cover_base64': afirme_cover_base64,
+                'afirme_cover_mime': afirme_cover_mime,
                 'cover_year': cover_year,
                 'include_cover': True,
                 'include_questions': False,
@@ -723,7 +724,7 @@ class InstitutionalTestWeasyPrintGenerator:
             
             # Carregar logo padrão (afirme_logo.png) se não houver logo do município
             default_logo_base64 = self._load_default_logo()
-            afirme_cover_base64 = self._load_afirme_cover_base64()
+            afirme_cover_base64, afirme_cover_mime = self._load_afirme_cover_asset()
             cover_year = self._cover_year_from_test_data(test_data)
             
             # Gerar questions_map: mapear número da questão para lista de letras das alternativas
@@ -773,6 +774,7 @@ class InstitutionalTestWeasyPrintGenerator:
                 'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
                 'default_logo': default_logo_base64,
                 'afirme_cover_base64': afirme_cover_base64,
+                'afirme_cover_mime': afirme_cover_mime,
                 'cover_year': cover_year,
             }
             
@@ -1440,19 +1442,30 @@ class InstitutionalTestWeasyPrintGenerator:
             logging.error(f"Erro ao carregar logo padrão: {str(e)}")
             return None
 
-    def _load_afirme_cover_base64(self) -> Optional[str]:
-        """Carrega capalimpa.png (capa Afirme) como base64 para WeasyPrint."""
+    def _load_afirme_cover_asset(self) -> Tuple[Optional[str], str]:
+        """Carrega nova_capa.jpeg (capa Afirme) como base64 + MIME para WeasyPrint."""
         try:
             assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets')
-            cover_path = os.path.join(assets_dir, 'capalimpa.png')
-            if os.path.exists(cover_path):
-                with open(cover_path, 'rb') as cover_file:
-                    return base64.b64encode(cover_file.read()).decode('utf-8')
-            logging.warning(f"Capa Afirme não encontrada em: {cover_path}")
-            return None
+            candidates = [
+                ('nova_capa.jpeg', 'image/jpeg'),
+                ('nova_capa.jpg', 'image/jpeg'),
+                ('capalimpa.png', 'image/png'),
+            ]
+            for filename, mime in candidates:
+                cover_path = os.path.join(assets_dir, filename)
+                if os.path.exists(cover_path):
+                    with open(cover_path, 'rb') as cover_file:
+                        return base64.b64encode(cover_file.read()).decode('utf-8'), mime
+            logging.warning('Capa Afirme não encontrada em %s', assets_dir)
+            return None, 'image/jpeg'
         except Exception as e:
             logging.error(f"Erro ao carregar capa Afirme: {str(e)}")
-            return None
+            return None, 'image/jpeg'
+
+    def _load_afirme_cover_base64(self) -> Optional[str]:
+        """Compatibilidade: retorna apenas o base64 da capa Afirme."""
+        cover_base64, _ = self._load_afirme_cover_asset()
+        return cover_base64
 
     def _cover_year_from_test_data(self, test_data: Optional[Dict]) -> int:
         """Ano exibido no subtítulo da capa (ex.: 9º ANO — 2026)."""
@@ -1470,8 +1483,8 @@ class InstitutionalTestWeasyPrintGenerator:
         self, student: Dict, test_data: Dict
     ) -> Optional[bytes]:
         """
-        Overlay ReportLab: nome do aluno no campo ALUNO(A) da capa Afirme.
-        Coordenadas calibradas sobre capalimpa.png (@page afirme-cover, A4 21×29,7 cm).
+        Overlay ReportLab: nome do aluno no campo ESTUDANTE da capa Afirme.
+        Coordenadas calibradas sobre nova_capa.jpeg (@page afirme-cover, A4 21×29,7 cm).
         """
         try:
             from reportlab.pdfgen.canvas import Canvas
@@ -1487,7 +1500,7 @@ class InstitutionalTestWeasyPrintGenerator:
             max_chars = student_max_chars(layout)
 
             FONT_NAME = 'Helvetica-Bold'
-            FONT_COLOR = HexColor('#5b2d8e')
+            FONT_COLOR = HexColor('#1a1a1a')
 
             if len(student_name) > max_chars:
                 student_name = student_name[: max_chars - 1] + '…'

@@ -64,7 +64,7 @@
 			/* Sem rodapé no cartão resposta */
 		}
 
-		/* Capa Afirme (capalimpa.png) — full bleed A4, sem margem @page */
+		/* Capa Afirme (nova_capa.jpeg) — full bleed A4, sem margem @page */
 		@page afirme-cover {
 			size: A4 portrait;
 			margin: 0;
@@ -99,61 +99,114 @@
 			pointer-events: none;
 		}
 
-		/* Título e subtítulo (coordenadas: app/assets/afirme_cover_layout.json) */
+		/* Coordenadas: app/assets/afirme_cover_layout.json */
+		.afirme-cover-logo-municipality {
+			position: absolute;
+			top: {{ afirme_cover_layout.municipality_logo.top_cm | default(0.45) }}cm;
+			left: {{ afirme_cover_layout.municipality_logo.left_cm | default(0.45) }}cm;
+			width: {{ afirme_cover_layout.municipality_logo.width_cm | default(7.0) }}cm;
+			height: {{ afirme_cover_layout.municipality_logo.height_cm | default(2.25) }}cm;
+			display: flex;
+			align-items: center;
+			justify-content: flex-start;
+			overflow: hidden;
+		}
+
+		.afirme-cover-logo-municipality img {
+			max-width: 100%;
+			max-height: 100%;
+			width: auto;
+			height: auto;
+			object-fit: contain;
+			display: block;
+		}
+
+		.afirme-cover-logo-company {
+			position: absolute;
+			top: {{ afirme_cover_layout.company_logo.top_cm | default(9.0) }}cm;
+			left: {{ afirme_cover_layout.company_logo.left_cm | default(0.75) }}cm;
+			width: {{ afirme_cover_layout.company_logo.width_cm | default(7.5) }}cm;
+			height: {{ afirme_cover_layout.company_logo.height_cm | default(7.5) }}cm;
+			border-radius: 50%;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			overflow: hidden;
+		}
+
+		.afirme-cover-logo-company img {
+			max-width: 88%;
+			max-height: 88%;
+			width: auto;
+			height: auto;
+			object-fit: contain;
+			display: block;
+		}
+
 		.afirme-cover-title {
 			position: absolute;
-			top: {{ afirme_cover_layout.title.top_cm | default(2.6) }}cm;
-			left: {{ afirme_cover_layout.title.left_cm | default(1.4) }}cm;
-			right: {{ afirme_cover_layout.title.right_cm | default(1.4) }}cm;
-			text-align: center;
-			font-family: "Times New Roman", Times, serif;
-			font-size: {{ afirme_cover_layout.title.font_pt | default(21) }}pt;
+			top: {{ afirme_cover_layout.title.top_cm | default(10.6) }}cm;
+			left: {{ afirme_cover_layout.title.left_cm | default(9.0) }}cm;
+			width: {{ afirme_cover_layout.title.width_cm | default(11.2) }}cm;
+			text-align: right;
+			font-family: "Helvetica", Arial, sans-serif;
+			font-size: {{ afirme_cover_layout.title.font_pt | default(15) }}pt;
 			font-weight: bold;
-			color: #5b2d8e;
+			color: #1a1a1a;
+			line-height: 1.2;
+		}
+
+		.afirme-cover-grade-subjects {
+			position: absolute;
+			top: {{ afirme_cover_layout.grade_subjects.top_cm | default(19.2) }}cm;
+			left: {{ afirme_cover_layout.grade_subjects.left_cm | default(12.8) }}cm;
+			width: {{ afirme_cover_layout.grade_subjects.width_cm | default(7.8) }}cm;
+			text-align: center;
+			color: #1a1a1a;
+			font-family: "Helvetica", Arial, sans-serif;
+		}
+
+		.afirme-cover-grade-line {
+			line-height: 1;
+			margin-bottom: 0.35cm;
+		}
+
+		.afirme-cover-grade-number {
+			font-size: {{ afirme_cover_layout.grade_subjects.grade_num_font_pt | default(42) }}pt;
+			font-weight: 800;
+			letter-spacing: -1px;
+		}
+
+		.afirme-cover-grade-label {
+			display: block;
+			font-size: {{ afirme_cover_layout.grade_subjects.grade_label_font_pt | default(14) }}pt;
+			font-weight: 700;
 			text-transform: uppercase;
-			line-height: 1.15;
 			letter-spacing: 0.5px;
+			margin-top: -0.15cm;
 		}
 
-		.afirme-cover-subtitle {
-			position: absolute;
-			top: {{ afirme_cover_layout.subtitle.top_cm | default(5.1) }}cm;
-			left: {{ afirme_cover_layout.subtitle.left_cm | default(1.4) }}cm;
-			right: {{ afirme_cover_layout.subtitle.right_cm | default(1.4) }}cm;
-			text-align: center;
-			font-family: "Helvetica", Arial, sans-serif;
-			font-size: {{ afirme_cover_layout.subtitle.font_pt | default(12.5) }}pt;
-			font-weight: bold;
-			color: #6d28d9;
-			text-transform: uppercase;
-			letter-spacing: 0.3px;
-		}
-
-		.afirme-cover-field-institution {
-			position: absolute;
-			top: {{ afirme_cover_layout.institution.top_cm | default(13.55) }}cm;
-			left: {{ afirme_cover_layout.institution.left_cm | default(5.05) }}cm;
-			right: {{ afirme_cover_layout.institution.right_cm | default(2.6) }}cm;
-			font-family: "Helvetica", Arial, sans-serif;
-			font-size: {{ afirme_cover_layout.institution.font_pt | default(10) }}pt;
-			font-weight: 600;
-			color: #5b2d8e;
+		.afirme-cover-subjects {
+			font-size: {{ afirme_cover_layout.grade_subjects.subjects_font_pt | default(11) }}pt;
+			font-weight: 700;
 			text-transform: uppercase;
 			line-height: 1.25;
-			white-space: normal;
 			overflow-wrap: break-word;
 			word-wrap: break-word;
 		}
 
-		.afirme-cover-field-grade {
+		.afirme-cover-field-school {
 			position: absolute;
-			top: {{ afirme_cover_layout.grade.top_cm | default(15.05) }}cm;
-			left: {{ afirme_cover_layout.grade.left_cm | default(3.25) }}cm;
-			width: {{ afirme_cover_layout.grade.width_cm | default(5.8) }}cm;
+			top: {{ afirme_cover_layout.school.top_cm | default(28.05) }}cm;
+			left: {{ afirme_cover_layout.school.left_cm | default(5.0) }}cm;
+			width: {{ afirme_cover_layout.school.width_cm | default(9.2) }}cm;
+			height: {{ afirme_cover_layout.school.height_cm | default(0.88) }}cm;
+			display: flex;
+			align-items: center;
 			font-family: "Helvetica", Arial, sans-serif;
-			font-size: {{ afirme_cover_layout.grade.font_pt | default(10) }}pt;
+			font-size: {{ afirme_cover_layout.school.font_pt | default(9) }}pt;
 			font-weight: 600;
-			color: #5b2d8e;
+			color: #1a1a1a;
 			text-transform: uppercase;
 			overflow: hidden;
 			text-overflow: ellipsis;
@@ -162,20 +215,23 @@
 
 		.afirme-cover-field-class {
 			position: absolute;
-			top: {{ afirme_cover_layout.class.top_cm | default(15.05) }}cm;
-			left: {{ afirme_cover_layout.class.left_cm | default(11.55) }}cm;
-			width: {{ afirme_cover_layout.class.width_cm | default(5.8) }}cm;
+			top: {{ afirme_cover_layout.class.top_cm | default(28.05) }}cm;
+			left: {{ afirme_cover_layout.class.left_cm | default(16.1) }}cm;
+			width: {{ afirme_cover_layout.class.width_cm | default(4.8) }}cm;
+			height: {{ afirme_cover_layout.class.height_cm | default(0.88) }}cm;
+			display: flex;
+			align-items: center;
 			font-family: "Helvetica", Arial, sans-serif;
-			font-size: {{ afirme_cover_layout.class.font_pt | default(10) }}pt;
+			font-size: {{ afirme_cover_layout.class.font_pt | default(9) }}pt;
 			font-weight: 600;
-			color: #5b2d8e;
+			color: #1a1a1a;
 			text-transform: uppercase;
 			overflow: hidden;
 			text-overflow: ellipsis;
 			white-space: nowrap;
 		}
 
-		/* ALUNO(A): preenchido via overlay ReportLab por aluno */
+		/* ESTUDANTE: preenchido via overlay ReportLab por aluno */
 
 			* {
 				margin: 0;
@@ -1233,24 +1289,44 @@
 		<!-- Capa Institucional -->
 		{% if include_cover %}
 		{% if afirme_cover_base64 %}
+		{% set cover_logo = test_data.municipality_logo or default_logo %}
+		{% set grade_name = test_data.grade_name or '' %}
+		{% set grade_parts = grade_name.split() %}
+		{% set subject_names = questions_by_subject.keys() | list %}
 		<div class="afirme-cover-page">
 			<img
 				class="afirme-cover-bg"
-				src="data:image/png;base64,{{ afirme_cover_base64 }}"
+				src="data:{{ afirme_cover_mime | default('image/jpeg') }};base64,{{ afirme_cover_base64 }}"
 				alt="" />
 			<div class="afirme-cover-overlay">
+				{% if cover_logo %}
+				<div class="afirme-cover-logo-municipality">
+					<img src="data:image/png;base64,{{ cover_logo }}" alt="" />
+				</div>
+				<div class="afirme-cover-logo-company">
+					<img src="data:image/png;base64,{{ cover_logo }}" alt="" />
+				</div>
+				{% endif %}
 				<div class="afirme-cover-title">
-					{{ test_data.title or 'TÍTULO DA AVALIAÇÃO' }}
+					{{ test_data.title or 'Título da avaliação' }}
 				</div>
-				<div class="afirme-cover-subtitle">
-					{% if test_data.grade_name %}{{ test_data.grade_name }} —
-					{% endif %}{{ cover_year or '' }}
+				<div class="afirme-cover-grade-subjects">
+					{% if grade_name %}
+					<div class="afirme-cover-grade-line">
+						<span class="afirme-cover-grade-number">{{ grade_parts[0] }}</span>
+						{% if grade_parts|length > 1 %}
+						<span class="afirme-cover-grade-label">{{ grade_parts[1:]|join(' ') | upper }}</span>
+						{% endif %}
+					</div>
+					{% endif %}
+					{% if subject_names %}
+					<div class="afirme-cover-subjects">
+						{{ subject_names | join(' E ') | upper }}
+					</div>
+					{% endif %}
 				</div>
-				<div class="afirme-cover-field-institution">
+				<div class="afirme-cover-field-school">
 					{{ student.school_name or test_data.institution or '' }}
-				</div>
-				<div class="afirme-cover-field-grade">
-					{{ test_data.grade_name or '' }}
 				</div>
 				<div class="afirme-cover-field-class">
 					{{ student.class_name or '' }}

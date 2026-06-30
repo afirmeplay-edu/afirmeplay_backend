@@ -4,6 +4,7 @@ from app.routes.mobile import sync_routes  # noqa: F401
 from app.routes.mobile import offline_pack_routes  # noqa: F401
 from app.routes.mobile import discovery_routes  # noqa: F401
 from app.routes.mobile import answer_sheet_routes  # noqa: F401
+from app.routes.mobile import socioeconomic_form_routes  # noqa: F401
 from app.routes.mobile import admin_routes  # noqa: F401
 
 __all__ = ["mobile_bp"]

@@ -40,6 +40,10 @@ from app.services.mobile.student_bundle_serializer import (
 from app.services.mobile.answer_sheet_mobile_service import (
     collect_gabaritos_for_school,
 )
+from app.services.mobile.socioeconomic_form_mobile_service import (
+    build_forms_content_versions,
+    collect_forms_for_school,
+)
 
 from app.services.aplicador_user_service import collect_aplicadores_for_city
 
@@ -266,27 +270,53 @@ def collect_filtered_scope(
     class_ids: Optional[Set[str]],
     student_ids: Optional[Set[str]],
     gabarito_ids: Optional[Set[str]],
-) -> Tuple[Dict[str, Test], List[Tuple[str, str]], Dict[str, Dict[str, Any]], List[Tuple[str, str]]]:
+    form_ids: Optional[Set[str]] = None,
+) -> Tuple[
+    Dict[str, Test],
+    List[Tuple[str, str]],
+    Dict[str, Dict[str, Any]],
+    List[Tuple[str, str]],
+    Dict[str, Dict[str, Any]],
+    List[Tuple[str, str]],
+    List[Tuple[str, str]],
+]:
     """
-    Agrega provas online e gabaritos de cartões conforme filtros.
-    
+    Agrega provas online, gabaritos de cartões e formulários socioeconômicos conforme filtros.
+
     Returns:
-        Tupla (all_tests, test_links, gabaritos_map, gabarito_links)
+        Tupla (
+            all_tests, test_links, gabaritos_map, gabarito_links,
+            forms_map, student_form_links, user_form_links,
+        )
     """
     all_tests: Dict[str, Test] = {}
     links_out: List[Tuple[str, str]] = []
     seen: Set[Tuple[str, str]] = set()
     pending: List[Tuple[str, str, str]] = []
     all_stu_ids: Set[str] = set()
-    
-    # Coletar gabaritos de todas as escolas
+
     all_gabaritos: Dict[str, Dict[str, Any]] = {}
     all_gabarito_links: List[Tuple[str, str]] = []
+    all_forms: Dict[str, Dict[str, Any]] = {}
+    all_student_form_links: List[Tuple[str, str]] = []
+    all_user_form_links: List[Tuple[str, str]] = []
 
     for sch_id in school_ids:
         try:
-            _, tests_map, school_links, gabaritos_map, gabarito_links = collect_school_scope(
-                sch_id, gabarito_ids_filter=gabarito_ids, class_ids_filter=class_ids
+            (
+                _,
+                tests_map,
+                school_links,
+                gabaritos_map,
+                gabarito_links,
+                forms_map,
+                student_form_links,
+                user_form_links,
+            ) = collect_school_scope(
+                sch_id,
+                gabarito_ids_filter=gabarito_ids,
+                class_ids_filter=class_ids,
+                form_ids_filter=form_ids,
             )
         except ValueError:
             continue
@@ -307,6 +337,14 @@ def collect_filtered_scope(
         for stu_id, gab_id in gabarito_links:
             all_stu_ids.add(stu_id)
             all_gabarito_links.append((stu_id, gab_id))
+
+        for form_id, form_data in forms_map.items():
+            all_forms[form_id] = form_data
+        for stu_id, fid in student_form_links:
+            all_stu_ids.add(stu_id)
+            all_student_form_links.append((stu_id, fid))
+        for uid, fid in user_form_links:
+            all_user_form_links.append((uid, fid))
 
     students_by_id: Dict[str, Student] = {}
     if all_stu_ids:
@@ -346,7 +384,38 @@ def collect_filtered_scope(
         seen_gab.add(key)
         filtered_gabarito_links.append(key)
 
-    return all_tests, links_out, all_gabaritos, filtered_gabarito_links
+    filtered_student_form_links: List[Tuple[str, str]] = []
+    seen_form: Set[Tuple[str, str]] = set()
+    for stu_id, fid in all_student_form_links:
+        stu = students_by_id.get(stu_id)
+        if not stu:
+            continue
+        if student_ids and stu_id not in student_ids:
+            continue
+        key = (stu_id, fid)
+        if key in seen_form:
+            continue
+        seen_form.add(key)
+        filtered_student_form_links.append(key)
+
+    filtered_user_form_links: List[Tuple[str, str]] = []
+    seen_user_form: Set[Tuple[str, str]] = set()
+    for uid, fid in all_user_form_links:
+        key = (uid, fid)
+        if key in seen_user_form:
+            continue
+        seen_user_form.add(key)
+        filtered_user_form_links.append(key)
+
+    return (
+        all_tests,
+        links_out,
+        all_gabaritos,
+        filtered_gabarito_links,
+        all_forms,
+        filtered_student_form_links,
+        filtered_user_form_links,
+    )
 
 
 def _schools_touched_from_links(
@@ -717,24 +786,40 @@ def redeem_offline_pack_page(
         class_ids = _optional_id_set("class_ids", user_sc)
         student_ids = _optional_id_set("student_ids", user_sc)
         gabarito_ids = _optional_id_set("gabarito_ids", user_sc)
+        form_ids = _optional_id_set("form_ids", user_sc)
 
         logger.info(
             f"[OFFLINE-PACK-REDEEM] Filtros aplicados: "
             f"schools={len(school_ids)} tests={len(test_ids) if test_ids else 0} "
-            f"classes={len(class_ids) if class_ids else 0} gabaritos={len(gabarito_ids) if gabarito_ids else 0}"
+            f"classes={len(class_ids) if class_ids else 0} gabaritos={len(gabarito_ids) if gabarito_ids else 0} "
+            f"forms={len(form_ids) if form_ids else 0}"
         )
 
-        tests_map, links, gabaritos_map, gabarito_links = collect_filtered_scope(
-            school_ids, test_ids, class_ids, student_ids, gabarito_ids
+        (
+            tests_map,
+            links,
+            gabaritos_map,
+            gabarito_links,
+            forms_map,
+            student_form_links,
+            user_form_links,
+        ) = collect_filtered_scope(
+            school_ids, test_ids, class_ids, student_ids, gabarito_ids, form_ids
         )
-        
+
         logger.info(
             f"[OFFLINE-PACK-REDEEM] Resultado: "
             f"tests={len(tests_map)} test_links={len(links)} "
-            f"gabaritos={len(gabaritos_map)} gabarito_links={len(gabarito_links)}"
+            f"gabaritos={len(gabaritos_map)} gabarito_links={len(gabarito_links)} "
+            f"forms={len(forms_map)} student_form_links={len(student_form_links)} "
+            f"user_form_links={len(user_form_links)}"
         )
-        
-        student_keys = sorted({sid for sid, _ in links} | {sid for sid, _ in gabarito_links})
+
+        student_keys = sorted(
+            {sid for sid, _ in links}
+            | {sid for sid, _ in gabarito_links}
+            | {sid for sid, _ in student_form_links}
+        )
         schools_touched = _schools_touched_from_links(links, school_ids)
 
         _reserve_device_slot(pack, device_id)
@@ -744,8 +829,11 @@ def redeem_offline_pack_page(
         tests_payload, content_versions, questions_by_test = (
             build_tests_questions_payload(tests_map)
         )
+        form_content_versions = build_forms_content_versions(forms_map)
         links_out = [{"student_id": a, "test_id": b} for a, b in links]
         gabarito_links_out = [{"student_id": a, "gabarito_id": b} for a, b in gabarito_links]
+        student_form_links_out = [{"student_id": a, "form_id": b} for a, b in student_form_links]
+        user_form_links_out = [{"user_id": a, "form_id": b} for a, b in user_form_links]
         aplicadores_payload = collect_aplicadores_for_city(city_id)
     else:
         if not MobileOfflinePackRedeemDevice.query.filter_by(
@@ -762,10 +850,23 @@ def redeem_offline_pack_page(
             class_ids = _optional_id_set("class_ids", user_sc)
             student_ids = _optional_id_set("student_ids", user_sc)
             gabarito_ids = _optional_id_set("gabarito_ids", user_sc)
-            _, links, _, gabarito_links = collect_filtered_scope(
-                school_ids, test_ids, class_ids, student_ids, gabarito_ids
+            form_ids = _optional_id_set("form_ids", user_sc)
+            (
+                _,
+                links,
+                _,
+                gabarito_links,
+                _,
+                student_form_links,
+                _,
+            ) = collect_filtered_scope(
+                school_ids, test_ids, class_ids, student_ids, gabarito_ids, form_ids
             )
-            student_keys = sorted({sid for sid, _ in links} | {sid for sid, _ in gabarito_links})
+            student_keys = sorted(
+                {sid for sid, _ in links}
+                | {sid for sid, _ in gabarito_links}
+                | {sid for sid, _ in student_form_links}
+            )
 
         versions, valid_min = _bundle_versions_from_pack(pack)
         tests_payload = {}
@@ -774,6 +875,10 @@ def redeem_offline_pack_page(
         links_out = []
         gabarito_links_out = []
         gabaritos_map = {}
+        forms_map = {}
+        student_form_links_out = []
+        user_form_links_out = {}
+        form_content_versions = {}
         aplicadores_payload = []
 
     if student_keys:
@@ -815,7 +920,11 @@ def redeem_offline_pack_page(
         "questions_by_test": questions_by_test if include_full else {},
         "test_content_version": content_versions if include_full else {},
         "answer_sheet_gabaritos": gabaritos_map if include_full else {},
-        "student_gabarito_links": gabarito_links_out if include_full else [],
+        "student_gabarito_links": gabarito_links_out if include_full else {},
+        "socioeconomic_forms": forms_map if include_full else {},
+        "student_form_links": student_form_links_out if include_full else [],
+        "user_form_links": user_form_links_out if include_full else [],
+        "form_content_version": form_content_versions if include_full else {},
     }
     if not include_full:
         body["includes_full_payload"] = False

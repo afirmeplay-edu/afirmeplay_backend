@@ -24,6 +24,10 @@ from app.services.mobile.student_bundle_serializer import (
 from app.services.mobile.answer_sheet_mobile_service import (
     collect_gabaritos_for_school,
 )
+from app.services.mobile.socioeconomic_form_mobile_service import (
+    build_forms_content_versions,
+    collect_forms_for_school,
+)
 from app.utils.response_formatters import _get_all_subjects_from_test
 
 logger = logging.getLogger(__name__)
@@ -108,17 +112,26 @@ def collect_school_scope(
     school_id: str,
     gabarito_ids_filter: Optional[Set[str]] = None,
     class_ids_filter: Optional[Set[str]] = None,
-) -> Tuple[List[str], Dict[str, Test], List[Tuple[str, str]], Dict[str, Dict[str, Any]], List[Tuple[str, str]]]:
+    form_ids_filter: Optional[Set[str]] = None,
+) -> Tuple[
+    List[str],
+    Dict[str, Test],
+    List[Tuple[str, str]],
+    Dict[str, Dict[str, Any]],
+    List[Tuple[str, str]],
+    Dict[str, Dict[str, Any]],
+    List[Tuple[str, str]],
+    List[Tuple[str, str]],
+]:
     """
-    Coleta escopo completo de uma escola: testes online + gabaritos de cartões resposta.
-    
-    Args:
-        school_id: ID da escola
-        gabarito_ids_filter: IDs específicos de gabaritos a incluir (opcional)
-        class_ids_filter: IDs de turmas para filtrar (opcional)
-    
+    Coleta escopo completo de uma escola: testes online, gabaritos e formulários socioeconômicos.
+
     Returns:
-        Tupla (test_ids, tests_map, student_test_links, gabaritos_map, student_gabarito_links)
+        Tupla (
+            test_ids, tests_map, student_test_links,
+            gabaritos_map, student_gabarito_links,
+            forms_map, student_form_links, user_form_links,
+        )
     """
     school = School.query.get(school_id)
     if not school:
@@ -126,7 +139,7 @@ def collect_school_scope(
 
     class_ids = [c.id for c in Class.query.filter_by(school_id=school_id).all()]
     if not class_ids:
-        return [], {}, [], {}, []
+        return [], {}, [], {}, [], {}, [], []
 
     # Coletar testes online (já existente)
     class_tests = ClassTest.query.filter(ClassTest.class_id.in_(class_ids)).all()
@@ -157,8 +170,23 @@ def collect_school_scope(
         gabarito_ids=gabarito_ids_filter,
         class_ids=class_ids_filter,
     )
-    
-    return test_ids, tests, student_test_links, gabaritos_map, student_gabarito_links
+
+    forms_map, student_form_links, user_form_links = collect_forms_for_school(
+        school_id,
+        form_ids=form_ids_filter,
+        class_ids=class_ids_filter,
+    )
+
+    return (
+        test_ids,
+        tests,
+        student_test_links,
+        gabaritos_map,
+        student_gabarito_links,
+        forms_map,
+        student_form_links,
+        user_form_links,
+    )
 
 
 def build_tests_questions_payload(
@@ -258,15 +286,31 @@ def build_bundle_response(
             "student_test_links": [],
             "answer_sheet_gabaritos": {},
             "student_gabarito_links": [],
+            "socioeconomic_forms": {},
+            "student_form_links": [],
+            "user_form_links": [],
+            "form_content_version": {},
         }
 
     if page == 1:
-        _, tests_map, student_links, gabaritos_map, student_gabarito_links = collect_school_scope(school_id)
+        (
+            _,
+            tests_map,
+            student_links,
+            gabaritos_map,
+            student_gabarito_links,
+            forms_map,
+            student_form_links,
+            user_form_links,
+        ) = collect_school_scope(school_id)
         tests_payload, content_versions, questions_by_test = (
             build_tests_questions_payload(tests_map)
         )
+        form_content_versions = build_forms_content_versions(forms_map)
         links_out = [{"student_id": a, "test_id": b} for a, b in student_links]
         gabarito_links_out = [{"student_id": a, "gabarito_id": b} for a, b in student_gabarito_links]
+        student_form_links_out = [{"student_id": a, "form_id": b} for a, b in student_form_links]
+        user_form_links_out = [{"user_id": a, "form_id": b} for a, b in user_form_links]
         students, total_students, total_pages = serialize_students_page(
             school_id, page, page_size
         )
@@ -286,6 +330,10 @@ def build_bundle_response(
             "student_test_links": links_out,
             "answer_sheet_gabaritos": gabaritos_map,
             "student_gabarito_links": gabarito_links_out,
+            "socioeconomic_forms": forms_map,
+            "student_form_links": student_form_links_out,
+            "user_form_links": user_form_links_out,
+            "form_content_version": form_content_versions,
         }
 
     students, total_students, total_pages = serialize_students_page(
@@ -307,5 +355,9 @@ def build_bundle_response(
         "student_test_links": [],
         "answer_sheet_gabaritos": {},
         "student_gabarito_links": [],
+        "socioeconomic_forms": {},
+        "student_form_links": [],
+        "user_form_links": [],
+        "form_content_version": {},
         "includes_full_payload": False,
     }

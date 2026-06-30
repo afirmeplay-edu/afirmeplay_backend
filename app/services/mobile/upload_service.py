@@ -24,7 +24,7 @@ def get_bundle_generation(
 
 
 def validate_student_test_link(student_id: str, test_id: str, school_id: str) -> bool:
-    _, _, links = collect_school_scope(school_id)
+    _, _, links, *_ = collect_school_scope(school_id)
     return (student_id, test_id) in links
 
 

@@ -7,7 +7,10 @@ e calcular proficiência e classificação por disciplina e média geral.
 
 import logging
 from typing import Dict, List, Any, Tuple, Optional
-from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+from app.services.cartao_resposta.course_name_resolver import (
+    infer_course_name_from_grade,
+    resolve_grade_name_for_proficiency,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +71,7 @@ def course_name_and_has_matematica_for_gabarito(gabarito_id: Optional[str]) -> T
         gab = AnswerSheetGabarito.query.get(str(gabarito_id).strip())
         if not gab:
             return infer_course_name_from_grade(""), False
-        grade_name = (gab.grade_name or gab.title or "").strip()
+        grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gab)
         course_name = infer_course_name_from_grade(grade_name)
         bc = getattr(gab, "blocks_config", None) or {}
         if isinstance(bc, str):
@@ -96,6 +99,8 @@ def calcular_proficiencia_por_disciplina(
     validated_answers: Dict[int, Optional[str]],
     gabarito_dict: Dict[int, str],
     grade_name: str = '',
+    gabarito_obj: Any = None,
+    student: Any = None,
 ) -> Tuple[Dict[str, Any], float, str, bool]:
     """
     Calcula proficiência e classificação por disciplina e média geral.
@@ -104,7 +109,9 @@ def calcular_proficiencia_por_disciplina(
         blocks_config: Config do gabarito (topology.blocks ou blocks com subject_id).
         validated_answers: Respostas detectadas { num_questao: "A"|None, ... }.
         gabarito_dict: Respostas corretas { num_questao: "A", ... }.
-        grade_name: Nome da série para inferir nível do curso.
+        grade_name: Nome da série para inferir nível do curso (opcional se gabarito_obj/student).
+        gabarito_obj: Gabarito (grade_name, grade_id, scope_snapshot, title).
+        student: Aluno (fallback: série da turma).
 
     Returns:
         (proficiency_by_subject, proficiency_media, grade_media, classification_geral, has_matematica)
@@ -115,7 +122,12 @@ def calcular_proficiencia_por_disciplina(
     """
     from app.services.evaluation_calculator import EvaluationCalculator
 
-    course_name = infer_course_name_from_grade(grade_name)
+    effective_grade_name = resolve_grade_name_for_proficiency(
+        gabarito_obj=gabarito_obj,
+        grade_name=grade_name,
+        student=student,
+    )
+    course_name = infer_course_name_from_grade(effective_grade_name)
     proficiency_by_subject = {}
     blocks = _extract_blocks_with_questions(blocks_config)
     has_matematica = infer_has_matematica_from_blocks_config(blocks_config)

@@ -133,6 +133,7 @@ def run_recalculate_answer_sheet_results_for_gabarito(
             fields = recalculate_answer_sheet_result_fields(
                 gabarito_obj=gabarito,
                 detected_answers_raw=res.detected_answers,
+                student=student,
             )
             for k, v in fields.items():
                 setattr(res, k, v)

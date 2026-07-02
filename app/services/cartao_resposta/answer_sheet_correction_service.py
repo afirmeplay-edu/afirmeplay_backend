@@ -120,16 +120,21 @@ class AnswerSheetCorrectionService:
             percentage = correction['score_percentage']
             
             from app.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
-            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+            from app.services.cartao_resposta.course_name_resolver import resolve_grade_name_for_proficiency
             blocks_config = getattr(gabarito_obj, 'blocks_config', None) or {}
-            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            student_obj = Student.query.get(student_id) if student_id else None
+            grade_name = resolve_grade_name_for_proficiency(
+                gabarito_obj=gabarito_obj,
+                student=student_obj,
+            )
             proficiency_by_subject, proficiency, grade, classification, has_matematica = calcular_proficiencia_por_disciplina(
                 blocks_config=blocks_config,
                 validated_answers=validated_answers,
                 gabarito_dict=gabarito,
                 grade_name=grade_name,
+                gabarito_obj=gabarito_obj,
+                student=student_obj,
             )
-            course_name = infer_course_name_from_grade(grade_name)
             
             # 11. Salvar resultado em AnswerSheetResult
             saved_result = self._salvar_resultado(

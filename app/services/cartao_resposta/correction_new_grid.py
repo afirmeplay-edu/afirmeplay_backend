@@ -2139,10 +2139,12 @@ class AnswerSheetCorrectionNewGrid:
         """
         try:
             from app.services.evaluation_calculator import EvaluationCalculator
-            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
-            
-            # Inferir nome do curso (string) baseado no grade_name
-            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            from app.services.cartao_resposta.course_name_resolver import (
+                infer_course_name_from_grade,
+                resolve_grade_name_for_proficiency,
+            )
+
+            grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gabarito_obj)
             course_name = infer_course_name_from_grade(grade_name)
             
             # Inferir nome da disciplina (string) baseado no title
@@ -2614,15 +2616,26 @@ class AnswerSheetCorrectionNewGrid:
                     except (ValueError, TypeError):
                         pass
                 from app.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
-                from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
-                grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+                from app.services.cartao_resposta.course_name_resolver import resolve_grade_name_for_proficiency
+                student_obj = None
+                if student_id:
+                    try:
+                        from app.models.student import Student
+                        student_obj = Student.query.get(student_id)
+                    except Exception:
+                        student_obj = None
+                grade_name = resolve_grade_name_for_proficiency(
+                    gabarito_obj=gabarito_obj,
+                    student=student_obj,
+                )
                 proficiency_by_subject, proficiency, grade, classification, has_matematica = calcular_proficiencia_por_disciplina(
                     blocks_config=blocks_config,
                     validated_answers=detected_answers,
                     gabarito_dict=gabarito_dict,
                     grade_name=grade_name,
+                    gabarito_obj=gabarito_obj,
+                    student=student_obj,
                 )
-                course_name = infer_course_name_from_grade(grade_name)
             
             # Decidir onde salvar
             if gabarito_id and not test_id:

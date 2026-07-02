@@ -99,6 +99,7 @@ def recalculate_answer_sheet_result_fields(
     *,
     gabarito_obj: Any,
     detected_answers_raw: Any,
+    student: Any = None,
 ) -> Dict[str, Any]:
     """
     Recalcula campos derivados para AnswerSheetResult, sem depender de imagem/OMR.
@@ -106,6 +107,9 @@ def recalculate_answer_sheet_result_fields(
     """
     from app.services.cartao_resposta.proficiency_by_subject import (
         calcular_proficiencia_por_disciplina,
+    )
+    from app.services.cartao_resposta.course_name_resolver import (
+        resolve_grade_name_for_proficiency,
     )
 
     gabarito_dict = _normalize_question_map(getattr(gabarito_obj, "correct_answers", None))
@@ -121,7 +125,10 @@ def recalculate_answer_sheet_result_fields(
     correction = calcular_correcao(detected_answers, gabarito_dict)
 
     blocks_config = getattr(gabarito_obj, "blocks_config", None) or {}
-    grade_name = (getattr(gabarito_obj, "grade_name", None) or getattr(gabarito_obj, "title", None) or "") or ""
+    grade_name = resolve_grade_name_for_proficiency(
+        gabarito_obj=gabarito_obj,
+        student=student,
+    )
 
     proficiency_by_subject, proficiency, grade, classification, _has_matematica = (
         calcular_proficiencia_por_disciplina(
@@ -129,6 +136,8 @@ def recalculate_answer_sheet_result_fields(
             validated_answers=detected_answers,
             gabarito_dict=gabarito_dict,
             grade_name=grade_name,
+            gabarito_obj=gabarito_obj,
+            student=student,
         )
     )
 

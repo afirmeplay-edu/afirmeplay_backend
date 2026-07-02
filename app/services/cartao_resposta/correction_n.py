@@ -5202,9 +5202,12 @@ class AnswerSheetCorrectionN:
         """
         try:
             from app.services.evaluation_calculator import EvaluationCalculator
-            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+            from app.services.cartao_resposta.course_name_resolver import (
+                infer_course_name_from_grade,
+                resolve_grade_name_for_proficiency,
+            )
 
-            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gabarito_obj)
             course_name = infer_course_name_from_grade(grade_name)
 
             title = gabarito_obj.title or ''

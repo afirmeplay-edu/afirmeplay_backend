@@ -65,7 +65,7 @@ from app.report_analysis.answer_sheet_report_builder import (
 from app.routes.answer_sheet_evaluation_listing import (
     answer_sheet_target_classes_visible_for_user,
 )
-from app.routes.report_routes import _obter_disciplinas_avaliacao
+from app.routes.report_routes import _obter_disciplinas_avaliacao, _obter_nome_curso
 from app.services.evaluation_calculator import EvaluationCalculator
 from app.services.evaluation_result_snapshot import (
     merge_participant_student_ids,
@@ -1660,6 +1660,94 @@ def _answer_sheet_acertos_data(
 
 
 # ---------------------------------------------------------------------------
+# Rótulos de faixa/curso (títulos narrativos do relatório)
+# ---------------------------------------------------------------------------
+
+
+def _build_intervalo_from_series_colunas(series_colunas: List[Dict[str, str]]) -> Optional[str]:
+    nomes = [
+        str(col.get("serie_nome") or "").strip()
+        for col in (series_colunas or [])
+        if str(col.get("serie_nome") or "").strip()
+    ]
+    if not nomes:
+        return None
+    if len(nomes) == 1:
+        return nomes[0]
+    return ", ".join(nomes)
+
+
+def _unique_curso_nome_from_itens(itens_selecionados: List[Dict[str, Any]]) -> Optional[str]:
+    nomes: Set[str] = set()
+    for item in itens_selecionados or []:
+        for key in ("curso_nome", "curso"):
+            raw = item.get(key)
+            if not raw or not str(raw).strip():
+                continue
+            text = str(raw).strip()
+            # Ignora UUID em curso legado; curso_nome sempre é legível.
+            if key == "curso" and _looks_like_uuid(text):
+                continue
+            nomes.add(text)
+            break
+    if len(nomes) == 1:
+        return next(iter(nomes))
+    return None
+
+
+def _looks_like_uuid(value: str) -> bool:
+    import re
+
+    return bool(
+        re.match(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            value,
+            re.I,
+        )
+    )
+
+
+def _build_faixa_avaliacao(
+    itens_selecionados: List[Dict[str, Any]],
+    series_colunas: List[Dict[str, str]],
+) -> Optional[Dict[str, str]]:
+    curso = _unique_curso_nome_from_itens(itens_selecionados)
+    intervalo = _build_intervalo_from_series_colunas(series_colunas)
+    if curso and intervalo:
+        return {"titulo": f"{curso} ({intervalo})"}
+    if intervalo:
+        return {"titulo": intervalo}
+    if curso:
+        return {"titulo": curso}
+    return None
+
+
+def _digital_item_selecionado(test: Test) -> Dict[str, Any]:
+    return {
+        "id": str(test.id),
+        "titulo": test.title,
+        "disciplinas": sorted(_disciplinas_from_test(test)),
+        "curso": test.course,
+        "curso_nome": _obter_nome_curso(test),
+    }
+
+
+def _answer_sheet_item_selecionado(gab: AnswerSheetGabarito) -> Dict[str, Any]:
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        course_name_and_has_matematica_for_gabarito,
+    )
+
+    course_name, _ = course_name_and_has_matematica_for_gabarito(str(gab.id))
+    return {
+        "id": str(gab.id),
+        "titulo": gab.title,
+        "disciplinas": sorted(_disciplinas_from_gabarito(gab)),
+        "serie": gab.grade_name,
+        "curso_nome": course_name,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Payload completo
 # ---------------------------------------------------------------------------
 
@@ -1693,6 +1781,9 @@ def _assemble_payload(
         },
         "distribuicao_niveis_proficiencia": distribuicao_niveis_proficiencia,
     }
+    faixa = _build_faixa_avaliacao(itens_selecionados, ctx.series_colunas)
+    if faixa:
+        payload["faixa_avaliacao"] = faixa
     if ctx.comparativo_municipio:
         payload["comparativo"] = {
             "ativo": True,
@@ -1851,10 +1942,7 @@ def build_digital_consolidated_report(
     if missing:
         raise ValueError(f"Avaliações não encontradas: {', '.join(missing)}")
     tests_by_id = {str(t.id): t for t in tests}
-    itens = [
-        {"id": str(t.id), "titulo": t.title, "disciplinas": sorted(_disciplinas_from_test(t)), "curso": t.course}
-        for t in tests
-    ]
+    itens = [_digital_item_selecionado(t) for t in tests]
 
     class_tests_linhas = _fetch_digital_class_tests(test_ids, municipio_id, escola_id, restrict)
     if not class_tests_linhas:
@@ -1895,7 +1983,7 @@ def build_digital_consolidated_report(
     for t in tests:
         all_disciplines |= _disciplinas_from_test(t)
     discipline_list = sorted(all_disciplines) + [GERAL_KEY]
-    course_name = tests[0].course or "Anos Iniciais"
+    course_name = _obter_nome_curso(tests[0]) if tests else "Anos Iniciais"
     has_mat = any("matem" in d.lower() for d in all_disciplines)
 
     return _assemble_payload(
@@ -1992,10 +2080,7 @@ def build_answer_sheet_consolidated_report(
     if missing:
         raise ValueError(f"Gabaritos não encontrados: {', '.join(missing)}")
     gabs_by_id = {str(g.id): g for g in gabs_linhas}
-    itens = [
-        {"id": str(g.id), "titulo": g.title, "disciplinas": sorted(_disciplinas_from_gabarito(g)), "serie": g.grade_name}
-        for g in gabs_linhas
-    ]
+    itens = [_answer_sheet_item_selecionado(g) for g in gabs_linhas]
 
     if not all_classes_linhas:
         return _empty_payload("cartao_resposta", filtros, itens)

@@ -8,17 +8,181 @@ from app.models.evaluationResult import EvaluationResult
 from app.models.student import Student
 from app.models.test import Test
 from app.models.studentClass import Class
+from app.models.school import School
+from sqlalchemy import func, cast
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import joinedload
 import base64
 import logging
 import mimetypes
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from app.services.storage.minio_service import MinIOService
+from app.utils.response_formatters import _get_all_subjects_from_test
 
 logger = logging.getLogger(__name__)
+
+
+def _approved_student_location_fields(student: Student) -> Dict[str, Optional[str]]:
+    """Resolve escola, série e turma do aluno (dados atuais, com fallback pela turma)."""
+    class_obj = student.class_ if student.class_id else None
+    if student.class_id and not class_obj:
+        class_obj = Class.query.get(student.class_id)
+
+    school = student.school
+    if not school and class_obj:
+        school = class_obj.school
+
+    grade = student.grade
+    if not grade and class_obj and class_obj.grade_id:
+        grade = class_obj.grade
+
+    class_name = class_obj.name if class_obj else None
+    school_id = student.school_id
+    if not school_id and class_obj and class_obj.school_id:
+        school_id = class_obj.school_id
+    grade_id = str(student.grade_id) if student.grade_id else None
+    if not grade_id and class_obj and class_obj.grade_id:
+        grade_id = str(class_obj.grade_id)
+
+    return {
+        "class_id": str(student.class_id) if student.class_id else None,
+        "class_name": class_name,
+        "school_id": school_id,
+        "school_name": school.name if school else None,
+        "grade_id": grade_id,
+        "grade_name": grade.name if grade else None,
+    }
+
+
+def _resolve_evaluation_certificate_status(
+    *,
+    has_template: bool,
+    approved_count: int,
+    pending_count: int,
+    certificates_count: int,
+) -> str:
+    """Status agregado da avaliação para badges da listagem de certificados."""
+    if approved_count > 0:
+        return "approved"
+    if certificates_count > 0 or has_template:
+        return "pending"
+    return "none"
+
+
+def _normalize_test_type(test: Test) -> str:
+    raw = getattr(test, "type", None)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return "AVALIACAO"
+    return str(raw).strip().upper()
+
+
+def _evaluation_display_fields(test: Test) -> Dict[str, Any]:
+    subjects = _get_all_subjects_from_test(test)
+    creator = test.creator
+    return {
+        "type": _normalize_test_type(test),
+        "subject": subjects[0] if subjects else None,
+        "subjects": subjects,
+        "created_by": (
+            {"id": creator.id, "name": creator.name} if creator else None
+        ),
+    }
+
+
+def _apply_visible_tests_filters(query, user: Dict[str, Any]):
+    """Restringe avaliações ao escopo do usuário (mesma lógica de GET /test/)."""
+    role = user.get("role")
+
+    if role == "tecadm":
+        city_id = user.get("tenant_id") or user.get("city_id")
+        if not city_id:
+            raise ValueError("ID da cidade não disponível")
+
+        schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+        school_ids = [school.id for school in schools_in_city]
+        filters = [Test.created_by == user["id"]]
+
+        if school_ids:
+            from app.models.schoolTeacher import SchoolTeacher
+            from app.models.teacher import Teacher
+
+            teacher_ids = (
+                db.session.query(SchoolTeacher.teacher_id)
+                .filter(SchoolTeacher.school_id.in_(school_ids))
+                .distinct()
+                .all()
+            )
+            teacher_ids = [t[0] for t in teacher_ids]
+            if teacher_ids:
+                user_ids_in_city = (
+                    db.session.query(Teacher.user_id)
+                    .filter(Teacher.id.in_(teacher_ids))
+                    .distinct()
+                    .all()
+                )
+                user_ids_in_city = [u[0] for u in user_ids_in_city]
+                if user_ids_in_city:
+                    filters.append(Test.created_by.in_(user_ids_in_city))
+
+            for school_id in school_ids:
+                school_id_str = str(school_id)
+                filters.append(cast(Test.schools, JSONB).op("@>")([school_id_str]))
+
+        if filters:
+            query = query.filter(db.or_(*filters))
+
+    elif role == "professor":
+        query = query.filter(Test.created_by == user["id"])
+
+    elif role in ("diretor", "coordenador"):
+        from app.models.manager import Manager
+
+        manager = Manager.query.filter_by(user_id=user["id"]).first()
+        if not manager or not manager.school_id:
+            raise ValueError("Diretor/Coordenador não encontrado ou não vinculado a uma escola")
+
+        school = School.query.get(manager.school_id)
+        if not school or not school.city_id:
+            raise ValueError("Escola do diretor/coordenador não encontrada ou sem município")
+
+        schools_in_city = School.query.filter_by(city_id=school.city_id).with_entities(School.id).all()
+        school_ids = [s.id for s in schools_in_city]
+        filters = [Test.created_by == user["id"]]
+
+        if school_ids:
+            from app.models.schoolTeacher import SchoolTeacher
+            from app.models.teacher import Teacher
+
+            teacher_ids = (
+                db.session.query(SchoolTeacher.teacher_id)
+                .filter(SchoolTeacher.school_id.in_(school_ids))
+                .distinct()
+                .all()
+            )
+            teacher_ids = [t[0] for t in teacher_ids]
+            if teacher_ids:
+                user_ids_in_city = (
+                    db.session.query(Teacher.user_id)
+                    .filter(Teacher.id.in_(teacher_ids))
+                    .distinct()
+                    .all()
+                )
+                user_ids_in_city = [u[0] for u in user_ids_in_city]
+                if user_ids_in_city:
+                    filters.append(Test.created_by.in_(user_ids_in_city))
+
+            for school_id in school_ids:
+                school_id_str = str(school_id)
+                filters.append(cast(Test.schools, JSONB).op("@>")([school_id_str]))
+
+        if filters:
+            query = query.filter(db.or_(*filters))
+
+    return query
 
 
 def _mime_to_ext_certificate(mime: str) -> str:
@@ -221,38 +385,221 @@ class CertificateService:
             evaluation_id: ID da avaliação (test_id)
             
         Returns:
-            Lista de dicionários com: { id, name, grade, class_name }
+            Lista de dicionários com id, name, grade, class_id, class_name,
+            school_id, school_name, grade_id, grade_name, certificate_id e
+            certificate_status.
         """
         try:
-            # Buscar resultados de avaliação onde grade >= 6
-            results = EvaluationResult.query.filter_by(
-                test_id=evaluation_id
-            ).filter(
-                EvaluationResult.grade >= 6.0
-            ).all()
-            
+            results = (
+                EvaluationResult.query.filter_by(test_id=evaluation_id)
+                .filter(EvaluationResult.grade >= 6.0)
+                .options(
+                    joinedload(EvaluationResult.student).options(
+                        joinedload(Student.school),
+                        joinedload(Student.grade),
+                        joinedload(Student.class_),
+                    )
+                )
+                .all()
+            )
+
+            student_ids = [r.student_id for r in results if r.student_id]
+            certificates_by_student: Dict[str, Certificate] = {}
+            if student_ids:
+                certificates = Certificate.query.filter(
+                    Certificate.evaluation_id == evaluation_id,
+                    Certificate.student_id.in_(student_ids),
+                ).all()
+                certificates_by_student = {
+                    cert.student_id: cert for cert in certificates
+                }
+
             approved_students = []
             for result in results:
-                student = Student.query.get(result.student_id)
+                student = result.student
                 if not student:
                     continue
-                
-                class_name = None
-                if student.class_id:
-                    class_obj = Class.query.get(student.class_id)
-                    class_name = class_obj.name if class_obj else None
-                
+
+                location = _approved_student_location_fields(student)
+                certificate = certificates_by_student.get(student.id)
                 approved_students.append({
-                    'id': student.id,
-                    'name': student.name,
-                    'grade': result.grade,
-                    'class_name': class_name
+                    "id": student.id,
+                    "name": student.name,
+                    "grade": result.grade,
+                    **location,
+                    "certificate_id": certificate.id if certificate else None,
+                    "certificate_status": certificate.status if certificate else None,
                 })
-            
+
             return approved_students
             
         except SQLAlchemyError as e:
             logger.error(f"Erro ao buscar alunos aprovados: {str(e)}")
+            raise
+
+    @staticmethod
+    def _certificate_stats_for_evaluations(
+        evaluation_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        if not evaluation_ids:
+            return {}
+
+        stats: Dict[str, Dict[str, Any]] = {
+            eval_id: {
+                "eligible_students_count": 0,
+                "approved_certificates_count": 0,
+                "pending_certificates_count": 0,
+                "certificates_count": 0,
+                "has_template": False,
+            }
+            for eval_id in evaluation_ids
+        }
+
+        eligible_rows = (
+            db.session.query(
+                EvaluationResult.test_id,
+                func.count(EvaluationResult.id),
+            )
+            .filter(
+                EvaluationResult.test_id.in_(evaluation_ids),
+                EvaluationResult.grade >= 6.0,
+            )
+            .group_by(EvaluationResult.test_id)
+            .all()
+        )
+        for eval_id, count in eligible_rows:
+            stats[eval_id]["eligible_students_count"] = int(count)
+
+        cert_rows = (
+            db.session.query(
+                Certificate.evaluation_id,
+                Certificate.status,
+                func.count(Certificate.id),
+            )
+            .filter(Certificate.evaluation_id.in_(evaluation_ids))
+            .group_by(Certificate.evaluation_id, Certificate.status)
+            .all()
+        )
+        for eval_id, status, count in cert_rows:
+            bucket = stats[eval_id]
+            count_int = int(count)
+            bucket["certificates_count"] += count_int
+            if status == "approved":
+                bucket["approved_certificates_count"] += count_int
+            elif status == "pending":
+                bucket["pending_certificates_count"] += count_int
+
+        template_rows = (
+            db.session.query(CertificateTemplate.evaluation_id)
+            .filter(CertificateTemplate.evaluation_id.in_(evaluation_ids))
+            .all()
+        )
+        for (eval_id,) in template_rows:
+            stats[eval_id]["has_template"] = True
+
+        for eval_id in evaluation_ids:
+            bucket = stats[eval_id]
+            bucket["certificate_status"] = _resolve_evaluation_certificate_status(
+                has_template=bucket["has_template"],
+                approved_count=bucket["approved_certificates_count"],
+                pending_count=bucket["pending_certificates_count"],
+                certificates_count=bucket["certificates_count"],
+            )
+
+        return stats
+
+    @staticmethod
+    def list_evaluations_with_certificate_stats(
+        user: Dict[str, Any],
+        *,
+        page: int = 1,
+        per_page: int = 10,
+        sort: str = "created_at",
+        order: str = "desc",
+    ) -> Dict[str, Any]:
+        """
+        Lista avaliações visíveis ao usuário com status agregado de certificados.
+        Inclui type, subject(s) e created_by para filtros e regras da UI.
+        """
+        try:
+            per_page = min(max(per_page, 1), 100)
+            page = max(page, 1)
+
+            query = Test.query.options(
+                joinedload(Test.creator),
+                joinedload(Test.subject_rel),
+            )
+            query = _apply_visible_tests_filters(query, user)
+
+            if sort == "title":
+                query = query.order_by(
+                    Test.title.desc() if order.lower() == "desc" else Test.title.asc()
+                )
+            else:
+                query = query.order_by(
+                    Test.created_at.desc()
+                    if order.lower() == "desc"
+                    else Test.created_at.asc()
+                )
+
+            paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+            tests = paginated.items
+            evaluation_ids = [test.id for test in tests]
+            stats_by_eval = CertificateService._certificate_stats_for_evaluations(
+                evaluation_ids
+            )
+
+            data = []
+            for test in tests:
+                stats = stats_by_eval.get(
+                    test.id,
+                    {
+                        "eligible_students_count": 0,
+                        "approved_certificates_count": 0,
+                        "pending_certificates_count": 0,
+                        "certificates_count": 0,
+                        "has_template": False,
+                        "certificate_status": "none",
+                    },
+                )
+                data.append(
+                    {
+                        "evaluation_id": test.id,
+                        "title": test.title,
+                        **_evaluation_display_fields(test),
+                        "created_at": test.created_at.isoformat()
+                        if test.created_at
+                        else None,
+                        "certificate_status": stats["certificate_status"],
+                        "eligible_students_count": stats["eligible_students_count"],
+                        "approved_certificates_count": stats[
+                            "approved_certificates_count"
+                        ],
+                        "pending_certificates_count": stats[
+                            "pending_certificates_count"
+                        ],
+                        "certificates_count": stats["certificates_count"],
+                        "has_template": stats["has_template"],
+                    }
+                )
+
+            return {
+                "data": data,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total": paginated.total,
+                    "pages": paginated.pages,
+                    "has_next": paginated.has_next,
+                    "has_prev": paginated.has_prev,
+                    "next_num": paginated.next_num,
+                    "prev_num": paginated.prev_num,
+                },
+            }
+        except ValueError:
+            raise
+        except SQLAlchemyError as e:
+            logger.error(f"Erro ao listar avaliações com certificados: {str(e)}")
             raise
     
     @staticmethod

@@ -221,6 +221,42 @@ def approve_certificates():
         return jsonify({"erro": "Erro ao aprovar certificados", "detalhes": str(e)}), 500
 
 
+# ==================== LISTAGEM DE AVALIAÇÕES (CERTIFICADOS) ====================
+
+@bp.route('/evaluations', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def list_evaluations_with_certificate_stats():
+    """Lista avaliações com status agregado de certificados para a tela inicial."""
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        page = request.args.get("page", 1, type=int)
+        per_page = request.args.get("per_page", 10, type=int)
+        sort = request.args.get("sort", "created_at")
+        order = request.args.get("order", "desc")
+
+        result = CertificateService.list_evaluations_with_certificate_stats(
+            user,
+            page=page,
+            per_page=per_page,
+            sort=sort,
+            order=order,
+        )
+        return jsonify(result), 200
+
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Erro ao listar avaliações de certificados: {str(e)}")
+        return jsonify(
+            {"erro": "Erro ao listar avaliações de certificados", "detalhes": str(e)}
+        ), 500
+
+
 # ==================== CONSULTA DE CERTIFICADOS ====================
 
 @bp.route('/me', methods=['GET'])

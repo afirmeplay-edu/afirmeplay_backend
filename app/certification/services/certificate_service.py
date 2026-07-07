@@ -239,8 +239,50 @@ def _data_url_to_minio_certificate_image_url(
     return url
 
 
+_CERTIFICATE_TEMPLATE_PROXY_RE = re.compile(
+    r"^/certificates/template/(?P<evaluation_id>[^/]+)/(?P<kind>logo|signature)/?$"
+)
+
+_CERTIFICATE_TEMPLATE_IMAGE_EXTENSIONS = ("png", "jpg", "jpeg", "webp", "gif", "svg")
+
+
+def _is_certificate_template_asset_proxy_path(
+    value: str, evaluation_id: str, role: str
+) -> bool:
+    match = _CERTIFICATE_TEMPLATE_PROXY_RE.match((value or "").strip())
+    return bool(
+        match
+        and match.group("evaluation_id") == evaluation_id
+        and match.group("kind") == role
+    )
+
+
+def _minio_public_url(bucket: str, object_name: str) -> str:
+    minio = MinIOService()
+    return f"{minio.public_endpoint}/{bucket}/{object_name}"
+
+
+def _discover_certificate_template_object(
+    evaluation_id: str, role: str
+) -> Optional[Tuple[str, str]]:
+    """Localiza logo/assinatura no bucket quando só há o path do proxy persistido."""
+    bucket = MinIOService.BUCKETS["CERTIFICATE_TEMPLATES"]
+    minio = MinIOService()
+    for ext in _CERTIFICATE_TEMPLATE_IMAGE_EXTENSIONS:
+        object_name = f"{evaluation_id}/{role}.{ext}"
+        try:
+            minio.client.stat_object(bucket, object_name)
+            return bucket, object_name
+        except Exception:
+            continue
+    return None
+
+
 def _resolve_certificate_template_image_field(
-    evaluation_id: str, value: Optional[str], role: str
+    evaluation_id: str,
+    value: Optional[str],
+    role: str,
+    existing: Optional[str] = None,
 ) -> Optional[str]:
     if value is None:
         return None
@@ -251,6 +293,17 @@ def _resolve_certificate_template_image_field(
         return None
     if s.startswith("data:image/"):
         return _data_url_to_minio_certificate_image_url(evaluation_id, s, role)
+    if _is_certificate_template_asset_proxy_path(s, evaluation_id, role):
+        existing_s = (existing or "").strip()
+        if existing_s and not _is_certificate_template_asset_proxy_path(
+            existing_s, evaluation_id, role
+        ):
+            return existing_s
+        discovered = _discover_certificate_template_object(evaluation_id, role)
+        if discovered:
+            bucket, object_name = discovered
+            return _minio_public_url(bucket, object_name)
+        return existing_s or None
     return s
 
 
@@ -267,6 +320,46 @@ def _parse_certificate_template_minio_location(stored_url: str) -> Tuple[str, st
     if not object_name:
         raise ValueError("Caminho do objeto inválido")
     return bucket, object_name
+
+
+def _resolve_certificate_template_minio_location(
+    stored_url: str, evaluation_id: str, asset_kind: str
+) -> Tuple[str, str]:
+    stored = stored_url.strip()
+    if _is_certificate_template_asset_proxy_path(stored, evaluation_id, asset_kind):
+        discovered = _discover_certificate_template_object(evaluation_id, asset_kind)
+        if not discovered:
+            raise ValueError("URL de arquivo não pertence ao armazenamento de certificados")
+        return discovered
+    return _parse_certificate_template_minio_location(stored)
+
+
+def _repair_certificate_template_stored_url(
+    template: CertificateTemplate,
+    asset_kind: str,
+    bucket: str,
+    object_name: str,
+    stored: str,
+) -> None:
+    if not _is_certificate_template_asset_proxy_path(
+        stored, template.evaluation_id, asset_kind
+    ):
+        return
+    repaired = _minio_public_url(bucket, object_name)
+    if asset_kind == "logo":
+        template.logo_url = repaired
+    else:
+        template.signature_url = repaired
+    try:
+        db.session.commit()
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.warning(
+            "Não foi possível reparar URL persistida do template %s (%s): %s",
+            template.id,
+            asset_kind,
+            e,
+        )
 
 
 class CertificateService:
@@ -303,7 +396,12 @@ class CertificateService:
             raise ValueError(
                 "Imagem ainda não foi enviada ao armazenamento; salve o template novamente"
             )
-        bucket, object_name = _parse_certificate_template_minio_location(stored)
+        bucket, object_name = _resolve_certificate_template_minio_location(
+            stored, evaluation_id, asset_kind
+        )
+        _repair_certificate_template_stored_url(
+            template, asset_kind, bucket, object_name, stored
+        )
         minio = MinIOService()
         data = minio.download_file(bucket, object_name)
         ctype, _ = mimetypes.guess_type(object_name)
@@ -327,7 +425,7 @@ class CertificateService:
             raise
     
     @staticmethod
-    def save_template(template_data: dict) -> CertificateTemplate:
+    def save_template(template_data: dict) -> Tuple[CertificateTemplate, bool]:
         """
         Salva ou atualiza template de certificado
         
@@ -335,41 +433,51 @@ class CertificateService:
             template_data: Dicionário com dados do template
             
         Returns:
-            CertificateTemplate salvo/atualizado
+            (CertificateTemplate salvo/atualizado, criado)
         """
         try:
             template_id = template_data.get('id')
-            
+            ev_id = template_data['evaluation_id']
+            is_new = False
+
             if template_id:
-                # Atualizar template existente
                 template = CertificateTemplate.query.get(template_id)
                 if not template:
                     raise ValueError(f"Template não encontrado: {template_id}")
             else:
-                # Criar novo template
-                template = CertificateTemplate()
+                template = CertificateTemplate.query.filter_by(
+                    evaluation_id=ev_id
+                ).first()
+                if not template:
+                    template = CertificateTemplate()
+                    is_new = True
             
             # Atualizar campos
-            template.evaluation_id = template_data['evaluation_id']
+            template.evaluation_id = ev_id
             template.title = template_data.get('title')
             template.text_content = template_data['text_content']
             template.background_color = template_data['background_color']
             template.text_color = template_data['text_color']
             template.accent_color = template_data['accent_color']
-            ev_id = template_data['evaluation_id']
             template.logo_url = _resolve_certificate_template_image_field(
-                ev_id, template_data.get('logo_url'), 'logo'
+                ev_id,
+                template_data.get('logo_url'),
+                'logo',
+                existing=template.logo_url,
             )
             template.signature_url = _resolve_certificate_template_image_field(
-                ev_id, template_data.get('signature_url'), 'signature'
+                ev_id,
+                template_data.get('signature_url'),
+                'signature',
+                existing=template.signature_url,
             )
             template.custom_date = template_data.get('custom_date')
             
-            if not template_id:
+            if is_new:
                 db.session.add(template)
             
             db.session.commit()
-            return template
+            return template, is_new
             
         except SQLAlchemyError as e:
             db.session.rollback()
@@ -435,6 +543,95 @@ class CertificateService:
             
         except SQLAlchemyError as e:
             logger.error(f"Erro ao buscar alunos aprovados: {str(e)}")
+            raise
+
+    @staticmethod
+    def get_certificates_batch_payload(
+        evaluation_id: str,
+        *,
+        status: str = "approved",
+        school_id: Optional[str] = None,
+        grade_id: Optional[str] = None,
+        class_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Payload único para exportação em lote no frontend (PDF + ZIP).
+        Template retornado uma vez; lista de certificados com hierarquia escola/série/turma.
+        """
+        try:
+            test = Test.query.get(evaluation_id)
+            if not test:
+                raise ValueError("Avaliação não encontrada")
+
+            template = CertificateService.get_template_by_evaluation(evaluation_id)
+
+            cert_query = Certificate.query.filter_by(evaluation_id=evaluation_id)
+            if status:
+                cert_query = cert_query.filter(Certificate.status == status)
+
+            certificates = (
+                cert_query.options(
+                    joinedload(Certificate.student).options(
+                        joinedload(Student.school),
+                        joinedload(Student.grade),
+                        joinedload(Student.class_),
+                    )
+                )
+                .order_by(Certificate.student_name.asc())
+                .all()
+            )
+
+            school_filter = str(school_id).strip() if school_id else None
+            grade_filter = str(grade_id).strip() if grade_id else None
+            class_filter = str(class_id).strip() if class_id else None
+
+            items: List[Dict[str, Any]] = []
+            for cert in certificates:
+                student = cert.student
+                if not student:
+                    continue
+
+                location = _approved_student_location_fields(student)
+                if school_filter and str(location.get("school_id") or "") != school_filter:
+                    continue
+                if grade_filter and str(location.get("grade_id") or "") != grade_filter:
+                    continue
+                if class_filter and str(location.get("class_id") or "") != class_filter:
+                    continue
+
+                items.append(
+                    {
+                        "certificate_id": cert.id,
+                        "student_id": cert.student_id,
+                        "student_name": cert.student_name,
+                        "grade": cert.grade,
+                        "issued_at": cert.issued_at.isoformat()
+                        if cert.issued_at
+                        else None,
+                        "certificate_status": cert.status,
+                        **location,
+                    }
+                )
+
+            return {
+                "evaluation_id": evaluation_id,
+                "evaluation_title": test.title or "Avaliação",
+                "template": template.to_dict() if template else None,
+                "certificates": items,
+                "meta": {
+                    "total": len(items),
+                    "filters_applied": {
+                        "status": status,
+                        "school_id": school_filter,
+                        "grade_id": grade_filter,
+                        "class_id": class_filter,
+                    },
+                },
+            }
+        except ValueError:
+            raise
+        except SQLAlchemyError as e:
+            logger.error(f"Erro ao montar batch de certificados: {str(e)}")
             raise
 
     @staticmethod

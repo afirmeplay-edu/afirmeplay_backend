@@ -197,7 +197,7 @@ class CompetitionStudentRankingService:
                 "text_color": colors["text_color"],
                 "accent_color": colors["accent_color"],
             }
-            template = CertificateService.save_template(template_data)
+            template, _ = CertificateService.save_template(template_data)
 
             # Emite certificado para o aluno (usa API de aprovação existente)
             CertificateService.approve_certificates(

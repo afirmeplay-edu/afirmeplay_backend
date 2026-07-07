@@ -140,9 +140,9 @@ def save_template():
             return jsonify({"erro": "Avaliação não encontrada"}), 404
         
         # Salvar template
-        template = CertificateService.save_template(data)
+        template, created = CertificateService.save_template(data)
         
-        return jsonify(template.to_dict()), 201 if not data.get('id') else 200
+        return jsonify(template.to_dict()), 201 if created else 200
         
     except ValueError as e:
         return jsonify({"erro": str(e)}), 400
@@ -176,6 +176,48 @@ def get_approved_students(evaluation_id):
     except Exception as e:
         logging.error(f"Erro ao buscar alunos aprovados: {str(e)}")
         return jsonify({"erro": "Erro ao buscar alunos aprovados", "detalhes": str(e)}), 500
+
+
+@bp.route('/batch/<string:evaluation_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def get_certificates_batch(evaluation_id):
+    """Payload JSON único para exportação em lote de certificados (PDF no frontend)."""
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        status = (request.args.get("status") or "approved").strip().lower()
+        if status not in ("approved", "pending"):
+            return jsonify(
+                {"erro": "status inválido (use approved ou pending)"}
+            ), 400
+
+        school_id = request.args.get("school_id")
+        grade_id = request.args.get("grade_id")
+        class_id = request.args.get("class_id")
+
+        result = CertificateService.get_certificates_batch_payload(
+            evaluation_id,
+            status=status,
+            school_id=school_id,
+            grade_id=grade_id,
+            class_id=class_id,
+        )
+        return jsonify(result), 200
+
+    except ValueError as e:
+        msg = str(e)
+        if "não encontrada" in msg.lower():
+            return jsonify({"erro": msg}), 404
+        return jsonify({"erro": msg}), 400
+    except Exception as e:
+        logging.error(f"Erro ao buscar batch de certificados: {str(e)}")
+        return jsonify(
+            {"erro": "Erro ao buscar batch de certificados", "detalhes": str(e)}
+        ), 500
 
 
 @bp.route('/approve', methods=['POST'])

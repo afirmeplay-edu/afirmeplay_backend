@@ -21,13 +21,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from app.services.storage.minio_service import MinIOService
+from app.services.evaluation_result_snapshot import prefetch_placement_from_results
 from app.utils.response_formatters import _get_all_subjects_from_test
 
 logger = logging.getLogger(__name__)
 
 
-def _approved_student_location_fields(student: Student) -> Dict[str, Optional[str]]:
-    """Resolve escola, série e turma do aluno (dados atuais, com fallback pela turma)."""
+def _location_fields_from_student(student: Student) -> Dict[str, Optional[str]]:
+    """Resolve escola, série e turma a partir do cadastro atual do aluno."""
     class_obj = student.class_ if student.class_id else None
     if student.class_id and not class_obj:
         class_obj = Class.query.get(student.class_id)
@@ -56,6 +57,91 @@ def _approved_student_location_fields(student: Student) -> Dict[str, Optional[st
         "grade_id": grade_id,
         "grade_name": grade.name if grade else None,
     }
+
+
+def _location_fields_from_evaluation_snapshots(
+    evaluation_result: EvaluationResult,
+    schools_by_id: Optional[Dict[str, School]] = None,
+    classes_by_id: Optional[Dict[Any, Class]] = None,
+    grades_by_id: Optional[Dict[Any, Any]] = None,
+) -> Dict[str, Optional[str]]:
+    """Resolve escola, série e turma a partir dos snapshots do resultado da avaliação."""
+    from app.models.grades import Grade
+
+    school_id = (
+        str(evaluation_result.school_id_snapshot)
+        if evaluation_result.school_id_snapshot
+        else None
+    )
+    class_id = (
+        str(evaluation_result.class_id_snapshot)
+        if evaluation_result.class_id_snapshot
+        else None
+    )
+    grade_id = (
+        str(evaluation_result.grade_id_snapshot)
+        if evaluation_result.grade_id_snapshot
+        else None
+    )
+
+    school = schools_by_id.get(school_id) if school_id and schools_by_id else None
+    if school_id and not school:
+        school = School.query.get(school_id)
+
+    class_obj = None
+    if evaluation_result.class_id_snapshot:
+        class_obj = (classes_by_id or {}).get(evaluation_result.class_id_snapshot)
+        if not class_obj:
+            class_obj = Class.query.get(evaluation_result.class_id_snapshot)
+
+    grade = None
+    if class_obj and getattr(class_obj, "grade", None):
+        grade = class_obj.grade
+    elif evaluation_result.grade_id_snapshot:
+        grade = (grades_by_id or {}).get(evaluation_result.grade_id_snapshot)
+        if not grade:
+            grade = Grade.query.get(evaluation_result.grade_id_snapshot)
+
+    if not school_id and class_obj and class_obj.school_id:
+        school_id = str(class_obj.school_id)
+        school = school or (schools_by_id or {}).get(school_id) or School.query.get(school_id)
+
+    if not grade_id and class_obj and class_obj.grade_id:
+        grade_id = str(class_obj.grade_id)
+        if not grade and class_obj.grade:
+            grade = class_obj.grade
+
+    return {
+        "class_id": class_id,
+        "class_name": class_obj.name if class_obj else None,
+        "school_id": school_id,
+        "school_name": school.name if school else None,
+        "grade_id": grade_id,
+        "grade_name": grade.name if grade else None,
+    }
+
+
+def _approved_student_location_fields(
+    student: Student,
+    evaluation_result: Optional[EvaluationResult] = None,
+    *,
+    schools_by_id: Optional[Dict[str, School]] = None,
+    classes_by_id: Optional[Dict[Any, Class]] = None,
+    grades_by_id: Optional[Dict[Any, Any]] = None,
+) -> Dict[str, Optional[str]]:
+    """Prefer snapshots da avaliação; fallback para cadastro atual do aluno."""
+    if evaluation_result and (
+        evaluation_result.school_id_snapshot
+        or evaluation_result.class_id_snapshot
+        or evaluation_result.grade_id_snapshot
+    ):
+        return _location_fields_from_evaluation_snapshots(
+            evaluation_result,
+            schools_by_id=schools_by_id,
+            classes_by_id=classes_by_id,
+            grades_by_id=grades_by_id,
+        )
+    return _location_fields_from_student(student)
 
 
 def _resolve_evaluation_certificate_status(
@@ -511,6 +597,10 @@ class CertificateService:
                 .all()
             )
 
+            schools_by_id, classes_by_id, grades_by_id = prefetch_placement_from_results(
+                results
+            )
+
             student_ids = [r.student_id for r in results if r.student_id]
             certificates_by_student: Dict[str, Certificate] = {}
             if student_ids:
@@ -528,7 +618,13 @@ class CertificateService:
                 if not student:
                     continue
 
-                location = _approved_student_location_fields(student)
+                location = _approved_student_location_fields(
+                    student,
+                    result,
+                    schools_by_id=schools_by_id,
+                    classes_by_id=classes_by_id,
+                    grades_by_id=grades_by_id,
+                )
                 certificate = certificates_by_student.get(student.id)
                 approved_students.append({
                     "id": student.id,
@@ -581,6 +677,20 @@ class CertificateService:
                 .all()
             )
 
+            student_ids = [cert.student_id for cert in certificates if cert.student_id]
+            results_by_student: Dict[str, EvaluationResult] = {}
+            if student_ids:
+                evaluation_results = EvaluationResult.query.filter(
+                    EvaluationResult.test_id == evaluation_id,
+                    EvaluationResult.student_id.in_(student_ids),
+                ).all()
+                results_by_student = {
+                    er.student_id: er for er in evaluation_results
+                }
+            schools_by_id, classes_by_id, grades_by_id = prefetch_placement_from_results(
+                list(results_by_student.values())
+            )
+
             school_filter = str(school_id).strip() if school_id else None
             grade_filter = str(grade_id).strip() if grade_id else None
             class_filter = str(class_id).strip() if class_id else None
@@ -591,7 +701,13 @@ class CertificateService:
                 if not student:
                     continue
 
-                location = _approved_student_location_fields(student)
+                location = _approved_student_location_fields(
+                    student,
+                    results_by_student.get(student.id),
+                    schools_by_id=schools_by_id,
+                    classes_by_id=classes_by_id,
+                    grades_by_id=grades_by_id,
+                )
                 if school_filter and str(location.get("school_id") or "") != school_filter:
                     continue
                 if grade_filter and str(location.get("grade_id") or "") != grade_filter:

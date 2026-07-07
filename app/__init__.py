@@ -671,7 +671,9 @@ def create_app():
         return route, method, additional_info
     
     def _send_error_alert(status_code, error_message, route, method, user_id, additional_info):
-        """Helper para enviar alerta Telegram para erros"""
+        """Helper para enviar alerta Telegram para erros (exceto 404 — rotas inexistentes)."""
+        if status_code == 404:
+            return
         send_telegram_alert(
             error_message=error_message,
             route=route,
@@ -745,8 +747,7 @@ def create_app():
             f"Usuário: {user_email or 'N/A'} ({user_id or 'N/A'}) - "
             f"IP: {request.remote_addr if request else 'N/A'}"
         )
-        
-        _send_error_alert(404, f"Recurso não encontrado: {route}", route, method, user_id, additional_info)
+
         return jsonify({"error": "Recurso não encontrado"}), 404
     
     # Error handler para 504 (Gateway Timeout)

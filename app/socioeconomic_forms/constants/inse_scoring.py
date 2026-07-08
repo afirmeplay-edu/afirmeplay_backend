@@ -1,120 +1,146 @@
 # -*- coding: utf-8 -*-
 """
-Tabela de pontuação INSE e faixas de nível.
+Cálculo INSE contínuo (INSE x Avaliação).
 
-O cálculo deve consumir apenas o formato canônico (saída de inse_normalizer).
-As tabelas abaixo são por conceito semântico; não dependem de ID de pergunta
-nem do texto exato da opção.
-
-Cobertura actual do simulador: soma de escolaridade (mãe + pai) + bens (7 itens)
-+ serviços (9 itens). O máximo teórico nesse subconjunto é 94; a faixa
-Nível 6 (111+ pontos) não é atingível só com estes e — ver INSE_PONTUACAO_MAXIMA_TEORICA.
+O cálculo consome apenas o formato canônico (saída de inse_normalizer), sem
+dependência de IDs de pergunta:
+- escolaridade da mãe e do pai (âncora)
+- bens por quantidade (Q12 no modelo)
+- itens de presença (sim/não) (Q13 no modelo)
 """
 
 from typing import Dict, Any, Tuple, Optional
 
-# ---------------------------------------------------------------------------
-# Pontuação canônica: conceito semântico -> pontos
-# (consumido após normalizar_respostas)
-# ---------------------------------------------------------------------------
-
-# Escolaridade: conceito retornado por normalizar_escolaridade -> pontos
-ESCOLARIDADE_PONTOS_CANONICO = {
-    "fundamental_incompleto": 1,
-    "fundamental_ate_4": 2,
-    "fundamental_completo": 4,
-    "medio_completo": 7,
-    "superior_completo": 10,
-    "nao_sei": 0,
-    "desconhecido": 0,
+ESCOLARIDADE_SCORE_CANONICO = {
+    # "Nunca estudou" é tratado como equivalente a "não completou 4º/5º".
+    "nunca_estudou": -0.9,
+    "fundamental_incompleto": -0.9,  # nao_completou_5
+    "fundamental_ate_4": -0.5,  # completou_5_nao_9
+    "fundamental_completo": -0.1,  # completou_9_nao_medio
+    "medio_completo": 0.4,  # completou_medio_nao_superior
+    "superior_completo": 1.1,  # completou_superior
+    "nao_sei": -0.2,
+    "desconhecido": -0.2,
 }
 
-# Bens: item -> valor canônico "0"|"1"|"2"|"3+" -> pontos (ordem: geladeira..celular)
-# Geladeira (PDF InnovPlay / alinhado ao frontend inseScoring): Nenhum/1/2/3+ -> 0/3/4/5.
-BENS_PONTOS_CANONICO = {
-    "geladeira": {"0": 0, "1": 3, "2": 4, "3+": 5},
-    "computador": {"0": 1, "1": 4, "2": 6, "3+": 8},
-    "quartos": {"0": 0, "1": 2, "2": 4, "3+": 6},
-    "televisao": {"0": 0, "1": 2, "2": 3, "3+": 4},
-    "banheiro": {"0": 0, "1": 3, "2": 5, "3+": 7},
-    "carro": {"0": 1, "1": 5, "2": 8, "3+": 10},
-    "celular": {"0": 0, "1": 2, "2": 3, "3+": 4},
+# Q12: score base por categoria de quantidade.
+Q12_QUANTIDADE_SCORE = {
+    "0": -0.4,
+    "1": 0.0,
+    "2": 0.25,
+    "3+": 0.5,
 }
 
-# Serviços: item -> bool (True=Sim) -> pontos
-SERVICOS_PONTOS_CANONICO = {
-    "tv_internet": {False: 1, True: 3},
-    "wifi": {False: 1, True: 5},
-    "quarto_so_seu": {False: 1, True: 4},
-    "mesa_estudar": {False: 1, True: 2},
-    "microondas": {False: 1, True: 3},
-    "aspirador": {False: 1, True: 2},
-    "maquina_lavar": {False: 1, True: 4},
-    "freezer": {False: 1, True: 3},
-    "garagem": {False: 1, True: 4},
+# Pesos por item de quantidade (Q12 no modelo novo).
+Q12_WEIGHTS = {
+    "geladeira": 0.6,
+    "computador": 0.9,
+    "quartos": 0.5,
+    "televisao": 0.4,
+    "banheiro": 0.7,
+    "carro": 0.9,
+    "celular": 0.5,
 }
 
-# Soma máxima possível com escolaridade (2×10) + bens + serviços, para documentação
-# de expectativas (faixa 111+ requer outras dimensões no futuro, se o produto o exigir).
-INSE_PONTUACAO_MAXIMA_TEORICA = 94
+# Pesos por item sim/não (Q13 no modelo novo).
+Q13_WEIGHTS = {
+    "tv_internet": 0.25,
+    "wifi": 0.30,
+    # Regra definida: repetir o peso da questão anterior (wifi).
+    "quarto_so_seu": 0.30,
+    "mesa_estudar": 0.20,
+    "microondas": 0.25,
+    "aspirador": 0.35,
+    "maquina_lavar": 0.25,
+    "freezer": 0.30,
+    "garagem": 0.30,
+}
 
-# Faixas de pontuação total -> nível INSE (1 a 6)
+# Pesos globais da combinação linear.
+PESO_ANCORA = 0.9
+PESO_BENS_Q12 = 0.55
+PESO_BENS_Q13 = 0.45
+
+# Parâmetros da transformação para escala INSE.
+INSE_TRANSFORM_OFFSET = 0.149337
+INSE_TRANSFORM_SCALE = 0.973668
+INSE_BASE = 5.0
+
+# Faixas de classificação por valor de INSE (níveis I a VIII).
 INSE_FAIXAS = [
-    (10, 30, 1, "Muito Baixo"),
-    (31, 50, 2, "Baixo"),
-    (51, 70, 3, "Médio Baixo"),
-    (71, 90, 4, "Médio"),
-    (91, 110, 5, "Alto"),
-    (111, 9999, 6, "Muito Alto"),
+    (3.0, 1, "Nível I"),
+    (4.0, 2, "Nível II"),
+    (4.5, 3, "Nível III"),
+    (5.0, 4, "Nível IV"),
+    (5.5, 5, "Nível V"),
+    (6.0, 6, "Nível VI"),
+    (7.0, 7, "Nível VII"),
 ]
 
 NIVEIS_INSE_LABELS = {
-    1: "Muito Baixo",
-    2: "Baixo",
-    3: "Médio Baixo",
-    4: "Médio",
-    5: "Alto",
-    6: "Muito Alto",
+    1: "Nível I",
+    2: "Nível II",
+    3: "Nível III",
+    4: "Nível IV",
+    5: "Nível V",
+    6: "Nível VI",
+    7: "Nível VII",
+    8: "Nível VIII",
 }
 
 
-def calcular_pontos_inse_canonico(normalized: Dict[str, Any]) -> Tuple[int, bool]:
+def _clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(max_value, value))
+
+
+def calcular_inse_canonico(normalized: Dict[str, Any]) -> Tuple[float, bool, float]:
     """
-    Calcula pontuação INSE a partir do dict canônico (saída de normalizar_respostas).
-    Não depende de IDs de pergunta nem de texto de opção.
-    Retorna (pontos_total, sucesso).
+    Calcula INSE contínuo a partir do dict canônico.
+    Retorna (inse, sucesso, theta_clamp).
     """
     if not normalized:
-        return 0, False
-    total = 0
-    # Escolaridade
-    total += ESCOLARIDADE_PONTOS_CANONICO.get(
-        normalized.get("mae_escolaridade"), 0
-    )
-    total += ESCOLARIDADE_PONTOS_CANONICO.get(
-        normalized.get("pai_escolaridade"), 0
-    )
-    # Bens
+        return 0.0, False, 0.0
+
+    esc_mae = ESCOLARIDADE_SCORE_CANONICO.get(normalized.get("mae_escolaridade"), -0.2)
+    esc_pai = ESCOLARIDADE_SCORE_CANONICO.get(normalized.get("pai_escolaridade"), -0.2)
+    ancora = (esc_mae + esc_pai) / 2.0
+
+    bens_q12 = 0.0
     bens = normalized.get("bens") or {}
-    for item, pontos_map in BENS_PONTOS_CANONICO.items():
-        val = bens.get(item, "0")
-        total += pontos_map.get(val, 0)
-    # Serviços
+    for item, peso in Q12_WEIGHTS.items():
+        categoria = bens.get(item, "0")
+        bens_q12 += Q12_QUANTIDADE_SCORE.get(categoria, -0.4) * peso
+
+    bens_q13 = 0.0
     servicos = normalized.get("servicos") or {}
-    for item, pontos_map in SERVICOS_PONTOS_CANONICO.items():
-        val = servicos.get(item, False)
-        total += pontos_map.get(val, 0)
-    return total, True
+    for item, peso in Q13_WEIGHTS.items():
+        valor = bool(servicos.get(item, False))
+        bens_q13 += (1.0 if valor else -0.5) * peso
+
+    theta = _clamp(
+        (ancora * PESO_ANCORA) + (bens_q12 * PESO_BENS_Q12) + (bens_q13 * PESO_BENS_Q13),
+        -3.0,
+        3.0,
+    )
+    inse = ((theta - INSE_TRANSFORM_OFFSET) / INSE_TRANSFORM_SCALE) + INSE_BASE
+    return inse, True, theta
 
 
-def pontuacao_para_nivel_inse(pontos: int) -> Tuple[Optional[int], str]:
+def pontuacao_para_nivel_inse(inse: Optional[float]) -> Tuple[Optional[int], str]:
     """
-    Retorna (número do nível 1-6, label).
-    Se pontos for None ou < 10, retorna (None, "Não calculado").
+    Retorna (número do nível 1-8, label) a partir do INSE contínuo.
     """
-    if pontos is None or pontos < 10:
+    if inse is None:
         return None, "Não calculado"
-    for min_p, max_p, nivel, label in INSE_FAIXAS:
-        if min_p <= pontos <= max_p:
+    for limite_superior, nivel, label in INSE_FAIXAS:
+        if inse < limite_superior:
             return nivel, label
-    return 6, NIVEIS_INSE_LABELS.get(6, "Muito Alto")
+    return 8, NIVEIS_INSE_LABELS[8]
+
+
+def calcular_pontos_inse_canonico(normalized: Dict[str, Any]) -> Tuple[float, bool]:
+    """
+    Compatibilidade: retorna o valor contínuo de INSE no formato antigo (valor, sucesso).
+    """
+    inse, ok, _theta = calcular_inse_canonico(normalized)
+    return inse, ok

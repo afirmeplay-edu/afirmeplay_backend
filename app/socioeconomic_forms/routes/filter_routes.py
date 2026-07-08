@@ -28,7 +28,7 @@ from typing import List, Dict, Any, Optional
 bp = Blueprint('form_filters', __name__, url_prefix='/forms')
 
 
-# ---------- Helpers para INSE x SAEB (avaliação no filtro) ----------
+# ---------- Helpers para INSE x Avaliação (avaliação no filtro) ----------
 def _norm_filtro_inse(val, all_values=("all", "todas", "")):
     if not val:
         return None
@@ -41,7 +41,7 @@ def _norm_filtro_inse(val, all_values=("all", "todas", "")):
 def _obter_series_com_aplicacoes_municipio_inse_saeb(
     municipio_id: str, user: dict, permissao: dict
 ) -> List[Dict[str, Any]]:
-    """Séries do município com avaliações aplicadas (modal INSE/SAEB e PNEERQ)."""
+    """Séries do município com avaliações aplicadas (modal INSE/Avaliação e PNEERQ)."""
     try:
         from app.models.test import Test
         from app.models.classTest import ClassTest
@@ -76,7 +76,7 @@ def _obter_series_com_aplicacoes_municipio_inse_saeb(
         series = query_series.distinct().order_by(Grade.name.asc()).all()
         return [{"id": str(s[0]), "nome": s[1], "name": s[1]} for s in series]
     except Exception as e:
-        logging.error("Erro ao obter séries por município (INSE-Saeb): %s", str(e))
+        logging.error("Erro ao obter séries por município (INSE-Avaliação): %s", str(e))
         return []
 
 
@@ -87,7 +87,7 @@ def _obter_avaliacoes_por_municipio_inse_saeb(
     serie_id: Optional[str] = None,
     nome: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Retorna avaliações aplicadas no município (para filtro INSE x SAEB)."""
+    """Retorna avaliações aplicadas no município (para filtro INSE x Avaliação)."""
     try:
         from app.models.test import Test
         from app.models.classTest import ClassTest
@@ -132,7 +132,7 @@ def _obter_avaliacoes_por_municipio_inse_saeb(
 
         return [{"id": str(a[0]), "titulo": a[1], "nome": a[1]} for a in avaliacoes]
     except Exception as e:
-        logging.error("Erro ao obter avaliações por município (INSE-Saeb): %s", str(e))
+        logging.error("Erro ao obter avaliações por município (INSE-Avaliação): %s", str(e))
         return []
 
 
@@ -179,7 +179,7 @@ def _obter_escolas_por_avaliacao_inse_saeb(
         escolas = query_escolas.distinct().all()
         return [{"id": str(e[0]), "nome": e[1], "name": e[1]} for e in escolas]
     except Exception as e:
-        logging.error("Erro ao obter escolas por avaliação (INSE-Saeb): %s", str(e))
+        logging.error("Erro ao obter escolas por avaliação (INSE-Avaliação): %s", str(e))
         return []
 
 
@@ -206,7 +206,7 @@ def _obter_series_por_escola_avaliacao_inse_saeb(
         series = query_series.distinct().all()
         return [{"id": str(s[0]), "nome": s[1], "name": s[1]} for s in series]
     except Exception as e:
-        logging.error("Erro ao obter séries por escola/avaliação (INSE-Saeb): %s", str(e))
+        logging.error("Erro ao obter séries por escola/avaliação (INSE-Avaliação): %s", str(e))
         return []
 
 
@@ -249,7 +249,7 @@ def _obter_turmas_por_serie_avaliacao_inse_saeb(
             out.append({**opt, "nome": opt["name"]})
         return out
     except Exception as e:
-        logging.error("Erro ao obter turmas por série/avaliação (INSE-Saeb): %s", str(e))
+        logging.error("Erro ao obter turmas por série/avaliação (INSE-Avaliação): %s", str(e))
         return []
 
 
@@ -766,14 +766,15 @@ def obter_opcoes_filtros_resultados():
         return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
 
 
-# ==================== FILTROS INSE x SAEB (FORMULÁRIO + AVALIAÇÃO) ====================
+# ==================== FILTROS INSE x AVALIAÇÃO (FORMULÁRIO + AVALIAÇÃO) ====================
 
 @bp.route('/results/inse-saeb/filter-options', methods=['GET'])
+@bp.route('/results/inse-avaliacao/filter-options', methods=['GET'])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador", "professor")
 def obter_opcoes_filtros_inse_saeb():
     """
-    Retorna opções hierárquicas de filtros para o relatório INSE x SAEB.
+    Retorna opções hierárquicas de filtros para o relatório INSE x Avaliação.
     Hierarquia: Estado → Município → Formulário → Avaliação → Escola → Série → Turma.
 
     Query Parameters (cascata):
@@ -856,7 +857,7 @@ def obter_opcoes_filtros_inse_saeb():
         return jsonify(response), 200
 
     except Exception as e:
-        logging.error("Erro ao obter opções de filtros INSE-Saeb: %s", str(e), exc_info=True)
+        logging.error("Erro ao obter opções de filtros INSE-Avaliação: %s", str(e), exc_info=True)
         return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
 
 

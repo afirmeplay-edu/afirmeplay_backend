@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Serviço para o relatório INSE x SAEB: cruza respostas do formulário socioeconômico
+Serviço para o relatório INSE x Avaliação: cruza respostas do formulário socioeconômico
 com resultados da avaliação (proficiência por disciplina e média).
 """
 
@@ -9,7 +9,7 @@ from app.socioeconomic_forms.models import Form
 from app.socioeconomic_forms.services.results_service import ResultsService
 from app.socioeconomic_forms.constants.inse_normalizer import normalizar_respostas
 from app.socioeconomic_forms.constants.inse_scoring import (
-    calcular_pontos_inse_canonico,
+    calcular_inse_canonico,
     pontuacao_para_nivel_inse,
     NIVEIS_INSE_LABELS,
 )
@@ -23,20 +23,82 @@ from app.services.evaluation_result_service import EvaluationResultService
 from collections import defaultdict
 import logging
 from typing import Dict, Any, List, Optional, Tuple
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
 
-def _calcular_inse_de_respostas(responses: Dict[str, Any]) -> Tuple[int, bool, Optional[int], str]:
+def _normalize_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s else None
+
+
+def _race_group(value: Optional[str]) -> str:
+    """
+    Agrupamento racial para filtros/visões consolidadas.
+    """
+    v = (_normalize_str(value) or "").lower()
+    if v == "branca":
+        return "Branca"
+    if v in ("preta", "parda"):
+        return "PretaParda"
+    if v in ("não quero declarar", "nao quero declarar", "não declarar", "nao declarar"):
+        return "NaoDeclarada"
+    if v:
+        return "Outras"
+    return "NaoInformada"
+
+
+def _normalize_text_key(value: Any) -> str:
+    s = str(value or "").strip().lower()
+    if not s:
+        return ""
+    s = "".join(ch for ch in unicodedata.normalize("NFD", s) if unicodedata.category(ch) != "Mn")
+    return " ".join(s.split())
+
+
+def _resolver_question_id_raca(form: Form) -> str:
+    """
+    Resolve dinamicamente o question_id de raça/cor no formulário.
+    Fallback para q5 (templates atuais) e q4 (templates legados).
+    """
+    try:
+        for question in getattr(form, "questions", []) or []:
+            text_norm = _normalize_text_key(getattr(question, "text", ""))
+            if ("cor" in text_norm and "raca" in text_norm) or ("cor ou raca" in text_norm):
+                qid = getattr(question, "question_id", None)
+                if qid:
+                    return str(qid)
+    except Exception:
+        pass
+    return "q5"
+
+
+def _extrair_raca_resposta(responses_data: Dict[str, Any], race_question_id: str) -> Optional[str]:
+    raw = _normalize_str((responses_data or {}).get(race_question_id))
+    if raw:
+        return raw
+    # Fallback para variações conhecidas de templates.
+    for k in ("q5", "q4"):
+        raw_fallback = _normalize_str((responses_data or {}).get(k))
+        if raw_fallback:
+            return raw_fallback
+    return None
+
+
+def _calcular_inse_de_respostas(
+    responses: Dict[str, Any],
+) -> Tuple[float, bool, Optional[int], str]:
     """
     Normaliza respostas e calcula INSE (pontos e nível).
-    Retorna (pontos, ok, nivel_num, nivel_label).
-    nivel_num pode ser None quando pontos < 10 (não calculado).
+    Retorna (inse, ok, nivel_num, nivel_label).
     """
     normalized = normalizar_respostas(responses or {})
-    pontos, ok = calcular_pontos_inse_canonico(normalized)
-    nivel_num, nivel_label = pontuacao_para_nivel_inse(pontos)
-    return pontos, ok, nivel_num, nivel_label
+    inse, ok, _theta = calcular_inse_canonico(normalized)
+    nivel_num, nivel_label = pontuacao_para_nivel_inse(inse)
+    return inse, ok, nivel_num, nivel_label
 
 
 def _format_decimal(val: Optional[float]) -> float:
@@ -198,8 +260,8 @@ def _disciplinas_e_proficiencia_por_aluno(
     return disciplinas_info, dict(resultado_por_aluno)
 
 
-class InseSaebService:
-    """Serviço do relatório INSE x SAEB."""
+class InseAvaliacaoService:
+    """Serviço do relatório INSE x Avaliação."""
 
     @staticmethod
     def gerar_relatorio(
@@ -208,9 +270,11 @@ class InseSaebService:
         avaliacao_id: str,
         page: int = 1,
         limit: int = 50,
+        raca_cor: Optional[str] = None,
+        raca_cor_grupo: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Gera o relatório completo INSE x SAEB.
+        Gera o relatório completo INSE x Avaliação.
 
         Args:
             form_id: ID do formulário
@@ -225,6 +289,7 @@ class InseSaebService:
         form = Form.query.get(form_id)
         if not form:
             raise ValueError("Formulário não encontrado")
+        race_question_id = _resolver_question_id_raca(form)
 
         test = Test.query.get(avaliacao_id)
         if not test:
@@ -235,7 +300,37 @@ class InseSaebService:
 
         # 1) Alunos do escopo (responderam ao formulário e passaram nos filtros)
         query = ResultsService._build_base_query(form_id, filters)
-        results = query.all()
+        results_raw = query.all()
+
+        # Opções de filtro por raça/cor com base no escopo antes do filtro de raça.
+        opcoes_raca_cor = defaultdict(int)
+        opcoes_raca_cor_grupo = defaultdict(int)
+        raca_por_student = {}
+        for row in results_raw:
+            response, user, student, school, grade, class_, city = row
+            responses_data = response.responses or {}
+            race_raw = _extrair_raca_resposta(responses_data, race_question_id)
+            raca_por_student[student.id] = race_raw
+            opcoes_raca_cor[race_raw or "NaoInformada"] += 1
+            opcoes_raca_cor_grupo[_race_group(race_raw)] += 1
+
+        # Filtro por raça/cor (backend), aplicado antes de qualquer cálculo/paginação.
+        target_raca = _normalize_str(raca_cor)
+        target_raca_grupo = _normalize_str(raca_cor_grupo)
+        if target_raca or target_raca_grupo:
+            results = []
+            for row in results_raw:
+                response, user, student, school, grade, class_, city = row
+                race_raw = raca_por_student.get(student.id)
+                group = _race_group(race_raw)
+                if target_raca and (race_raw or "") != target_raca:
+                    continue
+                if target_raca_grupo and group != target_raca_grupo:
+                    continue
+                results.append(row)
+        else:
+            results = results_raw
+
         total_alunos_questionario = len(results)
 
         total_nao_responderam = max(0, total_receberam_formulario - total_alunos_questionario)
@@ -247,18 +342,20 @@ class InseSaebService:
         ) if total_receberam_formulario else 0
 
         if total_alunos_questionario == 0:
-            return InseSaebService._empty_report(
+            return InseAvaliacaoService._empty_report(
                 form, test, avaliacao_id, filters,
                 total_receberam_formulario=total_receberam_formulario,
                 total_nao_responderam=total_nao_responderam,
                 porcentagem_participacao=porcentagem_participacao,
                 porcentagem_nao_responderam=porcentagem_nao_responderam,
+                raca_cor=target_raca,
+                raca_cor_grupo=target_raca_grupo,
             )
 
         # 2) Calcular INSE por aluno e agregados
         student_ids = []
         inse_por_aluno = {}
-        distribuicao_inse = {i: {"quantidade": 0, "porcentagem": 0.0} for i in range(1, 7)}
+        distribuicao_inse = {i: {"quantidade": 0, "porcentagem": 0.0} for i in range(1, 9)}
         soma_inse = 0
         count_inse_valido = 0
 
@@ -266,19 +363,19 @@ class InseSaebService:
             response, user, student, school, grade, class_, city = row
             student_ids.append(student.id)
             responses_data = (response.responses or {})
-            pontos, ok, nivel_num, nivel_label = _calcular_inse_de_respostas(responses_data)
+            inse, ok, nivel_num, nivel_label = _calcular_inse_de_respostas(responses_data)
             inse_por_aluno[student.id] = {
-                "pontos": pontos,
+                "valor": inse,
                 "nivel": nivel_num,
                 "nivel_label": nivel_label,
             }
             if nivel_num is not None:
                 distribuicao_inse[nivel_num]["quantidade"] += 1
             if ok and nivel_num is not None:
-                soma_inse += pontos
+                soma_inse += inse
                 count_inse_valido += 1
 
-        for i in range(1, 7):
+        for i in range(1, 9):
             qtd = distribuicao_inse[i]["quantidade"]
             distribuicao_inse[i]["porcentagem"] = round(
                 (qtd / total_alunos_questionario * 100), 2
@@ -381,9 +478,11 @@ class InseSaebService:
                 "proficiencia_media": _format_decimal(proficiencia_media_aluno),
                 "nota": _format_decimal(nota_media),
                 "nivel_proficiencia": classificacao_principal,
-                "inse_pontos": inse_data.get("pontos", 0),
+                "inse_valor": _format_decimal(inse_data.get("valor", 0)),
                 "inse_nivel": inse_data.get("nivel"),
                 "inse_nivel_label": inse_data.get("nivel_label", ""),
+                "raca_cor": raca_por_student.get(student.id),
+                "raca_cor_grupo": _race_group(raca_por_student.get(student.id)),
             })
 
         return {
@@ -391,7 +490,11 @@ class InseSaebService:
             "formTitle": form.title,
             "avaliacaoId": avaliacao_id,
             "avaliacaoTitulo": test.title,
-            "filtros": filters,
+            "filtros": {
+                **filters,
+                **({"raca_cor": target_raca} if target_raca else {}),
+                **({"raca_cor_grupo": target_raca_grupo} if target_raca_grupo else {}),
+            },
             "resumo": {
                 "total_receberam_formulario": total_receberam_formulario,
                 "total_alunos_questionario": total_alunos_questionario,
@@ -408,9 +511,13 @@ class InseSaebService:
                     "quantidade": distribuicao_inse[i]["quantidade"],
                     "porcentagem": distribuicao_inse[i]["porcentagem"],
                 }
-                for i in range(1, 7)
+                for i in range(1, 9)
             },
             "distribuicao_proficiencia": distribuicao_proficiencia,
+            "opcoes_raca_cor": {
+                "categorias": [{"valor": k, "quantidade": v} for k, v in sorted(opcoes_raca_cor.items(), key=lambda x: x[0])],
+                "grupos": [{"valor": k, "quantidade": v} for k, v in sorted(opcoes_raca_cor_grupo.items(), key=lambda x: x[0])],
+            },
             "disciplinas_avaliacao": disciplinas_info,
             "alunos": {
                 "data": alunos_lista,
@@ -433,6 +540,8 @@ class InseSaebService:
         total_nao_responderam: int = 0,
         porcentagem_participacao: float = 0.0,
         porcentagem_nao_responderam: float = 0.0,
+        raca_cor: Optional[str] = None,
+        raca_cor_grupo: Optional[str] = None,
     ) -> Dict[str, Any]:
         disciplinas_info, _ = _disciplinas_e_proficiencia_por_aluno(avaliacao_id, test, [])
         return {
@@ -440,7 +549,11 @@ class InseSaebService:
             "formTitle": form.title,
             "avaliacaoId": test.id,
             "avaliacaoTitulo": test.title,
-            "filtros": filters,
+            "filtros": {
+                **(filters or {}),
+                **({"raca_cor": raca_cor} if raca_cor else {}),
+                **({"raca_cor_grupo": raca_cor_grupo} if raca_cor_grupo else {}),
+            },
             "resumo": {
                 "total_receberam_formulario": total_receberam_formulario,
                 "total_alunos_questionario": 0,
@@ -452,13 +565,18 @@ class InseSaebService:
             },
             "distribuicao_inse": {
                 str(i): {"nivel": i, "label": NIVEIS_INSE_LABELS.get(i, ""), "quantidade": 0, "porcentagem": 0.0}
-                for i in range(1, 7)
+                for i in range(1, 9)
             },
             "distribuicao_proficiencia": {
                 "abaixo_do_basico": 0, "basico": 0, "adequado": 0, "avancado": 0,
                 "abaixo_do_basico_porcentagem": 0, "basico_porcentagem": 0,
                 "adequado_porcentagem": 0, "avancado_porcentagem": 0,
             },
+            "opcoes_raca_cor": {"categorias": [], "grupos": []},
             "disciplinas_avaliacao": disciplinas_info,
             "alunos": {"data": [], "pagination": {"page": 1, "limit": 50, "total": 0, "totalPages": 0}},
         }
+
+
+# Compatibilidade com imports antigos
+InseSaebService = InseAvaliacaoService

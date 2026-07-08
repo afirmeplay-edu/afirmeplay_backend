@@ -24,22 +24,23 @@ _score = _load("inse_scoring", _CONSTANTS / "inse_scoring.py")
 
 normalizar_respostas = _norm.normalizar_respostas
 normalizar_escolaridade = _norm.normalizar_escolaridade
-BENS_PONTOS_CANONICO = _score.BENS_PONTOS_CANONICO
-INSE_PONTUACAO_MAXIMA_TEORICA = _score.INSE_PONTUACAO_MAXIMA_TEORICA
+ESCOLARIDADE_SCORE_CANONICO = _score.ESCOLARIDADE_SCORE_CANONICO
+Q12_QUANTIDADE_SCORE = _score.Q12_QUANTIDADE_SCORE
+Q12_WEIGHTS = _score.Q12_WEIGHTS
+Q13_WEIGHTS = _score.Q13_WEIGHTS
+calcular_inse_canonico = _score.calcular_inse_canonico
 calcular_pontos_inse_canonico = _score.calcular_pontos_inse_canonico
 pontuacao_para_nivel_inse = _score.pontuacao_para_nivel_inse
 INSE_FAIXAS = _score.INSE_FAIXAS
 
 
 class TestInse(unittest.TestCase):
-    def test_geladeira_tabela_pdf_innovplay(self):
-        # PDF: Nenhum=0, 1=3, 2=4, 3 ou mais=5 (canônico 1/2/3+)
-        self.assertEqual(BENS_PONTOS_CANONICO["geladeira"]["1"], 3)
-        self.assertEqual(BENS_PONTOS_CANONICO["geladeira"]["2"], 4)
-        self.assertEqual(BENS_PONTOS_CANONICO["geladeira"]["3+"], 5)
-
-    def test_pontuacao_maxima_teorica(self):
-        self.assertEqual(INSE_PONTUACAO_MAXIMA_TEORICA, 94)
+    def test_tabelas_novas_presentes(self):
+        self.assertEqual(ESCOLARIDADE_SCORE_CANONICO["fundamental_incompleto"], -0.9)
+        self.assertEqual(Q12_QUANTIDADE_SCORE["3+"], 0.5)
+        self.assertEqual(Q12_WEIGHTS["computador"], 0.9)
+        self.assertEqual(Q13_WEIGHTS["quarto_so_seu"], 0.30)
+        self.assertEqual(Q13_WEIGHTS["maquina_lavar"], 0.25)
 
     def test_formsdata_mae_pai_bens(self):
         # formsData: q8 mãe, q9 pai, bens em q12*, serviços em q13*
@@ -66,16 +67,18 @@ class TestInse(unittest.TestCase):
         n = normalizar_respostas(r)
         self.assertEqual(n["mae_escolaridade"], "fundamental_incompleto")
         self.assertEqual(n["pai_escolaridade"], "medio_completo")
-        # Geladeira vem de q12a=2 (4 pts no PDF), não de q13a=Sim/Não do serviço
+        # Geladeira vem de q12a=2 (quantidade), não de q13a=Sim/Não do serviço
         self.assertEqual(n["bens"]["geladeira"], "2")
-        p, _ = calcular_pontos_inse_canonico(n)
-        self.assertGreater(p, 0)
+        inse, ok, theta = calcular_inse_canonico(n)
+        self.assertTrue(ok)
+        self.assertIsInstance(inse, float)
+        self.assertIsInstance(theta, float)
 
     def test_geladeira_string_3_mapeia_para_3_ou_mais(self):
         # Dígito "3" sozinho: `normalizar_quantidade_bens` mapeia para "3+" (regra "3" in t).
         n = normalizar_respostas({"q12a": "3"})
         self.assertEqual(n["bens"]["geladeira"], "3+")
-        self.assertEqual(BENS_PONTOS_CANONICO["geladeira"]["3+"], 5)
+        self.assertEqual(Q12_QUANTIDADE_SCORE["3+"], 0.5)
 
     def test_template_api_mae_pai_bens(self):
         # aluno_jovem_questions: q9 mãe, q10 pai, bens q13*, serviços q14*
@@ -126,14 +129,42 @@ class TestInse(unittest.TestCase):
         t = "Ensino Fundamental até o 5º ano"
         self.assertEqual(normalizar_escolaridade(t), "fundamental_ate_4")
 
+    def test_alias_nunca_estudou(self):
+        t = "Nunca estudou"
+        self.assertEqual(normalizar_escolaridade(t), "fundamental_incompleto")
+
+    def test_theta_fica_no_intervalo(self):
+        n = {
+            "mae_escolaridade": "superior_completo",
+            "pai_escolaridade": "superior_completo",
+            "bens": {k: "3+" for k in Q12_WEIGHTS.keys()},
+            "servicos": {k: True for k in Q13_WEIGHTS.keys()},
+        }
+        inse, ok, theta = calcular_inse_canonico(n)
+        self.assertTrue(ok)
+        self.assertLessEqual(theta, 3.0)
+        self.assertGreaterEqual(theta, -3.0)
+        self.assertIsInstance(inse, float)
+
     def test_pontuacao_para_nivel(self):
-        self.assertEqual(pontuacao_para_nivel_inse(9), (None, "Não calculado"))
-        self.assertEqual(pontuacao_para_nivel_inse(10)[0], 1)
-        self.assertEqual(pontuacao_para_nivel_inse(30)[0], 1)
-        self.assertEqual(pontuacao_para_nivel_inse(31)[0], 2)
-        self.assertEqual(pontuacao_para_nivel_inse(110)[0], 5)
-        self.assertEqual(pontuacao_para_nivel_inse(111)[0], 6)
-        self.assertEqual(len(INSE_FAIXAS), 6)
+        self.assertEqual(pontuacao_para_nivel_inse(None), (None, "Não calculado"))
+        self.assertEqual(pontuacao_para_nivel_inse(2.9)[0], 1)
+        self.assertEqual(pontuacao_para_nivel_inse(3.0)[0], 2)
+        self.assertEqual(pontuacao_para_nivel_inse(4.4)[0], 3)
+        self.assertEqual(pontuacao_para_nivel_inse(4.8)[0], 4)
+        self.assertEqual(pontuacao_para_nivel_inse(5.2)[0], 5)
+        self.assertEqual(pontuacao_para_nivel_inse(5.8)[0], 6)
+        self.assertEqual(pontuacao_para_nivel_inse(6.5)[0], 7)
+        self.assertEqual(pontuacao_para_nivel_inse(7.0)[0], 8)
+        self.assertEqual(len(INSE_FAIXAS), 7)
+
+    def test_compat_calcular_pontos_retorna_inse_continuo(self):
+        n = normalizar_respostas({"q9": "Ensino Médio completo", "q10": "Não sei"})
+        inse_compat, ok_compat = calcular_pontos_inse_canonico(n)
+        inse_novo, ok_novo, _theta = calcular_inse_canonico(n)
+        self.assertTrue(ok_compat)
+        self.assertTrue(ok_novo)
+        self.assertAlmostEqual(inse_compat, inse_novo, places=9)
 
 
 if __name__ == "__main__":

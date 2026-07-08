@@ -9,7 +9,7 @@ from app.decorators.role_required import role_required
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
 from app.socioeconomic_forms.services.results_tasks import generate_indices_report, generate_profiles_report, generate_responses_report, generate_pneerq_report
 from app.socioeconomic_forms.services.results_migration_tasks import populate_initial_cache_for_form, populate_all_forms_cache
-from app.socioeconomic_forms.services.inse_saeb_service import InseSaebService
+from app.socioeconomic_forms.services.inse_saeb_service import InseAvaliacaoService
 from celery.result import AsyncResult
 from app.report_analysis.celery_app import celery_app
 import logging
@@ -138,11 +138,12 @@ def get_profiles_report(form_id):
 
 
 @bp.route('/<form_id>/results/inse-saeb', methods=['GET'])
+@bp.route('/<form_id>/results/inse-avaliacao', methods=['GET'])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador")
-def get_inse_saeb_report(form_id):
+def get_inse_avaliacao_report(form_id):
     """
-    Relatório INSE x SAEB: cruza respostas do formulário socioeconômico com resultados
+    Relatório INSE x Avaliação: cruza respostas do formulário socioeconômico com resultados
     da avaliação (proficiência por disciplina, INSE por aluno).
 
     Query params:
@@ -152,6 +153,8 @@ def get_inse_saeb_report(form_id):
     - serie: ID da série (UUID)
     - turma: ID da turma (UUID)
     - avaliacao: ID da avaliação (test_id) — obrigatório
+    - raca_cor: valor exato de q5 (ex.: Branca, Preta, Parda, Indígena)
+    - raca_cor_grupo: grupo racial (Branca, PretaParda, Outras, NaoDeclarada, NaoInformada)
     - page: Página da lista de alunos (default: 1)
     - limit: Limite por página (default: 50)
     """
@@ -169,19 +172,23 @@ def get_inse_saeb_report(form_id):
             return jsonify({"error": "Parâmetro 'avaliacao' é obrigatório"}), 400
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 50))
+        raca_cor = request.args.get('raca_cor')
+        raca_cor_grupo = request.args.get('raca_cor_grupo')
 
-        result = InseSaebService.gerar_relatorio(
+        result = InseAvaliacaoService.gerar_relatorio(
             form_id=form_id,
             filters=filters,
             avaliacao_id=avaliacao_id,
             page=page,
             limit=limit,
+            raca_cor=raca_cor,
+            raca_cor_grupo=raca_cor_grupo,
         )
         return jsonify(result), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        logger.error(f"Erro ao obter relatório INSE x SAEB: {str(e)}", exc_info=True)
+        logger.error(f"Erro ao obter relatório INSE x Avaliação: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao processar solicitação", "details": str(e)}), 500
 
 

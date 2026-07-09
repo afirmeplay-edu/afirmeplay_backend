@@ -78,21 +78,32 @@ class UserDeletionService(BaseDeletionService):
             self.log("step 3 deleting teacher relations across schemas", teacher_id=teacher_id)
             from app.models.teacherClass import TeacherClass
             from app.models.schoolTeacher import SchoolTeacher
+            from app.models.classSubject import ClassSubject
 
+            total_class_subject = 0
             total_teacher_class = 0
             total_school_teacher = 0
+            total_teacher = 0
 
             for city in all_cities:
                 set_search_path(city_id_to_schema_name(city.id))
+                total_class_subject += ClassSubject.query.filter_by(teacher_id=teacher_id).delete(
+                    synchronize_session=False
+                )
                 total_teacher_class += TeacherClass.query.filter_by(teacher_id=teacher_id).delete(
                     synchronize_session=False
                 )
                 total_school_teacher += SchoolTeacher.query.filter_by(teacher_id=teacher_id).delete(
                     synchronize_session=False
                 )
+                total_teacher += Teacher.query.filter_by(user_id=user_id).delete(
+                    synchronize_session=False
+                )
 
+            deleted["class_subject_links"] = total_class_subject
             deleted["teacher_class_links"] = total_teacher_class
             deleted["school_teacher_links"] = total_school_teacher
+            deleted["teacher"] = total_teacher > 0
             _set_search_path_for_user()
 
         self.log("step 4 deleting student and tenant dependencies")

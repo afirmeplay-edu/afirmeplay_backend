@@ -55,6 +55,7 @@ SERVICOS_MAP = {
 
 ESCOLARIDADE_ALIAS = {
     "fundamental_incompleto": [
+        "Nunca estudou",
         "Não completou o 5º ano",
         "Não completou a 4ª série",
         "Não completou a 4ª série ou o 5º ano do Ensino Fundamental",

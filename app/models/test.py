@@ -3,6 +3,15 @@ import uuid
 from sqlalchemy.dialects.postgresql import UUID, JSON
 from datetime import datetime
 
+# Valores válidos para Test.evaluation_mode:
+# - 'virtual': avaliação online, aluno responde e o sistema corrige (TestSession/StudentAnswer).
+# - 'physical': avaliação física, correção via cartão-resposta (OMR).
+# - 'subjective': avaliação subjetiva. Sem resposta online do aluno: o professor lança o
+#   resultado manualmente por questão (rubrica SIM/PARCIAL/NAO/BRANCO) após a aplicação.
+#   As questões usam `Question.skill_text` (habilidade digitada livremente, sem tabela skills)
+#   e `Question.interaction_config` (um dos 9 tipos de interação). Ver SubjectiveResult/SubjectivePresence.
+EVALUATION_MODES = ('virtual', 'physical', 'subjective')
+
 class Test(db.Model):
     __tablename__ = 'test'
     __table_args__ = {"schema": "tenant"}

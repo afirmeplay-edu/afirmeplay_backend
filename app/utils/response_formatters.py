@@ -231,6 +231,8 @@ def format_question_response(q, exclude_fields=None):
         'alternatives': normalized_alternatives,  # Campo obrigatório com estrutura correta
         'options': normalized_alternatives,  # Alias para compatibilidade
         'skills': q.skill.split(',') if q.skill and isinstance(q.skill, str) else [],
+        'skillText': q.skill_text if getattr(q, 'skill_text', None) else '',
+        'interactionConfig': q.interaction_config if getattr(q, 'interaction_config', None) else None,
         'difficulty': q.difficulty_level if q.difficulty_level else 'Médio',
         'solution': q.correct_answer if q.correct_answer else '',
         'correct_answer': q.correct_answer if q.correct_answer else '',  # Campo obrigatório
@@ -571,6 +573,7 @@ def format_test_response(test, questions=None):
         'title': test.title,
         'description': test.description,
         'type': test_type,
+        'evaluation_mode': test.evaluation_mode if test.evaluation_mode else 'virtual',
         'subject': all_subjects[0] if all_subjects else None,
         'subjects': all_subjects,
         'subjects_count': len(all_subjects),

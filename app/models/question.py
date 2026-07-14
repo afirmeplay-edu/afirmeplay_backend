@@ -3,6 +3,20 @@ import uuid
 from sqlalchemy.dialects.postgresql import UUID, JSON, BYTEA
 from datetime import datetime
 
+# Tipos de questão usados na avaliação subjetiva (Test.evaluation_mode == 'subjective').
+# `question_type` aceita também os tipos legados: multipleChoice, essay, discursive.
+SUBJECTIVE_QUESTION_TYPES = (
+    'dissertativa',
+    'arrastar_soltar',
+    'ligar_colunas',
+    'ordenacao',
+    'completar_lacunas',
+    'substituicao',
+    'destacar_trechos',
+    'escrita_matematica',
+    'construcao_resposta',
+)
+
 class Question(db.Model):
     __tablename__ = 'question'
     __table_args__ = {"schema": "public"}
@@ -23,6 +37,12 @@ class Question(db.Model):
     subtitle = db.Column(db.String)
     alternatives = db.Column(db.JSON)  # Array de opções com formatação
     skill = db.Column(db.String)
+    # Avaliação subjetiva: habilidade digitada livremente pelo usuário (sem usar a tabela `skills`).
+    skill_text = db.Column(db.String)
+    # Avaliação subjetiva: configuração da interação por tipo (bank/slots, pares, itens, etc.),
+    # no mesmo formato do union `Interaction` do protótipo QUESTÃO SUBJETIVA. Usada apenas para
+    # documentar/exibir a questão — a correção é sempre manual (ver SubjectiveResult).
+    interaction_config = db.Column(db.JSON)
     grade_level = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'))
     education_stage_id = db.Column(UUID(as_uuid=True), db.ForeignKey('public.education_stage.id'))
     difficulty_level = db.Column(db.String)

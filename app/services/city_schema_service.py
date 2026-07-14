@@ -480,6 +480,63 @@ def migrate_plantao_online_from_public_to_city_schema(schema_name: str) -> dict:
         raw_conn.close()
 
 
+def get_subjective_evaluation_tables_ddl(schema: str) -> str:
+    """
+    DDL idempotente das tabelas da avaliação subjetiva (Test.evaluation_mode == 'subjective')
+    no schema city_xxx.
+
+    subjective_results: rubrica SIM/PARCIAL/NAO/BRANCO lançada manualmente pelo professor,
+    por aluno e por questão (não há resposta online do aluno neste fluxo).
+    subjective_presences: presença do aluno na aplicação da avaliação.
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".subjective_results (
+    id VARCHAR PRIMARY KEY,
+    test_id VARCHAR NOT NULL REFERENCES "{schema}".test(id),
+    question_id VARCHAR NOT NULL REFERENCES public.question(id),
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
+    value VARCHAR(10) NOT NULL,
+    corrected_by VARCHAR REFERENCES public.users(id),
+    corrected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_subjective_result_test_question_student UNIQUE(test_id, question_id, student_id),
+    CONSTRAINT ck_subjective_result_value CHECK (value IN ('SIM', 'PARCIAL', 'NAO', 'BRANCO'))
+);
+CREATE INDEX IF NOT EXISTS idx_subjective_results_test_id ON "{schema}".subjective_results(test_id);
+CREATE INDEX IF NOT EXISTS idx_subjective_results_student_id ON "{schema}".subjective_results(student_id);
+COMMENT ON TABLE "{schema}".subjective_results IS 'Rubrica de correção manual (SIM/PARCIAL/NAO/BRANCO) da avaliação subjetiva';
+
+CREATE TABLE IF NOT EXISTS "{schema}".subjective_presences (
+    id VARCHAR PRIMARY KEY,
+    test_id VARCHAR NOT NULL REFERENCES "{schema}".test(id),
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
+    present BOOLEAN NOT NULL DEFAULT true,
+    updated_by VARCHAR REFERENCES public.users(id),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_subjective_presence_test_student UNIQUE(test_id, student_id)
+);
+CREATE INDEX IF NOT EXISTS idx_subjective_presences_test_id ON "{schema}".subjective_presences(test_id);
+COMMENT ON TABLE "{schema}".subjective_presences IS 'Presença do aluno na aplicação da avaliação subjetiva';
+"""
+
+
+def provision_subjective_evaluation_for_city_schema(schema_name: str) -> None:
+    """Aplica apenas o bloco DDL da avaliação subjetiva em um schema city_* existente (idempotente)."""
+    if not schema_name.replace("_", "").isalnum() or not schema_name.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema_name}")
+
+    raw_conn = db.engine.raw_connection()
+    try:
+        raw_conn.set_isolation_level(0)
+        cursor = raw_conn.cursor()
+        cursor.execute(get_subjective_evaluation_tables_ddl(schema_name))
+        logger.info("Avaliação subjetiva DDL aplicado em schema %s", schema_name)
+    except Exception as e:
+        logger.exception("Falha ao aplicar avaliação subjetiva em %s: %s", schema_name, e)
+        raise
+    finally:
+        raw_conn.close()
+
+
 def get_calendar_tables_ddl(schema: str) -> str:
     """DDL idempotente para estruturas do Calendar em schemas city_*."""
     return f"""
@@ -832,6 +889,7 @@ def _get_city_tables_ddl(schema: str) -> str:
     monitoring_block = get_monitoring_tables_ddl(schema)
     saved_ata_block = get_saved_ata_sala_tables_ddl(schema)
     afirme_ler_block = get_afirme_ler_evaluation_tables_ddl(schema)
+    subjective_evaluation_block = get_subjective_evaluation_tables_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
 CREATE TABLE IF NOT EXISTS "{schema}".school (
@@ -1540,7 +1598,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".form_result_cache (
 COMMENT ON TABLE "{schema}".form_result_cache IS 'Cache de resultados de formulários';
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_form_type ON "{schema}".form_result_cache(form_id, report_type);
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_dirty ON "{schema}".form_result_cache(is_dirty);
-""" + play_tv_block + plantao_online_block + ideb_meta_block + monitoring_block + saved_ata_block + afirme_ler_block + f"""
+""" + play_tv_block + plantao_online_block + ideb_meta_block + monitoring_block + saved_ata_block + afirme_ler_block + subjective_evaluation_block + f"""
 CREATE TABLE IF NOT EXISTS "{schema}".certificate_templates (
     id VARCHAR PRIMARY KEY,
     evaluation_id VARCHAR REFERENCES "{schema}".test(id),

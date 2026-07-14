@@ -43,6 +43,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from app.models.studentAnswer import StudentAnswer
 from app.models.skill import Skill
 from app.models.subject import Subject
+from app.models.test import EVALUATION_MODES
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
 
@@ -177,6 +178,13 @@ def criar_avaliacao():
                 logging.error("Disciplina ou disciplinas ausentes para tipo AVALIACAO")
                 return jsonify({"error": "Subject or subjects array is required for AVALIACAO type"}), 400
 
+        # Validação de evaluation_mode ('virtual', 'physical' ou 'subjective')
+        evaluation_mode = data.get('evaluation_mode', 'virtual')
+        if evaluation_mode not in EVALUATION_MODES:
+            return jsonify({
+                "error": f"evaluation_mode inválido: {evaluation_mode}. Valores aceitos: {', '.join(EVALUATION_MODES)}"
+            }), 400
+
         # Validação de escola se fornecida
         if data.get('schools'):
             if isinstance(data['schools'], list):
@@ -223,7 +231,7 @@ def criar_avaliacao():
             time_limit=datetime.fromisoformat(data.get('time_limit')) if data.get('time_limit') else None,
             end_time=datetime.fromisoformat(data.get('end_time')) if data.get('end_time') else None,
             duration=data.get('duration'),  # Duração em minutos
-            evaluation_mode=data.get('evaluation_mode', 'virtual'),
+            evaluation_mode=evaluation_mode,
             created_by=data.get('created_by'),
             municipalities=data.get('municipalities'),
             schools=data.get('schools'),
@@ -281,6 +289,11 @@ def criar_avaliacao():
                         else:
                             # Se vier string, usar diretamente
                             skill_value = skills_input
+
+                    # Avaliação subjetiva: habilidade digitada livremente (sem usar a tabela skills)
+                    # e configuração da interação (arrastar_soltar, ligar_colunas, etc.)
+                    skill_text_value = question_data.get('skillText') or question_data.get('skill_text')
+                    interaction_config_value = question_data.get('interactionConfig') or question_data.get('interaction_config')
                     
                     # Definir scope_type e owner baseado na role do criador
                     scope_type = None
@@ -313,6 +326,8 @@ def criar_avaliacao():
                         subtitle=question_data.get('subtitle'),
                         alternatives=question_data.get('options'),
                         skill=skill_value,
+                        skill_text=skill_text_value,
+                        interaction_config=interaction_config_value,
                         grade_level=grade_level,
                         difficulty_level=question_data.get('difficulty'),
                         correct_answer=question_data.get('solution'),
@@ -1018,6 +1033,12 @@ def atualizar_avaliacao(test_id):
                     logging.error("Disciplina ou disciplinas ausentes para tipo AVALIACAO")
                     return jsonify({"error": "Subject or subjects array is required for AVALIACAO type"}), 400
 
+        # Validação de evaluation_mode ('virtual', 'physical' ou 'subjective')
+        if 'evaluation_mode' in data and data['evaluation_mode'] not in EVALUATION_MODES:
+            return jsonify({
+                "error": f"evaluation_mode inválido: {data['evaluation_mode']}. Valores aceitos: {', '.join(EVALUATION_MODES)}"
+            }), 400
+
         updated_class_ids_uuids = None
         # Validação de turmas se fornecidas
         if 'classes' in data and data.get('classes'):
@@ -1115,6 +1136,10 @@ def atualizar_avaliacao(test_id):
                             skill_value = skills_input[0] if skills_input else None
                         else:
                             skill_value = skills_input
+
+                    # Avaliação subjetiva: habilidade digitada livremente e configuração da interação
+                    skill_text_value = question_data.get('skillText') or question_data.get('skill_text')
+                    interaction_config_value = question_data.get('interactionConfig') or question_data.get('interaction_config')
                     
                     # Definir scope_type e owner baseado na role do usuário que está atualizando
                     scope_type = None
@@ -1147,6 +1172,8 @@ def atualizar_avaliacao(test_id):
                         subtitle=question_data.get('subtitle'),
                         alternatives=question_data.get('options'),
                         skill=skill_value,
+                        skill_text=skill_text_value,
+                        interaction_config=interaction_config_value,
                         grade_level=grade_level,
                         difficulty_level=question_data.get('difficulty'),
                         correct_answer=question_data.get('solution'),

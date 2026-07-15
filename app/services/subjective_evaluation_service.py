@@ -94,7 +94,6 @@ class SubjectiveEvaluationService:
                     "number": q.number,
                     "text": q.text,
                     "question_type": q.question_type,
-                    "skill_text": q.skill_text,
                     "skill": q.skill,
                     "interaction_config": q.interaction_config,
                 }

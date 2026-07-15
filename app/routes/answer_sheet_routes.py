@@ -4252,6 +4252,10 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
     from app.services.evaluation_calculator import EvaluationCalculator
     course_name = _get_course_name_from_grade(grade_name)
     q_skills_map, skill_by_uuid = _build_question_skill_lookup_for_detailed_table(gabarito)
+    from app.services.skills_map_service import compute_question_percentuals_answer_sheet
+    # Mesma base de participantes do mapa de habilidades (GET /mapa-habilidades), para a
+    # coluna "% da turma" nunca mais divergir entre as duas telas.
+    percentuais_por_questao = compute_question_percentuals_answer_sheet(gabarito_id, class_ids)
 
     def build_respostas_por_questao(question_numbers, detected_answers):
         respostas = []
@@ -4277,6 +4281,7 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             {
                 "numero": q,
                 "skills": _skills_payload_for_question_number(q, q_skills_map, skill_by_uuid),
+                "percentual_acertos": percentuais_por_questao.get(int(q), 0.0),
             }
             for q in sorted(q_numbers)
         ]

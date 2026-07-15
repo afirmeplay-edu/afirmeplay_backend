@@ -414,8 +414,6 @@ def get_skills_by_evaluation(test_id):
         # Extrair todos os códigos/ids de skill únicos (uma passagem)
         skills_set = set()
         skill_to_subject = {}
-        # Avaliação subjetiva: habilidade digitada livremente (skill_text), sem tabela skills.
-        subjective_skill_texts = {}
         for question in questions:
             if question.skill:
                 for s in question.skill.split(','):
@@ -424,10 +422,6 @@ def get_skills_by_evaluation(test_id):
                         skills_set.add(code)
                         if code not in skill_to_subject:
                             skill_to_subject[code] = (question.subject_id, question.grade_level)
-            elif getattr(question, 'skill_text', None):
-                text = question.skill_text.strip()
-                if text and text not in subjective_skill_texts:
-                    subjective_skill_texts[text] = (question.subject_id, question.grade_level)
 
         # Buscar todas as skills em 2 queries (por ID e por code) em vez de N
         import uuid as _uuid
@@ -478,17 +472,6 @@ def get_skills_by_evaluation(test_id):
                     "grade_id": grade_id,
                     "source": "question"
                 })
-
-        # Habilidades da avaliação subjetiva (texto livre, sem tabela skills)
-        for text, (subject_id, grade_id) in subjective_skill_texts.items():
-            skills_data.append({
-                "id": None,
-                "code": text,
-                "description": text,
-                "subject_id": subject_id,
-                "grade_id": grade_id,
-                "source": "subjective_text",
-            })
 
         if not skills_data:
             return jsonify({"message": "Nenhuma skill encontrada na avaliação."}), 404

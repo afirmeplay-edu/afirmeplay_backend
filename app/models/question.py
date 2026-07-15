@@ -37,8 +37,6 @@ class Question(db.Model):
     subtitle = db.Column(db.String)
     alternatives = db.Column(db.JSON)  # Array de opções com formatação
     skill = db.Column(db.String)
-    # Avaliação subjetiva: habilidade digitada livremente pelo usuário (sem usar a tabela `skills`).
-    skill_text = db.Column(db.String)
     # Avaliação subjetiva: configuração da interação por tipo (bank/slots, pares, itens, etc.),
     # no mesmo formato do union `Interaction` do protótipo QUESTÃO SUBJETIVA. Usada apenas para
     # documentar/exibir a questão — a correção é sempre manual (ver SubjectiveResult).

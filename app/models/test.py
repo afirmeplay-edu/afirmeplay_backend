@@ -8,8 +8,8 @@ from datetime import datetime
 # - 'physical': avaliação física, correção via cartão-resposta (OMR).
 # - 'subjective': avaliação subjetiva. Sem resposta online do aluno: o professor lança o
 #   resultado manualmente por questão (rubrica SIM/PARCIAL/NAO/BRANCO) após a aplicação.
-#   As questões usam `Question.skill_text` (habilidade digitada livremente, sem tabela skills)
-#   e `Question.interaction_config` (um dos 9 tipos de interação). Ver SubjectiveResult/SubjectivePresence.
+#   As questões usam a mesma tabela `skills` das avaliações online (Question.skill) e
+#   `Question.interaction_config` (um dos 9 tipos de interação). Ver SubjectiveResult/SubjectivePresence.
 EVALUATION_MODES = ('virtual', 'physical', 'subjective')
 
 class Test(db.Model):

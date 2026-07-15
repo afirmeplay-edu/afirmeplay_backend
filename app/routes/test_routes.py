@@ -290,9 +290,8 @@ def criar_avaliacao():
                             # Se vier string, usar diretamente
                             skill_value = skills_input
 
-                    # Avaliação subjetiva: habilidade digitada livremente (sem usar a tabela skills)
-                    # e configuração da interação (arrastar_soltar, ligar_colunas, etc.)
-                    skill_text_value = question_data.get('skillText') or question_data.get('skill_text')
+                    # Avaliação subjetiva: configuração da interação (arrastar_soltar, ligar_colunas, etc.)
+                    # A habilidade usa a mesma tabela skills das avaliações online (skill_value acima).
                     interaction_config_value = question_data.get('interactionConfig') or question_data.get('interaction_config')
                     
                     # Definir scope_type e owner baseado na role do criador
@@ -326,7 +325,6 @@ def criar_avaliacao():
                         subtitle=question_data.get('subtitle'),
                         alternatives=question_data.get('options'),
                         skill=skill_value,
-                        skill_text=skill_text_value,
                         interaction_config=interaction_config_value,
                         grade_level=grade_level,
                         difficulty_level=question_data.get('difficulty'),
@@ -1137,8 +1135,8 @@ def atualizar_avaliacao(test_id):
                         else:
                             skill_value = skills_input
 
-                    # Avaliação subjetiva: habilidade digitada livremente e configuração da interação
-                    skill_text_value = question_data.get('skillText') or question_data.get('skill_text')
+                    # Avaliação subjetiva: configuração da interação.
+                    # A habilidade usa a mesma tabela skills das avaliações online (skill_value acima).
                     interaction_config_value = question_data.get('interactionConfig') or question_data.get('interaction_config')
                     
                     # Definir scope_type e owner baseado na role do usuário que está atualizando
@@ -1172,7 +1170,6 @@ def atualizar_avaliacao(test_id):
                         subtitle=question_data.get('subtitle'),
                         alternatives=question_data.get('options'),
                         skill=skill_value,
-                        skill_text=skill_text_value,
                         interaction_config=interaction_config_value,
                         grade_level=grade_level,
                         difficulty_level=question_data.get('difficulty'),

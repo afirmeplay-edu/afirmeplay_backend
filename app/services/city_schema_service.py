@@ -482,39 +482,77 @@ def migrate_plantao_online_from_public_to_city_schema(schema_name: str) -> dict:
 
 def get_subjective_evaluation_tables_ddl(schema: str) -> str:
     """
-    DDL idempotente das tabelas da avaliação subjetiva (Test.evaluation_mode == 'subjective')
-    no schema city_xxx.
+    DDL idempotente das tabelas da avaliação subjetiva no schema city_xxx.
 
-    subjective_results: rubrica SIM/PARCIAL/NAO/BRANCO lançada manualmente pelo professor,
-    por aluno e por questão (não há resposta online do aluno neste fluxo).
+    Avaliação subjetiva é uma entidade própria (subjective_tests), separada de
+    test/question: a prova em si é física/impressa e fica fora do sistema — só a
+    estrutura é cadastrada (subjective_questions: número, código e habilidade digitada
+    livremente, por questão). A correção é sempre manual, célula a célula (aluno x
+    questão), com a rubrica SIM/PARCIAL/NAO/BRANCO (subjective_results).
     subjective_presences: presença do aluno na aplicação da avaliação.
+
+    `subjective_tests.shadow_test_id` referencia um registro-espelho em "{schema}".test
+    (evaluation_mode='subjective'), criado internamente só para reaproveitar o pipeline
+    de evaluation_results/relatórios já existente — não é exposto/editado pelo frontend.
     """
     return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".subjective_tests (
+    id VARCHAR PRIMARY KEY,
+    title VARCHAR(200) NOT NULL,
+    description VARCHAR(500),
+    test_type VARCHAR(50) DEFAULT 'Diagnóstica',
+    subject_id VARCHAR NOT NULL REFERENCES public.subject(id),
+    grade_id UUID NOT NULL REFERENCES public.grade(id),
+    application_date DATE,
+    municipalities JSON,
+    schools JSON,
+    classes JSON,
+    status VARCHAR(20) DEFAULT 'pendente',
+    created_by VARCHAR REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    shadow_test_id VARCHAR REFERENCES "{schema}".test(id)
+);
+CREATE INDEX IF NOT EXISTS idx_subjective_tests_created_by ON "{schema}".subjective_tests(created_by);
+COMMENT ON TABLE "{schema}".subjective_tests IS 'Avaliação subjetiva (cartão-resposta manual): só a estrutura é cadastrada, a prova física fica fora do sistema';
+
+CREATE TABLE IF NOT EXISTS "{schema}".subjective_questions (
+    id VARCHAR PRIMARY KEY,
+    subjective_test_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_tests(id) ON DELETE CASCADE,
+    number INTEGER NOT NULL,
+    code VARCHAR(50),
+    skill_description VARCHAR(500) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_subjective_question_test_number UNIQUE(subjective_test_id, number)
+);
+CREATE INDEX IF NOT EXISTS idx_subjective_questions_test_id ON "{schema}".subjective_questions(subjective_test_id);
+COMMENT ON TABLE "{schema}".subjective_questions IS 'Estrutura da questão da avaliação subjetiva: número, código e habilidade digitada livremente';
+
 CREATE TABLE IF NOT EXISTS "{schema}".subjective_results (
     id VARCHAR PRIMARY KEY,
-    test_id VARCHAR NOT NULL REFERENCES "{schema}".test(id),
-    question_id VARCHAR NOT NULL REFERENCES public.question(id),
+    subjective_test_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_tests(id) ON DELETE CASCADE,
+    subjective_question_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_questions(id) ON DELETE CASCADE,
     student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
     value VARCHAR(10) NOT NULL,
     corrected_by VARCHAR REFERENCES public.users(id),
     corrected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_subjective_result_test_question_student UNIQUE(test_id, question_id, student_id),
+    CONSTRAINT uq_subjective_result_test_question_student UNIQUE(subjective_test_id, subjective_question_id, student_id),
     CONSTRAINT ck_subjective_result_value CHECK (value IN ('SIM', 'PARCIAL', 'NAO', 'BRANCO'))
 );
-CREATE INDEX IF NOT EXISTS idx_subjective_results_test_id ON "{schema}".subjective_results(test_id);
+CREATE INDEX IF NOT EXISTS idx_subjective_results_test_id ON "{schema}".subjective_results(subjective_test_id);
 CREATE INDEX IF NOT EXISTS idx_subjective_results_student_id ON "{schema}".subjective_results(student_id);
 COMMENT ON TABLE "{schema}".subjective_results IS 'Rubrica de correção manual (SIM/PARCIAL/NAO/BRANCO) da avaliação subjetiva';
 
 CREATE TABLE IF NOT EXISTS "{schema}".subjective_presences (
     id VARCHAR PRIMARY KEY,
-    test_id VARCHAR NOT NULL REFERENCES "{schema}".test(id),
+    subjective_test_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_tests(id) ON DELETE CASCADE,
     student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
     present BOOLEAN NOT NULL DEFAULT true,
     updated_by VARCHAR REFERENCES public.users(id),
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_subjective_presence_test_student UNIQUE(test_id, student_id)
+    CONSTRAINT uq_subjective_presence_test_student UNIQUE(subjective_test_id, student_id)
 );
-CREATE INDEX IF NOT EXISTS idx_subjective_presences_test_id ON "{schema}".subjective_presences(test_id);
+CREATE INDEX IF NOT EXISTS idx_subjective_presences_test_id ON "{schema}".subjective_presences(subjective_test_id);
 COMMENT ON TABLE "{schema}".subjective_presences IS 'Presença do aluno na aplicação da avaliação subjetiva';
 """
 

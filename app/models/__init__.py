@@ -18,6 +18,8 @@ from .skill import Skill
 from .question import Question
 from .studentAnswer import StudentAnswer
 from .testSession import TestSession
+from .subjectiveTest import SubjectiveTest
+from .subjectiveQuestion import SubjectiveQuestion
 from .subjectiveResult import SubjectiveResult
 from .subjectivePresence import SubjectivePresence
 from .userQuickLinks import UserQuickLinks

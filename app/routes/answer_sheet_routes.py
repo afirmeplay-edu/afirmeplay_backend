@@ -4252,6 +4252,10 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
     from app.services.evaluation_calculator import EvaluationCalculator
     course_name = _get_course_name_from_grade(grade_name)
     q_skills_map, skill_by_uuid = _build_question_skill_lookup_for_detailed_table(gabarito)
+    from app.services.skills_map_service import compute_question_percentuals_answer_sheet
+    # Mesma base de participantes do mapa de habilidades (GET /mapa-habilidades), para a
+    # coluna "% da turma" nunca mais divergir entre as duas telas.
+    percentuais_por_questao = compute_question_percentuals_answer_sheet(gabarito_id, class_ids)
 
     def build_respostas_por_questao(question_numbers, detected_answers):
         respostas = []
@@ -4277,6 +4281,7 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             {
                 "numero": q,
                 "skills": _skills_payload_for_question_number(q, q_skills_map, skill_by_uuid),
+                "percentual_acertos": percentuais_por_questao.get(int(q), 0.0),
             }
             for q in sorted(q_numbers)
         ]
@@ -5616,6 +5621,131 @@ def listar_gabaritos_evolucao_cartao():
             exc_info=True,
         )
         return jsonify({"error": "Erro ao listar gabaritos", "details": str(e)}), 500
+
+
+@bp.route("/evolucao/alunos", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def listar_alunos_evolucao_cartao():
+    """
+    Lista alunos do escopo com evolução completa em todos os gabaritos que fizeram.
+    Espelha GET /evaluation-results/evolucao/alunos.
+
+    Query params:
+    - estado, municipio (obrigatórios)
+    - escola, serie, turma (opcionais; 'all' = sem recorte)
+    - data_inicio, data_fim (opcionais)
+    - nome_aluno (opcional)
+    - page, per_page (opcionais; default 1 / 50, máx. 100)
+    """
+    try:
+        from app.permissions import get_user_permission_scope
+        from app.routes.evaluation_results_routes import (
+            _aplicar_restricoes_escopo_evolucao_alunos,
+            _buscar_alunos_por_escopo,
+            _determinar_escopo_busca,
+            _determinar_escopo_calculo,
+            _nivel_granularidade_evolucao_alunos,
+        )
+        from app.services.student_evolution_service import StudentEvolutionService
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        permissao = get_user_permission_scope(user)
+        if not permissao.get("permitted"):
+            return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
+
+        estado = request.args.get("estado") or ""
+        municipio = request.args.get("municipio") or ""
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        data_inicio = request.args.get("data_inicio")
+        data_fim = request.args.get("data_fim")
+        nome_aluno = (request.args.get("nome_aluno") or "").strip()
+        page = request.args.get("page", 1, type=int)
+        per_page = request.args.get("per_page", 50, type=int)
+
+        if not estado.strip() or not municipio.strip():
+            return jsonify({
+                "error": "Os parâmetros 'estado' e 'municipio' são obrigatórios para Evolução."
+            }), 400
+
+        municipio_id = str(municipio).strip()
+        user_city = _user_city_id_cartao(user)
+        if permissao["scope"] != "all" and user_city != municipio_id:
+            return jsonify({
+                "error": "Você só pode listar evolução de alunos do seu município."
+            }), 403
+
+        city = City.query.get(municipio_id)
+        if not city:
+            return jsonify({"error": "Município não encontrado"}), 404
+        if estado and city.state and str(city.state).strip().upper() != str(estado).strip().upper():
+            return jsonify({"error": "Município não pertence ao estado informado"}), 400
+
+        set_search_path(city_id_to_schema_name(municipio_id))
+
+        scope_info = _determinar_escopo_busca(
+            estado, municipio_id, escola, serie, turma, None, user
+        )
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        scope_info = _aplicar_restricoes_escopo_evolucao_alunos(scope_info, user)
+        if scope_info.get("escola") and (not escola or str(escola).lower() == "all"):
+            escola = scope_info.get("escola")
+
+        nivel = _nivel_granularidade_evolucao_alunos(escola, serie, turma)
+        if nivel in ("serie", "turma") and (
+            not escola or str(escola).strip().lower() in ("all", "")
+        ):
+            return jsonify({
+                "error": "Para filtrar por série ou turma, selecione também a escola."
+            }), 400
+
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel)
+        alunos = _buscar_alunos_por_escopo(escopo_calculo)
+
+        if nome_aluno:
+            nome_lower = nome_aluno.lower()
+            alunos = [a for a in alunos if a.name and nome_lower in a.name.lower()]
+
+        dt_inicio = _parse_data_filtro_evolucao_cartao(data_inicio)
+        dt_fim = _parse_data_filtro_evolucao_cartao(data_fim)
+
+        evolution = StudentEvolutionService.build_answer_sheet_evolution_for_students(
+            alunos,
+            data_inicio=dt_inicio,
+            data_fim=dt_fim,
+            page=page,
+            per_page=per_page,
+        )
+
+        return jsonify({
+            "source_type": "cartao_resposta",
+            "filters": {
+                "estado": estado,
+                "municipio": municipio_id,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "data_inicio": data_inicio,
+                "data_fim": data_fim,
+                "nome_aluno": nome_aluno or None,
+            },
+            "pagination": evolution["pagination"],
+            "students": evolution["students"],
+        }), 200
+    except Exception as e:
+        logging.error(
+            "Erro ao listar alunos para Evolução (cartão resposta): %s",
+            e,
+            exc_info=True,
+        )
+        return jsonify({"error": "Erro ao listar evolução dos alunos", "details": str(e)}), 500
 
 
 def _parse_gabarito_ids_from_body(data: dict, field: str = "gabarito_ids") -> Tuple[Optional[List[str]], Optional[tuple]]:

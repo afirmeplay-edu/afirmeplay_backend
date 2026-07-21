@@ -552,6 +552,99 @@ def _resolve_failed_bucket_key(
     return _answer_sheet_stat_bucket_key(sk, "geral")
 
 
+def resolve_participating_students_answer_sheet(
+    gabarito: AnswerSheetGabarito,
+    class_ids: List[str],
+) -> Tuple[List[Student], Dict[str, AnswerSheetResult], int]:
+    """
+    Alunos participantes (cartão efetivamente corrigido) de um gabarito, dentro do
+    escopo de turmas informado. Fonte única desta regra: usada tanto pelo mapa de
+    habilidades quanto por qualquer outro relatório que precise do mesmo denominador
+    ("total de participantes", em branco contando como erro) para não divergir dele.
+
+    Regra: `_participating_answer_sheet_result` (cartão com `corrected_at` e algum sinal
+    de participação) + alinhamento com `evaluation_results` quando o gabarito está
+    vinculado a uma prova (test_id), mesmo critério de participante de
+    `GET /evaluation-results/avaliacoes`.
+
+    Retorna (alunos_participantes, resultado_por_aluno, total_alunos_no_escopo_da_turma).
+    """
+    if not class_ids:
+        return [], {}, 0
+    students_all = (
+        Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
+        .filter(Student.class_id.in_(class_ids))
+        .all()
+    )
+    student_ids_all = [s.id for s in students_all]
+    results = AnswerSheetResult.query.filter(
+        AnswerSheetResult.gabarito_id == gabarito.id,
+        AnswerSheetResult.student_id.in_(student_ids_all),
+    ).all()
+    result_by_student = {r.student_id: r for r in results}
+    students = [
+        s
+        for s in students_all
+        if s.id in result_by_student and _participating_answer_sheet_result(result_by_student[s.id])
+    ]
+    linked_test_id = getattr(gabarito, "test_id", None)
+    if linked_test_id and students:
+        sid_list = [s.id for s in students]
+        eval_ids = {
+            row[0]
+            for row in EvaluationResult.query.filter(
+                EvaluationResult.test_id == str(linked_test_id),
+                EvaluationResult.student_id.in_(sid_list),
+            )
+            .with_entities(EvaluationResult.student_id)
+            .distinct()
+            .all()
+        }
+        students = [s for s in students if s.id in eval_ids]
+    return students, result_by_student, len(students_all)
+
+
+def compute_question_percentuals_answer_sheet(
+    gabarito_id: str,
+    class_ids: List[str],
+) -> Dict[int, float]:
+    """
+    Percentual de acertos por número de questão (independente de habilidade),
+    usando exatamente a mesma base de participantes do mapa de habilidades
+    (`resolve_participating_students_answer_sheet`): corretas / total de alunos
+    participantes; quem deixou a questão em branco conta como erro no denominador.
+
+    Fonte única para a coluna "% da turma" da tabela detalhada de
+    GET /answer-sheets/resultados-agregados, para que ela nunca mais divirja do
+    mapa de habilidades (GET /answer-sheets/mapa-habilidades) para a mesma questão.
+    """
+    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gabarito:
+        return {}
+    gab_map = _gabarito_answer_map(gabarito)
+    if not gab_map:
+        return {}
+
+    students, result_by_student, _ = resolve_participating_students_answer_sheet(gabarito, class_ids)
+    total = len(students)
+    if total == 0:
+        return {qn: 0.0 for qn in gab_map.keys()}
+
+    correct_counts: Dict[int, int] = defaultdict(int)
+    for st in students:
+        r = result_by_student.get(st.id)
+        detected = _parse_detected(r.detected_answers if r else None)
+        for qn, ca in gab_map.items():
+            st_ans = detected.get(qn, "")
+            if ca and st_ans and st_ans == ca:
+                correct_counts[qn] += 1
+
+    return {
+        qn: round_to_two_decimals((correct_counts.get(qn, 0) / total) * 100.0)
+        for qn in gab_map.keys()
+    }
+
+
 def build_skills_map_answer_sheet(
     gabarito_id: str,
     class_ids: List[str],
@@ -627,36 +720,9 @@ def build_skills_map_answer_sheet(
             "_students_all_count": 0,
         }
 
-    students_all = (
-        Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
-        .filter(Student.class_id.in_(class_ids))
-        .all()
+    students, result_by_student, students_all_count = resolve_participating_students_answer_sheet(
+        gabarito, class_ids
     )
-    student_ids_all = [s.id for s in students_all]
-    results = AnswerSheetResult.query.filter(
-        AnswerSheetResult.gabarito_id == gabarito_id,
-        AnswerSheetResult.student_id.in_(student_ids_all),
-    ).all()
-    result_by_student = {r.student_id: r for r in results}
-    students = [
-        s
-        for s in students_all
-        if s.id in result_by_student and _participating_answer_sheet_result(result_by_student[s.id])
-    ]
-    linked_test_id = getattr(gabarito, "test_id", None)
-    if linked_test_id and students:
-        sid_list = [s.id for s in students]
-        eval_ids = {
-            row[0]
-            for row in EvaluationResult.query.filter(
-                EvaluationResult.test_id == str(linked_test_id),
-                EvaluationResult.student_id.in_(sid_list),
-            )
-            .with_entities(EvaluationResult.student_id)
-            .distinct()
-            .all()
-        }
-        students = [s for s in students if s.id in eval_ids]
 
     stats: Dict[str, Dict[str, int]] = defaultdict(lambda: {"correct": 0, "total": 0})
     failed_by_skill: Dict[str, Set[str]] = defaultdict(set)
@@ -743,7 +809,7 @@ def build_skills_map_answer_sheet(
         "por_faixa": por_faixa,
         "_failed_by_skill": {k: set(v) for k, v in failed_by_skill.items()},
         "_students_snapshot": students,
-        "_students_all_count": len(students_all),
+        "_students_all_count": students_all_count,
     }
 
 

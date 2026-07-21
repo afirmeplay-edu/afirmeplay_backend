@@ -6,6 +6,8 @@ debug_corrections/
 debug_bubbles/
 generated_pdfs/
 
+AVALIAÇÃO SUBJETIVA/
+
 # C extensions
 *.so
 

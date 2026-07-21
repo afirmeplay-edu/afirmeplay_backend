@@ -7880,6 +7880,160 @@ def listar_avaliacoes_evolucao():
         return jsonify({"error": "Erro ao listar avaliações", "details": str(e)}), 500
 
 
+def _nivel_granularidade_evolucao_alunos(escola, serie, turma) -> str:
+    """Nível pelo filtro mais específico (sem exigir avaliação selecionada)."""
+    def _valid(value):
+        return bool(value) and str(value).strip().lower() not in ("all", "todas", "")
+
+    if _valid(turma):
+        return "turma"
+    if _valid(serie):
+        return "serie"
+    if _valid(escola):
+        return "escola"
+    return "municipio"
+
+
+def _aplicar_restricoes_escopo_evolucao_alunos(scope_info: dict, user: dict) -> dict:
+    """Propaga restrições de professor/diretor no scope_info."""
+    role = (user.get("role") or "").lower()
+    if role == "professor":
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+
+        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+        if not teacher:
+            scope_info["_restrict_class_ids"] = []
+            return scope_info
+        teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+        scope_info["_restrict_class_ids"] = [tc.class_id for tc in teacher_classes]
+    elif role in ("diretor", "coordenador"):
+        from app.models.manager import Manager
+
+        manager = Manager.query.filter_by(user_id=user["id"]).first()
+        if manager and manager.school_id:
+            scope_info["_restrict_school_id"] = manager.school_id
+            if not scope_info.get("escola") or str(scope_info.get("escola")).lower() == "all":
+                scope_info["escola"] = manager.school_id
+    return scope_info
+
+
+@bp.route('/evolucao/alunos', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def listar_alunos_evolucao():
+    """
+    Lista alunos do escopo com evolução completa em todas as avaliações que fizeram.
+
+    O usuário não seleciona avaliações: o filtro escolhe os alunos; cada item traz
+    o histórico completo (nome das provas + comparação geral/disciplina/habilidade).
+
+    Query params:
+    - estado, municipio (obrigatórios)
+    - escola, serie, turma (opcionais; 'all' = sem recorte)
+    - data_inicio, data_fim (opcionais; filtram o histórico por data de aplicação)
+    - nome_aluno (opcional)
+    - page, per_page (opcionais; default 1 / 50, máx. 100)
+    """
+    try:
+        from app.services.student_evolution_service import StudentEvolutionService
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        permissao = verificar_permissao_filtros(user)
+        if not permissao["permitted"]:
+            return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
+
+        estado = request.args.get("estado") or ""
+        municipio = request.args.get("municipio") or ""
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        data_inicio = request.args.get("data_inicio")
+        data_fim = request.args.get("data_fim")
+        nome_aluno = (request.args.get("nome_aluno") or "").strip()
+        page = request.args.get("page", 1, type=int)
+        per_page = request.args.get("per_page", 50, type=int)
+
+        if not estado.strip() or not municipio.strip():
+            return jsonify({
+                "error": "Os parâmetros 'estado' e 'municipio' são obrigatórios para Evolução."
+            }), 400
+
+        municipio_id = str(municipio).strip()
+        user_city = _user_city_id(user)
+        if permissao["scope"] != "all" and user_city != municipio_id:
+            return jsonify({
+                "error": "Você só pode listar evolução de alunos do seu município."
+            }), 403
+
+        city = City.query.get(municipio_id)
+        if not city:
+            return jsonify({"error": "Município não encontrado"}), 404
+        if estado and city.state and str(city.state).strip().upper() != str(estado).strip().upper():
+            return jsonify({"error": "Município não pertence ao estado informado"}), 400
+
+        schema = city_id_to_schema_name(municipio_id)
+        set_search_path(schema)
+
+        scope_info = _determinar_escopo_busca(
+            estado, municipio_id, escola, serie, turma, None, user
+        )
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        scope_info = _aplicar_restricoes_escopo_evolucao_alunos(scope_info, user)
+        if scope_info.get("escola") and (not escola or str(escola).lower() == "all"):
+            escola = scope_info.get("escola")
+
+        nivel = _nivel_granularidade_evolucao_alunos(escola, serie, turma)
+        if nivel in ("serie", "turma") and (
+            not escola or str(escola).strip().lower() in ("all", "")
+        ):
+            return jsonify({
+                "error": "Para filtrar por série ou turma, selecione também a escola."
+            }), 400
+
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel)
+        alunos = _buscar_alunos_por_escopo(escopo_calculo)
+
+        if nome_aluno:
+            nome_lower = nome_aluno.lower()
+            alunos = [a for a in alunos if a.name and nome_lower in a.name.lower()]
+
+        dt_inicio = _parse_data_filtro(data_inicio)
+        dt_fim = _parse_data_filtro(data_fim)
+
+        evolution = StudentEvolutionService.build_digital_evolution_for_students(
+            alunos,
+            data_inicio=dt_inicio,
+            data_fim=dt_fim,
+            page=page,
+            per_page=per_page,
+        )
+
+        return jsonify({
+            "filters": {
+                "estado": estado,
+                "municipio": municipio_id,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "data_inicio": data_inicio,
+                "data_fim": data_fim,
+                "nome_aluno": nome_aluno or None,
+            },
+            "pagination": evolution["pagination"],
+            "students": evolution["students"],
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao listar alunos para Evolução: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao listar evolução dos alunos", "details": str(e)}), 500
+
+
 # ==================== ENDPOINTS PARA OPÇÕES DE FILTROS ====================
 
 @bp.route('/opcoes-filtros', methods=['GET'])

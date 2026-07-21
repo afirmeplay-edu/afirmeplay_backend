@@ -757,9 +757,11 @@ def evaluations_stats():
 
         virtual_evaluations = 0
         physical_evaluations = 0
+        subjective_evaluations = 0
         try:
             virtual_evaluations = test_query.filter(Test.evaluation_mode == 'virtual').count()
             physical_evaluations = test_query.filter(Test.evaluation_mode == 'physical').count()
+            subjective_evaluations = test_query.filter(Test.evaluation_mode == 'subjective').count()
         except Exception as e:
             logging.debug("modo: %s", e)
 
@@ -769,6 +771,7 @@ def evaluations_stats():
             "total_questions": total_questions,
             "virtual_evaluations": virtual_evaluations,
             "physical_evaluations": physical_evaluations,
+            "subjective_evaluations": subjective_evaluations,
             "by_type": by_type,
             "by_model": by_model,
             "by_status": by_status,

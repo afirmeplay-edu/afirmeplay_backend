@@ -286,7 +286,12 @@ class SubjectiveEvaluationService:
 
     @staticmethod
     def get_correction_matrix(subjective_test_id: str, class_id) -> Optional[Dict[str, Any]]:
-        """Matriz aluno x questão para a tela de correção manual de uma turma."""
+        """
+        Matriz aluno x questão para a tela de correção manual de uma turma.
+
+        Se já existir EvaluationResult no Test espelho (após finalizar), inclui em cada
+        aluno o campo `evaluation` com nota/proficiência/classificação gravadas.
+        """
         subjective_test = SubjectiveTest.query.get(subjective_test_id)
         if not subjective_test:
             return None
@@ -315,6 +320,22 @@ class SubjectiveEvaluationService:
         )
         presence_map = {str(p.student_id): p.present for p in presences}
 
+        evaluation_by_student: Dict[str, Dict[str, Any]] = {}
+        if subjective_test.shadow_test_id and student_ids:
+            for er in EvaluationResult.query.filter(
+                EvaluationResult.test_id == subjective_test.shadow_test_id,
+                EvaluationResult.student_id.in_(student_ids),
+            ).all():
+                evaluation_by_student[str(er.student_id)] = {
+                    "score_percentage": er.score_percentage,
+                    "grade": er.grade,
+                    "proficiency": er.proficiency,
+                    "classification": er.classification,
+                    "correct_answers": er.correct_answers,
+                    "total_questions": er.total_questions,
+                    "persisted": True,
+                }
+
         return {
             "subjective_test": {
                 "id": subjective_test.id,
@@ -329,6 +350,7 @@ class SubjectiveEvaluationService:
                     "registration": s.registration,
                     "present": presence_map.get(str(s.id), True),
                     "results": results_map.get(str(s.id), {}),
+                    "evaluation": evaluation_by_student.get(str(s.id)),
                 }
                 for s in students
             ],
@@ -443,6 +465,97 @@ class SubjectiveEvaluationService:
         return session
 
     @staticmethod
+    def _compute_student_score(
+        subjective_test: SubjectiveTest,
+        student_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Calcula nota/proficiência/classificação a partir da rubrica já lançada.
+        Não grava nada — usado pelo preview e pelo calculate_and_save.
+        Retorna None se a avaliação não tiver questões.
+        """
+        questions = subjective_test.questions
+        total_questions = len(questions)
+        if total_questions == 0:
+            return None
+
+        question_ids = [q.id for q in questions]
+        results = SubjectiveResult.query.filter(
+            SubjectiveResult.subjective_test_id == subjective_test.id,
+            SubjectiveResult.student_id == student_id,
+            SubjectiveResult.subjective_question_id.in_(question_ids),
+        ).all()
+        value_by_question = {str(r.subjective_question_id): r.value for r in results}
+
+        weighted_sum = 0.0
+        correct_equivalent_count = 0
+        for qid in question_ids:
+            v = value_by_question.get(str(qid))
+            weighted_sum += RUBRIC_WEIGHTS.get(v, 0.0)
+            if v == 'SIM':
+                correct_equivalent_count += 1
+
+        course_name, subject_name = SubjectiveEvaluationService._resolve_course_and_subject_names(subjective_test)
+        calc_result = EvaluationCalculator.calculate_complete_evaluation(
+            correct_answers=weighted_sum,
+            total_questions=total_questions,
+            course_name=course_name,
+            subject_name=subject_name,
+            use_simple_calculation=False,
+        )
+        score_percentage = (
+            round_to_two_decimals((weighted_sum / total_questions) * 100) if total_questions > 0 else 0.0
+        )
+
+        return {
+            "skipped": False,
+            "student_id": student_id,
+            "subjective_test_id": subjective_test.id,
+            "correct_answers": correct_equivalent_count,
+            "total_questions": total_questions,
+            "score_percentage": score_percentage,
+            "grade": calc_result['grade'],
+            "proficiency": calc_result['proficiency'],
+            "classification": calc_result['classification'],
+        }
+
+    @staticmethod
+    def preview_student_result(subjective_test_id: str, student_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Preview do resultado de um aluno: mesma fórmula do finalize, mas NÃO grava
+        EvaluationResult nem marca relatórios dirty. Para atualizar a coluna da matriz
+        a cada lançamento de rubrica.
+        """
+        subjective_test = SubjectiveTest.query.get(subjective_test_id)
+        if not subjective_test:
+            return None
+
+        presence = SubjectivePresence.query.filter_by(
+            subjective_test_id=subjective_test_id, student_id=student_id
+        ).first()
+        if presence and not presence.present:
+            return {
+                "skipped": True,
+                "reason": "ausente",
+                "student_id": student_id,
+                "subjective_test_id": subjective_test_id,
+                "persisted": False,
+            }
+
+        computed = SubjectiveEvaluationService._compute_student_score(subjective_test, student_id)
+        if computed is None:
+            return {
+                "skipped": True,
+                "reason": "sem_questoes",
+                "student_id": student_id,
+                "subjective_test_id": subjective_test_id,
+                "persisted": False,
+            }
+
+        computed["persisted"] = False
+        return computed
+
+    @staticmethod
     def calculate_and_save_result_for_student(
         subjective_test_id: str,
         student_id: str,
@@ -482,45 +595,20 @@ class SubjectiveEvaluationService:
                     db.session.commit()
                 return {"skipped": True, "reason": "ausente", "student_id": student_id}
 
-            questions = subjective_test.questions
-            total_questions = len(questions)
-            if total_questions == 0:
+            computed = SubjectiveEvaluationService._compute_student_score(subjective_test, student_id)
+            if computed is None:
                 logging.warning("SubjectiveEvaluationService: avaliação %s sem questões", subjective_test_id)
                 return None
 
-            question_ids = [q.id for q in questions]
-            results = SubjectiveResult.query.filter(
-                SubjectiveResult.subjective_test_id == subjective_test_id,
-                SubjectiveResult.student_id == student_id,
-                SubjectiveResult.subjective_question_id.in_(question_ids),
-            ).all()
-            value_by_question = {str(r.subjective_question_id): r.value for r in results}
-
-            weighted_sum = 0.0
-            correct_equivalent_count = 0
-            for qid in question_ids:
-                v = value_by_question.get(str(qid))
-                weighted_sum += RUBRIC_WEIGHTS.get(v, 0.0)
-                if v == 'SIM':
-                    correct_equivalent_count += 1
-
-            course_name, subject_name = SubjectiveEvaluationService._resolve_course_and_subject_names(subjective_test)
-
-            calc_result = EvaluationCalculator.calculate_complete_evaluation(
-                correct_answers=weighted_sum,
-                total_questions=total_questions,
-                course_name=course_name,
-                subject_name=subject_name,
-                use_simple_calculation=False,
-            )
-
-            score_percentage = round_to_two_decimals((weighted_sum / total_questions) * 100) if total_questions > 0 else 0.0
+            total_questions = computed["total_questions"]
+            correct_equivalent_count = computed["correct_answers"]
+            score_percentage = computed["score_percentage"]
 
             session = SubjectiveEvaluationService._get_or_create_synthetic_session(shadow_test_id, student_id)
             session.total_questions = total_questions
             session.correct_answers = correct_equivalent_count
             session.score = score_percentage
-            session.grade = calc_result['grade']
+            session.grade = computed['grade']
             session.status = 'corrigida'
             session.corrected_by = corrected_by
             session.corrected_at = datetime.utcnow()
@@ -535,9 +623,9 @@ class SubjectiveEvaluationService:
                 existing_result.correct_answers = correct_equivalent_count
                 existing_result.total_questions = total_questions
                 existing_result.score_percentage = score_percentage
-                existing_result.grade = calc_result['grade']
-                existing_result.proficiency = calc_result['proficiency']
-                existing_result.classification = calc_result['classification']
+                existing_result.grade = computed['grade']
+                existing_result.proficiency = computed['proficiency']
+                existing_result.classification = computed['classification']
                 existing_result.calculated_at = datetime.utcnow()
                 for snap_key in (
                     "school_id_snapshot", "class_id_snapshot", "grade_id_snapshot", "enrollment_id_snapshot",
@@ -553,9 +641,9 @@ class SubjectiveEvaluationService:
                     correct_answers=correct_equivalent_count,
                     total_questions=total_questions,
                     score_percentage=score_percentage,
-                    grade=calc_result['grade'],
-                    proficiency=calc_result['proficiency'],
-                    classification=calc_result['classification'],
+                    grade=computed['grade'],
+                    proficiency=computed['proficiency'],
+                    classification=computed['classification'],
                 )
                 for snap_key, snap_val in placement.items():
                     if snap_val is not None:
@@ -573,9 +661,10 @@ class SubjectiveEvaluationService:
                 "correct_answers": correct_equivalent_count,
                 "total_questions": total_questions,
                 "score_percentage": score_percentage,
-                "grade": calc_result['grade'],
-                "proficiency": calc_result['proficiency'],
-                "classification": calc_result['classification'],
+                "grade": computed['grade'],
+                "proficiency": computed['proficiency'],
+                "classification": computed['classification'],
+                "persisted": True,
             }
         except Exception as e:
             logging.error(
@@ -808,3 +897,291 @@ class SubjectiveEvaluationService:
             "saeb_levels": saeb_levels,
             "per_question": per_question,
         }
+
+    # ------------------------------------------------------------------
+    # Opções de filtros (Estado → Município → Escola → Série → Avaliação → Turma)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_filter_all(value) -> bool:
+        if value is None:
+            return True
+        s = str(value).strip().lower()
+        return s == '' or s in ('all', 'todas', 'todos')
+
+    @staticmethod
+    def _user_city_id(user: dict) -> Optional[str]:
+        return user.get('city_id') or user.get('tenant_id')
+
+    @staticmethod
+    def _corrected_subjective_tests() -> List[SubjectiveTest]:
+        """Avaliações subjetivas que já têm pelo menos um lançamento de correção."""
+        corrected_ids = [
+            row[0]
+            for row in db.session.query(SubjectiveResult.subjective_test_id).distinct().all()
+        ]
+        if not corrected_ids:
+            return []
+        return SubjectiveTest.query.filter(SubjectiveTest.id.in_(corrected_ids)).all()
+
+    @staticmethod
+    def _class_ids_with_correction(subjective_test_id: str) -> set:
+        """Turmas que têm pelo menos um aluno com rubrica lançada nesta avaliação."""
+        student_ids = [
+            row[0]
+            for row in db.session.query(SubjectiveResult.student_id).filter(
+                SubjectiveResult.subjective_test_id == subjective_test_id
+            ).distinct().all()
+        ]
+        if not student_ids:
+            return set()
+        return {
+            s.class_id
+            for s in Student.query.filter(Student.id.in_(student_ids)).all()
+            if s.class_id is not None
+        }
+
+    @staticmethod
+    def _test_intersects_school(subjective_test: SubjectiveTest, school_id: str, class_ids: List) -> bool:
+        school_id_str = str(school_id)
+        if subjective_test.schools:
+            schools = (
+                subjective_test.schools
+                if isinstance(subjective_test.schools, list)
+                else [subjective_test.schools]
+            )
+            if any(str(s) == school_id_str for s in schools):
+                return True
+        if not class_ids:
+            return False
+        return Class.query.filter(
+            Class.id.in_(class_ids),
+            Class.school_id == school_id_str,
+        ).first() is not None
+
+    @staticmethod
+    def get_filter_options(
+        user: dict,
+        estado: Optional[str] = None,
+        municipio: Optional[str] = None,
+        escola: Optional[str] = None,
+        serie: Optional[str] = None,
+        avaliacao: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Opções hierárquicas para filtros da avaliação subjetiva.
+
+        Ordem: Estado → Município → Escola → Série → Avaliação → Turma
+        (diferente de evaluation-results, onde avaliação vem antes da escola).
+
+        Só lista avaliações que já têm correção lançada (SubjectiveResult).
+        Diretor/coordenador: pré-seleciona a escola vinculada.
+        """
+        from app.models.city import City
+        from app.models.grades import Grade
+        from app.permissions import get_user_permission_scope
+        from app.permissions.utils import get_manager_school, get_teacher_schools, get_teacher_classes
+        from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
+        from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
+
+        permissao = get_user_permission_scope(user)
+        if not permissao.get('permitted'):
+            return {"error": permissao.get('error') or "Sem permissão", "status": 403}
+
+        role = str(user.get('role') or '').lower()
+        user_city_id = SubjectiveEvaluationService._user_city_id(user)
+
+        response: Dict[str, Any] = {}
+
+        # --- Estados ---
+        if permissao.get('scope') == 'all':
+            estados = db.session.query(City.state).distinct().filter(City.state.isnot(None)).all()
+        else:
+            estados = db.session.query(City.state).distinct().filter(
+                City.state.isnot(None),
+                City.id == user_city_id,
+            ).all()
+        response["estados"] = [{"id": e[0], "nome": e[0]} for e in estados if e[0]]
+
+        if SubjectiveEvaluationService._is_filter_all(estado):
+            return response
+
+        # --- Municípios ---
+        if permissao.get('scope') == 'all':
+            municipios = City.query.filter(City.state.ilike(f"%{estado}%")).all()
+        else:
+            municipios = City.query.filter(
+                City.state.ilike(f"%{estado}%"),
+                City.id == user_city_id,
+            ).all()
+        response["municipios"] = [{"id": str(m.id), "nome": m.name} for m in municipios]
+
+        if SubjectiveEvaluationService._is_filter_all(municipio):
+            return response
+
+        municipio_str = str(municipio).strip()
+        city = City.query.get(municipio_str)
+        if not city:
+            return {**response, "error": "Município não encontrado", "status": 404}
+        if permissao.get('scope') != 'all' and str(user_city_id) != municipio_str:
+            return {**response, "error": "Sem permissão para este município", "status": 403}
+
+        # Schema do município (necessário para SubjectiveTest/School/Class no tenant).
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        # Pré-seleção de escola para diretor/coordenador.
+        escola_pre_selecionada = None
+        if role in ('diretor', 'coordenador'):
+            escola_pre_selecionada = get_manager_school(user['id'])
+            response["escola_pre_selecionada"] = escola_pre_selecionada
+
+        escola_efetiva = None if SubjectiveEvaluationService._is_filter_all(escola) else str(escola).strip()
+        if escola_efetiva is None and escola_pre_selecionada:
+            escola_efetiva = str(escola_pre_selecionada)
+
+        serie_efetiva = None if SubjectiveEvaluationService._is_filter_all(serie) else ensure_uuid(serie)
+        avaliacao_efetiva = None if SubjectiveEvaluationService._is_filter_all(avaliacao) else str(avaliacao).strip()
+
+        # Restrições por role.
+        allowed_school_ids = None
+        allowed_class_ids = None
+        if role in ('diretor', 'coordenador'):
+            manager_school = get_manager_school(user['id'])
+            allowed_school_ids = {str(manager_school)} if manager_school else set()
+        elif role == 'professor':
+            allowed_school_ids = set(get_teacher_schools(user['id']) or [])
+            allowed_class_ids = set(ensure_uuid_list(get_teacher_classes(user['id']) or []))
+
+        corrected_tests = SubjectiveEvaluationService._corrected_subjective_tests()
+
+        # Para cada avaliação corrigida: turmas do escopo ∩ turmas com lançamento ∩ permissão.
+        test_contexts = []
+        for test in corrected_tests:
+            scope_class_ids = SubjectiveEvaluationService._resolve_target_class_ids(test)
+            corrected_class_ids = SubjectiveEvaluationService._class_ids_with_correction(test.id)
+            class_ids = [cid for cid in scope_class_ids if cid in corrected_class_ids]
+            if allowed_class_ids is not None:
+                class_ids = [cid for cid in class_ids if cid in allowed_class_ids]
+            if not class_ids and not test.schools and not test.municipalities:
+                continue
+            if allowed_school_ids is not None:
+                # Mantém só se intersecta escola permitida.
+                intersects = False
+                for sid in allowed_school_ids:
+                    if SubjectiveEvaluationService._test_intersects_school(test, sid, class_ids):
+                        intersects = True
+                        break
+                if not intersects:
+                    continue
+            test_contexts.append({"test": test, "class_ids": class_ids})
+
+        # Escolas do município presentes no escopo das avaliações corrigidas.
+        school_ids_set = set()
+        for ctx in test_contexts:
+            test = ctx["test"]
+            class_ids = ctx["class_ids"]
+            if class_ids:
+                for c in Class.query.filter(Class.id.in_(class_ids)).all():
+                    if c.school_id:
+                        school_ids_set.add(str(c.school_id))
+            if test.schools:
+                schools = test.schools if isinstance(test.schools, list) else [test.schools]
+                for s in schools:
+                    school_ids_set.add(str(s))
+
+        if allowed_school_ids is not None:
+            school_ids_set &= allowed_school_ids
+
+        schools_q = School.query.filter(
+            School.city_id == municipio_str,
+            School.id.in_(list(school_ids_set) or ['__none__']),
+        ).order_by(School.name)
+        response["escolas"] = [{"id": s.id, "nome": s.name} for s in schools_q.all()]
+
+        # A partir daqui, estreita pelo nível selecionado (escola → série → avaliação → turma).
+        filtered_contexts = test_contexts
+        if escola_efetiva:
+            filtered_contexts = [
+                ctx for ctx in filtered_contexts
+                if SubjectiveEvaluationService._test_intersects_school(
+                    ctx["test"], escola_efetiva, ctx["class_ids"]
+                )
+            ]
+            # Restringe class_ids à escola.
+            narrowed = []
+            for ctx in filtered_contexts:
+                class_ids = ctx["class_ids"]
+                if class_ids:
+                    class_ids = [
+                        c.id for c in Class.query.filter(
+                            Class.id.in_(class_ids),
+                            Class.school_id == str(escola_efetiva),
+                        ).all()
+                    ]
+                narrowed.append({"test": ctx["test"], "class_ids": class_ids})
+            filtered_contexts = narrowed
+
+        # Séries
+        grade_ids = {ctx["test"].grade_id for ctx in filtered_contexts if ctx["test"].grade_id}
+        grades = (
+            Grade.query.filter(Grade.id.in_(list(grade_ids))).order_by(Grade.name).all()
+            if grade_ids else []
+        )
+        response["series"] = [{"id": str(g.id), "nome": g.name} for g in grades]
+
+        if serie_efetiva:
+            filtered_contexts = [
+                ctx for ctx in filtered_contexts
+                if ctx["test"].grade_id == serie_efetiva
+            ]
+            narrowed = []
+            for ctx in filtered_contexts:
+                class_ids = ctx["class_ids"]
+                if class_ids:
+                    class_ids = [
+                        c.id for c in Class.query.filter(
+                            Class.id.in_(class_ids),
+                            Class.grade_id == serie_efetiva,
+                        ).all()
+                    ]
+                narrowed.append({"test": ctx["test"], "class_ids": class_ids})
+            filtered_contexts = narrowed
+
+        # Avaliações (já corrigidas e no recorte)
+        avaliacoes = []
+        for ctx in filtered_contexts:
+            test = ctx["test"]
+            avaliacoes.append({
+                "id": test.id,
+                "titulo": test.title,
+                "test_type": test.test_type,
+                "grade_id": str(test.grade_id) if test.grade_id else None,
+                "subject_id": test.subject_id,
+            })
+        # Dedup + sort
+        seen = set()
+        avaliacoes_unique = []
+        for a in sorted(avaliacoes, key=lambda x: (x["titulo"] or "").lower()):
+            if a["id"] not in seen:
+                seen.add(a["id"])
+                avaliacoes_unique.append(a)
+        response["avaliacoes"] = avaliacoes_unique
+
+        if avaliacao_efetiva:
+            filtered_contexts = [
+                ctx for ctx in filtered_contexts if ctx["test"].id == avaliacao_efetiva
+            ]
+
+        # Turmas
+        turma_ids = set()
+        for ctx in filtered_contexts:
+            for cid in ctx["class_ids"]:
+                turma_ids.add(cid)
+        turmas = (
+            Class.query.filter(Class.id.in_(list(turma_ids))).order_by(Class.name).all()
+            if turma_ids else []
+        )
+        response["turmas"] = [{"id": str(t.id), "nome": t.name} for t in turmas]
+
+        return response
+

@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy.dialects.postgresql import UUID, JSON, BYTEA
 from datetime import datetime
 
+
 class Question(db.Model):
     __tablename__ = 'question'
     __table_args__ = {"schema": "public"}

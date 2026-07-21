@@ -312,7 +312,7 @@ def create_app():
         app.logger.warning("Scheduler não pôde ser iniciado: %s", e)
     
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes, ranking_routes, monitoring_routes, saved_ata_routes, folha_rascunho_routes, termo_compromisso_routes, etiquetas_routes
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes, ranking_routes, monitoring_routes, saved_ata_routes, folha_rascunho_routes, termo_compromisso_routes, etiquetas_routes, subjective_test_routes
     from app.physical_tests.routes import bp as physical_test_bp
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
     from app.socioeconomic_forms.routes import filter_routes
@@ -352,6 +352,7 @@ def create_app():
     app.register_blueprint(student_answer_routes.bp)
     app.register_blueprint(userQuickLinks_routes.bp)
     app.register_blueprint(evaluation_results_routes.bp)
+    app.register_blueprint(subjective_test_routes.bp)
     # Registrar blueprint de report_analysis ANTES (para sobrescrever rotas antigas)
     from app.report_analysis import routes as report_analysis_routes
     app.register_blueprint(report_analysis_routes.bp)

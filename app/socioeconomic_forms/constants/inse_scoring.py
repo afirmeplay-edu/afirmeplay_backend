@@ -88,6 +88,41 @@ NIVEIS_INSE_LABELS = {
     8: "Nível VIII",
 }
 
+NIVEIS_INSE_DESCRICOES = {
+    1: (
+        "Extrema vulnerabilidade. Pais com até o 5º ano incompleto. "
+        "Domicílios com bens muito básicos: até 1 geladeira, 1 TV, 1 banheiro e 1 celular."
+    ),
+    2: (
+        "Baixo. Bens básicos acrescidos de rede Wi-Fi. Escolaridade dos pais ainda baixa, "
+        "predominância de até o ensino fundamental incompleto."
+    ),
+    3: (
+        "Baixo com alguns bens adicionais. Presença de computador/notebook, "
+        "maior quantidade de eletrodomésticos e possível acesso à internet."
+    ),
+    4: (
+        "Médio-Baixo. Escolaridade dos pais próxima ao ensino médio. "
+        "Domicílio com mais de um banheiro, TV a cabo/internet e alguns bens de conforto."
+    ),
+    5: (
+        "Médio. Pais com ensino médio completo ou superior incompleto. "
+        "Casa com múltiplos bens duráveis: máquina de lavar, micro-ondas, computador, Wi-Fi."
+    ),
+    6: (
+        "Médio-Alto. Pelo menos um dos pais com ensino superior completo. "
+        "Presença de carro, garagem, freezer, aspirador de pó e maior número de quartos."
+    ),
+    7: (
+        "Alto. Pais com ensino superior completo ou pós-graduação. "
+        "Domicílio com muitos bens duráveis, acesso a tecnologia e condições habitacionais confortáveis."
+    ),
+    8: (
+        "Muito Alto. Famílias com alta escolaridade dos pais, múltiplos bens de luxo e conforto, "
+        "acesso pleno a serviços e infraestrutura de qualidade."
+    ),
+}
+
 
 def _clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(max_value, value))

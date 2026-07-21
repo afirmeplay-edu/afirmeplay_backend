@@ -11,6 +11,7 @@ from app.socioeconomic_forms.constants.inse_normalizer import normalizar_respost
 from app.socioeconomic_forms.constants.inse_scoring import (
     calcular_inse_canonico,
     pontuacao_para_nivel_inse,
+    NIVEIS_INSE_DESCRICOES,
     NIVEIS_INSE_LABELS,
 )
 from app.models.test import Test
@@ -508,6 +509,7 @@ class InseAvaliacaoService:
                 str(i): {
                     "nivel": i,
                     "label": NIVEIS_INSE_LABELS.get(i, ""),
+                    "descricao": NIVEIS_INSE_DESCRICOES.get(i, ""),
                     "quantidade": distribuicao_inse[i]["quantidade"],
                     "porcentagem": distribuicao_inse[i]["porcentagem"],
                 }
@@ -564,7 +566,13 @@ class InseAvaliacaoService:
                 "inse_medio": 0.0,
             },
             "distribuicao_inse": {
-                str(i): {"nivel": i, "label": NIVEIS_INSE_LABELS.get(i, ""), "quantidade": 0, "porcentagem": 0.0}
+                str(i): {
+                    "nivel": i,
+                    "label": NIVEIS_INSE_LABELS.get(i, ""),
+                    "descricao": NIVEIS_INSE_DESCRICOES.get(i, ""),
+                    "quantidade": 0,
+                    "porcentagem": 0.0,
+                }
                 for i in range(1, 9)
             },
             "distribuicao_proficiencia": {

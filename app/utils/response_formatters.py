@@ -571,6 +571,7 @@ def format_test_response(test, questions=None):
         'title': test.title,
         'description': test.description,
         'type': test_type,
+        'evaluation_mode': test.evaluation_mode if test.evaluation_mode else 'virtual',
         'subject': all_subjects[0] if all_subjects else None,
         'subjects': all_subjects,
         'subjects_count': len(all_subjects),
@@ -608,4 +609,109 @@ def format_test_response(test, questions=None):
     except Exception as e:
         db.session.rollback()
         logging.error(f"Erro inesperado em format_test_response para teste {test.id}: {str(e)}", exc_info=True)
-        raise 
+        raise
+
+
+def format_subjective_test_response(subjective_test, questions=None):
+    """
+    Formata a resposta de uma avaliação subjetiva (SubjectiveTest).
+    Se `questions` for passado, usa essa lista em vez de subjective_test.questions (evita N+1).
+    """
+    from app import db
+
+    try:
+        municipalities_list = []
+        if subjective_test.municipalities:
+            municipality_ids = (
+                subjective_test.municipalities
+                if isinstance(subjective_test.municipalities, list)
+                else [subjective_test.municipalities]
+            )
+            try:
+                municipalities_objs = City.query.filter(City.id.in_(municipality_ids)).all()
+                municipalities_list = [{'id': m.id, 'name': m.name} for m in municipalities_objs]
+            except Exception as e:
+                db.session.rollback()
+                logging.warning(f"Erro ao buscar municípios da avaliação subjetiva: {str(e)}")
+
+        schools_list = []
+        if subjective_test.schools:
+            school_ids = (
+                subjective_test.schools if isinstance(subjective_test.schools, list) else [subjective_test.schools]
+            )
+            try:
+                schools_objs = School.query.filter(School.id.in_(school_ids)).all()
+                schools_list = [{'id': s.id, 'name': s.name} for s in schools_objs]
+            except Exception as e:
+                db.session.rollback()
+                logging.warning(f"Erro ao buscar escolas da avaliação subjetiva: {str(e)}")
+
+        classes_info = []
+        if subjective_test.classes:
+            class_ids = (
+                subjective_test.classes if isinstance(subjective_test.classes, list) else [subjective_test.classes]
+            )
+            try:
+                from app.utils.uuid_helpers import ensure_uuid_list
+                class_ids_uuids = ensure_uuid_list(class_ids)
+                specific_classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
+                for class_obj in specific_classes:
+                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
+                    classes_info.append({
+                        'id': class_obj.id,
+                        'name': class_obj.name,
+                        'students_count': len(class_obj.students) if class_obj.students else 0,
+                        'school': {'id': school_obj.id, 'name': school_obj.name} if school_obj else None,
+                    })
+            except Exception as e:
+                db.session.rollback()
+                logging.warning(f"Erro ao buscar turmas da avaliação subjetiva: {str(e)}")
+
+        if questions is None:
+            questions = subjective_test.questions
+        questions_formatted = [q.to_dict() for q in questions]
+
+        return {
+            'id': subjective_test.id,
+            'title': subjective_test.title,
+            'description': subjective_test.description,
+            'test_type': subjective_test.test_type,
+            'subject': (
+                {'id': subjective_test.subject_rel.id, 'name': subjective_test.subject_rel.name}
+                if subjective_test.subject_rel else None
+            ),
+            'grade': (
+                {'id': subjective_test.grade.id, 'name': subjective_test.grade.name}
+                if subjective_test.grade else None
+            ),
+            'application_date': (
+                subjective_test.application_date.isoformat() if subjective_test.application_date else None
+            ),
+            'municipalities': municipalities_list,
+            'municipalities_count': len(municipalities_list),
+            'schools': schools_list,
+            'schools_count': len(schools_list),
+            'classes': classes_info,
+            'classes_count': len(classes_info),
+            'status': subjective_test.status,
+            'createdBy': (
+                {'id': subjective_test.creator.id, 'name': subjective_test.creator.name}
+                if subjective_test.creator else None
+            ),
+            'createdAt': subjective_test.created_at.isoformat() if subjective_test.created_at else None,
+            'updatedAt': subjective_test.updated_at.isoformat() if subjective_test.updated_at else None,
+            'total_questions': len(questions_formatted),
+            'questions': questions_formatted,
+        }
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(
+            f"Erro SQLAlchemy em format_subjective_test_response para {subjective_test.id}: {str(e)}", exc_info=True
+        )
+        raise
+    except Exception as e:
+        db.session.rollback()
+        logging.error(
+            f"Erro inesperado em format_subjective_test_response para {subjective_test.id}: {str(e)}", exc_info=True
+        )
+        raise

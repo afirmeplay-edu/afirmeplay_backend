@@ -158,6 +158,47 @@ def list_subjective_tests():
         return jsonify({"error": "Erro interno no servidor", "details": str(e)}), 500
 
 
+@bp.route('/opcoes-filtros', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_subjective_filter_options():
+    """
+    Opções hierárquicas de filtros da avaliação subjetiva.
+
+    Hierarquia: Estado → Município → Escola → Série → Avaliação → Turma
+    (diferente de /evaluation-results/opcoes-filtros, onde avaliação vem antes da escola).
+
+    Só retorna avaliações que já têm correção lançada.
+    Diretor/coordenador: inclui escola_pre_selecionada e estreita o recorte por ela.
+
+    Query params (todos opcionais, cascata):
+      - estado, municipio, escola, serie, avaliacao
+      Valores 'all' / 'todas' / omitidos = todos daquele nível.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não autenticado"}), 401
+
+        result = SubjectiveEvaluationService.get_filter_options(
+            user=user,
+            estado=request.args.get('estado'),
+            municipio=request.args.get('municipio'),
+            escola=request.args.get('escola'),
+            serie=request.args.get('serie'),
+            avaliacao=request.args.get('avaliacao'),
+        )
+        if result.get("error"):
+            status = result.pop("status", 400)
+            # Mantém níveis já montados (estados/municipios) junto com o erro.
+            return jsonify(result), status
+
+        return jsonify(result), 200
+    except Exception as e:
+        logging.error("Erro ao obter opções de filtros subjetivos: %s", str(e), exc_info=True)
+        return jsonify({"error": "Erro interno no servidor", "details": str(e)}), 500
+
+
 @bp.route('/<string:subjective_test_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
@@ -337,6 +378,45 @@ def get_correction_matrix(subjective_test_id, class_id):
         logging.error(
             "Erro ao buscar matriz de correção avaliacao=%s turma=%s: %s",
             subjective_test_id, class_id, str(e), exc_info=True,
+        )
+        return jsonify({"error": "Erro interno no servidor", "details": str(e)}), 500
+
+
+@bp.route('/<string:subjective_test_id>/alunos/<string:student_id>/resultado', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def preview_student_result(subjective_test_id, student_id):
+    """
+    Preview do resultado de um aluno a partir da rubrica já lançada.
+    Mesma fórmula do finalize (EvaluationCalculator), mas NÃO grava EvaluationResult
+    nem marca relatórios dirty — para atualizar a coluna da matriz a cada célula.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não autenticado"}), 401
+
+        subjective_test = SubjectiveTest.query.get(subjective_test_id)
+        if not subjective_test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+
+        from app.models.student import Student
+        student = Student.query.get(student_id)
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+        if student.class_id and not _user_can_access_class(user, student.class_id):
+            return jsonify({"error": "Acesso negado a este aluno"}), 403
+
+        result = SubjectiveEvaluationService.preview_student_result(subjective_test_id, student_id)
+        if result is None:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+
+        return jsonify(result), 200
+    except Exception as e:
+        logging.error(
+            "Erro ao preview resultado aluno=%s avaliacao=%s: %s",
+            student_id, subjective_test_id, str(e), exc_info=True,
         )
         return jsonify({"error": "Erro interno no servidor", "details": str(e)}), 500
 

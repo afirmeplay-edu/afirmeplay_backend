@@ -79,8 +79,8 @@ from app.services.celery_tasks.ai_analysis_cache_tasks import generate_ai_analys
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 
-# Admin e aplicador: leitura e correção de todos os cartões do tenant (sem filtro created_by).
-_CARTAO_FULL_GABARITO_ACCESS_ROLES = frozenset({"admin", "aplicador"})
+# Admin, aplicador e tecadm: leitura e listagem de todos os cartões do tenant (sem filtro created_by).
+_CARTAO_FULL_GABARITO_ACCESS_ROLES = frozenset({"admin", "aplicador", "tecadm"})
 
 
 def _user_sees_all_city_gabaritos(user: dict) -> bool:
@@ -88,7 +88,7 @@ def _user_sees_all_city_gabaritos(user: dict) -> bool:
 
 
 def _user_can_read_gabarito(user: dict, gabarito: AnswerSheetGabarito) -> bool:
-    """Leitura de gabarito: admin/aplicador = qualquer; demais = criador."""
+    """Leitura de gabarito: admin/aplicador/tecadm = qualquer; demais = criador."""
     if _user_sees_all_city_gabaritos(user):
         return True
     if not gabarito.created_by:
@@ -1346,7 +1346,7 @@ def list_gabaritos():
         school_id = request.args.get('school_id')
         title = request.args.get('title')
         
-        # Admin/aplicador: todos do tenant; demais: apenas os que criaram
+        # Admin/aplicador/tecadm: todos do tenant; demais: apenas os que criaram
         query = AnswerSheetGabarito.query
         if not _user_sees_all_city_gabaritos(user):
             query = query.filter(AnswerSheetGabarito.created_by == str(user['id']))

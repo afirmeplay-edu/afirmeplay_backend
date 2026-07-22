@@ -29,7 +29,7 @@ if __name__ == "__main__":
     
     try:
         # Executar servidor Flask padrão (sem Socket.IO)
-        app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=True)
+        app.run(host="0.0.0.0", port=5002, debug=True, use_reloader=True)
     except KeyboardInterrupt:
         logging.info("Aplicação interrompida")
     finally:

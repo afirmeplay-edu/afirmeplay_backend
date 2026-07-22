@@ -342,6 +342,9 @@ class SubjectiveEvaluationService:
                 "title": subjective_test.title,
                 "test_type": subjective_test.test_type,
             },
+            "classification_legend": SubjectiveEvaluationService.get_classification_legend_for_test(
+                subjective_test
+            ),
             "questions": [q.to_dict() for q in questions],
             "students": [
                 {
@@ -444,6 +447,14 @@ class SubjectiveEvaluationService:
         return course_name, subject_name
 
     @staticmethod
+    def get_classification_legend_for_test(subjective_test: SubjectiveTest) -> Dict[str, Any]:
+        """Legenda oficial (faixas de proficiência) para a avaliação subjetiva."""
+        course_name, subject_name = SubjectiveEvaluationService._resolve_course_and_subject_names(
+            subjective_test
+        )
+        return EvaluationCalculator.get_classification_legend(course_name, subject_name)
+
+    @staticmethod
     def _get_or_create_synthetic_session(test_id: str, student_id: str) -> TestSession:
         """
         TestSession "sintética": não representa uma sessão online real (não existe nesse
@@ -530,6 +541,8 @@ class SubjectiveEvaluationService:
         if not subjective_test:
             return None
 
+        legend = SubjectiveEvaluationService.get_classification_legend_for_test(subjective_test)
+
         presence = SubjectivePresence.query.filter_by(
             subjective_test_id=subjective_test_id, student_id=student_id
         ).first()
@@ -540,6 +553,7 @@ class SubjectiveEvaluationService:
                 "student_id": student_id,
                 "subjective_test_id": subjective_test_id,
                 "persisted": False,
+                "classification_legend": legend,
             }
 
         computed = SubjectiveEvaluationService._compute_student_score(subjective_test, student_id)
@@ -550,9 +564,11 @@ class SubjectiveEvaluationService:
                 "student_id": student_id,
                 "subjective_test_id": subjective_test_id,
                 "persisted": False,
+                "classification_legend": legend,
             }
 
         computed["persisted"] = False
+        computed["classification_legend"] = legend
         return computed
 
     @staticmethod

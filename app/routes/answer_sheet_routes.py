@@ -48,6 +48,7 @@ from app.utils.decimal_helpers import round_to_two_decimals
 from typing import Dict, Optional, List, Any, Tuple, Set
 from collections import defaultdict
 from sqlalchemy import cast, String, desc, func, or_, and_
+from sqlalchemy.orm.attributes import flag_modified
 import dateutil.parser
 from sqlalchemy.orm import joinedload
 from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
@@ -201,6 +202,7 @@ def _resolve_question_skills_to_ids(question_skills_raw: Dict) -> Dict[int, List
     Converte question_skills do payload (códigos ou IDs em string) para um mapa
     número da questão -> lista de IDs (UUID string) de Skill.
     Aceita no payload: {"1": ["EF01LP01", "uuid-aqui"], "2": ["code2"]}.
+    Questões com lista vazia ou códigos inválidos não entram no mapa.
     """
     if not question_skills_raw or not isinstance(question_skills_raw, dict):
         return {}
@@ -233,6 +235,109 @@ def _resolve_question_skills_to_ids(question_skills_raw: Dict) -> Dict[int, List
         if resolved_ids:
             result[q_num] = resolved_ids
     return result
+
+
+_STRUCTURE_EDIT_STRUCTURAL_KEYS = (
+    "num_questions",
+    "blocks_config",
+    "questions_options",
+    "use_blocks",
+)
+
+
+def _is_skills_only_structure_payload(
+    data: Dict,
+    gabarito: Optional["AnswerSheetGabarito"] = None,
+) -> bool:
+    """
+    True se o body altera efetivamente apenas question_skills.
+    Campos estruturais iguais aos valores atuais do gabarito são ignorados
+    (ex.: form que reenvia num_questions sem mudar).
+    """
+    if not isinstance(data, dict) or "question_skills" not in data:
+        return False
+
+    if "blocks_config" in data:
+        return False
+    if data.get("questions_options"):
+        return False
+
+    if gabarito is not None:
+        if "num_questions" in data:
+            try:
+                if int(data["num_questions"]) != int(gabarito.num_questions or 0):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        if "use_blocks" in data:
+            if bool(data["use_blocks"]) != bool(gabarito.use_blocks):
+                return False
+        return True
+
+    return not any(k in data for k in _STRUCTURE_EDIT_STRUCTURAL_KEYS)
+
+
+def _parse_question_skills_updates(question_skills_raw: Dict) -> Dict[int, List[str]]:
+    """
+    Mapa de atualizações explícitas de skills por questão.
+    Inclui questões com lista vazia (limpa skills). Códigos/UUIDs inválidos viram [].
+    """
+    if not isinstance(question_skills_raw, dict):
+        return {}
+    updates: Dict[int, List[str]] = {}
+    for q_key, values in question_skills_raw.items():
+        try:
+            q_num = int(q_key)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(values, list):
+            values = [values] if values is not None else []
+        resolved = _resolve_question_skills_to_ids({str(q_num): values})
+        updates[q_num] = list(resolved.get(q_num, []))
+    return updates
+
+
+def _apply_skills_patch_to_blocks_config(
+    blocks_config: Optional[Dict],
+    question_skills_raw: Dict,
+) -> Tuple[Dict, bool]:
+    """
+    Atualiza apenas a chave skills nas questões da topology existente (merge parcial).
+    Questões omitidas no payload mantêm as skills atuais.
+    Retorna (novo_blocks_config, houve_alteracao).
+    """
+    import copy
+
+    new_bc = copy.deepcopy(blocks_config) if blocks_config else {}
+    topology = new_bc.get("topology") or {}
+    blocks = topology.get("blocks") or []
+    if not blocks:
+        raise ValueError("Gabarito sem topology; não é possível atualizar habilidades")
+
+    updates = _parse_question_skills_updates(question_skills_raw)
+    if not updates:
+        return new_bc, False
+
+    changed = False
+    for block in blocks:
+        for q in block.get("questions") or []:
+            try:
+                q_num = int(q.get("q"))
+            except (TypeError, ValueError):
+                continue
+            if q_num not in updates:
+                continue
+            new_skills = updates[q_num]
+            old_skills = [str(s) for s in (q.get("skills") or []) if s]
+            if old_skills != new_skills:
+                q["skills"] = new_skills
+                changed = True
+            elif "skills" not in q:
+                q["skills"] = new_skills
+                changed = True
+
+    new_bc["topology"] = topology
+    return new_bc, changed
 
 
 def _generate_complete_structure(num_questions: int, use_blocks: bool,
@@ -1926,8 +2031,12 @@ def patch_gabarito_structure(gabarito_id: str):
     Edita a ESTRUTURA do cartão resposta: num_questions, blocks_config, question_skills.
     
     ⚠️ REGRAS DE NEGÓCIO:
-    - ❌ BLOQUEADO se já existem correções (AnswerSheetResult)
-    - ✅ PERMITIDO se gerado mas não corrigido (com aviso de regeneração)
+    - ❌ BLOQUEADO se já existem correções (AnswerSheetResult) E o payload
+      altera estrutura (num_questions, blocks_config, questions_options, use_blocks)
+    - ✅ PERMITIDO editar APENAS question_skills mesmo com correções
+      (patch cirúrgico na topology; não regenera coordenadas/templates;
+      não altera nota/proficiência já calculadas)
+    - ✅ PERMITIDO estrutura completa se gerado mas não corrigido (com aviso de regeneração)
     - ✅ PERMITIDO se apenas criado (sem avisos)
     
     Body (todos os campos são opcionais, envie apenas o que deseja alterar):
@@ -1966,14 +2075,16 @@ def patch_gabarito_structure(gabarito_id: str):
                 "num_questions": {"old": 20, "new": 30},
                 "blocks_count": {"old": 2, "new": 3},
                 "skills_updated": true
-            }
+            },
+            "skills_only": true   # presente quando só habilidades foram alteradas
         }
     
-    Returns (422 se bloqueado por correções):
+    Returns (422 se bloqueado por correções + alteração estrutural):
         {
             "error": "Este cartão resposta não pode ser editado...",
             "reason": "has_corrections",
-            "corrections_count": 15
+            "corrections_count": 15,
+            "hint": "Com correções registradas, envie apenas question_skills."
         }
     """
     try:
@@ -1990,26 +2101,65 @@ def patch_gabarito_structure(gabarito_id: str):
         if not _user_can_edit_gabarito(user, gabarito):
             return jsonify({"error": "Você não tem permissão para editar este gabarito"}), 403
 
-        # 3. Verificar se tem correções (BLOQUEIO TOTAL)
+        # 3. Processar payload
+        data = request.get_json() or {}
+        if not data:
+            return jsonify({"error": "Nenhum dado fornecido para edição"}), 400
+
         corrections_count = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).count()
-        if corrections_count > 0:
+        skills_only = _is_skills_only_structure_payload(data, gabarito)
+
+        # Com correções: só question_skills é permitido
+        if corrections_count > 0 and not skills_only:
             return jsonify({
-                "error": "Este cartão resposta não pode ser editado porque já existem correções registradas. Editar agora poderia causar inconsistências nos resultados já calculados. Para fazer alterações, crie um novo cartão resposta.",
+                "error": (
+                    "Este cartão resposta já possui correções registradas. "
+                    "Não é possível alterar a estrutura (quantidade de questões, blocos ou alternativas). "
+                    "É permitido editar apenas as habilidades (question_skills)."
+                ),
                 "reason": "has_corrections",
-                "corrections_count": corrections_count
+                "corrections_count": corrections_count,
+                "hint": "Envie apenas o campo question_skills no body do PATCH.",
             }), 422
 
-        # 4. Verificar se foi gerado (para avisar)
+        # --- Caminho: apenas habilidades (com ou sem correções) ---
+        if skills_only:
+            question_skills_raw = data.get("question_skills")
+            if not isinstance(question_skills_raw, dict) or not question_skills_raw:
+                return jsonify({
+                    "error": "question_skills deve ser um objeto com ao menos uma questão"
+                }), 400
+
+            try:
+                new_blocks_config, skills_changed = _apply_skills_patch_to_blocks_config(
+                    gabarito.blocks_config,
+                    question_skills_raw,
+                )
+            except ValueError as ve:
+                return jsonify({"error": str(ve)}), 400
+
+            gabarito.blocks_config = new_blocks_config
+            flag_modified(gabarito, "blocks_config")
+            db.session.commit()
+
+            return jsonify({
+                "success": True,
+                "gabarito_id": str(gabarito_id),
+                "message": (
+                    "Habilidades atualizadas com sucesso"
+                    if skills_changed
+                    else "Nenhuma alteração nas habilidades"
+                ),
+                "changes": {"skills_updated": bool(skills_changed)},
+                "skills_only": True,
+            }), 200
+
+        # 4. Verificar se foi gerado (para avisar em edição estrutural)
         has_generations = bool(
             gabarito.minio_url or 
             gabarito.last_generation_job_id or
             AnswerSheetGenerationJob.query.filter_by(gabarito_id=gabarito_id).first()
         )
-
-        # 5. Processar payload
-        data = request.get_json() or {}
-        if not data:
-            return jsonify({"error": "Nenhum dado fornecido para edição"}), 400
 
         changes = {}
         

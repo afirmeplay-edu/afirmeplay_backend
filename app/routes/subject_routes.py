@@ -1,10 +1,13 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import jwt_required
+from app.decorators.role_required import role_required
 from app.models.subject import Subject
 from app.models.test import Test
 from app.models.classTest import ClassTest
 from app.models.studentClass import Class
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app import db
+from sqlalchemy import func
 import logging
 import re
 from typing import Optional
@@ -23,7 +26,49 @@ def list_subjects():
 
     except Exception as e:
         logging.error(f"Error listing subjects: {str(e)}", exc_info=True)
-        return jsonify({"error": "Error listing subjects", "details": str(e)}), 500 
+        return jsonify({"error": "Error listing subjects", "details": str(e)}), 500
+
+
+@bp.route('', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def create_subject():
+    """
+    Cria uma nova disciplina.
+    Body JSON: name (obrigatório)
+    """
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "Corpo JSON obrigatório"}), 400
+
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "name é obrigatório"}), 400
+        if len(name) > 100:
+            return jsonify({"error": "name deve ter no máximo 100 caracteres"}), 400
+
+        existing = Subject.query.filter(func.lower(Subject.name) == name.lower()).first()
+        if existing:
+            return jsonify({
+                "error": "Já existe uma disciplina com este nome",
+                "id": existing.id,
+                "name": existing.name,
+            }), 409
+
+        subject = Subject(name=name)
+        db.session.add(subject)
+        db.session.commit()
+
+        return jsonify({
+            "id": subject.id,
+            "name": subject.name,
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error creating subject: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error creating subject", "details": str(e)}), 500
 
 
 @bp.route('/by-school/<string:school_id>', methods=['GET'])

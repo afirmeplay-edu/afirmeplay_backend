@@ -36,6 +36,7 @@ Documentação: docs/FONTE_DA_VERDADE_CALCULOS_RESULTADOS.md (§7)
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -82,6 +83,48 @@ logger = logging.getLogger(__name__)
 GERAL_KEY = "GERAL"
 FAIXAS = ("abaixo_do_basico", "basico", "adequado", "avancado")
 _SUBJECT_NAME_CACHE: Dict[str, str] = {}
+
+# Educação Especial: grade = "Suporte N"; o ano escolar vive em class.name ("- 1º ANO").
+_SUPORTE_GRADE_RE = re.compile(r"^suporte\s*([123])$", re.IGNORECASE)
+_ANO_IN_CLASS_NAME_RE = re.compile(r"(?P<n>\d+)\s*[ºo°]?\s*ano", re.IGNORECASE)
+
+
+def _series_identity_for_class(co: Class) -> Tuple[str, str]:
+    """
+    Identidade da coluna série no consolidado.
+
+    Para turmas de Suporte 1/2/3 com ano no nome (ex.: "- 1º ANO"), separa colunas
+    "Suporte 1 1º Ano", "Suporte 1 2º Ano", etc. Demais grades seguem grade.id/name.
+    """
+    grade = getattr(co, "grade", None)
+    grade_id = str(grade.id) if grade and getattr(grade, "id", None) is not None else "_sem_serie"
+    grade_name = (getattr(grade, "name", None) if grade else None) or "Sem série"
+
+    m_sup = _SUPORTE_GRADE_RE.match(str(grade_name).strip())
+    if not m_sup:
+        return grade_id, grade_name
+
+    class_name = (getattr(co, "name", None) or "").strip()
+    m_ano = _ANO_IN_CLASS_NAME_RE.search(class_name)
+    if not m_ano:
+        return grade_id, grade_name
+
+    n = int(m_ano.group("n"))
+    serie_nome = f"{grade_name.strip()} {n}º Ano"
+    serie_id = f"{grade_id}::{n}"
+    return serie_id, serie_nome
+
+
+def _series_sort_key(serie_nome: str) -> Tuple[Any, ...]:
+    """Ordena colunas Suporte N Mº Ano de forma natural; demais por nome."""
+    text = (serie_nome or "").strip()
+    m = re.match(r"^suporte\s*([123])\s+(\d+)\s*[ºo°]?\s*ano", text, re.IGNORECASE)
+    if m:
+        return (0, int(m.group(1)), int(m.group(2)), text.upper())
+    m2 = re.match(r"^suporte\s*([123])$", text, re.IGNORECASE)
+    if m2:
+        return (0, int(m2.group(1)), 0, text.upper())
+    return (1, 0, 0, text.upper())
 
 
 def parse_csv_ids(raw: Optional[str], param_name: str = "ids") -> List[str]:
@@ -259,9 +302,7 @@ def _build_scope_index(
         if not co or not co.school_id:
             continue
         escola_id = str(co.school_id)
-        grade = co.grade
-        serie_id = str(grade.id) if grade else "_sem_serie"
-        serie_nome = (grade.name if grade else None) or "Sem série"
+        serie_id, serie_nome = _series_identity_for_class(co)
         escola_nome = (co.school.name if co.school else None) or "Escola"
         school_meta[escola_id] = escola_nome
         grade_meta[serie_id] = (serie_id, serie_nome)
@@ -275,7 +316,7 @@ def _build_scope_index(
 
     series_colunas = [
         {"serie_id": gid, "serie_nome": gname}
-        for gid, gname in sorted(grade_meta.values(), key=lambda x: x[1].upper())
+        for gid, gname in sorted(grade_meta.values(), key=lambda x: _series_sort_key(x[1]))
     ]
     escolas = [
         {"escola_id": sid, "escola_nome": sname}
@@ -322,7 +363,7 @@ def _build_series_aplicadas(
     out: List[Dict[str, Any]] = []
     for sch in sorted(tree.values(), key=lambda x: (x.get("escola_nome") or "").upper()):
         series_list = []
-        for s in sorted(sch["series"].values(), key=lambda x: (x.get("serie_nome") or "").upper()):
+        for s in sorted(sch["series"].values(), key=lambda x: _series_sort_key(x.get("serie_nome") or "")):
             series_list.append(
                 {"serie_id": s["serie_id"], "serie_nome": s["serie_nome"], "itens": sorted(s["itens"])}
             )

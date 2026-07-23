@@ -146,6 +146,10 @@ def get_inse_avaliacao_report(form_id):
     Relatório INSE x Avaliação: cruza respostas do formulário socioeconômico com resultados
     da avaliação (proficiência por disciplina, INSE por aluno).
 
+    Também retorna comparativos agregados (médias por raça/cor, por nível INSE e
+    cruzamento raça×INSE), sempre calculados no backend sobre o escopo completo
+    (filtros territoriais/avaliação), independentemente do filtro de raça da tabela.
+
     Query params:
     - state: Estado (ex: "SP")
     - municipio: ID do município (UUID)

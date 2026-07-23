@@ -108,6 +108,180 @@ def _format_decimal(val: Optional[float]) -> float:
     return round(float(val), 2)
 
 
+def _empty_comparativos() -> Dict[str, Any]:
+    return {
+        "comparativo_por_raca_cor": [],
+        "comparativo_por_inse": [
+            {
+                "inse_nivel": i,
+                "label": NIVEIS_INSE_LABELS.get(i, f"Nível {i}"),
+                "quantidade": 0,
+                "quantidade_com_resultado": 0,
+                "media_proficiencia": None,
+                "media_nota": None,
+            }
+            for i in range(1, 9)
+        ],
+        "comparativo_raca_x_inse": [],
+        "destaques": {
+            "maior_media": None,
+            "menor_media": None,
+            "maior_gap": None,
+        },
+    }
+
+
+def _build_comparativos(metricas: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Agrega médias de desempenho por raça/cor, por nível INSE e no cruzamento.
+    Cálculo exclusivo do backend — o frontend só exibe.
+    Alunos sem resultado de avaliação entram em `quantidade`, mas não na média.
+    """
+    by_raca: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {
+            "quantidade": 0,
+            "quantidade_com_resultado": 0,
+            "soma_prof": 0.0,
+            "soma_nota": 0.0,
+        }
+    )
+    by_inse: Dict[int, Dict[str, Any]] = {
+        i: {
+            "quantidade": 0,
+            "quantidade_com_resultado": 0,
+            "soma_prof": 0.0,
+            "soma_nota": 0.0,
+        }
+        for i in range(1, 9)
+    }
+    by_cruz: Dict[Tuple[str, int], Dict[str, Any]] = defaultdict(
+        lambda: {
+            "quantidade": 0,
+            "quantidade_com_resultado": 0,
+            "soma_prof": 0.0,
+            "soma_nota": 0.0,
+        }
+    )
+
+    for m in metricas:
+        raca = m.get("raca_cor") or "NaoInformada"
+        inse_nivel = m.get("inse_nivel")
+        media_prof = m.get("media_proficiencia")
+        media_nota = m.get("media_nota")
+        tem_resultado = media_prof is not None
+
+        by_raca[raca]["quantidade"] += 1
+        if tem_resultado:
+            by_raca[raca]["quantidade_com_resultado"] += 1
+            by_raca[raca]["soma_prof"] += float(media_prof)
+            if media_nota is not None:
+                by_raca[raca]["soma_nota"] += float(media_nota)
+
+        if inse_nivel is not None and 1 <= int(inse_nivel) <= 8:
+            nivel = int(inse_nivel)
+            by_inse[nivel]["quantidade"] += 1
+            if tem_resultado:
+                by_inse[nivel]["quantidade_com_resultado"] += 1
+                by_inse[nivel]["soma_prof"] += float(media_prof)
+                if media_nota is not None:
+                    by_inse[nivel]["soma_nota"] += float(media_nota)
+
+            cruz_key = (raca, nivel)
+            by_cruz[cruz_key]["quantidade"] += 1
+            if tem_resultado:
+                by_cruz[cruz_key]["quantidade_com_resultado"] += 1
+                by_cruz[cruz_key]["soma_prof"] += float(media_prof)
+                if media_nota is not None:
+                    by_cruz[cruz_key]["soma_nota"] += float(media_nota)
+
+    def _medias(bucket: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+        n = bucket["quantidade_com_resultado"]
+        if n <= 0:
+            return None, None
+        media_p = _format_decimal(bucket["soma_prof"] / n)
+        media_n = _format_decimal(bucket["soma_nota"] / n) if n else None
+        return media_p, media_n
+
+    comparativo_por_raca_cor = []
+    for raca, bucket in sorted(by_raca.items(), key=lambda x: x[0].lower()):
+        media_p, media_n = _medias(bucket)
+        comparativo_por_raca_cor.append({
+            "raca_cor": raca,
+            "raca_cor_grupo": _race_group(None if raca == "NaoInformada" else raca),
+            "quantidade": bucket["quantidade"],
+            "quantidade_com_resultado": bucket["quantidade_com_resultado"],
+            "media_proficiencia": media_p,
+            "media_nota": media_n,
+        })
+
+    comparativo_por_inse = []
+    for i in range(1, 9):
+        bucket = by_inse[i]
+        media_p, media_n = _medias(bucket)
+        comparativo_por_inse.append({
+            "inse_nivel": i,
+            "label": NIVEIS_INSE_LABELS.get(i, f"Nível {i}"),
+            "quantidade": bucket["quantidade"],
+            "quantidade_com_resultado": bucket["quantidade_com_resultado"],
+            "media_proficiencia": media_p,
+            "media_nota": media_n,
+        })
+
+    comparativo_raca_x_inse = []
+    for (raca, nivel), bucket in sorted(by_cruz.items(), key=lambda x: (x[0][0].lower(), x[0][1])):
+        media_p, media_n = _medias(bucket)
+        comparativo_raca_x_inse.append({
+            "raca_cor": raca,
+            "raca_cor_grupo": _race_group(None if raca == "NaoInformada" else raca),
+            "inse_nivel": nivel,
+            "inse_nivel_label": NIVEIS_INSE_LABELS.get(nivel, f"Nível {nivel}"),
+            "quantidade": bucket["quantidade"],
+            "quantidade_com_resultado": bucket["quantidade_com_resultado"],
+            "media_proficiencia": media_p,
+            "media_nota": media_n,
+        })
+
+    # Destaques: grupos de raça/cor com ao menos 1 resultado
+    candidatos = [
+        item for item in comparativo_por_raca_cor
+        if item["media_proficiencia"] is not None and item["quantidade_com_resultado"] > 0
+    ]
+    maior = max(candidatos, key=lambda x: x["media_proficiencia"]) if candidatos else None
+    menor = min(candidatos, key=lambda x: x["media_proficiencia"]) if candidatos else None
+    maior_gap = None
+    if maior and menor and maior is not menor:
+        maior_gap = _format_decimal(maior["media_proficiencia"] - menor["media_proficiencia"])
+
+    destaques = {
+        "maior_media": (
+            {
+                "dimensao": "raca_cor",
+                "grupo": maior["raca_cor"],
+                "valor": maior["media_proficiencia"],
+                "quantidade_com_resultado": maior["quantidade_com_resultado"],
+            }
+            if maior else None
+        ),
+        "menor_media": (
+            {
+                "dimensao": "raca_cor",
+                "grupo": menor["raca_cor"],
+                "valor": menor["media_proficiencia"],
+                "quantidade_com_resultado": menor["quantidade_com_resultado"],
+            }
+            if menor else None
+        ),
+        "maior_gap": maior_gap,
+    }
+
+    return {
+        "comparativo_por_raca_cor": comparativo_por_raca_cor,
+        "comparativo_por_inse": comparativo_por_inse,
+        "comparativo_raca_x_inse": comparativo_raca_x_inse,
+        "destaques": destaques,
+    }
+
+
 def _course_name_for_test(test: Test) -> str:
     """Retorna o nome do curso (ex.: Anos Iniciais) a partir de test.course."""
     if not getattr(test, "course", None):
@@ -343,7 +517,7 @@ class InseAvaliacaoService:
         ) if total_receberam_formulario else 0
 
         if total_alunos_questionario == 0:
-            return InseAvaliacaoService._empty_report(
+            empty = InseAvaliacaoService._empty_report(
                 form, test, avaliacao_id, filters,
                 total_receberam_formulario=total_receberam_formulario,
                 total_nao_responderam=total_nao_responderam,
@@ -352,28 +526,94 @@ class InseAvaliacaoService:
                 raca_cor=target_raca,
                 raca_cor_grupo=target_raca_grupo,
             )
+            # Comparativos no escopo completo (antes do filtro de raça), mesmo sem linhas filtradas.
+            if results_raw:
+                student_ids_full = [row[2].id for row in results_raw]
+                inse_full = {}
+                for row in results_raw:
+                    response, _user, student, *_rest = row
+                    inse, ok, nivel_num, nivel_label = _calcular_inse_de_respostas(response.responses or {})
+                    inse_full[student.id] = {"valor": inse, "nivel": nivel_num, "nivel_label": nivel_label, "ok": ok}
+                disciplinas_info_full, resultado_full = _disciplinas_e_proficiencia_por_aluno(
+                    avaliacao_id, test, student_ids_full
+                )
+                metricas_full = []
+                for row in results_raw:
+                    _response, _user, student, *_rest = row
+                    disc_data = resultado_full.get(student.id, {})
+                    media_prof = None
+                    media_nota = None
+                    if disc_data:
+                        profs = [d["proficiency"] for d in disc_data.values()]
+                        grades = [d["grade"] for d in disc_data.values()]
+                        media_prof = sum(profs) / len(profs) if profs else None
+                        media_nota = sum(grades) / len(grades) if grades else None
+                    race_raw = raca_por_student.get(student.id)
+                    inse_data = inse_full.get(student.id, {})
+                    metricas_full.append({
+                        "raca_cor": race_raw or "NaoInformada",
+                        "inse_nivel": inse_data.get("nivel"),
+                        "media_proficiencia": media_prof,
+                        "media_nota": media_nota,
+                    })
+                empty["disciplinas_avaliacao"] = disciplinas_info_full
+                empty.update(_build_comparativos(metricas_full))
+            return empty
 
-        # 2) Calcular INSE por aluno e agregados
-        student_ids = []
+        # 2) INSE + proficiência no escopo COMPLETO (antes do filtro de raça)
+        #    → base dos comparativos. O filtro de raça afeta só resumo/distribuições/tabela.
+        student_ids_full = [row[2].id for row in results_raw]
         inse_por_aluno = {}
-        distribuicao_inse = {i: {"quantidade": 0, "porcentagem": 0.0} for i in range(1, 9)}
-        soma_inse = 0
-        count_inse_valido = 0
-
-        for row in results:
-            response, user, student, school, grade, class_, city = row
-            student_ids.append(student.id)
-            responses_data = (response.responses or {})
-            inse, ok, nivel_num, nivel_label = _calcular_inse_de_respostas(responses_data)
+        for row in results_raw:
+            response, _user, student, *_rest = row
+            inse, ok, nivel_num, nivel_label = _calcular_inse_de_respostas(response.responses or {})
             inse_por_aluno[student.id] = {
                 "valor": inse,
                 "nivel": nivel_num,
                 "nivel_label": nivel_label,
+                "ok": ok,
             }
+
+        disciplinas_info, resultado_por_aluno_por_disciplina = _disciplinas_e_proficiencia_por_aluno(
+            avaliacao_id, test, student_ids_full
+        )
+        course_name = _course_name_for_test(test)
+
+        metricas_full = []
+        for row in results_raw:
+            _response, _user, student, *_rest = row
+            disc_data = resultado_por_aluno_por_disciplina.get(student.id, {})
+            media_prof = None
+            media_nota = None
+            if disc_data:
+                profs = [d["proficiency"] for d in disc_data.values()]
+                grades = [d["grade"] for d in disc_data.values()]
+                media_prof = sum(profs) / len(profs) if profs else None
+                media_nota = sum(grades) / len(grades) if grades else None
+            race_raw = raca_por_student.get(student.id)
+            inse_data = inse_por_aluno.get(student.id, {})
+            metricas_full.append({
+                "raca_cor": race_raw or "NaoInformada",
+                "inse_nivel": inse_data.get("nivel"),
+                "media_proficiencia": media_prof,
+                "media_nota": media_nota,
+            })
+
+        comparativos = _build_comparativos(metricas_full)
+
+        # 3) Agregados do escopo FILTRADO (raça/cor) — resumo + distribuições
+        student_ids = [row[2].id for row in results]
+        distribuicao_inse = {i: {"quantidade": 0, "porcentagem": 0.0} for i in range(1, 9)}
+        soma_inse = 0.0
+        count_inse_valido = 0
+
+        for sid in student_ids:
+            inse_data = inse_por_aluno.get(sid, {})
+            nivel_num = inse_data.get("nivel")
             if nivel_num is not None:
                 distribuicao_inse[nivel_num]["quantidade"] += 1
-            if ok and nivel_num is not None:
-                soma_inse += inse
+            if inse_data.get("ok") and nivel_num is not None:
+                soma_inse += float(inse_data.get("valor") or 0)
                 count_inse_valido += 1
 
         for i in range(1, 9):
@@ -384,13 +624,6 @@ class InseAvaliacaoService:
 
         inse_medio = (soma_inse / count_inse_valido) if count_inse_valido else 0.0
 
-        # 3) Proficiência por disciplina (subjects_info + respostas, igual evaluation_results_routes)
-        disciplinas_info, resultado_por_aluno_por_disciplina = _disciplinas_e_proficiencia_por_aluno(
-            avaliacao_id, test, student_ids
-        )
-
-        # Média de proficiência do escopo e distribuição por nível (1 aluno = 1 classificação, igual evaluation_results_routes)
-        course_name = _course_name_for_test(test)
         soma_media_alunos = 0.0
         count_alunos_com_proficiencia = 0
         classificacoes = defaultdict(int)
@@ -402,7 +635,6 @@ class InseAvaliacaoService:
             media_aluno = sum(profs) / len(profs) if profs else 0.0
             soma_media_alunos += media_aluno
             count_alunos_com_proficiencia += 1
-            # Um aluno = um nível (derivado da proficiência média)
             nivel = _nivel_proficiencia_geral(media_aluno, course_name)
             if nivel:
                 if nivel == "Abaixo do Básico":
@@ -417,7 +649,7 @@ class InseAvaliacaoService:
             soma_media_alunos / count_alunos_com_proficiencia
             if count_alunos_com_proficiencia else 0.0
         )
-        total_class = sum(classificacoes.values())  # total = quantidade de alunos com resultado
+        total_class = sum(classificacoes.values())
         distribuicao_proficiencia = {
             "abaixo_do_basico": classificacoes["abaixo_do_basico"],
             "basico": classificacoes["basico"],
@@ -437,7 +669,7 @@ class InseAvaliacaoService:
             ) if total_class else 0,
         }
 
-        # 4) Lista de alunos (paginada)
+        # 4) Lista de alunos (paginada) — escopo filtrado
         start = (page - 1) * limit
         end = start + limit
         rows_paginados = results[start:end]
@@ -530,6 +762,7 @@ class InseAvaliacaoService:
                     "totalPages": (total_alunos_questionario + limit - 1) // limit if limit > 0 else 0,
                 },
             },
+            **comparativos,
         }
 
     @staticmethod
@@ -583,6 +816,7 @@ class InseAvaliacaoService:
             "opcoes_raca_cor": {"categorias": [], "grupos": []},
             "disciplinas_avaliacao": disciplinas_info,
             "alunos": {"data": [], "pagination": {"page": 1, "limit": 50, "total": 0, "totalPages": 0}},
+            **_empty_comparativos(),
         }
 
 

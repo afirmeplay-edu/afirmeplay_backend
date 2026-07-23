@@ -342,6 +342,9 @@ class SubjectiveEvaluationService:
                 "title": subjective_test.title,
                 "test_type": subjective_test.test_type,
             },
+            "classification_legend": SubjectiveEvaluationService.get_classification_legend_for_test(
+                subjective_test
+            ),
             "questions": [q.to_dict() for q in questions],
             "students": [
                 {
@@ -444,6 +447,14 @@ class SubjectiveEvaluationService:
         return course_name, subject_name
 
     @staticmethod
+    def get_classification_legend_for_test(subjective_test: SubjectiveTest) -> Dict[str, Any]:
+        """Legenda oficial (faixas de proficiência) para a avaliação subjetiva."""
+        course_name, subject_name = SubjectiveEvaluationService._resolve_course_and_subject_names(
+            subjective_test
+        )
+        return EvaluationCalculator.get_classification_legend(course_name, subject_name)
+
+    @staticmethod
     def _get_or_create_synthetic_session(test_id: str, student_id: str) -> TestSession:
         """
         TestSession "sintética": não representa uma sessão online real (não existe nesse
@@ -530,6 +541,8 @@ class SubjectiveEvaluationService:
         if not subjective_test:
             return None
 
+        legend = SubjectiveEvaluationService.get_classification_legend_for_test(subjective_test)
+
         presence = SubjectivePresence.query.filter_by(
             subjective_test_id=subjective_test_id, student_id=student_id
         ).first()
@@ -540,6 +553,7 @@ class SubjectiveEvaluationService:
                 "student_id": student_id,
                 "subjective_test_id": subjective_test_id,
                 "persisted": False,
+                "classification_legend": legend,
             }
 
         computed = SubjectiveEvaluationService._compute_student_score(subjective_test, student_id)
@@ -550,9 +564,11 @@ class SubjectiveEvaluationService:
                 "student_id": student_id,
                 "subjective_test_id": subjective_test_id,
                 "persisted": False,
+                "classification_legend": legend,
             }
 
         computed["persisted"] = False
+        computed["classification_legend"] = legend
         return computed
 
     @staticmethod
@@ -764,6 +780,11 @@ class SubjectiveEvaluationService:
 
         Não usa EvaluationResult/TRI: trabalha só com SubjectiveResult (rubrica) e
         SubjectivePresence — alinhado ao dashboard do protótipo AVALIAÇÃO SUBJETIVA.
+
+        Além das agregações de questões (`saeb_levels` / `per_question`), retorna:
+        - `student_saeb_levels` / `students_by_saeb_level`: alunos por faixa SAEB
+          (para hover do gráfico e listagens);
+        - `students`: tabelinha individual com rubrica e nível.
         """
         subjective_test = SubjectiveTest.query.get(subjective_test_id)
         if not subjective_test:
@@ -819,15 +840,18 @@ class SubjectiveEvaluationService:
 
         totals = {v: 0 for v in RUBRIC_VALUES}
         results_by_question: Dict[str, List[SubjectiveResult]] = {}
+        results_by_student: Dict[str, Dict[str, str]] = {}
         respondent_ids = set()
         for r in results:
             if r.value in totals:
                 totals[r.value] += 1
             results_by_question.setdefault(str(r.subjective_question_id), []).append(r)
+            results_by_student.setdefault(str(r.student_id), {})[str(r.subjective_question_id)] = r.value
             respondent_ids.add(str(r.student_id))
 
         total_responses = len(results)
         respondents = len(respondent_ids)
+        presence_map = {str(p.student_id): bool(p.present) for p in presences}
         marked_absent = sum(1 for p in presences if not p.present)
         absent = max(marked_absent, max(0, total_students - respondents))
 
@@ -842,6 +866,7 @@ class SubjectiveEvaluationService:
             pct = round((value / total_responses) * 100) if total_responses > 0 else 0
             distribution.append({"name": name, "value": value, "pct": pct})
 
+        # Contagem de QUESTÕES por faixa (mantida para compatibilidade / habilidades).
         saeb_levels = {'abaixo': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
         per_question = []
         for q in questions:
@@ -872,6 +897,52 @@ class SubjectiveEvaluationService:
                 "saeb_label": q_saeb['label'],
             })
 
+        # Alunos por nível SAEB simplificado (mesma fórmula do % individual da rubrica).
+        # Usado no hover/seleção do gráfico e na tabelinha do relatório.
+        n_questions = len(questions)
+        students_by_saeb_level: Dict[str, List[Dict[str, Any]]] = {
+            'abaixo': [], 'basico': [], 'adequado': [], 'avancado': [],
+        }
+        student_saeb_levels = {'abaixo': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
+        students_payload: List[Dict[str, Any]] = []
+
+        students_sorted = sorted(students, key=lambda s: (s.name or '').lower())
+        for s in students_sorted:
+            sid = str(s.id)
+            is_present = presence_map.get(sid, True)
+            value_by_q = results_by_student.get(sid, {})
+            has_results = len(value_by_q) > 0
+
+            score_pct = None
+            saeb_info = None
+            if is_present and has_results and n_questions > 0:
+                weighted_student = 0.0
+                for q in questions:
+                    weighted_student += RUBRIC_WEIGHTS.get(value_by_q.get(str(q.id)), 0.0)
+                score_pct = round((weighted_student / n_questions) * 100)
+                saeb_info = saeb_from_pct(score_pct)
+                entry = {
+                    "id": s.id,
+                    "name": s.name,
+                    "registration": s.registration,
+                    "score_percentage": score_pct,
+                    "saeb_level": saeb_info['level'],
+                    "saeb_label": saeb_info['label'],
+                }
+                students_by_saeb_level[saeb_info['level']].append(entry)
+                student_saeb_levels[saeb_info['level']] += 1
+
+            students_payload.append({
+                "id": s.id,
+                "name": s.name,
+                "registration": s.registration,
+                "present": is_present,
+                "score_percentage": score_pct,
+                "saeb_level": saeb_info['level'] if saeb_info else None,
+                "saeb_label": saeb_info['label'] if saeb_info else None,
+                "results": value_by_q,
+            })
+
         return {
             "subjective_test": {
                 "id": subjective_test.id,
@@ -895,6 +966,9 @@ class SubjectiveEvaluationService:
             "totals": totals,
             "distribution": distribution,
             "saeb_levels": saeb_levels,
+            "student_saeb_levels": student_saeb_levels,
+            "students_by_saeb_level": students_by_saeb_level,
+            "students": students_payload,
             "per_question": per_question,
         }
 

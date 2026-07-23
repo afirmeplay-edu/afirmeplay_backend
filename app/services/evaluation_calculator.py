@@ -4,7 +4,7 @@ Implementa as fórmulas específicas conforme os requisitos do sistema
 """
 
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 from app.utils.decimal_helpers import round_to_two_decimals
 
@@ -165,6 +165,43 @@ class EvaluationCalculator:
             (350, 425, Classification.AVANCADO)
         ],
     }
+
+    @classmethod
+    def get_classification_legend(cls, course_name: str, subject_name: str) -> Dict[str, Any]:
+        """
+        Faixas oficiais de classificação por proficiência para o par curso/disciplina.
+        Usado pelo frontend na legenda da correção subjetiva (não são faixas de %).
+        """
+        course_level = cls._determine_course_level(course_name)
+        subject_type = cls._determine_subject_type(subject_name)
+        ranges = cls.CLASSIFICATION_CONFIG.get(
+            (course_level, subject_type),
+            [
+                (0, 149, Classification.ABAIXO_BASICO),
+                (150, 199, Classification.BASICO),
+                (200, 249, Classification.ADEQUADO),
+                (250, 350, Classification.AVANCADO),
+            ],
+        )
+        max_proficiency = cls.MAX_PROFICIENCY_CONFIG.get(
+            (course_level, subject_type), 350
+        )
+        return {
+            "course_name": course_name,
+            "subject_name": subject_name,
+            "course_level": course_level.value,
+            "subject_type": subject_type.value,
+            "max_proficiency": max_proficiency,
+            "unit": "proficiency",
+            "ranges": [
+                {
+                    "label": classification.value,
+                    "min": min_val,
+                    "max": max_val,
+                }
+                for min_val, max_val, classification in ranges
+            ],
+        }
 
     @classmethod
     def _determine_course_level(cls, course_name: str) -> CourseLevel:

@@ -326,6 +326,7 @@ def create_app():
     from app.ideb_meta.routes import bp as ideb_meta_bp
     from app.store.routes import bp as store_bp
     from app.afirme_ler.routes import bp as afirme_ler_bp
+    from app.participation_report import bp as participation_report_bp
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
     
@@ -388,6 +389,7 @@ def create_app():
     app.register_blueprint(ideb_meta_bp)
     app.register_blueprint(store_bp)
     app.register_blueprint(afirme_ler_bp)
+    app.register_blueprint(participation_report_bp)
 
     from app.routes.mobile import mobile_bp
     app.register_blueprint(mobile_bp)

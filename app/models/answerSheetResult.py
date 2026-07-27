@@ -6,7 +6,7 @@ Independente do sistema de provas (Test, StudentAnswer, EvaluationResult)
 
 from app import db
 import uuid
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, UUID as PGUUID
 from datetime import datetime
 
 
@@ -45,6 +45,12 @@ class AnswerSheetResult(db.Model):
     # Metadados
     corrected_at = db.Column(db.TIMESTAMP, default=datetime.utcnow)
     detection_method = db.Column(db.String(20), default='geometric')  # 'geometric' ou 'ia'
+
+    # Colocação no momento da participação (imutável após preenchido)
+    school_id_snapshot = db.Column(db.String(36), nullable=True)
+    class_id_snapshot = db.Column(PGUUID(as_uuid=True), nullable=True)
+    grade_id_snapshot = db.Column(PGUUID(as_uuid=True), nullable=True)
+    enrollment_id_snapshot = db.Column(db.String(36), nullable=True)
     
     # Relacionamentos
     gabarito = db.relationship('AnswerSheetGabarito', backref='results')
@@ -68,7 +74,11 @@ class AnswerSheetResult(db.Model):
             'classification': self.classification,
             'proficiency_by_subject': self.proficiency_by_subject,
             'corrected_at': self.corrected_at.isoformat() if self.corrected_at else None,
-            'detection_method': self.detection_method
+            'detection_method': self.detection_method,
+            'school_id_snapshot': self.school_id_snapshot,
+            'class_id_snapshot': str(self.class_id_snapshot) if self.class_id_snapshot else None,
+            'grade_id_snapshot': str(self.grade_id_snapshot) if self.grade_id_snapshot else None,
+            'enrollment_id_snapshot': self.enrollment_id_snapshot,
         }
     
     def __repr__(self):

@@ -251,6 +251,38 @@ def ensure_class_shift_column(schema: str) -> None:
     db.session.commit()
 
 
+def get_answer_sheet_result_snapshot_columns_ddl(schema: str) -> str:
+    """ALTER idempotente: snapshots de colocação em answer_sheet_results."""
+    return f"""
+ALTER TABLE "{schema}".answer_sheet_results
+    ADD COLUMN IF NOT EXISTS school_id_snapshot VARCHAR(36);
+ALTER TABLE "{schema}".answer_sheet_results
+    ADD COLUMN IF NOT EXISTS class_id_snapshot UUID;
+ALTER TABLE "{schema}".answer_sheet_results
+    ADD COLUMN IF NOT EXISTS grade_id_snapshot UUID;
+ALTER TABLE "{schema}".answer_sheet_results
+    ADD COLUMN IF NOT EXISTS enrollment_id_snapshot VARCHAR(36);
+COMMENT ON COLUMN "{schema}".answer_sheet_results.school_id_snapshot IS 'Escola no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".answer_sheet_results.class_id_snapshot IS 'Turma no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".answer_sheet_results.grade_id_snapshot IS 'Série no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".answer_sheet_results.enrollment_id_snapshot IS 'Matrícula vigente no momento do resultado.';
+"""
+
+
+def ensure_answer_sheet_result_snapshot_columns(schema: str) -> None:
+    """Garante colunas de snapshot em answer_sheet_results (idempotente)."""
+    import re
+
+    from sqlalchemy import text
+
+    from app import db
+
+    if not schema or not re.match(r"^city_[a-zA-Z0-9_]+$", schema):
+        return
+    db.session.execute(text(get_answer_sheet_result_snapshot_columns_ddl(schema)))
+    db.session.commit()
+
+
 def get_saved_ata_sala_tables_ddl(schema: str) -> str:
     """DDL idempotente de atas de sala salvas no schema city_xxx."""
     return f"""
@@ -906,6 +938,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
         ddl = _get_city_tables_ddl(schema_name)
         cursor.execute(ddl)
         cursor.execute(get_class_shift_column_migrations_ddl(schema_name))
+        cursor.execute(get_answer_sheet_result_snapshot_columns_ddl(schema_name))
 
         mobile_ddl = get_mobile_tables_ddl(schema_name)
         cursor.execute(mobile_ddl)
@@ -1313,9 +1346,17 @@ CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_results (
     classification VARCHAR(50),
     proficiency_by_subject JSON,
     corrected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    detection_method VARCHAR(20) DEFAULT 'geometric'
+    detection_method VARCHAR(20) DEFAULT 'geometric',
+    school_id_snapshot VARCHAR(36),
+    class_id_snapshot UUID,
+    grade_id_snapshot UUID,
+    enrollment_id_snapshot VARCHAR(36)
 );
 COMMENT ON TABLE "{schema}".answer_sheet_results IS 'Resultados de correção de cartões';
+COMMENT ON COLUMN "{schema}".answer_sheet_results.school_id_snapshot IS 'Escola no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".answer_sheet_results.class_id_snapshot IS 'Turma no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".answer_sheet_results.grade_id_snapshot IS 'Série no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".answer_sheet_results.enrollment_id_snapshot IS 'Matrícula vigente no momento do resultado.';
 
 CREATE TABLE IF NOT EXISTS "{schema}".batch_correction_jobs (
     id VARCHAR(36) PRIMARY KEY,

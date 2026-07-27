@@ -3192,6 +3192,38 @@ def _dedupe_answer_sheet_results_latest_per_student(
     return list(by_student.values())
 
 
+def _load_cartao_roster_and_results(
+    gabarito_id: str,
+    class_ids: List[Any],
+    periodo_bounds=None,
+) -> Tuple[List[AnswerSheetResult], List[Student]]:
+    """
+    Roster (alunos atuais ∪ snapshots na turma) + resultados do gabarito no escopo.
+    Alinhado a evaluation_results com class_id_snapshot.
+    """
+    from app.services.answer_sheet_result_snapshot import (
+        query_answer_sheet_results_for_class_group,
+        student_ids_for_answer_sheet_class_group,
+    )
+
+    if not gabarito_id or not class_ids:
+        return [], []
+    base_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    base_ids = {s.id for s in base_students}
+    merged_ids = student_ids_for_answer_sheet_class_group(
+        str(gabarito_id), class_ids, base_ids
+    )
+    students = (
+        Student.query.filter(Student.id.in_(list(merged_ids))).all() if merged_ids else []
+    )
+    _rq = query_answer_sheet_results_for_class_group(
+        str(gabarito_id), class_ids, list(base_ids)
+    )
+    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+    results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
+    return results, students
+
+
 def _school_ids_com_correcao_cartao_no_periodo(
     gabarito_id: str, school_ids: List[str], periodo_bounds: Tuple[datetime, datetime]
 ) -> set:
@@ -3600,29 +3632,35 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
         if not class_ids:
             return _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade)
 
-        todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
-        total_alunos = len(todos_alunos)
-        student_ids = [a.id for a in todos_alunos]
         if not gabarito_id:
+            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            total_alunos = len(todos_alunos)
             resultados = []
+            alunos_participantes = 0
         else:
-            _rq = AnswerSheetResult.query.filter(
-                AnswerSheetResult.gabarito_id == gabarito_id,
-                AnswerSheetResult.student_id.in_(student_ids),
+            resultados, todos_alunos = _load_cartao_roster_and_results(
+                str(gabarito_id), class_ids, periodo_bounds
             )
-            _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-            resultados = _rq.all()
-        resultados = _dedupe_answer_sheet_results_latest_per_student(resultados)
-        alunos_participantes = len(resultados)
-        # Agregação hierárquica (município = média das escolas; escola = média das séries; …)
+            total_alunos = len(todos_alunos)
+            alunos_participantes = len(resultados)
+        # Agregação hierárquica; nota = calculate_grade(média_proficiência)
         from app.utils.school_equal_weight_means import (
             granularidade_to_hierarchical_target,
             hierarchical_mean_grade_and_proficiency,
         )
+        from app.services.cartao_resposta.proficiency_by_subject import (
+            course_name_and_has_matematica_for_gabarito,
+        )
 
+        course_name, has_matematica = course_name_and_has_matematica_for_gabarito(
+            str(gabarito_id) if gabarito_id else None
+        )
         if resultados:
             media_nota, media_prof = hierarchical_mean_grade_and_proficiency(
-                resultados, granularidade_to_hierarchical_target(nivel_granularidade)
+                resultados,
+                granularidade_to_hierarchical_target(nivel_granularidade),
+                course_name=course_name,
+                has_matematica=has_matematica,
             )
         else:
             media_nota = 0.0
@@ -3718,18 +3756,23 @@ def _calcular_estatisticas_grupo_cartao(
     """
     if not class_ids or not gabarito_id:
         return {'total_alunos': 0, 'alunos_participantes': 0, 'alunos_pendentes': 0, 'media_nota': 0.0, 'media_proficiencia': 0.0, 'distribuicao_classificacao': {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}}
-    alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    resultados, alunos = _load_cartao_roster_and_results(
+        str(gabarito_id), class_ids, periodo_bounds
+    )
     total_alunos = len(alunos)
-    sid_list = [a.id for a in alunos]
-    _rq = AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id == gabarito_id, AnswerSheetResult.student_id.in_(sid_list))
-    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-    resultados = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
     participantes = len(resultados)
     from app.utils.school_equal_weight_means import hierarchical_mean_grade_and_proficiency
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        course_name_and_has_matematica_for_gabarito,
+    )
 
+    course_name, has_matematica = course_name_and_has_matematica_for_gabarito(str(gabarito_id))
     if resultados:
         media_nota, media_prof = hierarchical_mean_grade_and_proficiency(
-            resultados, aggregation_level
+            resultados,
+            aggregation_level,
+            course_name=course_name,
+            has_matematica=has_matematica,
         )
     else:
         media_nota = 0.0
@@ -3806,7 +3849,14 @@ def _medias_por_disciplina_de_resultados_cartao(
             nf = float(nota_disc) if nota_disc is not None else 0.0
             pf = float(data.get("proficiency") or 0)
             subject_rows[sidk].append(
-                {"student_id": r.student_id, "grade": nf, "proficiency": pf}
+                {
+                    "student_id": r.student_id,
+                    "grade": nf,
+                    "proficiency": pf,
+                    "class_id_snapshot": getattr(r, "class_id_snapshot", None),
+                    "school_id_snapshot": getattr(r, "school_id_snapshot", None),
+                    "grade_id_snapshot": getattr(r, "grade_id_snapshot", None),
+                }
             )
             if data.get("subject_name"):
                 by_subject[sidk]["disciplina"] = data.get("subject_name")
@@ -3820,7 +3870,12 @@ def _medias_por_disciplina_de_resultados_cartao(
             continue
         nom = agg["disciplina"]
         rows = subject_rows.get(_sidk) or []
-        mn, mp, _ = hierarchical_mean_from_subject_rows(rows, aggregation_level)
+        mn, mp, _ = hierarchical_mean_from_subject_rows(
+            rows,
+            aggregation_level,
+            course_name=course_name,
+            subject_name=nom or "GERAL",
+        )
         mn = round(mn, 2)
         mp = round(mp, 2)
         lista.append({"disciplina": nom, "media_nota": mn, "media_proficiencia": mp})
@@ -4087,7 +4142,14 @@ def _build_disciplina_rows_from_cartao_results(
             nf = float(nota_disc) if nota_disc is not None else 0.0
             pf = float(data.get("proficiency") or 0)
             subject_rows[sid].append(
-                {"student_id": r.student_id, "grade": nf, "proficiency": pf}
+                {
+                    "student_id": r.student_id,
+                    "grade": nf,
+                    "proficiency": pf,
+                    "class_id_snapshot": getattr(r, "class_id_snapshot", None),
+                    "school_id_snapshot": getattr(r, "school_id_snapshot", None),
+                    "grade_id_snapshot": getattr(r, "grade_id_snapshot", None),
+                }
             )
             cl = (data.get("classification") or "").lower()
             if "abaixo" in cl:
@@ -4103,9 +4165,15 @@ def _build_disciplina_rows_from_cartao_results(
     for sid, agg in by_subject.items():
         n = agg["alunos_participantes"]
         rows = subject_rows.get(sid) or []
-        media_nota, media_prof, _ = hierarchical_mean_from_subject_rows(rows, aggregation_level)
+        disc_name = agg["disciplina"]
+        media_nota, media_prof, _ = hierarchical_mean_from_subject_rows(
+            rows,
+            aggregation_level,
+            course_name=course_name,
+            subject_name=disc_name or "GERAL",
+        )
         out.append({
-            "disciplina": agg["disciplina"],
+            "disciplina": disc_name,
             "total_avaliacoes": 1,
             "total_alunos": total_alunos,
             "alunos_participantes": n,
@@ -4123,21 +4191,24 @@ def _load_cartao_results_and_students_for_disciplina(
     class_ids: List[Any],
     periodo_bounds=None,
 ) -> Tuple[List[AnswerSheetResult], List[Student], Dict[Any, Class]]:
-    """Resultados deduplicados e alunos do recorte (turmas previstas do gabarito)."""
-    students = Student.query.filter(Student.class_id.in_(class_ids)).all()
-    if not students:
-        return [], [], {}
-    student_ids = [s.id for s in students]
-    _rq = AnswerSheetResult.query.filter(
-        AnswerSheetResult.gabarito_id == gabarito_id,
-        AnswerSheetResult.student_id.in_(student_ids),
+    """Resultados deduplicados e alunos do recorte (turmas previstas + snapshots)."""
+    results, students = _load_cartao_roster_and_results(
+        gabarito_id, class_ids, periodo_bounds
     )
-    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-    results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
     classes = {
         c.id: c
         for c in Class.query.filter(Class.id.in_(class_ids)).all()
     }
+    # Inclui turmas só presentes via snapshot (aluno removido)
+    snap_cids = {
+        r.class_id_snapshot
+        for r in results
+        if getattr(r, "class_id_snapshot", None) is not None
+        and r.class_id_snapshot not in classes
+    }
+    if snap_cids:
+        for c in Class.query.filter(Class.id.in_(list(snap_cids))).all():
+            classes[c.id] = c
     return results, students, classes
 
 
@@ -4189,7 +4260,14 @@ def _calcular_resultados_por_disciplina_cartao(
         return []
 
     student_ids_in_scope = {s.id for s in students}
-    student_class_id = {s.id: s.class_id for s in students if s.class_id}
+    student_class_id: Dict[Any, Any] = {}
+    for s in students:
+        if s.class_id:
+            student_class_id[s.id] = s.class_id
+    for r in results:
+        snap = getattr(r, "class_id_snapshot", None)
+        if snap is not None:
+            student_class_id[r.student_id] = snap
 
     def _results_for_student_ids(sids: Set[Any]) -> List[AnswerSheetResult]:
         return [r for r in results if r.student_id in sids]
@@ -4383,20 +4461,22 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
     disciplinas_config = _extrair_blocos_por_disciplina_cartao(blocks_config)
     if not disciplinas_config:
         disciplinas_config = [{'id': 'geral', 'nome': 'Geral', 'question_numbers': list(gabarito_dict.keys())}]
-    student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
-    _rq = AnswerSheetResult.query.filter(
-        AnswerSheetResult.gabarito_id == gabarito_id,
-        AnswerSheetResult.student_id.in_(student_ids),
+    results, students = _load_cartao_roster_and_results(
+        str(gabarito_id), class_ids, periodo_bounds
     )
-    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-    results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
+    student_ids = [s.id for s in students]
     result_by_student = {r.student_id: r for r in results}
     classes_by_id = {c.id: c for c in Class.query.filter(Class.id.in_(class_ids)).all()}
+    for r in results:
+        snap_cid = getattr(r, "class_id_snapshot", None)
+        if snap_cid and snap_cid not in classes_by_id:
+            co = Class.query.get(snap_cid)
+            if co:
+                classes_by_id[co.id] = co
     schools_by_id = {}
     for c in classes_by_id.values():
         if c.school_id and c.school_id not in schools_by_id:
             schools_by_id[c.school_id] = School.query.get(c.school_id)
-    students = Student.query.filter(Student.id.in_(student_ids)).all()
     grade_name = gabarito.grade_name or gabarito.title or ''
     from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
     from app.services.evaluation_calculator import EvaluationCalculator
@@ -4438,8 +4518,16 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
         alunos_disciplina = []
         for s in students:
             r = result_by_student.get(s.id)
-            class_obj = classes_by_id.get(s.class_id) if s.class_id else None
+            class_key = (
+                (getattr(r, "class_id_snapshot", None) if r else None)
+                or s.class_id
+            )
+            class_obj = classes_by_id.get(class_key) if class_key else None
             school_obj = schools_by_id.get(class_obj.school_id) if class_obj else None
+            if school_obj is None and r and getattr(r, "school_id_snapshot", None):
+                school_obj = schools_by_id.get(r.school_id_snapshot) or School.query.get(
+                    r.school_id_snapshot
+                )
             escola_nome = school_obj.name if school_obj else "N/A"
             serie_nome = (Grade.query.get(class_obj.grade_id).name if (class_obj and class_obj.grade_id) else None) or "N/A"
             turma_nome = class_obj.name if class_obj else "N/A"
@@ -4598,15 +4686,21 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user,
     if not class_ids or not gabarito_id:
         return []
 
-    students = Student.query.filter(Student.class_id.in_(class_ids)).all()
-    if not students:
+    results, students = _load_cartao_roster_and_results(
+        str(gabarito_id), class_ids, periodo_bounds
+    )
+    if not students and not results:
         return []
-    student_ids = [s.id for s in students]
     students_by_id = {s.id: s for s in students}
+
+    all_class_ids = set(class_ids)
+    for r in results:
+        if getattr(r, "class_id_snapshot", None) is not None:
+            all_class_ids.add(r.class_id_snapshot)
 
     classes_with_grade = (
         Class.query.options(joinedload(Class.grade))
-        .filter(Class.id.in_(class_ids))
+        .filter(Class.id.in_(list(all_class_ids)))
         .all()
     )
     class_info_by_id: Dict[Any, Tuple[str, str, Any]] = {
@@ -4624,13 +4718,6 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user,
         else {}
     )
 
-    _rq = AnswerSheetResult.query.filter(
-        AnswerSheetResult.gabarito_id == gabarito_id,
-        AnswerSheetResult.student_id.in_(student_ids),
-    )
-    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-    results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
-
     sorted_results = sorted(
         results,
         key=lambda r: (float(r.grade or 0), float(r.proficiency or 0)),
@@ -4640,10 +4727,17 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user,
     ranking: List[Dict[str, Any]] = []
     for pos, r in enumerate(sorted_results, 1):
         student = students_by_id.get(r.student_id)
+        class_key = getattr(r, "class_id_snapshot", None) or getattr(student, "class_id", None)
         turma_nome, serie_nome, school_id = class_info_by_id.get(
-            getattr(student, "class_id", None), ("N/A", "N/A", None)
+            class_key, ("N/A", "N/A", None)
         )
+        if school_id is None and getattr(r, "school_id_snapshot", None):
+            school_id = r.school_id_snapshot
         school_obj = schools_by_id.get(str(school_id)) if school_id else None
+        if school_obj is None and school_id:
+            school_obj = School.query.get(str(school_id))
+            if school_obj:
+                schools_by_id[str(school_obj.id)] = school_obj
         escola_id = str(getattr(school_obj, "id", "") or "") or None
         escola_nome = (getattr(school_obj, "name", None) or "N/A")
         ranking.append({

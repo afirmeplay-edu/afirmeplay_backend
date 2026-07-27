@@ -5440,6 +5440,10 @@ class AnswerSheetCorrectionN:
                 existing_result.classification = classification
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'geometric_n'
+                from app.services.answer_sheet_result_snapshot import (
+                    fill_answer_sheet_result_snapshots,
+                )
+                fill_answer_sheet_result_snapshots(existing_result, only_if_empty=True)
                 
                 db.session.flush()
                 payload = existing_result.to_dict()
@@ -5472,6 +5476,10 @@ class AnswerSheetCorrectionN:
                     classification=classification,
                     detection_method='geometric_n'
                 )
+                from app.services.answer_sheet_result_snapshot import (
+                    fill_answer_sheet_result_snapshots,
+                )
+                fill_answer_sheet_result_snapshots(result, only_if_empty=False)
                 
                 db.session.add(result)
                 db.session.flush()

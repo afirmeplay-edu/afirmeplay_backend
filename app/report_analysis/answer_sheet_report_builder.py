@@ -851,6 +851,8 @@ def _build_proficiencia_nota(
     school_name_map: Dict[str, str],
     target_classes: List[Class],
     scope_type: str = "city",
+    course_name: str = "Anos Iniciais",
+    has_matematica: Optional[bool] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Mesmo formato do relatório de prova (report_organized.html): por disciplina,
@@ -859,6 +861,7 @@ def _build_proficiencia_nota(
 
     ``media_geral`` e ``por_escola`` (escopo município) usam agregação hierárquica
     (média das escolas; dentro de cada escola, série → turma → alunos).
+    Nota agregada = ``calculate_grade(média_proficiência)``.
     """
 
     def _discipline_ns_rows(res: List[AnswerSheetResult], name: str) -> List[SimpleNamespace]:
@@ -927,7 +930,13 @@ def _build_proficiencia_nota(
         full_rows = _discipline_ns_rows(results, name)
         if not full_rows and not target_classes:
             continue
-        mg, mp = hierarchical_mean_grade_and_proficiency(full_rows, level_root)
+        mg, mp = hierarchical_mean_grade_and_proficiency(
+            full_rows,
+            level_root,
+            course_name=course_name,
+            subject_name=name,
+            has_matematica=has_matematica,
+        )
         media_geral_n = round_to_two_decimals(mg)
         media_geral_p = round_to_two_decimals(mp)
 
@@ -937,7 +946,13 @@ def _build_proficiencia_nota(
             cl_id = str(c.id)
             sub = [r for r in results if _student_in_class(r, cl_id)]
             rows_t = _discipline_ns_rows(sub, name)
-            tg, tp = hierarchical_mean_grade_and_proficiency(rows_t, "turma")
+            tg, tp = hierarchical_mean_grade_and_proficiency(
+                rows_t,
+                "turma",
+                course_name=course_name,
+                subject_name=name,
+                has_matematica=has_matematica,
+            )
             class_shift = (c.shift or "").strip() if getattr(c, "shift", None) else ""
             por_turma_p.append(
                 {
@@ -967,7 +982,13 @@ def _build_proficiencia_nota(
         for sc_id in schools_order:
             sub = [r for r in results if _school_id_for_result(r) == sc_id]
             rows_s = _discipline_ns_rows(sub, name)
-            sg, sp = hierarchical_mean_grade_and_proficiency(rows_s, "escola")
+            sg, sp = hierarchical_mean_grade_and_proficiency(
+                rows_s,
+                "escola",
+                course_name=course_name,
+                subject_name=name,
+                has_matematica=has_matematica,
+            )
             por_escola_p.append(
                 {"escola": _label_escola(sc_id), "proficiencia": round_to_two_decimals(sp)}
             )
@@ -1066,8 +1087,18 @@ def build_answer_sheet_report_payload(
     acertos = _build_acertos_por_habilidade(results or [], gab, q_skills)
     total_alunos = _build_total_alunos(results, school_names, target_classes, counts)
     niveis = _build_niveis(results, school_names, target_classes)
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        course_name_and_has_matematica_for_gabarito,
+    )
+
+    course_name, has_mat = course_name_and_has_matematica_for_gabarito(str(gab.id))
     proficiencia, nota_geral = _build_proficiencia_nota(
-        results, school_names, target_classes, scope_type
+        results,
+        school_names,
+        target_classes,
+        scope_type,
+        course_name=course_name,
+        has_matematica=has_mat,
     )
 
     series_ordered: List[str] = []

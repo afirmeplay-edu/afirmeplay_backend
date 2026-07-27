@@ -6011,6 +6011,71 @@ def _parse_gabarito_ids_from_body(data: dict, field: str = "gabarito_ids") -> Tu
     return gabarito_ids, None
 
 
+def _build_compare_scope_cartao(data: dict, user: dict) -> Tuple[Optional[dict], str, Optional[tuple]]:
+    """
+    Monta scope_info + nivel_granularidade a partir do body do /compare (cartão).
+    Filtros opcionais: estado, municipio, escola, serie, turma (mesmos nomes de resultados-agregados).
+    Sem municipio no body, usa city_id do tenant/usuário.
+    Retorna (scope_info, nivel, None) ou (None, "", (response, status)).
+    """
+    from app.utils.tenant_middleware import get_current_tenant_context
+
+    estado = data.get("estado")
+    municipio = data.get("municipio")
+    escola = data.get("escola")
+    serie = data.get("serie")
+    turma = data.get("turma")
+
+    municipio_id = None
+    city_data = None
+    if _is_valid_filter(municipio):
+        city_data = City.query.get(str(municipio).strip()) or City.query.filter(
+            City.name.ilike(f"%{str(municipio).strip()}%")
+        ).first()
+        if not city_data:
+            return None, "", (jsonify({"error": "Município não encontrado"}), 404)
+        municipio_id = city_data.id
+    else:
+        ctx = get_current_tenant_context()
+        municipio_id = (ctx.city_id if ctx and getattr(ctx, "city_id", None) else None) or user.get(
+            "city_id"
+        )
+        if municipio_id:
+            city_data = City.query.get(municipio_id)
+        if not municipio_id or not city_data:
+            return None, "", (
+                jsonify({"error": "Município é obrigatório (body.municipio ou contexto do tenant)"}),
+                400,
+            )
+
+    estado_ef = None
+    if _is_valid_filter(estado):
+        estado_ef = str(estado).strip()
+    elif city_data and getattr(city_data, "state", None):
+        estado_ef = city_data.state
+
+    scope_info = {
+        "municipio_id": municipio_id,
+        "city_data": city_data,
+        "estado": estado_ef,
+        "municipio": str(municipio_id),
+        "escola": str(escola).strip() if _is_valid_filter(escola) else None,
+        "serie": str(serie).strip() if _is_valid_filter(serie) else None,
+        "turma": str(turma).strip() if _is_valid_filter(turma) else None,
+        "gabarito": None,
+        "escolas": [],
+    }
+    nivel = _determinar_nivel_granularidade_cartao(
+        estado_ef,
+        municipio_id,
+        scope_info.get("escola"),
+        scope_info.get("serie"),
+        scope_info.get("turma"),
+        "dummy",  # força recorte por turma/série/escola/município (não estado)
+    )
+    return scope_info, nivel, None
+
+
 def _validate_gabaritos_compare_access(user: dict, gabarito_ids: List[str]):
     """
     Verifica existência, resultados e permissão de acesso aos gabaritos.
@@ -6069,8 +6134,12 @@ def _validate_gabaritos_compare_access(user: dict, gabarito_ids: List[str]):
 def comparar_gabaritos_cartao():
     """
     Compara múltiplos gabaritos (cartões resposta) e mostra evolução sequencial.
-    Body JSON: {"gabarito_ids": ["id1", "id2", "id3"]} — mínimo 2.
-    Retorna comparação geral, por disciplina, por habilidade e participação.
+    Body JSON:
+      - gabarito_ids (obrigatório): ["id1", "id2", ...] — mínimo 2
+      - estado, municipio, escola, serie, turma (opcionais): mesmos filtros de
+        GET /answer-sheets/resultados-agregados
+    Sem escola/série/turma → agregação municipal; com escola → mesma base do
+    resultados-agregados filtrado por escola.
     """
     try:
         from app.services.answer_sheet_comparison_service import AnswerSheetComparisonService
@@ -6091,7 +6160,16 @@ def comparar_gabaritos_cartao():
         if err:
             return err
 
-        comparison_result = AnswerSheetComparisonService.compare_gabaritos(gabarito_ids)
+        scope_info, nivel, err = _build_compare_scope_cartao(data, user)
+        if err:
+            return err
+
+        comparison_result = AnswerSheetComparisonService.compare_gabaritos(
+            gabarito_ids,
+            scope_info=scope_info,
+            nivel_granularidade=nivel,
+            user=user,
+        )
         if not comparison_result:
             return jsonify({"error": "Erro ao realizar comparação dos gabaritos"}), 500
 
@@ -6131,13 +6209,23 @@ def export_evolution_excel_cartao():
         if err:
             return err
 
-        municipality = data.get("municipality")
-        state = data.get("state")
+        municipality = data.get("municipality") or data.get("municipio")
+        state = data.get("state") or data.get("estado")
         department = data.get("department")
+
+        scope_info, nivel, err = _build_compare_scope_cartao(data, user)
+        if err:
+            return err
 
         exporter = ExcelEvolutionExporter()
         excel_file = exporter.export_answer_sheets(
-            gabarito_ids, municipality, state, department
+            gabarito_ids,
+            municipality,
+            state,
+            department,
+            scope_info=scope_info,
+            nivel_granularidade=nivel,
+            user=user,
         )
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

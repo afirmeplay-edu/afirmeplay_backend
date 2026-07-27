@@ -2228,8 +2228,12 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
             if classification_original in classificacoes:
                 classificacoes[classification_original] += 1
     
-    if result_rows_frontend:
-        mn, mp = hierarchical_mean_grade_and_proficiency(result_rows_frontend, "municipio")
+    if evaluation_results:
+        mn, mp = hierarchical_mean_grade_and_proficiency(
+            evaluation_results,
+            "municipio",
+            course_name=_get_curso_nome(getattr(test, "course", None)),
+        )
         media_nota = round_to_two_decimals(mn)
         media_proficiencia = format_decimal_two_places(mp)
     else:
@@ -2289,8 +2293,12 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
             if classification_original in classificacoes:
                 classificacoes[classification_original] += 1
     
-    if result_rows_by_class:
-        mn, mp = hierarchical_mean_grade_and_proficiency(result_rows_by_class, "turma")
+    if evaluation_results:
+        mn, mp = hierarchical_mean_grade_and_proficiency(
+            evaluation_results,
+            "turma",
+            course_name=_get_curso_nome(getattr(test, "course", None)),
+        )
         media_nota = round_to_two_decimals(mn)
         media_proficiencia = format_decimal_two_places(mp)
     else:
@@ -2388,8 +2396,13 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
         
         # Calcular médias consolidadas
         if todos_resultados:
+            course_name = "Anos Iniciais"
+            if class_tests:
+                first_test = getattr(class_tests[0], "test", None) or Test.query.get(class_tests[0].test_id)
+                if first_test:
+                    course_name = _get_curso_nome(getattr(first_test, "course", None))
             media_nota_geral, media_proficiencia_geral = hierarchical_mean_grade_and_proficiency(
-                todos_resultados, "municipio"
+                todos_resultados, "municipio", course_name=course_name
             )
         else:
             media_nota_geral = 0.0
@@ -2936,8 +2949,15 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
         
         # Calcular médias consolidadas (agregação hierárquica conforme granularidade)
         if todos_resultados:
+            course_name = "Anos Iniciais"
+            if class_tests:
+                first_test = getattr(class_tests[0], "test", None) or Test.query.get(class_tests[0].test_id)
+                if first_test:
+                    course_name = _get_curso_nome(getattr(first_test, "course", None))
             media_nota_geral, media_proficiencia_geral = hierarchical_mean_grade_and_proficiency(
-                todos_resultados, granularidade_to_hierarchical_target(nivel_granularidade)
+                todos_resultados,
+                granularidade_to_hierarchical_target(nivel_granularidade),
+                course_name=course_name,
             )
         else:
             media_nota_geral = 0.0
@@ -8335,8 +8355,15 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
 
         # Calcular estatísticas consolidadas (agregação hierárquica conforme granularidade)
         if resultados_por_aluno_unico:
+            course_name = "Anos Iniciais"
+            if class_tests:
+                first_test = getattr(class_tests[0], "test", None) or Test.query.get(class_tests[0].test_id)
+                if first_test:
+                    course_name = _get_curso_nome(getattr(first_test, "course", None))
             media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
-                resultados_por_aluno_unico, granularidade_to_hierarchical_target(nivel_granularidade)
+                resultados_por_aluno_unico,
+                granularidade_to_hierarchical_target(nivel_granularidade),
+                course_name=course_name,
             )
         else:
             media_nota = 0.0
@@ -9155,10 +9182,12 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
         alunos_pendentes = total_alunos - alunos_participantes
         alunos_ausentes = alunos_pendentes
 
-        # Calcular médias (agregação hierárquica no recorte do grupo)
+        # Calcular médias (agregação hierárquica; nota = calculate_grade(média_prof))
         if resultados:
             media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
-                resultados, aggregation_level
+                resultados,
+                aggregation_level,
+                course_name=_get_curso_nome(getattr(evaluation, "course", None)),
             )
         else:
             media_nota = 0.0

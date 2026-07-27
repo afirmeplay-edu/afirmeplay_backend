@@ -3813,11 +3813,64 @@ def comparar_avaliacoes():
         results_check_time = time.time() - results_check_start
         print(f"[COMPARE] Verificação de resultados concluída - Tempo: {results_check_time:.2f}s - Tempo total: {time.time() - start_time:.2f}s")
         
+        # Escopo hierárquico (mesmos filtros de resultados agregados)
+        from app.models.city import City
+        from app.utils.tenant_middleware import get_current_tenant_context
+
+        def _valid(v):
+            return v and str(v).strip().lower() != "all"
+
+        estado = data.get("estado")
+        municipio = data.get("municipio")
+        escola = data.get("escola")
+        serie = data.get("serie")
+        turma = data.get("turma")
+
+        if _valid(municipio):
+            city = City.query.get(str(municipio).strip())
+            if not city:
+                return jsonify({"error": "Município não encontrado"}), 404
+            municipio_id = city.id
+        else:
+            ctx = get_current_tenant_context()
+            municipio_id = (ctx.city_id if ctx and getattr(ctx, "city_id", None) else None) or user.get("city_id")
+            if not municipio_id:
+                return jsonify({"error": "Município é obrigatório (body.municipio ou contexto do tenant)"}), 400
+
+        if _valid(turma):
+            nivel = "turma"
+        elif _valid(serie):
+            nivel = "serie"
+        elif _valid(escola):
+            nivel = "escola"
+        else:
+            nivel = "municipio"
+
+        escopo_calculo = {
+            "tipo": nivel,
+            "municipio_id": municipio_id,
+            "escola_id": str(escola).strip() if _valid(escola) else None,
+            "serie_id": str(serie).strip() if _valid(serie) else None,
+            "turma_id": str(turma).strip() if _valid(turma) else None,
+        }
+        filtros_aplicados = {
+            "estado": str(estado).strip() if _valid(estado) else None,
+            "municipio": str(municipio_id),
+            "escola": escopo_calculo["escola_id"],
+            "serie": escopo_calculo["serie_id"],
+            "turma": escopo_calculo["turma_id"],
+        }
+
         # Executar comparação
         comparison_start = time.time()
         print(f"[COMPARE] Iniciando EvaluationComparisonService.compare_evaluations - Tempo: {time.time() - start_time:.2f}s")
         
-        comparison_result = EvaluationComparisonService.compare_evaluations(test_ids)
+        comparison_result = EvaluationComparisonService.compare_evaluations(
+            test_ids,
+            escopo_calculo=escopo_calculo,
+            nivel_granularidade=nivel,
+            filtros_aplicados=filtros_aplicados,
+        )
         
         comparison_time = time.time() - comparison_start
         print(f"[COMPARE] EvaluationComparisonService.compare_evaluations concluído - Tempo: {comparison_time:.2f}s - Tempo total: {time.time() - start_time:.2f}s")
@@ -3892,14 +3945,68 @@ def export_evolution_excel():
                 if not professor_pode_ver_avaliacao(user['id'], test.id):
                     return jsonify({"error": f"Acesso negado à avaliação {test.id}"}), 403
         
-        # Obter informações opcionais
+        # Obter informações opcionais + escopo hierárquico
         municipality = data.get('municipality')
         state = data.get('state')
         department = data.get('department')
+
+        from app.models.city import City
+        from app.utils.tenant_middleware import get_current_tenant_context
+
+        def _valid(v):
+            return v and str(v).strip().lower() != "all"
+
+        municipio = data.get("municipio") or municipality
+        escola = data.get("escola")
+        serie = data.get("serie")
+        turma = data.get("turma")
+        estado = data.get("estado") or state
+
+        if _valid(municipio):
+            city = City.query.get(str(municipio).strip())
+            municipio_id = city.id if city else None
+        else:
+            ctx = get_current_tenant_context()
+            municipio_id = (ctx.city_id if ctx and getattr(ctx, "city_id", None) else None) or user.get("city_id")
+
+        if _valid(turma):
+            nivel = "turma"
+        elif _valid(serie):
+            nivel = "serie"
+        elif _valid(escola):
+            nivel = "escola"
+        else:
+            nivel = "municipio"
+
+        escopo_calculo = None
+        filtros_aplicados = None
+        if municipio_id:
+            escopo_calculo = {
+                "tipo": nivel,
+                "municipio_id": municipio_id,
+                "escola_id": str(escola).strip() if _valid(escola) else None,
+                "serie_id": str(serie).strip() if _valid(serie) else None,
+                "turma_id": str(turma).strip() if _valid(turma) else None,
+            }
+            filtros_aplicados = {
+                "estado": str(estado).strip() if _valid(estado) else None,
+                "municipio": str(municipio_id),
+                "escola": escopo_calculo["escola_id"],
+                "serie": escopo_calculo["serie_id"],
+                "turma": escopo_calculo["turma_id"],
+            }
         
         # Exportar para Excel
         exporter = ExcelEvolutionExporter()
-        excel_file = exporter.export(test_ids, municipality, state, department)
+        excel_file = exporter.export(
+            test_ids,
+            municipality,
+            state,
+            department,
+            escopo_calculo=escopo_calculo,
+            nivel_granularidade=nivel,
+            filtros_aplicados=filtros_aplicados,
+        )
         
         # Gerar nome do arquivo
         from datetime import datetime

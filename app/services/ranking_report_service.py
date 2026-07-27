@@ -535,15 +535,19 @@ class RankingReportService:
                 )
                 if total_students < participating_students:
                     total_students = participating_students
-                average_score = round(
-                    cls._hierarchical_mean_values(
-                        [float(item.get("average_score") or 0) for item in course_series]
-                    ),
-                    1,
-                )
                 average_proficiency = round(
                     cls._hierarchical_mean_values(
                         [float(item.get("average_proficiency") or 0) for item in course_series]
+                    ),
+                    1,
+                )
+                from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
+
+                average_score = round(
+                    aggregated_grade_from_proficiency(
+                        average_proficiency,
+                        course_label,
+                        subject_name=subject_name or "GERAL",
                     ),
                     1,
                 )
@@ -1779,6 +1783,8 @@ class RankingReportService:
         score_expr = subject_score_expr if use_discipline_metrics else results_model.grade
         prof_expr = subject_prof_expr if use_discipline_metrics else results_model.proficiency
 
+        from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
+
         turma_query = (
             db.session.query(
                 School.id.label("school_id"),
@@ -1811,6 +1817,30 @@ class RankingReportService:
         if not turma_rows:
             return []
 
+        # Nota agregada canônica: calculate_grade(média_proficiência), não média das notas
+        normalized_turma_rows: List[Any] = []
+        for turma_row in turma_rows:
+            avg_prof = float(turma_row.average_proficiency or 0)
+            course_label = cls._derive_course_label(str(turma_row.grade_name or ""))
+            avg_score = aggregated_grade_from_proficiency(
+                avg_prof,
+                course_label,
+                subject_name=subject_name or "GERAL",
+            )
+            normalized_turma_rows.append(
+                SimpleNamespace(
+                    school_id=turma_row.school_id,
+                    school_name=turma_row.school_name,
+                    grade_id=turma_row.grade_id,
+                    grade_name=turma_row.grade_name,
+                    class_id=turma_row.class_id,
+                    average_score=avg_score,
+                    average_proficiency=avg_prof,
+                    students_count=turma_row.students_count,
+                )
+            )
+        turma_rows = normalized_turma_rows
+
         grouped: List[Any] = []
         series_buckets: Dict[tuple, Dict[str, Any]] = {}
         for turma_row in turma_rows:
@@ -1836,14 +1866,21 @@ class RankingReportService:
             bucket["students_count"] += int(turma_row.students_count or 0)
 
         for bucket in series_buckets.values():
+            avg_prof = cls._hierarchical_mean_values(bucket["turma_profs"])
+            course_label = cls._derive_course_label(str(bucket["grade_name"] or ""))
+            avg_score = aggregated_grade_from_proficiency(
+                avg_prof,
+                course_label,
+                subject_name=subject_name or "GERAL",
+            )
             grouped.append(
                 SimpleNamespace(
                     school_id=bucket["school_id"],
                     school_name=bucket["school_name"],
                     grade_id=bucket["grade_id"],
                     grade_name=bucket["grade_name"],
-                    average_score=cls._hierarchical_mean_values(bucket["turma_scores"]),
-                    average_proficiency=cls._hierarchical_mean_values(bucket["turma_profs"]),
+                    average_score=avg_score,
+                    average_proficiency=avg_prof,
                     students_count=bucket["students_count"],
                 )
             )
@@ -2117,10 +2154,6 @@ class RankingReportService:
             school["participation_rate"] = round((participating_students / total_students) * 100, 1) if total_students > 0 else 0.0
 
             if students_with_results > 0:
-                school["average_score"] = round(
-                    cls._hierarchical_mean_values([float(item["average_score"]) for item in series]),
-                    1,
-                )
                 school["average_proficiency"] = round(
                     cls._hierarchical_mean_values([float(item["average_proficiency"]) for item in series]),
                     1,
@@ -2132,6 +2165,17 @@ class RankingReportService:
             if series:
                 dominant_series = max(series, key=lambda item: int(item.get("students_count") or 0))
                 dominant_course = cls._derive_course_label(str(dominant_series.get("grade_name") or ""))
+            if students_with_results > 0:
+                from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
+
+                school["average_score"] = round(
+                    aggregated_grade_from_proficiency(
+                        school["average_proficiency"],
+                        dominant_course,
+                        subject_name=subject_name or "GERAL",
+                    ),
+                    1,
+                )
             school["classification"] = cls._classification_from_proficiency(
                 float(school["average_proficiency"] or 0),
                 course_label=dominant_course,
@@ -2488,15 +2532,21 @@ class RankingReportService:
         result: List[Dict[str, Any]] = []
         for label in sorted(bucket.keys()):
             pairs = bucket[label]
-            average_score = round(
-                cls._hierarchical_mean_values([score for score, _prof in pairs]),
-                1,
-            )
             average_proficiency = round(
                 cls._hierarchical_mean_values([prof for _score, prof in pairs]),
                 1,
             )
             course_label = cls._derive_course_label(label)
+            from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
+
+            average_score = round(
+                aggregated_grade_from_proficiency(
+                    average_proficiency,
+                    course_label,
+                    subject_name=subject_name or "GERAL",
+                ),
+                1,
+            )
             result.append(
                 {
                     "grade_name": label,

@@ -150,9 +150,10 @@ Agregações (município, escola, distribuição): leitura desses campos em `eva
 | Conceito | Tabela / campo |
 |----------|----------------|
 | Resultado por aluno | `answer_sheet_results`: `grade`, `proficiency`, `classification`, `proficiency_by_subject` (JSON) |
+| Colocação histórica | `school_id_snapshot` / `class_id_snapshot` / `grade_id_snapshot` (igual `evaluation_results`) |
 
 - **Média geral do aluno** na tabela detalhada: média das notas/proficiências por disciplina conforme `_calcular_dados_gerais_alunos_cartao` em `answer_sheet_routes.py`.
-- **Estatísticas gerais / por escola / por disciplina**: médias e distribuições a partir dos registros deduplicados por aluno (`_dedupe_answer_sheet_results_latest_per_student`).
+- **Estatísticas gerais / por escola / por disciplina**: médias e distribuições a partir dos registros deduplicados por aluno (`_dedupe_answer_sheet_results_latest_per_student`), com roster = alunos atuais **∪** snapshots (`app/services/answer_sheet_result_snapshot.py`).
 
 ### 4.3 Nível de classificação (cartão, lista municipal)
 
@@ -165,7 +166,7 @@ Ou seja: para auditar, use a **média** exibida (`media_proficiencia`) + curso +
 
 ### 4.4 Município (consolidado)
 
-- **Médias** (`media_nota_geral`, `media_proficiencia_geral`): agregação hierárquica via `hierarchical_mean_grade_and_proficiency` sobre os resultados dos participantes no escopo — **não** é média aritmética simples de todos os alunos nem média ponderada por tamanho de turma/série/escola.
+- **Médias** (`media_nota_geral`, `media_proficiencia_geral`): agregação hierárquica via `hierarchical_mean_grade_and_proficiency` — a proficiência é a média hierárquica; a **nota geral** é `calculate_grade(média_proficiência)`, não a média das notas dos alunos.
 - **Distribuição** (`distribuicao_classificacao_geral`): contagem de alunos em cada faixa usando o campo `classification` de cada resultado (regra por substring no código), alinhada ao evaluation quando aplicável.
 
 ---
@@ -205,32 +206,37 @@ Proibido em qualquer endpoint, serviço, ranking, dashboard ou relatório:
 - usar `SQL AVG(grade)` / `SQL AVG(proficiency)` agrupado acima do nível **turma** para representar escola, série ou município;
 - implementar “média geral dos alunos” quando o nível de exibição for escola ou superior.
 
-### 7.2 Obrigatório — média hierárquica com peso igual
+### 7.2 Obrigatório — média hierárquica com peso igual + nota via proficiência
 
-Implementação canônica: `app/utils/school_equal_weight_means.py` → `hierarchical_mean_grade_and_proficiency(results, target_level)`.
+Implementação canônica: `app/utils/school_equal_weight_means.py` → `hierarchical_mean_grade_and_proficiency(results, target_level, course_name=...)`.
 
-| Nível exibido | Regra |
-|---------------|--------|
-| Turma | Média aritmética dos alunos da turma |
+| Nível exibido | Regra da **proficiência** |
+|---------------|---------------------------|
+| Turma | Média aritmética das proficiências dos alunos da turma |
 | Série | Média das médias das turmas (peso igual por turma) |
 | Escola | Média das médias das séries (peso igual por série) |
 | Município | Média das médias das escolas (peso igual por escola) |
+
+**Nota agregada (canônico):** `media_nota = calculate_grade(media_proficiencia_agregada)` (`aggregated_grade_from_proficiency`).  
+**Não** usar a média das notas individuais dos alunos (clipping em 0 distorce a média das notas vs. a nota da média de proficiência).
+
+Nota do **aluno** continua sendo `calculate_grade(proficiência_do_aluno)` na correção.
 
 **Referência correta:** `GET /evaluation-results/avaliacoes` — `_calcular_estatisticas_grupo` + `hierarchical_mean_grade_and_proficiency`.
 
 **Exemplo auditável (Pedro Ribeiro, 3 turmas na mesma série):**
 
-| Turma | Alunos | Nota média |
-|-------|--------|------------|
-| A | 6 | 4,10 |
-| B | 5 | 6,01 |
-| C | 19 | 6,16 |
+| Turma | Alunos | Proficiência média (turma) |
+|-------|--------|----------------------------|
+| A | 6 | … |
+| B | 5 | … |
+| C | 19 | … |
 
-- ❌ Média ponderada / `AVG` de todos os alunos: **5,72**
-- ✅ Média hierárquica (escola = média das 3 turmas): **(4,10 + 6,01 + 6,16) / 3 = 5,42**
+- ❌ Média ponderada / `AVG` de todos os alunos
+- ✅ Média hierárquica da **proficiência** (escola = média das 3 turmas), depois `calculate_grade` uma vez
 
-Rotas de ranking devem usar a mesma regra (ver `RankingReportService._hierarchical_mean_values` e `app/services/ranking_report_service.py`).
+Rotas de ranking devem usar a mesma regra (agregar proficiência → derivar nota; ver `RankingReportService` + `aggregated_grade_from_proficiency`).
 
 ---
 
-*Última revisão: inclui §7 (médias hierárquicas obrigatórias); revisar após alterações em agregações ou em `determine_classification`.*
+*Última revisão: §7 — nota agregada canônica via `calculate_grade(média_prof)`; revisar após alterações em agregações ou em `determine_classification`.*

@@ -39,12 +39,28 @@ class AnswerSheetComparisonService:
     """Compara múltiplos gabaritos de cartão resposta (evolução sequencial)."""
 
     @staticmethod
-    def compare_gabaritos(gabarito_ids: List[str]) -> Optional[Dict[str, Any]]:
+    def compare_gabaritos(
+        gabarito_ids: List[str],
+        *,
+        scope_info: Optional[Dict[str, Any]] = None,
+        nivel_granularidade: str = "municipio",
+        user: Optional[dict] = None,
+    ) -> Optional[Dict[str, Any]]:
         if len(gabarito_ids) < 2:
             logger.error("Mínimo de 2 gabaritos necessário. Recebido: %s", len(gabarito_ids))
             return None
 
         try:
+            from app.services.answer_sheet_result_snapshot import (
+                query_answer_sheet_results_for_class_group,
+                student_ids_for_answer_sheet_class_group,
+            )
+            from app.utils.school_equal_weight_means import (
+                granularidade_to_hierarchical_target,
+            )
+
+            aggregation_level = granularidade_to_hierarchical_target(nivel_granularidade)
+
             gabaritos = AnswerSheetGabarito.query.filter(
                 AnswerSheetGabarito.id.in_(gabarito_ids)
             ).all()
@@ -62,12 +78,66 @@ class AnswerSheetComparisonService:
             gabaritos_with_dates.sort(key=lambda x: x["application_date"])
             ordered_gabaritos = [item["gabarito"] for item in gabaritos_with_dates]
 
+            def _load_scoped_results(gab_id: str, class_ids: List[Any]) -> List[AnswerSheetResult]:
+                if not class_ids:
+                    return []
+                base_ids = {
+                    s.id
+                    for s in Student.query.filter(Student.class_id.in_(class_ids)).all()
+                }
+                merged_ids = student_ids_for_answer_sheet_class_group(
+                    str(gab_id), class_ids, base_ids
+                )
+                raw = query_answer_sheet_results_for_class_group(
+                    str(gab_id), class_ids, list(base_ids)
+                ).all()
+                # latest per student
+                by_student: Dict[str, AnswerSheetResult] = {}
+                for r in raw:
+                    prev = by_student.get(r.student_id)
+                    if prev is None:
+                        by_student[r.student_id] = r
+                        continue
+                    prev_at = getattr(prev, "corrected_at", None)
+                    cur_at = getattr(r, "corrected_at", None)
+                    if cur_at and (not prev_at or cur_at >= prev_at):
+                        by_student[r.student_id] = r
+                return [
+                    r
+                    for r in by_student.values()
+                    if r.student_id in merged_ids and _participating_answer_sheet_result(r)
+                ]
+
             all_results: Dict[str, List[AnswerSheetResult]] = {}
+            class_ids_by_gabarito: Dict[str, List[Any]] = {}
             for gab in ordered_gabaritos:
-                results = AnswerSheetResult.query.filter_by(gabarito_id=gab.id).all()
-                participating = [r for r in results if _participating_answer_sheet_result(r)]
+                if scope_info:
+                    from app.routes.answer_sheet_routes import (
+                        _class_ids_alunos_previstos_cartao,
+                    )
+
+                    scope_gab = dict(scope_info)
+                    scope_gab["gabarito"] = str(gab.id)
+                    class_ids = _class_ids_alunos_previstos_cartao(
+                        str(gab.id), scope_gab, nivel_granularidade, user
+                    )
+                    class_ids_by_gabarito[gab.id] = class_ids
+                    participating = _load_scoped_results(str(gab.id), class_ids)
+                else:
+                    class_ids_by_gabarito[gab.id] = [
+                        c
+                        for c in AnswerSheetComparisonService._target_class_ids(gab.id)
+                    ]
+                    results = AnswerSheetResult.query.filter_by(gabarito_id=gab.id).all()
+                    participating = [
+                        r for r in results if _participating_answer_sheet_result(r)
+                    ]
                 if not participating:
-                    logger.warning("Gabarito %s não possui resultados calculados", gab.id)
+                    logger.warning(
+                        "Gabarito %s não possui resultados no escopo (%s)",
+                        gab.id,
+                        nivel_granularidade,
+                    )
                     return None
                 all_results[gab.id] = participating
 
@@ -104,10 +174,18 @@ class AnswerSheetComparisonService:
                             gab_to, i + 2, grade_info_by_gabarito.get(gab_to.id)
                         ),
                         "general_comparison": AnswerSheetComparisonService._get_general_comparison(
-                            results_from, results_to
+                            results_from,
+                            results_to,
+                            gab_from,
+                            gab_to,
+                            aggregation_level=aggregation_level,
                         ),
                         "subject_comparison": AnswerSheetComparisonService._get_subject_comparison(
-                            gab_from, gab_to, results_from, results_to
+                            gab_from,
+                            gab_to,
+                            results_from,
+                            results_to,
+                            aggregation_level=aggregation_level,
                         ),
                         "skills_comparison": AnswerSheetComparisonService._get_skills_comparison(
                             gab_from, gab_to, results_from, results_to
@@ -118,15 +196,33 @@ class AnswerSheetComparisonService:
             participation_data = {"general": {}, "by_school": {}}
             for i, gab in enumerate(ordered_gabaritos):
                 eval_key = f"evaluation_{i + 1}"
+                cids = class_ids_by_gabarito.get(gab.id) or []
                 participation_data["general"][eval_key] = (
-                    AnswerSheetComparisonService._get_general_participation(gab.id)
+                    AnswerSheetComparisonService._get_general_participation(
+                        gab.id, class_ids=cids
+                    )
                 )
                 participation_data["by_school"][eval_key] = (
-                    AnswerSheetComparisonService._get_participation_by_school(gab.id)
+                    AnswerSheetComparisonService._get_participation_by_school(
+                        gab.id, class_ids=cids
+                    )
                 )
+
+            filtros_aplicados = None
+            if scope_info is not None:
+                filtros_aplicados = {
+                    "estado": scope_info.get("estado"),
+                    "municipio": scope_info.get("municipio")
+                    or scope_info.get("municipio_id"),
+                    "escola": scope_info.get("escola"),
+                    "serie": scope_info.get("serie"),
+                    "turma": scope_info.get("turma"),
+                }
 
             return {
                 "source_type": "cartao_resposta",
+                "nivel_granularidade": nivel_granularidade,
+                "filtros_aplicados": filtros_aplicados,
                 "evaluations": evaluations_data,
                 "total_evaluations": len(ordered_gabaritos),
                 "comparisons": comparisons,
@@ -256,22 +352,49 @@ class AnswerSheetComparisonService:
             return None
 
     @staticmethod
+    def _course_meta_for_gabarito(gabarito: Optional[AnswerSheetGabarito]) -> Tuple[str, bool]:
+        from app.services.cartao_resposta.proficiency_by_subject import (
+            course_name_and_has_matematica_for_gabarito,
+        )
+
+        gab_id = str(gabarito.id) if gabarito and getattr(gabarito, "id", None) else None
+        return course_name_and_has_matematica_for_gabarito(gab_id)
+
+    @staticmethod
     def _get_general_comparison(
-        results_1: List[AnswerSheetResult], results_2: List[AnswerSheetResult]
+        results_1: List[AnswerSheetResult],
+        results_2: List[AnswerSheetResult],
+        gab_1: Optional[AnswerSheetGabarito] = None,
+        gab_2: Optional[AnswerSheetGabarito] = None,
+        aggregation_level: str = "municipio",
     ) -> Dict[str, Any]:
+        """Médias gerais com agregação hierárquica (mesma regra de resultados-agregados)."""
         try:
-            avg_grade_1 = sum(r.grade for r in results_1) / len(results_1) if results_1 else 0
-            avg_prof_1 = (
-                sum(r.proficiency or 0 for r in results_1) / len(results_1)
-                if results_1
-                else 0
+            from app.utils.school_equal_weight_means import (
+                hierarchical_mean_grade_and_proficiency,
             )
-            avg_grade_2 = sum(r.grade for r in results_2) / len(results_2) if results_2 else 0
-            avg_prof_2 = (
-                sum(r.proficiency or 0 for r in results_2) / len(results_2)
-                if results_2
-                else 0
-            )
+
+            course_1, has_mat_1 = AnswerSheetComparisonService._course_meta_for_gabarito(gab_1)
+            course_2, has_mat_2 = AnswerSheetComparisonService._course_meta_for_gabarito(gab_2)
+
+            if results_1:
+                avg_grade_1, avg_prof_1 = hierarchical_mean_grade_and_proficiency(
+                    results_1,
+                    aggregation_level,
+                    course_name=course_1,
+                    has_matematica=has_mat_1,
+                )
+            else:
+                avg_grade_1, avg_prof_1 = 0.0, 0.0
+            if results_2:
+                avg_grade_2, avg_prof_2 = hierarchical_mean_grade_and_proficiency(
+                    results_2,
+                    aggregation_level,
+                    course_name=course_2,
+                    has_matematica=has_mat_2,
+                )
+            else:
+                avg_grade_2, avg_prof_2 = 0.0, 0.0
 
             dist_1: Dict[str, int] = {}
             dist_2: Dict[str, int] = {}
@@ -344,6 +467,9 @@ class AnswerSheetComparisonService:
                     "grade": float(entry.get("grade") or 0),
                     "proficiency": float(entry.get("proficiency") or 0),
                     "classification": entry.get("classification"),
+                    "class_id_snapshot": getattr(result, "class_id_snapshot", None),
+                    "school_id_snapshot": getattr(result, "school_id_snapshot", None),
+                    "grade_id_snapshot": getattr(result, "grade_id_snapshot", None),
                 }
             )
         return subject_results
@@ -354,13 +480,19 @@ class AnswerSheetComparisonService:
         gab_2: AnswerSheetGabarito,
         results_1: List[AnswerSheetResult],
         results_2: List[AnswerSheetResult],
+        aggregation_level: str = "municipio",
     ) -> Dict[str, Any]:
         try:
+            from app.utils.school_equal_weight_means import hierarchical_mean_from_subject_rows
+
             subjects_1 = AnswerSheetComparisonService._extract_subjects_from_gabarito(gab_1)
             subjects_2 = AnswerSheetComparisonService._extract_subjects_from_gabarito(gab_2)
             common_subjects = set(subjects_1.keys()) & set(subjects_2.keys())
             if not common_subjects:
                 return {}
+
+            course_1, has_mat_1 = AnswerSheetComparisonService._course_meta_for_gabarito(gab_1)
+            course_2, has_mat_2 = AnswerSheetComparisonService._course_meta_for_gabarito(gab_2)
 
             calc = EvaluationComparisonService._calculate_evolution_percentage
             subject_comparison: Dict[str, Any] = {}
@@ -376,10 +508,20 @@ class AnswerSheetComparisonService:
                 if not subj_results_1 or not subj_results_2:
                     continue
 
-                avg_grade_1 = sum(r["grade"] for r in subj_results_1) / len(subj_results_1)
-                avg_prof_1 = sum(r["proficiency"] for r in subj_results_1) / len(subj_results_1)
-                avg_grade_2 = sum(r["grade"] for r in subj_results_2) / len(subj_results_2)
-                avg_prof_2 = sum(r["proficiency"] for r in subj_results_2) / len(subj_results_2)
+                avg_grade_1, avg_prof_1, _ = hierarchical_mean_from_subject_rows(
+                    subj_results_1,
+                    aggregation_level,
+                    course_name=course_1,
+                    subject_name=subject_name or "GERAL",
+                    has_matematica=has_mat_1,
+                )
+                avg_grade_2, avg_prof_2, _ = hierarchical_mean_from_subject_rows(
+                    subj_results_2,
+                    aggregation_level,
+                    course_name=course_2,
+                    subject_name=subject_name or "GERAL",
+                    has_matematica=has_mat_2,
+                )
 
                 dist_1: Dict[str, int] = {}
                 dist_2: Dict[str, int] = {}
@@ -588,9 +730,12 @@ class AnswerSheetComparisonService:
         return [str(c) for c in union_target_class_ids_for_gabarito(gab)]
 
     @staticmethod
-    def _get_general_participation(gabarito_id: str) -> Dict[str, Any]:
+    def _get_general_participation(
+        gabarito_id: str, class_ids: Optional[List[Any]] = None
+    ) -> Dict[str, Any]:
         try:
-            class_ids = AnswerSheetComparisonService._target_class_ids(gabarito_id)
+            if class_ids is None:
+                class_ids = AnswerSheetComparisonService._target_class_ids(gabarito_id)
             if not class_ids:
                 return {
                     "total_students": 0,
@@ -607,12 +752,27 @@ class AnswerSheetComparisonService:
                 Student.class_id.in_(class_uuids)
             ).count()
 
-            participating = (
-                AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
-                .join(Student, AnswerSheetResult.student_id == Student.id)
-                .filter(Student.class_id.in_(class_uuids))
-                .count()
+            from app.services.answer_sheet_result_snapshot import (
+                query_answer_sheet_results_for_class_group,
             )
+
+            base_ids = [
+                s.id
+                for s in Student.query.filter(Student.class_id.in_(class_uuids))
+                .with_entities(Student.id)
+                .all()
+            ]
+            raw = query_answer_sheet_results_for_class_group(
+                str(gabarito_id), class_uuids, base_ids
+            ).all()
+            seen = set()
+            participating = 0
+            for r in raw:
+                if r.student_id in seen:
+                    continue
+                if _participating_answer_sheet_result(r):
+                    seen.add(r.student_id)
+                    participating += 1
             rate = (participating / total_students * 100) if total_students > 0 else 0.0
             return {
                 "total_students": total_students,
@@ -633,9 +793,12 @@ class AnswerSheetComparisonService:
             }
 
     @staticmethod
-    def _get_participation_by_school(gabarito_id: str) -> Dict[str, Dict[str, Any]]:
+    def _get_participation_by_school(
+        gabarito_id: str, class_ids: Optional[List[Any]] = None
+    ) -> Dict[str, Dict[str, Any]]:
         try:
-            class_ids = AnswerSheetComparisonService._target_class_ids(gabarito_id)
+            if class_ids is None:
+                class_ids = AnswerSheetComparisonService._target_class_ids(gabarito_id)
             if not class_ids:
                 return {}
 
@@ -659,6 +822,10 @@ class AnswerSheetComparisonService:
                     }
                 schools_data[school_id]["class_ids"].append(class_obj.id)
 
+            from app.services.answer_sheet_result_snapshot import (
+                query_answer_sheet_results_for_class_group,
+            )
+
             participation_by_school: Dict[str, Dict[str, Any]] = {}
             for school_id, school_info in schools_data.items():
                 class_ids_school = school_info["class_ids"]
@@ -668,16 +835,23 @@ class AnswerSheetComparisonService:
                 if total_students == 0:
                     continue
 
-                student_ids = [
-                    s[0]
+                base_ids = [
+                    s.id
                     for s in Student.query.filter(Student.class_id.in_(class_ids_school))
                     .with_entities(Student.id)
                     .all()
                 ]
-                participating = AnswerSheetResult.query.filter(
-                    AnswerSheetResult.gabarito_id == gabarito_id,
-                    AnswerSheetResult.student_id.in_(student_ids),
-                ).count()
+                raw = query_answer_sheet_results_for_class_group(
+                    str(gabarito_id), class_ids_school, base_ids
+                ).all()
+                seen = set()
+                participating = 0
+                for r in raw:
+                    if r.student_id in seen:
+                        continue
+                    if _participating_answer_sheet_result(r):
+                        seen.add(r.student_id)
+                        participating += 1
                 rate = (participating / total_students * 100) if total_students > 0 else 0.0
                 participation_by_school[school_id] = {
                     "school_name": school_info["school_name"],

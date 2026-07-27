@@ -2340,6 +2340,10 @@ class AnswerSheetCorrectionNewGrid:
                 existing_result.proficiency_by_subject = proficiency_by_subject
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = correction.get('detection_method', 'new_grid')
+                from app.services.answer_sheet_result_snapshot import (
+                    fill_answer_sheet_result_snapshots,
+                )
+                fill_answer_sheet_result_snapshots(existing_result, only_if_empty=True)
                 
                 db.session.flush()
                 payload = existing_result.to_dict()
@@ -2374,6 +2378,10 @@ class AnswerSheetCorrectionNewGrid:
                     proficiency_by_subject=proficiency_by_subject,
                     detection_method=correction.get('detection_method', 'new_grid')
                 )
+                from app.services.answer_sheet_result_snapshot import (
+                    fill_answer_sheet_result_snapshots,
+                )
+                fill_answer_sheet_result_snapshots(result, only_if_empty=False)
                 
                 db.session.add(result)
                 db.session.flush()

@@ -571,15 +571,29 @@ def resolve_participating_students_answer_sheet(
     """
     if not class_ids:
         return [], {}, 0
-    students_all = (
+    from app.services.answer_sheet_result_snapshot import (
+        query_answer_sheet_results_for_class_group,
+        student_ids_for_answer_sheet_class_group,
+    )
+
+    students_base = (
         Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
         .filter(Student.class_id.in_(class_ids))
         .all()
     )
-    student_ids_all = [s.id for s in students_all]
-    results = AnswerSheetResult.query.filter(
-        AnswerSheetResult.gabarito_id == gabarito.id,
-        AnswerSheetResult.student_id.in_(student_ids_all),
+    base_ids = {s.id for s in students_base}
+    merged_ids = student_ids_for_answer_sheet_class_group(
+        str(gabarito.id), class_ids, base_ids
+    )
+    students_all = (
+        Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
+        .filter(Student.id.in_(list(merged_ids)))
+        .all()
+        if merged_ids
+        else []
+    )
+    results = query_answer_sheet_results_for_class_group(
+        str(gabarito.id), class_ids, list(base_ids)
     ).all()
     result_by_student = {r.student_id: r for r in results}
     students = [

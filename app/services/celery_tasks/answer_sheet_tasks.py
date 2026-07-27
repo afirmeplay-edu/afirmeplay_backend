@@ -138,6 +138,10 @@ def run_recalculate_answer_sheet_results_for_gabarito(
             for k, v in fields.items():
                 setattr(res, k, v)
             res.corrected_at = datetime.utcnow()
+            from app.services.answer_sheet_result_snapshot import (
+                fill_answer_sheet_result_snapshots,
+            )
+            fill_answer_sheet_result_snapshots(res, student, only_if_empty=True)
 
             processed += 1
             if processed % commit_every == 0:

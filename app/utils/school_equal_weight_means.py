@@ -9,18 +9,25 @@ por quantidade de alunos entre turmas, séries ou escolas.
 Única forma válida de agregar acima da turma: média hierárquica com peso igual entre
 unidades do mesmo nível (implementação canônica neste módulo).
 
-Hierarquia:
+Hierarquia (sobre **proficiência** dos alunos):
 
-- **Turma**: média aritmética dos **alunos** da turma.
+- **Turma**: média aritmética das proficiências dos alunos da turma.
 - **Série**: média das médias de **turma** (peso igual por turma).
 - **Escola**: média das médias de **série** (peso igual por série).
 - **Município**: média das médias **escolares** (peso igual por escola).
 
-Referência de uso correto: ``evaluation_results_routes._calcular_estatisticas_grupo`` e
+**Nota agregada (canônico):** ``calculate_grade(média_proficiência_agregada, …)``.
+Não usar média das notas individuais dos alunos no nível turma/série/escola/município.
+
+Nota do **aluno** continua sendo calculada a partir da proficiência **dele** na correção.
+
+Referência: ``evaluation_results_routes._calcular_estatisticas_grupo`` e
 ``GET /evaluation-results/avaliacoes``. Documentação: ``docs/FONTE_DA_VERDADE_CALCULOS_RESULTADOS.md`` (§7).
 
 Objetos em ``results`` devem expor ``student_id``, ``grade`` e ``proficiency`` (AnswerSheetResult,
-EvaluationResult ou SimpleNamespace equivalente).
+EvaluationResult ou SimpleNamespace equivalente). Snapshots de colocação
+(``class_id_snapshot`` / ``school_id_snapshot`` / ``grade_id_snapshot``) são preferidos
+quando presentes.
 
 Fallback: alunos sem turma/escola mapeável entram numa média simples global se não houver árvore.
 """
@@ -150,11 +157,27 @@ def _simple_mean_results(results: Sequence[Any]) -> Pair:
 def _build_school_grade_class_tree(
     results: Sequence[Any],
 ) -> Tree:
-    """Monta árvore escola -> série -> turma -> [(nota, proficiência)]."""
+    """Monta árvore escola -> série -> turma -> [(nota, proficiência)].
+
+    Prefere ``school_id_snapshot`` / ``class_id_snapshot`` / ``grade_id_snapshot``
+    no próprio resultado (participação histórica); fallback para colocação atual do aluno.
+    """
     tree: Tree = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     ids = [str(getattr(r, "student_id", None)) for r in results if getattr(r, "student_id", None)]
     if not ids:
         return {}
+
+    snap_class_ids = [
+        getattr(r, "class_id_snapshot", None)
+        for r in results
+        if getattr(r, "class_id_snapshot", None) is not None
+    ]
+    classes_by_snap = {}
+    if snap_class_ids:
+        classes_by_snap = {
+            c.id: c for c in Class.query.filter(Class.id.in_(snap_class_ids)).all()
+        }
+
     students = (
         Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
         .filter(Student.id.in_(ids))
@@ -167,6 +190,25 @@ def _build_school_grade_class_tree(
             continue
         g = float(getattr(r, "grade", None) or 0)
         p = float(getattr(r, "proficiency", None) or 0)
+
+        snap_class = getattr(r, "class_id_snapshot", None)
+        snap_school = getattr(r, "school_id_snapshot", None)
+        snap_grade = getattr(r, "grade_id_snapshot", None)
+        if snap_class is not None or snap_school:
+            co = classes_by_snap.get(snap_class) if snap_class is not None else None
+            sch = str(snap_school) if snap_school else (str(co.school_id) if co and co.school_id else None)
+            if not sch:
+                continue
+            if snap_grade is not None:
+                gid = str(snap_grade)
+            elif co and co.grade_id:
+                gid = str(co.grade_id)
+            else:
+                gid = "_sem_serie"
+            cid = str(snap_class) if snap_class is not None else "_sem_turma"
+            tree[sch][gid][cid].append((g, p))
+            continue
+
         st = by_stu.get(str(sid))
         if not st or not st.class_id:
             continue
@@ -182,22 +224,7 @@ def _build_school_grade_class_tree(
     return tree
 
 
-def hierarchical_mean_grade_and_proficiency(
-    results: Sequence[Any],
-    target_level: str,
-) -> Tuple[float, float]:
-    """
-    Agregação hierárquica conforme ``target_level``:
-
-    - ``municipio``: média das escolas (cada escola = regra escola).
-    - ``escola``: média das séries na escola (cada série = regra série).
-    - ``serie``: média das turmas (cada turma = média dos alunos).
-    - ``turma``: média dos alunos (uma ou mais turmas no recorte: se várias, média das médias de turma).
-
-    ``target_level`` aceita aliases em inglês: municipality, school, grade, class.
-    """
-    if not results:
-        return 0.0, 0.0
+def _normalize_hierarchical_target(target_level: str) -> str:
     tl = (target_level or "turma").strip().lower()
     aliases = {
         "municipality": "municipio",
@@ -210,7 +237,17 @@ def hierarchical_mean_grade_and_proficiency(
     tl = aliases.get(tl, tl)
     if tl not in {"municipio", "escola", "serie", "turma"}:
         tl = "turma"
+    return tl
 
+
+def _hierarchical_mean_pair_raw(
+    results: Sequence[Any],
+    target_level: str,
+) -> Tuple[float, float]:
+    """Média hierárquica dos campos grade/proficiency armazenados (uso interno)."""
+    if not results:
+        return 0.0, 0.0
+    tl = _normalize_hierarchical_target(target_level)
     tree = _build_school_grade_class_tree(results)
 
     if not tree:
@@ -249,7 +286,6 @@ def hierarchical_mean_grade_and_proficiency(
             return sum(smg) / len(smg), sum(smp) / len(smp)
         return _simple_mean_results(results)
 
-    # turma: média dos alunos em cada turma; se várias turmas no recorte, média das médias de turma
     flat_classes: Dict[str, List[Pair]] = defaultdict(list)
     for _sch, grades in tree.items():
         for _gid, classes_map in grades.items():
@@ -269,26 +305,89 @@ def hierarchical_mean_grade_and_proficiency(
     return sum(gms) / len(gms), sum(pms) / len(pms)
 
 
+def aggregated_grade_from_proficiency(
+    media_proficiencia: float,
+    course_name: str,
+    subject_name: str = "GERAL",
+    has_matematica: Optional[bool] = None,
+) -> float:
+    """Nota agregada canônica a partir da média de proficiência (não média das notas)."""
+    from app.services.evaluation_calculator import EvaluationCalculator
+
+    return float(
+        EvaluationCalculator.calculate_grade(
+            float(media_proficiencia or 0),
+            course_name,
+            subject_name,
+            has_matematica=has_matematica,
+        )
+    )
+
+
+def hierarchical_mean_grade_and_proficiency(
+    results: Sequence[Any],
+    target_level: str,
+    *,
+    course_name: str,
+    subject_name: str = "GERAL",
+    has_matematica: Optional[bool] = None,
+    derive_grade_from_proficiency: bool = True,
+) -> Tuple[float, float]:
+    """
+    Agregação hierárquica conforme ``target_level``.
+
+    A **proficiência** agregada é a média hierárquica das proficiências dos alunos.
+    A **nota** agregada canônica é ``calculate_grade(média_proficiência)``, salvo se
+    ``derive_grade_from_proficiency=False`` (ex.: agregação de score_percentage).
+
+    ``target_level``: municipio | escola | serie | turma (aliases em inglês aceitos).
+    """
+    if not results:
+        return 0.0, 0.0
+    _media_nota_raw, media_prof = _hierarchical_mean_pair_raw(results, target_level)
+    if not derive_grade_from_proficiency:
+        return float(_media_nota_raw), float(media_prof)
+    media_nota = aggregated_grade_from_proficiency(
+        media_prof,
+        course_name,
+        subject_name=subject_name,
+        has_matematica=has_matematica,
+    )
+    return float(media_nota), float(media_prof)
+
+
 def mean_grade_and_proficiency_equal_weight_by_school(
     results: Sequence[Any],
+    *,
+    course_name: str,
+    subject_name: str = "GERAL",
+    has_matematica: Optional[bool] = None,
 ) -> Tuple[float, float]:
     """
     Compatibilidade: delega para agregação hierárquica em nível município
     (média das escolas, cada escola com série/turma/alunos conforme regra global).
     """
-    return hierarchical_mean_grade_and_proficiency(results, "municipio")
+    return hierarchical_mean_grade_and_proficiency(
+        results,
+        "municipio",
+        course_name=course_name,
+        subject_name=subject_name,
+        has_matematica=has_matematica,
+    )
 
 
 def hierarchical_mean_from_subject_rows(
     subject_rows: List[Dict[str, Any]],
     target_level: str,
     student_id_key: str = "student_id",
+    *,
+    course_name: str,
+    subject_name: str = "GERAL",
+    has_matematica: Optional[bool] = None,
 ) -> Tuple[float, float, float]:
     """
     Mesma hierarquia que ``hierarchical_mean_grade_and_proficiency``, a partir de dicts
-    com grade, proficiency e score_percentage. A árvore de escopo usa ``student_id``;
-    o score segue a mesma estrutura (valores replicados em grade/proficiência internos
-    só para reaproveitar o rollup).
+    com grade, proficiency e score_percentage. Nota agregada = calculate_grade(média_prof).
     """
     if not subject_rows:
         return 0.0, 0.0, 0.0
@@ -301,21 +400,64 @@ def hierarchical_mean_from_subject_rows(
         g = float(row.get("grade") or 0)
         p = float(row.get("proficiency") or 0)
         sp = float(row.get("score_percentage") or 0)
-        ns_gp.append(SimpleNamespace(student_id=sid, grade=g, proficiency=p))
-        ns_sp.append(SimpleNamespace(student_id=sid, grade=sp, proficiency=sp))
+        ns_gp.append(
+            SimpleNamespace(
+                student_id=sid,
+                grade=g,
+                proficiency=p,
+                class_id_snapshot=row.get("class_id_snapshot"),
+                school_id_snapshot=row.get("school_id_snapshot"),
+                grade_id_snapshot=row.get("grade_id_snapshot"),
+            )
+        )
+        ns_sp.append(
+            SimpleNamespace(
+                student_id=sid,
+                grade=sp,
+                proficiency=sp,
+                class_id_snapshot=row.get("class_id_snapshot"),
+                school_id_snapshot=row.get("school_id_snapshot"),
+                grade_id_snapshot=row.get("grade_id_snapshot"),
+            )
+        )
     if not ns_gp:
         return 0.0, 0.0, 0.0
-    mg, mp = hierarchical_mean_grade_and_proficiency(ns_gp, target_level)
-    msp, _ = hierarchical_mean_grade_and_proficiency(ns_sp, target_level)
+    mg, mp = hierarchical_mean_grade_and_proficiency(
+        ns_gp,
+        target_level,
+        course_name=course_name,
+        subject_name=subject_name,
+        has_matematica=has_matematica,
+    )
+    # score %: média hierárquica do campo, sem converter como proficiência SAEB
+    msp, _ = hierarchical_mean_grade_and_proficiency(
+        ns_sp,
+        target_level,
+        course_name=course_name,
+        subject_name=subject_name,
+        has_matematica=has_matematica,
+        derive_grade_from_proficiency=False,
+    )
     return mg, mp, msp
 
 
 def mean_grade_and_proficiency_equal_weight_by_school_from_subject_rows(
     subject_rows: List[Dict[str, Any]],
     student_id_key: str = "student_id",
+    *,
+    course_name: str,
+    subject_name: str = "GERAL",
+    has_matematica: Optional[bool] = None,
 ) -> Tuple[float, float, float]:
     """
     subject_rows: lista de dicts com student_id, grade, proficiency (e opcionalmente score_percentage).
     Retorna (avg_grade, avg_proficiency, avg_score_pct) com agregação hierárquica municipal.
     """
-    return hierarchical_mean_from_subject_rows(subject_rows, "municipio", student_id_key=student_id_key)
+    return hierarchical_mean_from_subject_rows(
+        subject_rows,
+        "municipio",
+        student_id_key=student_id_key,
+        course_name=course_name,
+        subject_name=subject_name,
+        has_matematica=has_matematica,
+    )

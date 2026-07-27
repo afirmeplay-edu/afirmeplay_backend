@@ -35,11 +35,21 @@ class ExcelEvolutionExporter:
         self.temp_files = []  # Lista para rastrear arquivos temporários
     
     def export(self, test_ids: List[str], municipality: Optional[str] = None, 
-               state: Optional[str] = None, department: Optional[str] = None) -> BytesIO:
+               state: Optional[str] = None, department: Optional[str] = None,
+               *,
+               escopo_calculo: Optional[Dict[str, Any]] = None,
+               nivel_granularidade: str = "municipio",
+               filtros_aplicados: Optional[Dict[str, Any]] = None,
+               ) -> BytesIO:
         """
         Exporta relatório de evolução de avaliações online para Excel
         """
-        comparison_data = EvaluationComparisonService.compare_evaluations(test_ids)
+        comparison_data = EvaluationComparisonService.compare_evaluations(
+            test_ids,
+            escopo_calculo=escopo_calculo,
+            nivel_granularidade=nivel_granularidade,
+            filtros_aplicados=filtros_aplicados,
+        )
         if not comparison_data:
             raise ValueError("Não foi possível obter dados de comparação")
 
@@ -61,11 +71,20 @@ class ExcelEvolutionExporter:
         municipality: Optional[str] = None,
         state: Optional[str] = None,
         department: Optional[str] = None,
+        *,
+        scope_info: Optional[Dict[str, Any]] = None,
+        nivel_granularidade: str = "municipio",
+        user: Optional[dict] = None,
     ) -> BytesIO:
         """
         Exporta relatório de evolução de cartões resposta para Excel
         """
-        comparison_data = AnswerSheetComparisonService.compare_gabaritos(gabarito_ids)
+        comparison_data = AnswerSheetComparisonService.compare_gabaritos(
+            gabarito_ids,
+            scope_info=scope_info,
+            nivel_granularidade=nivel_granularidade,
+            user=user,
+        )
         if not comparison_data:
             raise ValueError("Não foi possível obter dados de comparação dos cartões resposta")
 

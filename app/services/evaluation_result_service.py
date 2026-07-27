@@ -744,7 +744,10 @@ class EvaluationResultService:
                     total_students = len(subject_results)
                     avg_grade, avg_proficiency, avg_score_percentage = (
                         mean_grade_and_proficiency_equal_weight_by_school_from_subject_rows(
-                            subject_results, student_id_key="student_id"
+                            subject_results,
+                            student_id_key="student_id",
+                            course_name=course_name,
+                            subject_name=subject_name,
                         )
                     )
                     avg_proficiency = round_to_two_decimals(avg_proficiency)

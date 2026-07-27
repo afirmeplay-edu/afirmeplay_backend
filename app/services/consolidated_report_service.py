@@ -919,12 +919,14 @@ def _build_medias_section_digital(
     tests_by_id: Dict[str, Test],
     all_disciplines: Set[str],
     field: str,
+    course_name: str = "Anos Iniciais",
+    has_matematica: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     ⚠️ MÉDIA HIERÁRQUICA (NÃO PONDERADA) ⚠️
     
     Hierarquia para medias_da_rede.taxa_geral:
-    1. TURMA → média dos alunos (via hierarchical_mean_grade_and_proficiency)
+    1. TURMA → média das proficiências dos alunos; nota = calculate_grade(média_prof)
     2. SÉRIE → média das turmas/escolas (peso igual por escola que tem a série)
     3. MUNICÍPIO → média das séries (peso igual por série)
     
@@ -944,7 +946,12 @@ def _build_medias_section_digital(
         if not cell_results:
             return None
         if discipline is None:
-            mg, mp = hierarchical_mean_grade_and_proficiency(cell_results, "turma")
+            mg, mp = hierarchical_mean_grade_and_proficiency(
+                cell_results,
+                "turma",
+                course_name=course_name,
+                has_matematica=has_matematica,
+            )
             return round_to_two_decimals(mg if field == "grade" else mp)
         srows: List[Dict[str, Any]] = []
         for r in cell_results:
@@ -952,7 +959,13 @@ def _build_medias_section_digital(
             srows.extend(_subject_rows_from_digital_result(r, test, discipline))
         if not srows:
             return None
-        mg, mp, _ = hierarchical_mean_from_subject_rows(srows, "turma")
+        mg, mp, _ = hierarchical_mean_from_subject_rows(
+            srows,
+            "turma",
+            course_name=course_name,
+            subject_name=discipline or "GERAL",
+            has_matematica=has_matematica,
+        )
         return round_to_two_decimals(mg if field == "grade" else mp)
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
@@ -974,12 +987,14 @@ def _build_medias_section_answer_sheet(
     results_rede: List[AnswerSheetResult],
     all_disciplines: Set[str],
     field: str,
+    course_name: str = "Anos Iniciais",
+    has_matematica: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     ⚠️ MÉDIA HIERÁRQUICA (NÃO PONDERADA) ⚠️
     
     Hierarquia para medias_da_rede.taxa_geral:
-    1. TURMA → média dos alunos (via hierarchical_mean_grade_and_proficiency)
+    1. TURMA → média das proficiências dos alunos; nota = calculate_grade(média_prof)
     2. SÉRIE → média das turmas/escolas (peso igual por escola que tem a série)
     3. MUNICÍPIO → média das séries (peso igual por série)
     
@@ -999,14 +1014,25 @@ def _build_medias_section_answer_sheet(
         if not cell_results:
             return None
         if discipline is None:
-            mg, mp = hierarchical_mean_grade_and_proficiency(cell_results, "turma")
+            mg, mp = hierarchical_mean_grade_and_proficiency(
+                cell_results,
+                "turma",
+                course_name=course_name,
+                has_matematica=has_matematica,
+            )
             return round_to_two_decimals(mg if field == "grade" else mp)
         srows: List[Dict[str, Any]] = []
         for r in cell_results:
             srows.extend(_subject_rows_from_answer_sheet(r, discipline))
         if not srows:
             return None
-        mg, mp, _ = hierarchical_mean_from_subject_rows(srows, "turma")
+        mg, mp, _ = hierarchical_mean_from_subject_rows(
+            srows,
+            "turma",
+            course_name=course_name,
+            subject_name=discipline or "GERAL",
+            has_matematica=has_matematica,
+        )
         return round_to_two_decimals(mg if field == "grade" else mp)
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
@@ -1067,7 +1093,13 @@ def _build_distribuicao_section_digital(
         )
 
     out = _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
-    _, mp = hierarchical_mean_grade_and_proficiency(results_rede, "municipio") if results_rede else (0.0, 0.0)
+    _, mp = (
+        hierarchical_mean_grade_and_proficiency(
+            results_rede, "municipio", course_name=course_name, has_matematica=has_matematica
+        )
+        if results_rede
+        else (0.0, 0.0)
+    )
     out[GERAL_KEY]["medias_da_rede"]["media_da_rede_nivel"] = (
         EvaluationCalculator.determine_classification(mp, course_name, GERAL_KEY, has_matematica=has_matematica)
         if results_rede
@@ -1119,7 +1151,13 @@ def _build_distribuicao_section_answer_sheet(
         )
 
     out = _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
-    _, mp = hierarchical_mean_grade_and_proficiency(results_rede, "municipio") if results_rede else (0.0, 0.0)
+    _, mp = (
+        hierarchical_mean_grade_and_proficiency(
+            results_rede, "municipio", course_name=course_name, has_matematica=has_matematica
+        )
+        if results_rede
+        else (0.0, 0.0)
+    )
     out[GERAL_KEY]["medias_da_rede"]["media_da_rede_nivel"] = (
         EvaluationCalculator.determine_classification(mp, course_name, GERAL_KEY, has_matematica=has_matematica)
         if results_rede
@@ -2038,10 +2076,12 @@ def build_digital_consolidated_report(
             ctx, results_linhas, results_rede, tests_by_id, all_disciplines
         ),
         consolidado_medias_nota=_build_medias_section_digital(
-            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, "grade"
+            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, "grade",
+            course_name=course_name, has_matematica=has_mat,
         ),
         consolidado_medias_proficiencia=_build_medias_section_digital(
-            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, "proficiency"
+            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, "proficiency",
+            course_name=course_name, has_matematica=has_mat,
         ),
         acertos_por_habilidade=_digital_acertos_data(
             ctx, tests_by_id, test_ids, class_ids_linhas, class_ids_rede, all_disciplines
@@ -2083,13 +2123,26 @@ def _fetch_answer_sheet_scope(
 def _answer_sheet_results_for_classes(gabarito_ids: List[str], class_ids: List[Any]) -> List[AnswerSheetResult]:
     if not class_ids:
         return []
-    return _dedupe_answer_sheet_by_gabarito_student(
-        AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id.in_([str(g) for g in gabarito_ids]))
-        .options(joinedload(AnswerSheetResult.student).joinedload(Student.class_).joinedload(Class.grade))
-        .join(Student, AnswerSheetResult.student_id == Student.id)
-        .filter(Student.class_id.in_(class_ids))
-        .all()
+    from app.services.answer_sheet_result_snapshot import (
+        query_answer_sheet_results_for_class_group,
     )
+
+    out: List[AnswerSheetResult] = []
+    base_ids = [
+        s.id
+        for s in Student.query.filter(Student.class_id.in_(class_ids)).all()
+    ]
+    for gid in gabarito_ids:
+        out.extend(
+            query_answer_sheet_results_for_class_group(str(gid), class_ids, base_ids)
+            .options(
+                joinedload(AnswerSheetResult.student)
+                .joinedload(Student.class_)
+                .joinedload(Class.grade)
+            )
+            .all()
+        )
+    return _dedupe_answer_sheet_by_gabarito_student(out)
 
 
 def build_answer_sheet_consolidated_report(
@@ -2183,10 +2236,12 @@ def build_answer_sheet_consolidated_report(
             ctx, results_linhas, results_rede, all_disciplines
         ),
         consolidado_medias_nota=_build_medias_section_answer_sheet(
-            ctx, results_linhas, results_rede, all_disciplines, "grade"
+            ctx, results_linhas, results_rede, all_disciplines, "grade",
+            course_name=course_name, has_matematica=has_mat,
         ),
         consolidado_medias_proficiencia=_build_medias_section_answer_sheet(
-            ctx, results_linhas, results_rede, all_disciplines, "proficiency"
+            ctx, results_linhas, results_rede, all_disciplines, "proficiency",
+            course_name=course_name, has_matematica=has_mat,
         ),
         acertos_por_habilidade=_answer_sheet_acertos_data(
             ctx, gabs_by_id, gabarito_ids, results_linhas, results_rede, all_disciplines

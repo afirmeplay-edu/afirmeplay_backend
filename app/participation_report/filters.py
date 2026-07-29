@@ -274,10 +274,28 @@ def obter_turmas(
     return [class_filter_option(r[0], r[1], r[2] if len(r) > 2 else None) for r in rows]
 
 
+def is_answer_sheet_report(args=None) -> bool:
+    """True quando report_entity_type=answer_sheet (query string ou dict)."""
+    if args is None:
+        from flask import request
+
+        raw = request.args.get("report_entity_type")
+    else:
+        raw = args.get("report_entity_type") if hasattr(args, "get") else None
+    return (str(raw or "").strip().lower()) == "answer_sheet"
+
+
 def build_filter_options(user: dict, args) -> Dict[str, Any]:
     """
     Monta resposta incremental de opções de filtro a partir dos query args.
+
+    Com report_entity_type=answer_sheet, lista gabaritos na chave ``avaliacoes``.
     """
+    if is_answer_sheet_report(args):
+        from app.participation_report.answer_sheet import build_filter_options_answer_sheet
+
+        return build_filter_options_answer_sheet(user, args)
+
     permissao = get_user_permission_scope(user)
     if not permissao.get("permitted"):
         raise PermissionError(permissao.get("error") or "Sem permissão")

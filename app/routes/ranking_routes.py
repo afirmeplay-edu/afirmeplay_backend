@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app import db
 from app.decorators import requires_city_context
 from app.decorators.role_required import get_current_user_from_token, role_required
+from app.services.class_peer_ranking_service import ClassPeerRankingService
 from app.services.ranking_report_service import RankingReportService
 
 bp = Blueprint("ranking_routes", __name__, url_prefix="/ranking")
@@ -123,3 +124,36 @@ def ranking_report():
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Erro ao gerar relatório de ranking.", "details": str(e)}), 500
+
+
+@bp.route("/classes-peer", methods=["GET"])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor")
+@requires_city_context
+def ranking_classes_peer():
+    """
+    Ranking de turmas iguais (mesmo nome + turno na mesma série) e alunos entre esses peers.
+
+    Query params:
+      - scope: municipio | escola
+      - evaluation_id: avaliação obrigatória
+      - municipio: obrigatório se scope=municipio
+      - escola: obrigatório se scope=escola
+      - serie: opcional (sem filtro = uma seção por série)
+      - turma_nome: opcional
+      - turno: opcional
+      - page, per_page: paginação do student_ranking em cada peer
+    """
+    try:
+        req = ClassPeerRankingService.build_request(request.args)
+        user = get_current_user_from_token()
+        payload = ClassPeerRankingService.get_report(user, req)
+        return jsonify(payload), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return jsonify({"error": "Erro de banco ao gerar ranking de turmas iguais.", "details": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Erro ao gerar ranking de turmas iguais.", "details": str(e)}), 500

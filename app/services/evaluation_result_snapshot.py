@@ -7,7 +7,7 @@ continuam a usar o universo de alunos atual (class_id/school_id) como fallback.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from sqlalchemy import and_, cast, or_
 from sqlalchemy.dialects.postgresql import VARCHAR
@@ -195,11 +195,26 @@ def query_evaluation_results_for_class_group(
     return q
 
 
-def municipal_evaluation_results_query(city_id: str, evaluation_id: str) -> Any:
+def municipal_evaluation_results_query(
+    city_id: str,
+    evaluation_id: Union[str, Sequence[str]],
+) -> Any:
     """
-    Resultados de uma avaliação contando para o município:
+    Resultados de uma ou mais avaliações contando para o município:
     escola em snapshot OU (linha legada sem snapshot e aluno atualmente no município).
     """
+    if isinstance(evaluation_id, str):
+        test_ids = [str(evaluation_id)]
+    else:
+        test_ids = [str(x) for x in evaluation_id if str(x).strip()]
+    if not test_ids:
+        return EvaluationResult.query.filter(False)
+
+    test_filter = (
+        EvaluationResult.test_id == test_ids[0]
+        if len(test_ids) == 1
+        else EvaluationResult.test_id.in_(test_ids)
+    )
     in_city_schools = db.session.query(School.id).filter(School.city_id == city_id)
     legacy_students = (
         db.session.query(Student.id)
@@ -208,7 +223,7 @@ def municipal_evaluation_results_query(city_id: str, evaluation_id: str) -> Any:
         .filter(School.city_id == city_id)
     )
     return EvaluationResult.query.filter(
-        EvaluationResult.test_id == evaluation_id,
+        test_filter,
         or_(
             EvaluationResult.school_id_snapshot.in_(in_city_schools),
             and_(

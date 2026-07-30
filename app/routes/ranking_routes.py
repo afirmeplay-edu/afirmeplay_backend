@@ -136,7 +136,8 @@ def ranking_classes_peer():
 
     Query params:
       - scope: municipio | escola
-      - evaluation_id: avaliação obrigatória
+      - evaluation_id: avaliação (compatibilidade; use evaluation_ids para várias)
+      - evaluation_ids: IDs separados por vírgula (consolida alunos das avaliações)
       - municipio: obrigatório se scope=municipio
       - escola: obrigatório se scope=escola
       - serie: opcional (sem filtro = uma seção por série)

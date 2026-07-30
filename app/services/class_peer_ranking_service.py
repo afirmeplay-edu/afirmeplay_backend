@@ -37,7 +37,7 @@ from app.utils.school_equal_weight_means import (
 @dataclass
 class ClassPeerRankingRequest:
     scope: str
-    evaluation_id: str
+    evaluation_ids: List[str]
     page: int
     per_page: int
     municipio: Optional[str] = None
@@ -45,6 +45,10 @@ class ClassPeerRankingRequest:
     serie: Optional[str] = None
     turma_nome: Optional[str] = None
     turno: Optional[str] = None
+
+    @property
+    def evaluation_id(self) -> str:
+        return self.evaluation_ids[0] if self.evaluation_ids else ""
 
 
 class ClassPeerRankingService:
@@ -105,6 +109,22 @@ class ClassPeerRankingService:
         return f"{cls._normalize_text(class_name)}|{cls._normalize_shift_key(shift)}"
 
     @classmethod
+    def _subject_name_is_lingua_portuguesa(cls, name: Any) -> bool:
+        n = cls._normalize_text(name)
+        return "portug" in n or n == "lp" or n.startswith("lp ")
+
+    @classmethod
+    def _portuguese_correct_answers(cls, subjects: Any) -> int:
+        if not isinstance(subjects, list):
+            return 0
+        for subject in subjects:
+            if not isinstance(subject, dict):
+                continue
+            if cls._subject_name_is_lingua_portuguesa(subject.get("subject_name")):
+                return int(subject.get("correct_answers") or 0)
+        return 0
+
+    @classmethod
     def _sort_key_metrics(
         cls,
         *,
@@ -114,6 +134,7 @@ class ClassPeerRankingService:
         total_questions: Any,
         name: Any,
     ) -> tuple:
+        """Ordenação de turmas (peers): pontos → taxa → acertos gerais → nome."""
         correct = float(correct_answers or 0)
         total_q = float(total_questions or 0)
         accuracy = (correct / total_q) if total_q > 0 else 0.0
@@ -126,14 +147,44 @@ class ClassPeerRankingService:
         )
 
     @classmethod
+    def _sort_key_student(cls, row: Dict[str, Any]) -> tuple:
+        """Ordenação de alunos: pontos → acertos de Português → nome (A→Z)."""
+        return (
+            -float(row.get("proficiency") or 0),
+            -float(row.get("grade") or 0),
+            -float(cls._portuguese_correct_answers(row.get("subjects"))),
+            str(row.get("name") or "").lower(),
+        )
+
+    @classmethod
+    def _parse_evaluation_ids(cls, args) -> List[str]:
+        raw_multi = args.get("evaluation_ids")
+        ids: List[str] = []
+        if raw_multi and str(raw_multi).strip():
+            ids = [x.strip() for x in str(raw_multi).split(",") if x.strip()]
+        if not ids:
+            single = str(args.get("evaluation_id") or "").strip()
+            if single:
+                ids = [single]
+        # Mantém ordem e remove duplicatas.
+        seen = set()
+        unique: List[str] = []
+        for eid in ids:
+            if eid in seen:
+                continue
+            seen.add(eid)
+            unique.append(eid)
+        if not unique:
+            raise ValueError("evaluation_id ou evaluation_ids é obrigatório.")
+        return unique
+
+    @classmethod
     def build_request(cls, args) -> ClassPeerRankingRequest:
         scope = cls._normalize_text(args.get("scope") or "")
         if scope not in {"municipio", "escola"}:
             raise ValueError("scope deve ser 'municipio' ou 'escola'.")
 
-        evaluation_id = str(args.get("evaluation_id") or "").strip()
-        if not evaluation_id:
-            raise ValueError("evaluation_id é obrigatório.")
+        evaluation_ids = cls._parse_evaluation_ids(args)
 
         page = max(1, int(args.get("page", 1) or 1))
         per_page = max(1, min(100, int(args.get("per_page", 20) or 20)))
@@ -157,7 +208,7 @@ class ClassPeerRankingService:
 
         return ClassPeerRankingRequest(
             scope=scope,
-            evaluation_id=evaluation_id,
+            evaluation_ids=evaluation_ids,
             page=page,
             per_page=per_page,
             municipio=municipio,
@@ -168,15 +219,38 @@ class ClassPeerRankingService:
         )
 
     @classmethod
+    def _resolve_tests(cls, evaluation_ids: Sequence[str]) -> List[Test]:
+        tests = Test.query.filter(Test.id.in_([str(t) for t in evaluation_ids])).all()
+        by_id = {str(t.id): t for t in tests}
+        missing = [eid for eid in evaluation_ids if str(eid) not in by_id]
+        if missing:
+            raise ValueError(f"Avaliação(ões) não encontrada(s): {', '.join(missing)}")
+        return [by_id[str(eid)] for eid in evaluation_ids]
+
+    @classmethod
+    def _evaluation_titles_payload(cls, tests: Sequence[Test]) -> Dict[str, Any]:
+        items = [{"id": str(t.id), "title": t.title or ""} for t in tests]
+        titles = [item["title"] for item in items if item["title"]]
+        if len(titles) <= 1:
+            joined = titles[0] if titles else None
+        else:
+            joined = " · ".join(titles)
+        return {
+            "evaluation_id": str(tests[0].id) if tests else "",
+            "evaluation_ids": [str(t.id) for t in tests],
+            "evaluation_title": joined,
+            "evaluations": items,
+        }
+
+    @classmethod
     def get_report(cls, user: Dict[str, Any], req: ClassPeerRankingRequest) -> Dict[str, Any]:
-        test = Test.query.get(req.evaluation_id)
-        if not test:
-            raise ValueError("Avaliação não encontrada.")
+        tests = cls._resolve_tests(req.evaluation_ids)
+        primary_test = tests[0]
 
         scope = cls._resolve_and_authorize_scope(user, req)
         results = cls._load_latest_results(req, scope)
         if not results:
-            return cls._empty_payload(req, scope)
+            return cls._empty_payload(req, scope, tests)
 
         schools_by_id, classes_by_id, grades_by_id = prefetch_placement_from_results(results)
         student_ids = list({str(r.student_id) for r in results if r.student_id})
@@ -262,14 +336,16 @@ class ClassPeerRankingService:
                     "total_questions": int(er.total_questions or 0),
                     "score_percentage": float(er.score_percentage or 0),
                     "subject_results": er.subject_results or {},
+                    "source_evaluation_id": str(er.test_id) if er.test_id else None,
                     "result_obj": er,
                 }
             )
 
-        sections = cls._build_sections(rows, req, course_fallback=getattr(test, "course", None))
-        return {
-            "evaluation_id": req.evaluation_id,
-            "evaluation_title": test.title,
+        sections = cls._build_sections(
+            rows, req, course_fallback=getattr(primary_test, "course", None)
+        )
+        payload = {
+            **cls._evaluation_titles_payload(tests),
             "scope": req.scope,
             "filters": {
                 "municipio": req.municipio,
@@ -290,13 +366,29 @@ class ClassPeerRankingService:
                 "students_count": len(rows),
             },
         }
+        return payload
 
     @classmethod
-    def _empty_payload(cls, req: ClassPeerRankingRequest, scope: Dict[str, Any]) -> Dict[str, Any]:
-        test = Test.query.get(req.evaluation_id)
-        return {
+    def _empty_payload(
+        cls,
+        req: ClassPeerRankingRequest,
+        scope: Dict[str, Any],
+        tests: Optional[Sequence[Test]] = None,
+    ) -> Dict[str, Any]:
+        resolved_tests = list(tests) if tests is not None else []
+        if not resolved_tests and req.evaluation_ids:
+            try:
+                resolved_tests = cls._resolve_tests(req.evaluation_ids)
+            except ValueError:
+                resolved_tests = []
+        titles = cls._evaluation_titles_payload(resolved_tests) if resolved_tests else {
             "evaluation_id": req.evaluation_id,
-            "evaluation_title": getattr(test, "title", None),
+            "evaluation_ids": list(req.evaluation_ids),
+            "evaluation_title": None,
+            "evaluations": [],
+        }
+        return {
+            **titles,
             "scope": req.scope,
             "filters": {
                 "municipio": req.municipio,
@@ -344,18 +436,23 @@ class ClassPeerRankingService:
     def _load_latest_results(
         cls, req: ClassPeerRankingRequest, scope: Dict[str, Any]
     ) -> List[EvaluationResult]:
-        evaluation_id = str(req.evaluation_id)
+        evaluation_ids = [str(eid) for eid in req.evaluation_ids]
 
         if req.scope == "municipio":
-            base_q = municipal_evaluation_results_query(str(req.municipio), evaluation_id)
+            base_q = municipal_evaluation_results_query(str(req.municipio), evaluation_ids)
         else:
             school_id = str(req.escola)
             legacy_students = (
                 db.session.query(Student.id)
                 .filter(Student.school_id == school_id)
             )
+            test_filter = (
+                EvaluationResult.test_id == evaluation_ids[0]
+                if len(evaluation_ids) == 1
+                else EvaluationResult.test_id.in_(evaluation_ids)
+            )
             base_q = EvaluationResult.query.filter(
-                EvaluationResult.test_id == evaluation_id,
+                test_filter,
                 or_(
                     EvaluationResult.school_id_snapshot == school_id,
                     and_(
@@ -367,6 +464,7 @@ class ClassPeerRankingService:
             )
 
         results = base_q.all()
+        # Um aluno = um resultado (o mais recente entre as avaliações selecionadas).
         latest_by_student: Dict[str, EvaluationResult] = {}
         for er in results:
             sid = str(er.student_id)
@@ -567,17 +665,10 @@ class ClassPeerRankingService:
                     "total_questions": int(row.get("total_questions") or 0),
                     "accuracy_rate": round(float(row.get("score_percentage") or 0), 1),
                     "subjects": subjects,
+                    "source_evaluation_id": row.get("source_evaluation_id"),
                 }
             )
-        items.sort(
-            key=lambda row: cls._sort_key_metrics(
-                proficiency=row.get("proficiency"),
-                score=row.get("grade"),
-                correct_answers=row.get("correct_answers"),
-                total_questions=row.get("total_questions"),
-                name=row.get("name"),
-            )
-        )
+        items.sort(key=cls._sort_key_student)
         for idx, row in enumerate(items):
             row["position"] = idx + 1
         return items

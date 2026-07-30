@@ -6,30 +6,22 @@ Todas as sessões usam o mesmo padrão:
   linhas = escolas | colunas = series_colunas (root) | TX. GERAL por linha | MÉDIAS DA REDE.
 
 ═══════════════════════════════════════════════════════════════════════════════
-⚠️⚠️⚠️ REGRA OBRIGATÓRIA: NÃO EXISTE MÉDIA PONDERADA NESTE SISTEMA ⚠️⚠️⚠️
+⚠️ REGRA OBRIGATÓRIA — NOTA E PROFICIÊNCIA: NÃO EXISTE MÉDIA PONDERADA
 ═══════════════════════════════════════════════════════════════════════════════
 
-TODA agregação de valores (nota, proficiência, distribuição, taxa de participação)
-acima do nível TURMA deve usar MÉDIA HIERÁRQUICA com PESO IGUAL entre unidades
-do mesmo nível.
+Agregação de **nota** e **proficiência** acima do nível TURMA = média hierárquica
+com peso igual (school_equal_weight_means / `_build_numeric_matriz`).
 
-Hierarquia (sempre esta ordem):
-1. TURMA → média aritmética dos alunos da turma
-2. SÉRIE → média das médias das turmas (peso igual por turma)
-3. ESCOLA → média das médias das séries (peso igual por série)
-4. MUNICÍPIO → média das médias das escolas (peso igual por escola)
+═══════════════════════════════════════════════════════════════════════════════
+⚠️ REGRA OBRIGATÓRIA — PARTICIPAÇÃO / FREQUÊNCIA: RATIO SIMPLES (CANÔNICO)
+═══════════════════════════════════════════════════════════════════════════════
 
-NUNCA:
-- Somar contagens e dividir pelo total (média ponderada por número de alunos)
-- Ponderar pelo número de turmas, alunos ou escolas
-- Usar AVG SQL para consolidar acima do nível turma
+percentual = avaliados / matriculados * 100
 
-SEMPRE:
-- Calcular percentuais/médias por unidade
-- Tirar média aritmética simples dos percentuais/médias
-
-Referência: hierarchical_mean_grade_and_proficiency (school_equal_weight_means.py)
-Documentação: docs/FONTE_DA_VERDADE_CALCULOS_RESULTADOS.md (§7)
+Em célula, escola, série e município. NÃO usar média das taxas das escolas/séries.
+Implementação: `_build_participation_matriz`.
+Referências: evaluation-results, participation-report, socioeconômico (INSE).
+Documentação: docs/FONTE_DA_VERDADE_CALCULOS_RESULTADOS.md (§8)
 
 ═══════════════════════════════════════════════════════════════════════════════
 """
@@ -391,7 +383,7 @@ def _build_numeric_matriz(
     """
     ⚠️ HIERARQUIA CORRETA PARA TAXA_GERAL MUNICIPAL ⚠️
     
-    Constrói matriz numérica (nota/proficiência/taxa participação) com hierarquia:
+    Constrói matriz numérica (nota/proficiência) com hierarquia:
     
     1. CÉLULA (escola × série) → cell_fn retorna média da turma/célula
     2. LINHA (escola) → taxa_geral_escola = média das séries (peso igual por série)
@@ -401,6 +393,9 @@ def _build_numeric_matriz(
     CORRETO: taxa_geral = média de por_serie (hierarquia série → município)
     ERRADO:  taxa_geral = média das escolas (hierarquia escola → município)
               ↑ daria mais peso a escolas com mais séries (média ponderada)
+
+    ⚠️ PARTICIPAÇÃO / FREQUÊNCIA NÃO USA ESTA FUNÇÃO.
+    Use `_build_participation_matriz` (ratio canônico avaliados/matriculados).
     """
     cols = series_colunas or scope_linhas.series_colunas
     rede_scope = scope_rede or scope_linhas
@@ -460,6 +455,98 @@ def _build_numeric_matriz(
         "medias_da_rede": {
             "por_serie": por_serie,
             "taxa_geral": taxa_geral_municipal,
+        },
+    }
+
+
+def _participation_pct(avaliados: int, matriculados: int) -> Optional[float]:
+    """Canônico: avaliados / matriculados * 100 (2 casas). None se não há universo."""
+    if matriculados <= 0:
+        return None
+    return round_to_two_decimals(100.0 * avaliados / matriculados)
+
+
+def _build_participation_matriz(
+    scope_linhas: ScopeIndex,
+    counts_fn: Callable[[str, str], Optional[Tuple[int, int]]],
+    *,
+    scope_rede: Optional[ScopeIndex] = None,
+    counts_fn_rede: Optional[Callable[[str, str], Optional[Tuple[int, int]]]] = None,
+    series_colunas: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """
+    Matriz de participação / frequência — REGRA CANÔNICA (ratio simples).
+
+    Em todo nível: percentual = avaliados / matriculados * 100.
+
+    NÃO usar média das taxas das escolas/séries (isso diverge de evaluation-results,
+    participation-report e socioeconômico).
+
+    counts_fn(escola_id, serie_id) → (matriculados, avaliados) ou None se célula inexistente.
+    """
+    cols = series_colunas or scope_linhas.series_colunas
+    rede_scope = scope_rede or scope_linhas
+    rede_counts = counts_fn_rede or counts_fn
+
+    if not scope_linhas.escolas or not cols:
+        return _empty_matriz()
+
+    linhas: List[Dict[str, Any]] = []
+    for esc in scope_linhas.escolas:
+        eid = esc["escola_id"]
+        valores: List[Optional[float]] = []
+        mat_esc = 0
+        av_esc = 0
+        for col in cols:
+            sid = col["serie_id"]
+            if (eid, sid) not in scope_linhas.classes_by_cell:
+                valores.append(None)
+                continue
+            pair = counts_fn(eid, sid)
+            if pair is None:
+                valores.append(None)
+                continue
+            mat, av = int(pair[0]), int(pair[1])
+            valores.append(_participation_pct(av, mat))
+            mat_esc += mat
+            av_esc += av
+        linhas.append(
+            {
+                "escola_id": eid,
+                "escola_nome": esc["escola_nome"],
+                "valores_por_serie": valores,
+                "taxa_geral_escola": _participation_pct(av_esc, mat_esc),
+            }
+        )
+
+    por_serie: List[Optional[float]] = []
+    mat_rede = 0
+    av_rede = 0
+    for col in cols:
+        sid = col["serie_id"]
+        mat_col = 0
+        av_col = 0
+        has_cell = False
+        for esc in rede_scope.escolas:
+            eid = esc["escola_id"]
+            if (eid, sid) not in rede_scope.classes_by_cell:
+                continue
+            pair = rede_counts(eid, sid)
+            if pair is None:
+                continue
+            has_cell = True
+            mat, av = int(pair[0]), int(pair[1])
+            mat_col += mat
+            av_col += av
+            mat_rede += mat
+            av_rede += av
+        por_serie.append(_participation_pct(av_col, mat_col) if has_cell else None)
+
+    return {
+        "linhas": linhas,
+        "medias_da_rede": {
+            "por_serie": por_serie,
+            "taxa_geral": _participation_pct(av_rede, mat_rede),
         },
     }
 
@@ -743,35 +830,36 @@ def _build_frequencia_section_digital(
     tests_by_id: Dict[str, Test],
     all_disciplines: Set[str],
 ) -> Dict[str, Any]:
+    """Participação digital: ratio canônico avaliados/matriculados em todos os níveis."""
     subject_has_disc: Dict[str, Set[str]] = {tid: _disciplinas_from_test(t) for tid, t in tests_by_id.items()}
     mk = _matriz_kwargs(ctx)
 
-    def _freq_cell(
+    def _freq_counts(
         scope: ScopeIndex,
         results: List[EvaluationResult],
         escola_id: str,
         serie_id: str,
         discipline: Optional[str],
-    ) -> Optional[float]:
+    ) -> Optional[Tuple[int, int]]:
         if (escola_id, serie_id) not in scope.classes_by_cell:
             return None
         mat = len(_students_in_cell(scope, escola_id, serie_id))
-        if mat == 0:
-            return None
         part = len(
             _digital_participants_in_cell(
                 scope, results, escola_id, serie_id, discipline, tests_by_id, subject_has_disc
             )
         )
-        return round_to_two_decimals(100.0 * part / mat)
+        return mat, part
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
         kw = dict(mk)
         if ctx.comparativo_municipio:
-            kw["cell_fn_rede"] = lambda e, s: _freq_cell(ctx.scope_rede, results_rede, e, s, discipline)
-        return _build_numeric_matriz(
+            kw["counts_fn_rede"] = lambda e, s: _freq_counts(
+                ctx.scope_rede, results_rede, e, s, discipline
+            )
+        return _build_participation_matriz(
             ctx.scope_linhas,
-            lambda e, s: _freq_cell(ctx.scope_linhas, results_linhas, e, s, discipline),
+            lambda e, s: _freq_counts(ctx.scope_linhas, results_linhas, e, s, discipline),
             **kw,
         )
 
@@ -784,6 +872,7 @@ def _build_frequencia_section_answer_sheet(
     results_rede: List[AnswerSheetResult],
     all_disciplines: Set[str],
 ) -> Dict[str, Any]:
+    """Participação cartão: ratio canônico avaliados/matriculados em todos os níveis."""
     mk = _matriz_kwargs(ctx)
 
     def _participants(
@@ -810,28 +899,28 @@ def _build_frequencia_section_answer_sheet(
                         break
         return out
 
-    def _freq_cell(
+    def _freq_counts(
         scope: ScopeIndex,
         results: List[AnswerSheetResult],
         escola_id: str,
         serie_id: str,
         discipline: Optional[str],
-    ) -> Optional[float]:
+    ) -> Optional[Tuple[int, int]]:
         if (escola_id, serie_id) not in scope.classes_by_cell:
             return None
         mat = len(_students_in_cell(scope, escola_id, serie_id))
-        if mat == 0:
-            return None
         part = len(_participants(scope, results, escola_id, serie_id, discipline))
-        return round_to_two_decimals(100.0 * part / mat)
+        return mat, part
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
         kw = dict(mk)
         if ctx.comparativo_municipio:
-            kw["cell_fn_rede"] = lambda e, s: _freq_cell(ctx.scope_rede, results_rede, e, s, discipline)
-        return _build_numeric_matriz(
+            kw["counts_fn_rede"] = lambda e, s: _freq_counts(
+                ctx.scope_rede, results_rede, e, s, discipline
+            )
+        return _build_participation_matriz(
             ctx.scope_linhas,
-            lambda e, s: _freq_cell(ctx.scope_linhas, results_linhas, e, s, discipline),
+            lambda e, s: _freq_counts(ctx.scope_linhas, results_linhas, e, s, discipline),
             **kw,
         )
 

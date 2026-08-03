@@ -203,45 +203,197 @@ class TestClassPeerRankingService(unittest.TestCase):
             4,
         )
 
-    def test_student_tiebreak_portuguese_then_name(self):
+    def test_raw_correct_sum_from_subjects_and_fallback(self):
+        subjects = [
+            {"subject_name": "Português", "correct_answers": 8},
+            {"subject_name": "Matemática", "correct_answers": 6},
+            {"subject_name": "Ciências", "correct_answers": 6},
+            {"subject_name": "História", "correct_answers": 5},
+        ]
+        self.assertEqual(ClassPeerRankingService._raw_correct_sum(subjects, 99), 25)
+        self.assertEqual(ClassPeerRankingService._raw_correct_sum([], 17), 17)
+        self.assertEqual(ClassPeerRankingService._raw_correct_sum(None, 11), 11)
+
+    def test_school_display_name_ensino_medio_only(self):
+        self.assertEqual(
+            ClassPeerRankingService._school_display_name("LUZIÁPOLIS", "Ensino Médio"),
+            "LUZIÁPOLIS – ENSINO MÉDIO",
+        )
+        self.assertEqual(
+            ClassPeerRankingService._school_display_name("Escola X", "Anos Iniciais"),
+            "Escola X",
+        )
+        self.assertEqual(
+            ClassPeerRankingService._school_display_name("Campus Y", "Ensino Superior"),
+            "Campus Y – SUPERIOR",
+        )
+
+    def test_student_ranking_raw_sum_portuguese_and_name(self):
+        """Evidências: soma 3+ disciplinas, empate PT, empate nome, fallback subjects vazio, EM."""
         rows = [
             {
-                "student_id": "s1",
-                "name": "Bruno",
+                "student_id": "s-sum",
+                "name": "Zuleica",
                 "school_id": "sch1",
-                "school_name": "Escola X",
+                "school_name": "Escola Alpha",
                 "class_id": "c1",
                 "class_name": "A",
                 "shift": "Manhã",
                 "serie_id": "g1",
                 "serie_name": "5º Ano",
-                "grade": 8.0,
-                "proficiency": 300.0,
+                "grade": 1.0,
+                "proficiency": 50.0,
+                "classification": "Básico",
+                "correct_answers": 99,
+                "total_questions": 40,
+                "score_percentage": 10.0,
+                "course_name": "Anos Iniciais",
+                "subject_results": {
+                    "pt": {"subject_name": "Português", "correct_answers": 8, "total_questions": 10},
+                    "m": {"subject_name": "Matemática", "correct_answers": 6, "total_questions": 10},
+                    "c": {"subject_name": "Ciências", "correct_answers": 6, "total_questions": 10},
+                    "h": {"subject_name": "História", "correct_answers": 5, "total_questions": 10},
+                },
+            },
+            {
+                "student_id": "s-pt-low",
+                "name": "Bruno",
+                "school_id": "sch1",
+                "school_name": "Escola Alpha",
+                "class_id": "c1",
+                "class_name": "A",
+                "shift": "Manhã",
+                "serie_id": "g1",
+                "serie_name": "5º Ano",
+                "grade": 9.0,
+                "proficiency": 900.0,
+                "classification": "Avançado",
+                "correct_answers": 20,
+                "total_questions": 20,
+                "score_percentage": 100.0,
+                "course_name": "Anos Iniciais",
+                "subject_results": {
+                    "pt": {"subject_name": "Língua Portuguesa", "correct_answers": 5, "total_questions": 10},
+                    "m": {"subject_name": "Matemática", "correct_answers": 15, "total_questions": 10},
+                },
+            },
+            {
+                "student_id": "s-pt-high",
+                "name": "Ana",
+                "school_id": "sch1",
+                "school_name": "Escola Alpha",
+                "class_id": "c1",
+                "class_name": "A",
+                "shift": "Manhã",
+                "serie_id": "g1",
+                "serie_name": "5º Ano",
+                "grade": 2.0,
+                "proficiency": 100.0,
                 "classification": "Básico",
                 "correct_answers": 20,
                 "total_questions": 20,
                 "score_percentage": 100.0,
+                "course_name": "Anos Iniciais",
                 "subject_results": {
-                    "pt": {
-                        "subject_name": "Língua Portuguesa",
-                        "correct_answers": 5,
-                        "total_questions": 10,
-                        "grade": 5.0,
-                        "proficiency": 250.0,
-                        "classification": "Básico",
-                    },
-                    "math": {
-                        "subject_name": "Matemática",
-                        "correct_answers": 15,
-                        "total_questions": 10,
-                        "grade": 10.0,
-                        "proficiency": 350.0,
-                        "classification": "Avançado",
-                    },
+                    "pt": {"subject_name": "Português", "correct_answers": 12, "total_questions": 10},
+                    "m": {"subject_name": "Matemática", "correct_answers": 8, "total_questions": 10},
                 },
             },
             {
-                "student_id": "s2",
+                "student_id": "s-name-a",
+                "name": "Carla",
+                "school_id": "sch2",
+                "school_name": "LUZIÁPOLIS",
+                "class_id": "c2",
+                "class_name": "A",
+                "shift": "Manhã",
+                "serie_id": "g1",
+                "serie_name": "1ª Série EM",
+                "grade": 5.0,
+                "proficiency": 200.0,
+                "classification": "Básico",
+                "correct_answers": 15,
+                "total_questions": 20,
+                "score_percentage": 75.0,
+                "course_name": "Ensino Médio",
+                "subject_results": {
+                    "pt": {"subject_name": "Português", "correct_answers": 7, "total_questions": 10},
+                    "m": {"subject_name": "Matemática", "correct_answers": 8, "total_questions": 10},
+                },
+            },
+            {
+                "student_id": "s-name-b",
+                "name": "Beatriz",
+                "school_id": "sch2",
+                "school_name": "LUZIÁPOLIS",
+                "class_id": "c2",
+                "class_name": "A",
+                "shift": "Manhã",
+                "serie_id": "g1",
+                "serie_name": "1ª Série EM",
+                "grade": 5.0,
+                "proficiency": 200.0,
+                "classification": "Básico",
+                "correct_answers": 15,
+                "total_questions": 20,
+                "score_percentage": 75.0,
+                "course_name": "Ensino Médio",
+                "subject_results": {
+                    "pt": {"subject_name": "Português", "correct_answers": 7, "total_questions": 10},
+                    "m": {"subject_name": "Matemática", "correct_answers": 8, "total_questions": 10},
+                },
+            },
+            {
+                "student_id": "s-fallback",
+                "name": "Diego",
+                "school_id": "sch3",
+                "school_name": "Escola Beta",
+                "class_id": "c3",
+                "class_name": "A",
+                "shift": "Manhã",
+                "serie_id": "g1",
+                "serie_name": "5º Ano",
+                "grade": 9.5,
+                "proficiency": 380.0,
+                "classification": "Avançado",
+                "correct_answers": 18,
+                "total_questions": 20,
+                "score_percentage": 90.0,
+                "course_name": "Anos Iniciais",
+                "subject_results": {},
+            },
+        ]
+        ranking = ClassPeerRankingService._build_student_ranking(rows)
+        by_id = {row["student_id"]: row for row in ranking}
+
+        # 1) Soma 8+6+6+5 = 25 a partir de subjects[] (ignora correct_answers=99)
+        self.assertEqual(by_id["s-sum"]["raw_correct_answers"], 25)
+        self.assertEqual(len(by_id["s-sum"]["subjects"]), 4)
+
+        # 2) Empate soma 20: Ana (PT 12) acima de Bruno (PT 5)
+        # 3) Empate soma 15 e PT 7: Beatriz antes de Carla (alfabético)
+        # 4) subjects vazio: Diego usa fallback 18
+        # Ordem: Zuleica(25), Ana(20), Bruno(20), Diego(18), Beatriz(15), Carla(15)
+        self.assertEqual(
+            [row["name"] for row in ranking],
+            ["Zuleica", "Ana", "Bruno", "Diego", "Beatriz", "Carla"],
+        )
+        self.assertEqual(by_id["s-fallback"]["raw_correct_answers"], 18)
+        self.assertEqual(by_id["s-fallback"]["subjects"], [])
+
+        # 5) Ensino Médio → sufixo na escola
+        self.assertEqual(by_id["s-name-a"]["school_display_name"], "LUZIÁPOLIS – ENSINO MÉDIO")
+        self.assertEqual(by_id["s-name-b"]["school_display_name"], "LUZIÁPOLIS – ENSINO MÉDIO")
+        self.assertEqual(by_id["s-sum"]["school_display_name"], "Escola Alpha")
+
+        # proficiency/grade preservados (não usados no sort, mas presentes)
+        self.assertEqual(by_id["s-pt-low"]["proficiency"], 900.0)
+        self.assertEqual(by_id["s-pt-low"]["grade"], 9.0)
+
+    def test_student_ranking_includes_serie_and_category(self):
+        rows = [
+            {
+                "student_id": "s1",
                 "name": "Ana",
                 "school_id": "sch1",
                 "school_name": "Escola X",
@@ -251,91 +403,43 @@ class TestClassPeerRankingService(unittest.TestCase):
                 "serie_id": "g1",
                 "serie_name": "5º Ano",
                 "grade": 8.0,
-                "proficiency": 300.0,
-                "classification": "Básico",
-                "correct_answers": 12,
-                "total_questions": 20,
-                "score_percentage": 60.0,
-                "subject_results": {
-                    "pt": {
-                        "subject_name": "Português",
-                        "correct_answers": 8,
-                        "total_questions": 10,
-                        "grade": 8.0,
-                        "proficiency": 300.0,
-                        "classification": "Adequado",
-                    },
-                    "math": {
-                        "subject_name": "Matemática",
-                        "correct_answers": 4,
-                        "total_questions": 10,
-                        "grade": 4.0,
-                        "proficiency": 200.0,
-                        "classification": "Básico",
-                    },
-                },
-            },
-            {
-                "student_id": "s3",
-                "name": "Carla",
-                "school_id": "sch1",
-                "school_name": "Escola X",
-                "class_id": "c1",
-                "class_name": "A",
-                "shift": "Manhã",
-                "serie_id": "g1",
-                "serie_name": "5º Ano",
-                "grade": 8.0,
-                "proficiency": 300.0,
-                "classification": "Básico",
-                "correct_answers": 12,
-                "total_questions": 20,
-                "score_percentage": 60.0,
-                "subject_results": {
-                    "pt": {
-                        "subject_name": "Língua Portuguesa",
-                        "correct_answers": 8,
-                        "total_questions": 10,
-                        "grade": 8.0,
-                        "proficiency": 300.0,
-                        "classification": "Adequado",
-                    },
-                },
-            },
-            {
-                "student_id": "s4",
-                "name": "Diego",
-                "school_id": "sch1",
-                "school_name": "Escola X",
-                "class_id": "c1",
-                "class_name": "A",
-                "shift": "Manhã",
-                "serie_id": "g1",
-                "serie_name": "5º Ano",
-                "grade": 9.0,
-                "proficiency": 350.0,
+                "proficiency": 320.0,
                 "classification": "Adequado",
+                "correct_answers": 12,
+                "total_questions": 20,
+                "score_percentage": 60.0,
+                "course_name": "Anos Iniciais",
+                "subject_results": {},
+            },
+            {
+                "student_id": "s2",
+                "name": "Bruno",
+                "school_id": "sch1",
+                "school_name": "Escola X",
+                "class_id": "c2",
+                "class_name": "Suporte 1 - 5º ANO",
+                "shift": "Tarde",
+                "serie_id": "g2",
+                "serie_name": "Suporte 1",
+                "grade": 7.0,
+                "proficiency": 280.0,
+                "classification": "Básico",
                 "correct_answers": 10,
                 "total_questions": 20,
                 "score_percentage": 50.0,
-                "subject_results": {
-                    "pt": {
-                        "subject_name": "Português",
-                        "correct_answers": 1,
-                        "total_questions": 10,
-                        "grade": 1.0,
-                        "proficiency": 150.0,
-                        "classification": "Abaixo",
-                    },
-                },
+                "course_name": "Educação Especial",
+                "subject_results": {},
             },
         ]
         ranking = ClassPeerRankingService._build_student_ranking(rows)
-        names = [row["name"] for row in ranking]
-        # Diego lidera por pontos (proficiência/nota); empate 300/8.0:
-        # Ana e Carla (8 PT) acima de Bruno (5 PT); Ana antes de Carla por nome.
-        self.assertEqual(names, ["Diego", "Ana", "Carla", "Bruno"])
-        self.assertEqual([row["position"] for row in ranking], [1, 2, 3, 4])
+        by_id = {row["student_id"]: row for row in ranking}
+        self.assertEqual(by_id["s1"]["serie_name"], "5º Ano")
+        self.assertEqual(by_id["s1"]["category"], "Regular")
+        self.assertEqual(by_id["s2"]["serie_name"], "Suporte 1")
+        self.assertEqual(by_id["s2"]["category"], "Educação Especial")
+        self.assertEqual(ClassPeerRankingService._student_category(
+            serie_name="Suporte 2", course_name=""
+        ), "Educação Especial")
 
 
 if __name__ == "__main__":

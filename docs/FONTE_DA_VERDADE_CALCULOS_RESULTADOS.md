@@ -239,4 +239,51 @@ Rotas de ranking devem usar a mesma regra (agregar proficiência → derivar not
 
 ---
 
-*Última revisão: §7 — nota agregada canônica via `calculate_grade(média_prof)`; revisar após alterações em agregações ou em `determine_classification`.*
+## 8. REGRA OBRIGATÓRIA — participação / comparecimento
+
+### 8.1 Fórmula canônica
+
+```
+percentual_participacao = round(100 * avaliados / matriculados, 2)
+```
+
+(se `matriculados == 0` → `0` ou nulo conforme o endpoint)
+
+| Conceito | Significado |
+|----------|-------------|
+| **Matriculados** | Universo previsto no escopo (turmas da aplicação / destinatários / ClassTest ∪ snapshots, conforme o domínio) |
+| **Avaliados / participantes** | Quem tem resultado oficial no escopo (`EvaluationResult` ou `AnswerSheetResult`; no socioeconômico: quem respondeu) |
+
+### 8.2 Proibido para participação
+
+- Média das taxas de participação das escolas ou séries (peso igual) como “participação geral”
+- Qualquer consolidação que faça média de percentuais de unidades em vez de `soma(avaliados) / soma(matriculados)`
+
+Isso **não** conflita com §7: média hierárquica vale para **nota e proficiência**; participação é **contagem / ratio**.
+
+### 8.3 Referências corretas
+
+| Domínio | Onde |
+|---------|------|
+| Avaliação online | `evaluation_results_routes` → `percentual_comparecimento` |
+| Cartão (KPI / agregados) | `answer_sheet_routes` → `_calcular_estatisticas_consolidadas_cartao` |
+| Relatório de participação | `app/participation_report/` |
+| Socioeconômico INSE | `inse_saeb_service` → `porcentagem_participacao` |
+| Consolidado (frequência) | `consolidated_report_service._build_participation_matriz` |
+
+### 8.4 Exemplo (mesmo gabarito, 4 escolas)
+
+| Escola | Matriculados | Avaliados | Taxa da escola |
+|--------|--------------|-----------|----------------|
+| A | 51 | 44 | 86,27% |
+| B | 10 | 9 | 90,00% |
+| C | 18 | 16 | 88,89% |
+| D | 17 | 14 | 82,35% |
+| **Total** | **96** | **83** | |
+
+- ✅ Canônico: `83/96 = 86,46%`
+- ❌ Errado (média das taxas): `(86,27+90+88,89+82,35)/4 = 86,88%`
+
+---
+
+*Última revisão: §8 — participação canônica = ratio avaliados/matriculados; §7 permanece para nota/proficiência.*

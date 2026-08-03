@@ -125,6 +125,80 @@ class ClassPeerRankingService:
         return 0
 
     @classmethod
+    def _raw_correct_sum(cls, subjects: Any, fallback_correct_answers: Any = 0) -> int:
+        """Soma bruta de acertos por disciplina; fallback = correct_answers do topo."""
+        if isinstance(subjects, list) and subjects:
+            total = 0
+            has_any = False
+            for subject in subjects:
+                if not isinstance(subject, dict):
+                    continue
+                has_any = True
+                total += int(subject.get("correct_answers") or 0)
+            if has_any:
+                return total
+        return int(fallback_correct_answers or 0)
+
+    @classmethod
+    def _education_level_suffix(cls, course_name: Any) -> Optional[str]:
+        n = cls._normalize_text(course_name)
+        if not n:
+            return None
+        if "superior" in n:
+            return "SUPERIOR"
+        if "medio" in n:
+            return "ENSINO MÉDIO"
+        return None
+
+    @classmethod
+    def _school_display_name(cls, school_name: Any, course_name: Any) -> str:
+        base = str(school_name or "").strip() or "N/A"
+        suffix = cls._education_level_suffix(course_name)
+        if suffix:
+            return f"{base} – {suffix}"
+        return base
+
+    @classmethod
+    def _resolve_course_names_by_test_id(cls, tests: Sequence[Test]) -> Dict[str, str]:
+        """Mapeia test_id -> nome do education_stage (Test.course = UUID do stage)."""
+        from app.models.educationStage import EducationStage
+
+        course_ids: List[Any] = []
+        test_course: Dict[str, Any] = {}
+        for test in tests:
+            tid = str(test.id)
+            course_ref = getattr(test, "course", None)
+            test_course[tid] = course_ref
+            if course_ref:
+                course_ids.append(course_ref)
+
+        if not course_ids:
+            return {tid: "" for tid in test_course}
+
+        stages = EducationStage.query.filter(EducationStage.id.in_(course_ids)).all()
+        name_by_id = {str(s.id): str(s.name or "") for s in stages}
+
+        resolved: Dict[str, str] = {}
+        for tid, course_ref in test_course.items():
+            if not course_ref:
+                resolved[tid] = ""
+                continue
+            key = str(course_ref)
+            # Se já for um rótulo textual (legado), usa direto.
+            resolved[tid] = name_by_id.get(key) or (
+                str(course_ref) if not cls._looks_like_uuid(key) else ""
+            )
+        return resolved
+
+    @staticmethod
+    def _looks_like_uuid(value: str) -> bool:
+        text = str(value or "").strip()
+        if len(text) != 36:
+            return False
+        parts = text.split("-")
+        return len(parts) == 5
+
+    @classmethod
     def _sort_key_metrics(
         cls,
         *,
@@ -148,10 +222,13 @@ class ClassPeerRankingService:
 
     @classmethod
     def _sort_key_student(cls, row: Dict[str, Any]) -> tuple:
-        """Ordenação de alunos: pontos → acertos de Português → nome (A→Z)."""
+        """Ordenação de alunos: soma bruta de acertos → Português → nome (A→Z)."""
+        raw = cls._raw_correct_sum(
+            row.get("subjects"),
+            row.get("raw_correct_answers", row.get("correct_answers")),
+        )
         return (
-            -float(row.get("proficiency") or 0),
-            -float(row.get("grade") or 0),
+            -float(raw),
             -float(cls._portuguese_correct_answers(row.get("subjects"))),
             str(row.get("name") or "").lower(),
         )
@@ -243,14 +320,27 @@ class ClassPeerRankingService:
         }
 
     @classmethod
-    def get_report(cls, user: Dict[str, Any], req: ClassPeerRankingRequest) -> Dict[str, Any]:
-        tests = cls._resolve_tests(req.evaluation_ids)
-        primary_test = tests[0]
+    def _student_category(cls, *, serie_name: Any, course_name: Any) -> str:
+        """Rótulo de contexto: Regular vs Educação Especial (séries Suporte N)."""
+        course_n = cls._normalize_text(course_name)
+        serie_n = cls._normalize_text(serie_name)
+        if "educacao especial" in course_n or serie_n.startswith("suporte"):
+            return "Educação Especial"
+        return "Regular"
 
+    @classmethod
+    def _collect_student_rows(
+        cls,
+        user: Dict[str, Any],
+        req: ClassPeerRankingRequest,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Test]]:
+        """Carrega e filtra linhas de alunos (base comum peer + consolidado)."""
+        tests = cls._resolve_tests(req.evaluation_ids)
+        course_name_by_test_id = cls._resolve_course_names_by_test_id(tests)
         scope = cls._resolve_and_authorize_scope(user, req)
         results = cls._load_latest_results(req, scope)
         if not results:
-            return cls._empty_payload(req, scope, tests)
+            return [], scope, tests
 
         schools_by_id, classes_by_id, grades_by_id = prefetch_placement_from_results(results)
         student_ids = list({str(r.student_id) for r in results if r.student_id})
@@ -282,7 +372,7 @@ class ClassPeerRankingService:
                         schools_by_id[school_id] = school
 
         teacher_class_ids = scope.get("teacher_class_ids")
-        rows = []
+        rows: List[Dict[str, Any]] = []
         for er in results:
             student = students_by_id.get(str(er.student_id))
             ctx = resolve_participant_display_context(
@@ -318,6 +408,8 @@ class ClassPeerRankingService:
             if req.turno is not None and cls._normalize_shift_key(shift) != cls._normalize_shift_key(req.turno):
                 continue
 
+            source_evaluation_id = str(er.test_id) if er.test_id else None
+            course_name = course_name_by_test_id.get(source_evaluation_id or "", "")
             rows.append(
                 {
                     "student_id": str(er.student_id),
@@ -336,15 +428,27 @@ class ClassPeerRankingService:
                     "total_questions": int(er.total_questions or 0),
                     "score_percentage": float(er.score_percentage or 0),
                     "subject_results": er.subject_results or {},
-                    "source_evaluation_id": str(er.test_id) if er.test_id else None,
+                    "source_evaluation_id": source_evaluation_id,
+                    "course_name": course_name,
+                    "category": cls._student_category(
+                        serie_name=grade_name, course_name=course_name
+                    ),
                     "result_obj": er,
                 }
             )
+        return rows, scope, tests
 
+    @classmethod
+    def get_report(cls, user: Dict[str, Any], req: ClassPeerRankingRequest) -> Dict[str, Any]:
+        rows, scope, tests = cls._collect_student_rows(user, req)
+        if not rows:
+            return cls._empty_payload(req, scope, tests)
+
+        primary_test = tests[0]
         sections = cls._build_sections(
             rows, req, course_fallback=getattr(primary_test, "course", None)
         )
-        payload = {
+        return {
             **cls._evaluation_titles_payload(tests),
             "scope": req.scope,
             "filters": {
@@ -366,7 +470,41 @@ class ClassPeerRankingService:
                 "students_count": len(rows),
             },
         }
-        return payload
+
+    @classmethod
+    def get_consolidated_report(
+        cls, user: Dict[str, Any], req: ClassPeerRankingRequest
+    ) -> Dict[str, Any]:
+        """Ranking único de alunos (sem seções por série/turma), com série/turma no item."""
+        rows, scope, tests = cls._collect_student_rows(user, req)
+        if not rows:
+            return cls._empty_consolidated_payload(req, scope, tests)
+
+        all_students = cls._build_student_ranking(rows)
+        total = len(all_students)
+        start = (req.page - 1) * req.per_page
+        end = start + req.per_page
+        page_items = all_students[start:end]
+
+        return {
+            **cls._evaluation_titles_payload(tests),
+            "scope": req.scope,
+            "filters": {
+                "municipio": req.municipio,
+                "escola": req.escola,
+                "serie": req.serie,
+                "turma_nome": req.turma_nome,
+                "turno": req.turno,
+            },
+            "resolved_scope": {
+                "scope": scope.get("scope"),
+                "city_id": scope.get("city_id"),
+                "school_ids": scope.get("school_ids") or [],
+            },
+            "students": page_items,
+            "pagination": cls._pagination(req.page, req.per_page, total),
+            "totals": {"students_count": total},
+        }
 
     @classmethod
     def _empty_payload(
@@ -405,6 +543,20 @@ class ClassPeerRankingService:
             "sections": [],
             "totals": {"sections_count": 0, "peer_groups_count": 0, "students_count": 0},
         }
+
+    @classmethod
+    def _empty_consolidated_payload(
+        cls,
+        req: ClassPeerRankingRequest,
+        scope: Dict[str, Any],
+        tests: Optional[Sequence[Test]] = None,
+    ) -> Dict[str, Any]:
+        base = cls._empty_payload(req, scope, tests)
+        base.pop("sections", None)
+        base["students"] = []
+        base["pagination"] = cls._pagination(req.page, req.per_page, 0)
+        base["totals"] = {"students_count": 0}
+        return base
 
     @classmethod
     def _resolve_and_authorize_scope(
@@ -649,23 +801,35 @@ class ClassPeerRankingService:
         items: List[Dict[str, Any]] = []
         for row in peer_rows:
             subjects = cls._student_subjects(row.get("subject_results") or {})
+            fallback_correct = int(row.get("correct_answers") or 0)
+            raw_correct = cls._raw_correct_sum(subjects, fallback_correct)
+            school_name = row.get("school_name")
+            course_name = row.get("course_name") or ""
+            serie_name = row.get("serie_name") or ""
             items.append(
                 {
                     "student_id": row.get("student_id"),
                     "name": row.get("name"),
                     "school_id": row.get("school_id"),
-                    "school_name": row.get("school_name"),
+                    "school_name": school_name,
+                    "school_display_name": cls._school_display_name(school_name, course_name),
                     "class_id": row.get("class_id"),
                     "class_name": row.get("class_name"),
                     "shift": row.get("shift") or "",
+                    "serie_id": row.get("serie_id"),
+                    "serie_name": serie_name,
+                    "category": row.get("category")
+                    or cls._student_category(serie_name=serie_name, course_name=course_name),
                     "grade": round(float(row.get("grade") or 0), 1),
                     "proficiency": round(float(row.get("proficiency") or 0), 1),
                     "classification": row.get("classification") or "",
-                    "correct_answers": int(row.get("correct_answers") or 0),
+                    "correct_answers": fallback_correct,
+                    "raw_correct_answers": raw_correct,
                     "total_questions": int(row.get("total_questions") or 0),
                     "accuracy_rate": round(float(row.get("score_percentage") or 0), 1),
                     "subjects": subjects,
                     "source_evaluation_id": row.get("source_evaluation_id"),
+                    "course_name": course_name,
                 }
             )
         items.sort(key=cls._sort_key_student)

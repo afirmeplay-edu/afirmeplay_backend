@@ -158,3 +158,32 @@ def ranking_classes_peer():
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Erro ao gerar ranking de turmas iguais.", "details": str(e)}), 500
+
+
+@bp.route("/geral", methods=["GET"])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor")
+@requires_city_context
+def ranking_geral():
+    """
+    Ranking Geral consolidado: uma única listagem de alunos (sem seções por série/turma).
+
+    Query params (mesmos de /classes-peer):
+      - scope: municipio | escola
+      - evaluation_id / evaluation_ids
+      - municipio, escola, serie, turma_nome, turno
+      - page, per_page: paginação global da lista de alunos
+    """
+    try:
+        req = ClassPeerRankingService.build_request(request.args)
+        user = get_current_user_from_token()
+        payload = ClassPeerRankingService.get_consolidated_report(user, req)
+        return jsonify(payload), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return jsonify({"error": "Erro de banco ao gerar ranking geral.", "details": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Erro ao gerar ranking geral.", "details": str(e)}), 500

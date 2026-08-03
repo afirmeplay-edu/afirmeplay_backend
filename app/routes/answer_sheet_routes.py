@@ -244,36 +244,71 @@ _STRUCTURE_EDIT_STRUCTURAL_KEYS = (
     "use_blocks",
 )
 
+_GABARITO_TITLE_MAX_LEN = 200
+
+
+def _validate_gabarito_title(raw: Any) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Valida title do gabarito para PATCH de estrutura/metadados.
+    Retorna (title_limpo, None) ou (None, mensagem_de_erro).
+    """
+    if raw is None or not isinstance(raw, str):
+        return None, "title deve ser uma string não vazia"
+    title = raw.strip()
+    if not title:
+        return None, "title não pode ser vazio"
+    if len(title) > _GABARITO_TITLE_MAX_LEN:
+        return None, f"title deve ter no máximo {_GABARITO_TITLE_MAX_LEN} caracteres"
+    return title, None
+
+
+def _has_structural_structure_changes(
+    data: Dict,
+    gabarito: "AnswerSheetGabarito",
+) -> bool:
+    """
+    True se o payload altera efetivamente a estrutura
+    (questões, blocos, alternativas ou use_blocks).
+    title e question_skills não contam como estruturais.
+    """
+    if not isinstance(data, dict):
+        return False
+    if "blocks_config" in data:
+        return True
+    if data.get("questions_options"):
+        return True
+    if "num_questions" in data:
+        try:
+            if int(data["num_questions"]) != int(gabarito.num_questions or 0):
+                return True
+        except (TypeError, ValueError):
+            return True
+    if "use_blocks" in data:
+        if bool(data["use_blocks"]) != bool(gabarito.use_blocks):
+            return True
+    return False
+
 
 def _is_skills_only_structure_payload(
     data: Dict,
     gabarito: Optional["AnswerSheetGabarito"] = None,
 ) -> bool:
     """
-    True se o body altera efetivamente apenas question_skills.
+    True se o body altera efetivamente apenas question_skills
+    (title opcional pode coexistir; não é estrutural).
     Campos estruturais iguais aos valores atuais do gabarito são ignorados
     (ex.: form que reenvia num_questions sem mudar).
     """
     if not isinstance(data, dict) or "question_skills" not in data:
         return False
 
+    if gabarito is not None:
+        return not _has_structural_structure_changes(data, gabarito)
+
     if "blocks_config" in data:
         return False
     if data.get("questions_options"):
         return False
-
-    if gabarito is not None:
-        if "num_questions" in data:
-            try:
-                if int(data["num_questions"]) != int(gabarito.num_questions or 0):
-                    return False
-            except (TypeError, ValueError):
-                return False
-        if "use_blocks" in data:
-            if bool(data["use_blocks"]) != bool(gabarito.use_blocks):
-                return False
-        return True
-
     return not any(k in data for k in _STRUCTURE_EDIT_STRUCTURAL_KEYS)
 
 
@@ -2028,19 +2063,21 @@ def get_gabarito(gabarito_id):
 @requires_city_context
 def patch_gabarito_structure(gabarito_id: str):
     """
-    Edita a ESTRUTURA do cartão resposta: num_questions, blocks_config, question_skills.
+    Edita a ESTRUTURA/metadados do cartão resposta: title, num_questions,
+    blocks_config, question_skills.
     
     ⚠️ REGRAS DE NEGÓCIO:
     - ❌ BLOQUEADO se já existem correções (AnswerSheetResult) E o payload
       altera estrutura (num_questions, blocks_config, questions_options, use_blocks)
-    - ✅ PERMITIDO editar APENAS question_skills mesmo com correções
-      (patch cirúrgico na topology; não regenera coordenadas/templates;
+    - ✅ PERMITIDO editar title e/ou question_skills mesmo com correções
+      (metadado / patch cirúrgico na topology; não regenera coordenadas/templates;
       não altera nota/proficiência já calculadas)
     - ✅ PERMITIDO estrutura completa se gerado mas não corrigido (com aviso de regeneração)
     - ✅ PERMITIDO se apenas criado (sem avisos)
     
     Body (todos os campos são opcionais, envie apenas o que deseja alterar):
         {
+            "title": "Novo nome do gabarito",       # Metadado (até 200 chars)
             "num_questions": 30,                    # Nova quantidade de questões
             "blocks_config": {                      # Nova configuração de blocos
                 "blocks": [
@@ -2072,11 +2109,13 @@ def patch_gabarito_structure(gabarito_id: str):
             "message": "Estrutura atualizada com sucesso",
             "warning": "os cartões em PDF já gerados não refletem..." (se aplicável),
             "changes": {
+                "title": {"old": "...", "new": "..."},
                 "num_questions": {"old": 20, "new": 30},
                 "blocks_count": {"old": 2, "new": 3},
                 "skills_updated": true
             },
-            "skills_only": true   # presente quando só habilidades foram alteradas
+            "skills_only": true,   # presente quando só habilidades (e/ou title) foram alteradas
+            "title_only": true     # presente quando só o title foi alterado
         }
     
     Returns (422 se bloqueado por correções + alteração estrutural):
@@ -2084,7 +2123,7 @@ def patch_gabarito_structure(gabarito_id: str):
             "error": "Este cartão resposta não pode ser editado...",
             "reason": "has_corrections",
             "corrections_count": 15,
-            "hint": "Com correções registradas, envie apenas question_skills."
+            "hint": "Com correções registradas, envie apenas title e/ou question_skills."
         }
     """
     try:
@@ -2106,23 +2145,76 @@ def patch_gabarito_structure(gabarito_id: str):
         if not data:
             return jsonify({"error": "Nenhum dado fornecido para edição"}), 400
 
-        corrections_count = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).count()
-        skills_only = _is_skills_only_structure_payload(data, gabarito)
+        new_title = None
+        if "title" in data:
+            new_title, title_err = _validate_gabarito_title(data.get("title"))
+            if title_err:
+                return jsonify({"error": title_err}), 400
 
-        # Com correções: só question_skills é permitido
-        if corrections_count > 0 and not skills_only:
+        corrections_count = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).count()
+        has_structural_changes = _has_structural_structure_changes(data, gabarito)
+        skills_only = _is_skills_only_structure_payload(data, gabarito)
+        title_only = (
+            new_title is not None
+            and not has_structural_changes
+            and "question_skills" not in data
+        )
+
+        # Com correções: só title e/ou question_skills são permitidos
+        if corrections_count > 0 and not (title_only or skills_only):
             return jsonify({
                 "error": (
                     "Este cartão resposta já possui correções registradas. "
                     "Não é possível alterar a estrutura (quantidade de questões, blocos ou alternativas). "
-                    "É permitido editar apenas as habilidades (question_skills)."
+                    "É permitido editar o nome (title) e/ou as habilidades (question_skills)."
                 ),
                 "reason": "has_corrections",
                 "corrections_count": corrections_count,
-                "hint": "Envie apenas o campo question_skills no body do PATCH.",
+                "hint": "Envie apenas title e/ou question_skills no body do PATCH.",
             }), 422
 
-        # --- Caminho: apenas habilidades (com ou sem correções) ---
+        has_generations = bool(
+            gabarito.minio_url
+            or gabarito.last_generation_job_id
+            or AnswerSheetGenerationJob.query.filter_by(gabarito_id=gabarito_id).first()
+        )
+
+        def _apply_title_change(changes_dict: Dict) -> bool:
+            if new_title is None:
+                return False
+            old_title = gabarito.title
+            if (old_title or "") == new_title:
+                return False
+            gabarito.title = new_title
+            changes_dict["title"] = {"old": old_title, "new": new_title}
+            return True
+
+        # --- Caminho: apenas title (com ou sem correções) ---
+        if title_only:
+            changes = {}
+            title_changed = _apply_title_change(changes)
+            if title_changed:
+                db.session.commit()
+            response_data = {
+                "success": True,
+                "gabarito_id": str(gabarito_id),
+                "message": (
+                    "Nome do gabarito atualizado com sucesso"
+                    if title_changed
+                    else "Nenhuma alteração no nome do gabarito"
+                ),
+                "changes": changes if changes else None,
+                "title_only": True,
+            }
+            if title_changed and has_generations:
+                response_data["warning"] = (
+                    "Atenção: os cartões em PDF já gerados não refletem as alterações. "
+                    "É necessário gerar os cartões novamente para que as mudanças "
+                    "apareçam nos documentos impressos."
+                )
+            return jsonify(response_data), 200
+
+        # --- Caminho: apenas habilidades (+ title opcional; com ou sem correções) ---
         if skills_only:
             question_skills_raw = data.get("question_skills")
             if not isinstance(question_skills_raw, dict) or not question_skills_raw:
@@ -2140,27 +2232,35 @@ def patch_gabarito_structure(gabarito_id: str):
 
             gabarito.blocks_config = new_blocks_config
             flag_modified(gabarito, "blocks_config")
+            changes = {"skills_updated": bool(skills_changed)}
+            title_changed = _apply_title_change(changes)
             db.session.commit()
 
-            return jsonify({
+            if title_changed and skills_changed:
+                message = "Habilidades e nome do gabarito atualizados com sucesso"
+            elif title_changed:
+                message = "Nome do gabarito atualizado com sucesso"
+            elif skills_changed:
+                message = "Habilidades atualizadas com sucesso"
+            else:
+                message = "Nenhuma alteração nas habilidades"
+
+            response_data = {
                 "success": True,
                 "gabarito_id": str(gabarito_id),
-                "message": (
-                    "Habilidades atualizadas com sucesso"
-                    if skills_changed
-                    else "Nenhuma alteração nas habilidades"
-                ),
-                "changes": {"skills_updated": bool(skills_changed)},
+                "message": message,
+                "changes": changes,
                 "skills_only": True,
-            }), 200
+            }
+            if (title_changed or skills_changed) and has_generations and title_changed:
+                response_data["warning"] = (
+                    "Atenção: os cartões em PDF já gerados não refletem as alterações. "
+                    "É necessário gerar os cartões novamente para que as mudanças "
+                    "apareçam nos documentos impressos."
+                )
+            return jsonify(response_data), 200
 
-        # 4. Verificar se foi gerado (para avisar em edição estrutural)
-        has_generations = bool(
-            gabarito.minio_url or 
-            gabarito.last_generation_job_id or
-            AnswerSheetGenerationJob.query.filter_by(gabarito_id=gabarito_id).first()
-        )
-
+        # 4. Edição estrutural completa (+ title opcional)
         changes = {}
         
         # Valores atuais
@@ -2240,6 +2340,7 @@ def patch_gabarito_structure(gabarito_id: str):
         gabarito.use_blocks = use_blocks
         gabarito.blocks_config = new_blocks_config
         gabarito.coordinates = new_coordinates
+        _apply_title_change(changes)
         
         # 9. Invalidar templates de blocos (forçar regeneração)
         gabarito.template_block_1 = None

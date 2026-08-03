@@ -320,15 +320,27 @@ class ClassPeerRankingService:
         }
 
     @classmethod
-    def get_report(cls, user: Dict[str, Any], req: ClassPeerRankingRequest) -> Dict[str, Any]:
-        tests = cls._resolve_tests(req.evaluation_ids)
-        primary_test = tests[0]
-        course_name_by_test_id = cls._resolve_course_names_by_test_id(tests)
+    def _student_category(cls, *, serie_name: Any, course_name: Any) -> str:
+        """Rótulo de contexto: Regular vs Educação Especial (séries Suporte N)."""
+        course_n = cls._normalize_text(course_name)
+        serie_n = cls._normalize_text(serie_name)
+        if "educacao especial" in course_n or serie_n.startswith("suporte"):
+            return "Educação Especial"
+        return "Regular"
 
+    @classmethod
+    def _collect_student_rows(
+        cls,
+        user: Dict[str, Any],
+        req: ClassPeerRankingRequest,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Test]]:
+        """Carrega e filtra linhas de alunos (base comum peer + consolidado)."""
+        tests = cls._resolve_tests(req.evaluation_ids)
+        course_name_by_test_id = cls._resolve_course_names_by_test_id(tests)
         scope = cls._resolve_and_authorize_scope(user, req)
         results = cls._load_latest_results(req, scope)
         if not results:
-            return cls._empty_payload(req, scope, tests)
+            return [], scope, tests
 
         schools_by_id, classes_by_id, grades_by_id = prefetch_placement_from_results(results)
         student_ids = list({str(r.student_id) for r in results if r.student_id})
@@ -360,7 +372,7 @@ class ClassPeerRankingService:
                         schools_by_id[school_id] = school
 
         teacher_class_ids = scope.get("teacher_class_ids")
-        rows = []
+        rows: List[Dict[str, Any]] = []
         for er in results:
             student = students_by_id.get(str(er.student_id))
             ctx = resolve_participant_display_context(
@@ -397,6 +409,7 @@ class ClassPeerRankingService:
                 continue
 
             source_evaluation_id = str(er.test_id) if er.test_id else None
+            course_name = course_name_by_test_id.get(source_evaluation_id or "", "")
             rows.append(
                 {
                     "student_id": str(er.student_id),
@@ -416,15 +429,26 @@ class ClassPeerRankingService:
                     "score_percentage": float(er.score_percentage or 0),
                     "subject_results": er.subject_results or {},
                     "source_evaluation_id": source_evaluation_id,
-                    "course_name": course_name_by_test_id.get(source_evaluation_id or "", ""),
+                    "course_name": course_name,
+                    "category": cls._student_category(
+                        serie_name=grade_name, course_name=course_name
+                    ),
                     "result_obj": er,
                 }
             )
+        return rows, scope, tests
 
+    @classmethod
+    def get_report(cls, user: Dict[str, Any], req: ClassPeerRankingRequest) -> Dict[str, Any]:
+        rows, scope, tests = cls._collect_student_rows(user, req)
+        if not rows:
+            return cls._empty_payload(req, scope, tests)
+
+        primary_test = tests[0]
         sections = cls._build_sections(
             rows, req, course_fallback=getattr(primary_test, "course", None)
         )
-        payload = {
+        return {
             **cls._evaluation_titles_payload(tests),
             "scope": req.scope,
             "filters": {
@@ -446,7 +470,41 @@ class ClassPeerRankingService:
                 "students_count": len(rows),
             },
         }
-        return payload
+
+    @classmethod
+    def get_consolidated_report(
+        cls, user: Dict[str, Any], req: ClassPeerRankingRequest
+    ) -> Dict[str, Any]:
+        """Ranking único de alunos (sem seções por série/turma), com série/turma no item."""
+        rows, scope, tests = cls._collect_student_rows(user, req)
+        if not rows:
+            return cls._empty_consolidated_payload(req, scope, tests)
+
+        all_students = cls._build_student_ranking(rows)
+        total = len(all_students)
+        start = (req.page - 1) * req.per_page
+        end = start + req.per_page
+        page_items = all_students[start:end]
+
+        return {
+            **cls._evaluation_titles_payload(tests),
+            "scope": req.scope,
+            "filters": {
+                "municipio": req.municipio,
+                "escola": req.escola,
+                "serie": req.serie,
+                "turma_nome": req.turma_nome,
+                "turno": req.turno,
+            },
+            "resolved_scope": {
+                "scope": scope.get("scope"),
+                "city_id": scope.get("city_id"),
+                "school_ids": scope.get("school_ids") or [],
+            },
+            "students": page_items,
+            "pagination": cls._pagination(req.page, req.per_page, total),
+            "totals": {"students_count": total},
+        }
 
     @classmethod
     def _empty_payload(
@@ -485,6 +543,20 @@ class ClassPeerRankingService:
             "sections": [],
             "totals": {"sections_count": 0, "peer_groups_count": 0, "students_count": 0},
         }
+
+    @classmethod
+    def _empty_consolidated_payload(
+        cls,
+        req: ClassPeerRankingRequest,
+        scope: Dict[str, Any],
+        tests: Optional[Sequence[Test]] = None,
+    ) -> Dict[str, Any]:
+        base = cls._empty_payload(req, scope, tests)
+        base.pop("sections", None)
+        base["students"] = []
+        base["pagination"] = cls._pagination(req.page, req.per_page, 0)
+        base["totals"] = {"students_count": 0}
+        return base
 
     @classmethod
     def _resolve_and_authorize_scope(
@@ -733,6 +805,7 @@ class ClassPeerRankingService:
             raw_correct = cls._raw_correct_sum(subjects, fallback_correct)
             school_name = row.get("school_name")
             course_name = row.get("course_name") or ""
+            serie_name = row.get("serie_name") or ""
             items.append(
                 {
                     "student_id": row.get("student_id"),
@@ -743,6 +816,10 @@ class ClassPeerRankingService:
                     "class_id": row.get("class_id"),
                     "class_name": row.get("class_name"),
                     "shift": row.get("shift") or "",
+                    "serie_id": row.get("serie_id"),
+                    "serie_name": serie_name,
+                    "category": row.get("category")
+                    or cls._student_category(serie_name=serie_name, course_name=course_name),
                     "grade": round(float(row.get("grade") or 0), 1),
                     "proficiency": round(float(row.get("proficiency") or 0), 1),
                     "classification": row.get("classification") or "",

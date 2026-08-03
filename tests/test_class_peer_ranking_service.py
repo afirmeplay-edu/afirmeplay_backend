@@ -390,6 +390,57 @@ class TestClassPeerRankingService(unittest.TestCase):
         self.assertEqual(by_id["s-pt-low"]["proficiency"], 900.0)
         self.assertEqual(by_id["s-pt-low"]["grade"], 9.0)
 
+    def test_student_ranking_includes_serie_and_category(self):
+        rows = [
+            {
+                "student_id": "s1",
+                "name": "Ana",
+                "school_id": "sch1",
+                "school_name": "Escola X",
+                "class_id": "c1",
+                "class_name": "A",
+                "shift": "Manhã",
+                "serie_id": "g1",
+                "serie_name": "5º Ano",
+                "grade": 8.0,
+                "proficiency": 320.0,
+                "classification": "Adequado",
+                "correct_answers": 12,
+                "total_questions": 20,
+                "score_percentage": 60.0,
+                "course_name": "Anos Iniciais",
+                "subject_results": {},
+            },
+            {
+                "student_id": "s2",
+                "name": "Bruno",
+                "school_id": "sch1",
+                "school_name": "Escola X",
+                "class_id": "c2",
+                "class_name": "Suporte 1 - 5º ANO",
+                "shift": "Tarde",
+                "serie_id": "g2",
+                "serie_name": "Suporte 1",
+                "grade": 7.0,
+                "proficiency": 280.0,
+                "classification": "Básico",
+                "correct_answers": 10,
+                "total_questions": 20,
+                "score_percentage": 50.0,
+                "course_name": "Educação Especial",
+                "subject_results": {},
+            },
+        ]
+        ranking = ClassPeerRankingService._build_student_ranking(rows)
+        by_id = {row["student_id"]: row for row in ranking}
+        self.assertEqual(by_id["s1"]["serie_name"], "5º Ano")
+        self.assertEqual(by_id["s1"]["category"], "Regular")
+        self.assertEqual(by_id["s2"]["serie_name"], "Suporte 1")
+        self.assertEqual(by_id["s2"]["category"], "Educação Especial")
+        self.assertEqual(ClassPeerRankingService._student_category(
+            serie_name="Suporte 2", course_name=""
+        ), "Educação Especial")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -269,7 +269,7 @@ def _has_structural_structure_changes(
     """
     True se o payload altera efetivamente a estrutura
     (questões, blocos, alternativas ou use_blocks).
-    title e question_skills não contam como estruturais.
+    title, question_skills e correct_answers não contam como estruturais.
     """
     if not isinstance(data, dict):
         return False
@@ -289,13 +289,203 @@ def _has_structural_structure_changes(
     return False
 
 
+def _normalize_correct_answers_for_compare(raw: Any) -> Dict[int, Optional[str]]:
+    """Normaliza mapas de gabarito para comparação estável {1: 'A', ...}."""
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        try:
+            import json
+
+            raw = json.loads(raw)
+        except Exception:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[int, Optional[str]] = {}
+    for k, v in raw.items():
+        try:
+            q = int(k)
+        except (TypeError, ValueError):
+            continue
+        if v is None:
+            out[q] = None
+            continue
+        s = str(v).strip().upper()
+        out[q] = s if s else None
+    return out
+
+
+def _correct_answers_storage_equal(current: Any, new_storage: Dict[str, Any]) -> bool:
+    return _normalize_correct_answers_for_compare(current) == _normalize_correct_answers_for_compare(
+        new_storage
+    )
+
+
+def _start_gabarito_recalculation(
+    gabarito_id: str,
+    user_id: Optional[str],
+    *,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Tuple[Any, int]:
+    """
+    Cria job e dispara recálculo dos AnswerSheetResult do gabarito.
+    O gabarito (correct_answers) já deve estar commitado.
+
+    Returns:
+        (flask_response, status_code) — 202 em sucesso; 400/500 em erro.
+    """
+    results = (
+        AnswerSheetResult.query.options(joinedload(AnswerSheetResult.student))
+        .filter_by(gabarito_id=gabarito_id)
+        .all()
+    )
+
+    job_id = str(uuid.uuid4())
+    items_meta = []
+    for r in results:
+        st = getattr(r, "student", None)
+        items_meta.append(
+            {
+                "student_id": str(r.student_id) if r.student_id else None,
+                "student_name": getattr(st, "name", "") if st else "",
+            }
+        )
+
+    create_job(
+        job_id,
+        len(items_meta),
+        gabarito_id=str(gabarito_id),
+        user_id=str(user_id) if user_id else None,
+        task_ids=[],
+        items_meta=items_meta if items_meta else None,
+        stage_message="Recalculando resultados...",
+    )
+
+    context = get_current_tenant_context()
+    city_id = str(context.city_id) if context else None
+    if not city_id:
+        return jsonify({"error": "Contexto de município não encontrado"}), 400
+
+    try:
+        from app.services.answer_sheet_job_store import create_answer_sheet_job
+        from sqlalchemy.exc import IntegrityError
+
+        create_answer_sheet_job(
+            job_id,
+            len(items_meta),
+            str(gabarito_id),
+            str(user_id) if user_id else None,
+            [],
+            city_id,
+            scope_type="recalculate_gabarito",
+        )
+    except IntegrityError:
+        db.session.rollback()
+        logging.debug("Job de recálculo %s já existia na tabela (reuso)", job_id)
+    except Exception as db_job_err:
+        db.session.rollback()
+        logging.warning(
+            "Espelho DB do job de recálculo não criado (GET status pode falhar entre workers): %s",
+            db_job_err,
+        )
+
+    from app.services.celery_tasks.answer_sheet_tasks import (
+        recalculate_answer_sheet_results_for_gabarito,
+        run_recalculate_answer_sheet_results_for_gabarito,
+    )
+    from app.services.progress_store import update_job
+    from app.services.answer_sheet_job_store import update_answer_sheet_job
+
+    task_id = None
+    recalculated_sync = False
+
+    def _run_sync_recalc() -> None:
+        run_recalculate_answer_sheet_results_for_gabarito(
+            str(gabarito_id), job_id, city_id
+        )
+
+    if any_configured_redis_tcp_unreachable():
+        logging.warning(
+            "Redis inacessível (pré-check TCP); recálculo síncrono para gabarito %s",
+            gabarito_id,
+        )
+        try:
+            _run_sync_recalc()
+            recalculated_sync = True
+        except Exception as sync_err:
+            logging.error(
+                "Recálculo síncrono falhou para gabarito %s: %s",
+                gabarito_id,
+                sync_err,
+                exc_info=True,
+            )
+            return jsonify(
+                {
+                    "error": "Recálculo falhou (Redis inacessível e execução síncrona falhou).",
+                    "details": str(sync_err),
+                    "job_id": job_id,
+                }
+            ), 500
+    else:
+        try:
+            task = recalculate_answer_sheet_results_for_gabarito.apply_async(
+                args=[str(gabarito_id), job_id, city_id],
+                ignore_result=True,
+            )
+            task_id = task.id
+            update_job(job_id, {"task_ids": [task.id]})
+            try:
+                update_answer_sheet_job(job_id, {"task_ids": [task.id]})
+            except Exception as upd_db_err:
+                logging.debug(
+                    "Não foi possível gravar task_ids no job DB %s: %s",
+                    job_id,
+                    upd_db_err,
+                )
+        except Exception as enqueue_err:
+            logging.warning(
+                "Fila Celery indisponível (%s); executando recálculo síncrono",
+                enqueue_err,
+            )
+            try:
+                _run_sync_recalc()
+                recalculated_sync = True
+            except Exception as sync_err:
+                logging.error(
+                    "Recálculo síncrono falhou para gabarito %s: %s",
+                    gabarito_id,
+                    sync_err,
+                    exc_info=True,
+                )
+                return jsonify(
+                    {
+                        "error": "Recálculo falhou (Celery indisponível e execução síncrona falhou).",
+                        "details": str(sync_err),
+                        "job_id": job_id,
+                    }
+                ), 500
+
+    payload: Dict[str, Any] = {
+        "status": "completed" if recalculated_sync else "processing",
+        "job_id": job_id,
+        "task_id": task_id,
+        "gabarito_id": str(gabarito_id),
+        "polling_url": f"/answer-sheets/recalculate-jobs/{job_id}/status",
+        "recalculated_sync": recalculated_sync,
+    }
+    if extra:
+        payload.update(extra)
+    return jsonify(payload), 202
+
+
 def _is_skills_only_structure_payload(
     data: Dict,
     gabarito: Optional["AnswerSheetGabarito"] = None,
 ) -> bool:
     """
     True se o body altera efetivamente apenas question_skills
-    (title opcional pode coexistir; não é estrutural).
+    (title e correct_answers opcionais podem coexistir; não são estruturais).
     Campos estruturais iguais aos valores atuais do gabarito são ignorados
     (ex.: form que reenvia num_questions sem mudar).
     """
@@ -2125,70 +2315,39 @@ def get_gabarito(gabarito_id):
 @requires_city_context
 def patch_gabarito_structure(gabarito_id: str):
     """
-    Edita a ESTRUTURA/metadados do cartão resposta: title, num_questions,
-    blocks_config, question_skills.
+    Edita a ESTRUTURA/metadados do cartão resposta: title, correct_answers,
+    num_questions, blocks_config, question_skills.
     
     ⚠️ REGRAS DE NEGÓCIO:
     - ❌ BLOQUEADO se já existem correções (AnswerSheetResult) E o payload
       altera estrutura (num_questions, blocks_config, questions_options, use_blocks)
-    - ✅ PERMITIDO editar title e/ou question_skills mesmo com correções
-      (metadado / patch cirúrgico na topology; não regenera coordenadas/templates;
-      não altera nota/proficiência já calculadas)
+    - ✅ PERMITIDO editar title, correct_answers e/ou question_skills mesmo com correções
+    - ✅ Se correct_answers mudar: dispara recálculo e retorna 202 (mesmo fluxo de
+      PATCH /gabaritos/{id})
+    - ✅ title/skills sem mudança de gabarito: 200
     - ✅ PERMITIDO estrutura completa se gerado mas não corrigido (com aviso de regeneração)
-    - ✅ PERMITIDO se apenas criado (sem avisos)
     
     Body (todos os campos são opcionais, envie apenas o que deseja alterar):
         {
-            "title": "Novo nome do gabarito",       # Metadado (até 200 chars)
-            "num_questions": 30,                    # Nova quantidade de questões
-            "blocks_config": {                      # Nova configuração de blocos
-                "blocks": [
-                    {
-                        "block_id": 1,
-                        "subject_id": "uuid-disciplina",
-                        "subject_name": "Matemática",
-                        "start_question": 1,
-                        "end_question": 15,
-                        "questions_count": 15
-                    },
-                    ...
-                ]
-            },
-            "question_skills": {                    # Habilidades por questão
-                "1": ["EF05MA01", "uuid-habilidade"],
-                "2": ["EF05LP02"]
-            },
-            "questions_options": {                  # Alternativas customizadas (opcional)
-                "1": ["A", "B", "C", "D"],
-                "2": ["A", "B", "C"]
-            }
+            "title": "Novo nome do gabarito",
+            "correct_answers": {"1": "A", "2": "C", ...},
+            "num_questions": 30,
+            "blocks_config": { "blocks": [...] },
+            "question_skills": {"1": ["EF05MA01"], "2": ["EF05LP02"]},
+            "questions_options": {"1": ["A", "B", "C", "D"]}
         }
     
-    Returns (200 em sucesso):
-        {
-            "success": true,
-            "gabarito_id": "uuid",
-            "message": "Estrutura atualizada com sucesso",
-            "warning": "os cartões em PDF já gerados não refletem..." (se aplicável),
-            "changes": {
-                "title": {"old": "...", "new": "..."},
-                "num_questions": {"old": 20, "new": 30},
-                "blocks_count": {"old": 2, "new": 3},
-                "skills_updated": true
-            },
-            "skills_only": true,   # presente quando só habilidades (e/ou title) foram alteradas
-            "title_only": true     # presente quando só o title foi alterado
-        }
-    
-    Returns (422 se bloqueado por correções + alteração estrutural):
-        {
-            "error": "Este cartão resposta não pode ser editado...",
-            "reason": "has_corrections",
-            "corrections_count": 15,
-            "hint": "Com correções registradas, envie apenas title e/ou question_skills."
-        }
+    Returns (200): title/skills/estrutura sem mudança efetiva de correct_answers
+    Returns (202): correct_answers alterado → job de recálculo
+        { status, job_id, gabarito_id, polling_url, task_id?, recalculated_sync,
+          success?, message?, changes? }
+    Returns (422): correções existentes + alteração estrutural
     """
     try:
+        from app.services.cartao_resposta.answer_sheet_recalculation_service import (
+            validate_correct_answers_payload,
+        )
+
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
@@ -2213,26 +2372,46 @@ def patch_gabarito_structure(gabarito_id: str):
             if title_err:
                 return jsonify({"error": title_err}), 400
 
+        new_correct_answers_storage = None
+        if "correct_answers" in data:
+            ok, err, normalized = validate_correct_answers_payload(
+                data.get("correct_answers"),
+                int(gabarito.num_questions or 0),
+            )
+            if not ok:
+                return jsonify({"error": err}), 400
+            new_correct_answers_storage = {str(k): v for k, v in normalized.items()}
+
         corrections_count = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).count()
         has_structural_changes = _has_structural_structure_changes(data, gabarito)
         skills_only = _is_skills_only_structure_payload(data, gabarito)
+        answers_meta_only = (
+            new_correct_answers_storage is not None
+            and not has_structural_changes
+            and "question_skills" not in data
+        )
         title_only = (
             new_title is not None
             and not has_structural_changes
             and "question_skills" not in data
+            and "correct_answers" not in data
         )
 
-        # Com correções: só title e/ou question_skills são permitidos
-        if corrections_count > 0 and not (title_only or skills_only):
+        # Com correções: só title, correct_answers e/ou question_skills
+        if corrections_count > 0 and not (title_only or skills_only or answers_meta_only):
             return jsonify({
                 "error": (
                     "Este cartão resposta já possui correções registradas. "
                     "Não é possível alterar a estrutura (quantidade de questões, blocos ou alternativas). "
-                    "É permitido editar o nome (title) e/ou as habilidades (question_skills)."
+                    "É permitido editar o nome (title), o gabarito (correct_answers) "
+                    "e/ou as habilidades (question_skills)."
                 ),
                 "reason": "has_corrections",
                 "corrections_count": corrections_count,
-                "hint": "Envie apenas title e/ou question_skills no body do PATCH.",
+                "hint": (
+                    "Envie apenas title, correct_answers e/ou question_skills "
+                    "no body do PATCH."
+                ),
             }), 422
 
         has_generations = bool(
@@ -2251,24 +2430,45 @@ def patch_gabarito_structure(gabarito_id: str):
             changes_dict["title"] = {"old": old_title, "new": new_title}
             return True
 
-        # --- Caminho: apenas title (com ou sem correções) ---
-        if title_only:
-            changes = {}
-            title_changed = _apply_title_change(changes)
-            if title_changed:
-                db.session.commit()
+        def _apply_correct_answers_change(changes_dict: Dict) -> bool:
+            if new_correct_answers_storage is None:
+                return False
+            if _correct_answers_storage_equal(
+                gabarito.correct_answers, new_correct_answers_storage
+            ):
+                return False
+            gabarito.correct_answers = new_correct_answers_storage
+            flag_modified(gabarito, "correct_answers")
+            changes_dict["correct_answers_updated"] = True
+            return True
+
+        def _maybe_recalc_or_ok(
+            *,
+            changes: Dict,
+            message: str,
+            flags: Optional[Dict[str, Any]] = None,
+            answers_changed: bool,
+            warn_pdf: bool = False,
+        ):
+            if answers_changed:
+                return _start_gabarito_recalculation(
+                    str(gabarito_id),
+                    user.get("id"),
+                    extra={
+                        "success": True,
+                        "message": message,
+                        "changes": changes if changes else None,
+                        **(flags or {}),
+                    },
+                )
             response_data = {
                 "success": True,
                 "gabarito_id": str(gabarito_id),
-                "message": (
-                    "Nome do gabarito atualizado com sucesso"
-                    if title_changed
-                    else "Nenhuma alteração no nome do gabarito"
-                ),
+                "message": message,
                 "changes": changes if changes else None,
-                "title_only": True,
+                **(flags or {}),
             }
-            if title_changed and has_generations:
+            if warn_pdf and has_generations:
                 response_data["warning"] = (
                     "Atenção: os cartões em PDF já gerados não refletem as alterações. "
                     "É necessário gerar os cartões novamente para que as mudanças "
@@ -2276,7 +2476,50 @@ def patch_gabarito_structure(gabarito_id: str):
                 )
             return jsonify(response_data), 200
 
-        # --- Caminho: apenas habilidades (+ title opcional; com ou sem correções) ---
+        # --- Caminho: apenas title (com ou sem correções) ---
+        if title_only:
+            changes = {}
+            title_changed = _apply_title_change(changes)
+            if title_changed:
+                db.session.commit()
+            return _maybe_recalc_or_ok(
+                changes=changes,
+                message=(
+                    "Nome do gabarito atualizado com sucesso"
+                    if title_changed
+                    else "Nenhuma alteração no nome do gabarito"
+                ),
+                flags={"title_only": True},
+                answers_changed=False,
+                warn_pdf=title_changed,
+            )
+
+        # --- Caminho: correct_answers (+ title opcional; sem skills/estrutura) ---
+        if answers_meta_only:
+            changes = {}
+            title_changed = _apply_title_change(changes)
+            answers_changed = _apply_correct_answers_change(changes)
+            if title_changed or answers_changed:
+                db.session.commit()
+
+            if answers_changed and title_changed:
+                message = "Gabarito e nome atualizados; recálculo iniciado"
+            elif answers_changed:
+                message = "Gabarito atualizado; recálculo iniciado"
+            elif title_changed:
+                message = "Nome do gabarito atualizado com sucesso"
+            else:
+                message = "Nenhuma alteração no gabarito"
+
+            return _maybe_recalc_or_ok(
+                changes=changes,
+                message=message,
+                flags={"answers_only": True},
+                answers_changed=answers_changed,
+                warn_pdf=title_changed and not answers_changed,
+            )
+
+        # --- Caminho: habilidades (+ title/correct_answers opcionais) ---
         if skills_only:
             question_skills_raw = data.get("question_skills")
             if not isinstance(question_skills_raw, dict) or not question_skills_raw:
@@ -2296,33 +2539,25 @@ def patch_gabarito_structure(gabarito_id: str):
             flag_modified(gabarito, "blocks_config")
             changes = {"skills_updated": bool(skills_changed)}
             title_changed = _apply_title_change(changes)
+            answers_changed = _apply_correct_answers_change(changes)
             db.session.commit()
 
-            if title_changed and skills_changed:
-                message = "Habilidades e nome do gabarito atualizados com sucesso"
-            elif title_changed:
-                message = "Nome do gabarito atualizado com sucesso"
-            elif skills_changed:
-                message = "Habilidades atualizadas com sucesso"
+            if answers_changed:
+                message = "Alterações salvas; recálculo iniciado"
+            elif skills_changed or title_changed:
+                message = "Alterações salvas com sucesso"
             else:
                 message = "Nenhuma alteração nas habilidades"
 
-            response_data = {
-                "success": True,
-                "gabarito_id": str(gabarito_id),
-                "message": message,
-                "changes": changes,
-                "skills_only": True,
-            }
-            if (title_changed or skills_changed) and has_generations and title_changed:
-                response_data["warning"] = (
-                    "Atenção: os cartões em PDF já gerados não refletem as alterações. "
-                    "É necessário gerar os cartões novamente para que as mudanças "
-                    "apareçam nos documentos impressos."
-                )
-            return jsonify(response_data), 200
+            return _maybe_recalc_or_ok(
+                changes=changes,
+                message=message,
+                flags={"skills_only": True},
+                answers_changed=answers_changed,
+                warn_pdf=title_changed and not answers_changed,
+            )
 
-        # 4. Edição estrutural completa (+ title opcional)
+        # 4. Edição estrutural completa (+ title/correct_answers opcionais)
         changes = {}
         
         # Valores atuais
@@ -2411,23 +2646,43 @@ def patch_gabarito_structure(gabarito_id: str):
         gabarito.template_block_4 = None
         gabarito.template_generated_at = None
         
-        # 10. Atualizar correct_answers se necessário (expandir ou reduzir)
+        # 10. Atualizar correct_answers (resize por num_questions e/ou payload explícito)
         if new_num_questions != old_num_questions:
             current_answers = gabarito.correct_answers or {}
-            new_correct_answers = {}
+            resized_answers = {}
             
-            # Copiar respostas existentes até o limite
             for q in range(1, new_num_questions + 1):
                 q_str = str(q)
                 if q <= old_num_questions and q_str in current_answers:
-                    new_correct_answers[q_str] = current_answers[q_str]
+                    resized_answers[q_str] = current_answers[q_str]
                 else:
-                    # Questões novas recebem valor padrão "A"
-                    new_correct_answers[q_str] = "A"
+                    resized_answers[q_str] = "A"
             
-            gabarito.correct_answers = new_correct_answers
+            gabarito.correct_answers = resized_answers
+
+        answers_changed = _apply_correct_answers_change(changes)
+        # Resize implícito também exige recálculo se já houver resultados
+        if (
+            not answers_changed
+            and new_num_questions != old_num_questions
+            and corrections_count > 0
+        ):
+            # Com correções o gate estrutural já bloqueia; mantido por segurança.
+            answers_changed = True
+            changes["correct_answers_updated"] = True
         
         db.session.commit()
+
+        if answers_changed:
+            return _start_gabarito_recalculation(
+                str(gabarito_id),
+                user.get("id"),
+                extra={
+                    "success": True,
+                    "message": "Estrutura e gabarito atualizados; recálculo iniciado",
+                    "changes": changes if changes else None,
+                },
+            )
         
         # 11. Preparar resposta
         response_data = {
@@ -2501,160 +2756,12 @@ def patch_gabarito_correct_answers(gabarito_id: str):
             return jsonify({"error": err}), 400
 
         gabarito.correct_answers = {str(k): v for k, v in normalized.items()}
+        flag_modified(gabarito, "correct_answers")
         db.session.commit()
 
-        # Criar job de recálculo (um item por AnswerSheetResult)
-        results = (
-            AnswerSheetResult.query.options(joinedload(AnswerSheetResult.student))
-            .filter_by(gabarito_id=gabarito_id)
-            .all()
-        )
-
-        job_id = str(uuid.uuid4())
-        items_meta = []
-        for r in results:
-            st = getattr(r, "student", None)
-            items_meta.append(
-                {
-                    "student_id": str(r.student_id) if r.student_id else None,
-                    "student_name": getattr(st, "name", "") if st else "",
-                }
-            )
-
-        create_job(
-            job_id,
-            len(items_meta),
-            gabarito_id=str(gabarito_id),
-            user_id=str(user.get("id")),
-            task_ids=[],
-            items_meta=items_meta if items_meta else None,
-            stage_message="Recalculando resultados...",
-        )
-
-        context = get_current_tenant_context()
-        city_id = str(context.city_id) if context else None
-        if not city_id:
-            return jsonify({"error": "Contexto de município não encontrado"}), 400
-
-        # Espelho em public.answer_sheet_generation_jobs: GET /recalculate-jobs/.../status
-        # em outro worker ou sem Redis ainda encontra o job (contadores/status).
-        try:
-            from app.services.answer_sheet_job_store import create_answer_sheet_job
-            from sqlalchemy.exc import IntegrityError
-
-            create_answer_sheet_job(
-                job_id,
-                len(items_meta),
-                str(gabarito_id),
-                str(user.get("id")),
-                [],
-                city_id,
-                scope_type="recalculate_gabarito",
-            )
-        except IntegrityError:
-            db.session.rollback()
-            logging.debug("Job de recálculo %s já existia na tabela (reuso)", job_id)
-        except Exception as db_job_err:
-            db.session.rollback()
-            logging.warning(
-                "Espelho DB do job de recálculo não criado (GET status pode falhar entre workers): %s",
-                db_job_err,
-            )
-
-        # Disparar task Celery (ou recálculo síncrono se broker/Redis indisponível)
-        from app.services.celery_tasks.answer_sheet_tasks import (
-            recalculate_answer_sheet_results_for_gabarito,
-            run_recalculate_answer_sheet_results_for_gabarito,
-        )
-        from app.services.progress_store import update_job
-        from app.services.answer_sheet_job_store import update_answer_sheet_job
-
-        task_id = None
-        recalculated_sync = False
-
-        def _run_sync_recalc() -> None:
-            run_recalculate_answer_sheet_results_for_gabarito(
-                str(gabarito_id), job_id, city_id
-            )
-
-        # Evita chamar apply_async quando algum Redis configurado não aceita TCP:
-        # o cliente tenta reconectar dezenas de vezes e segura a requisição ~20s+.
-        if any_configured_redis_tcp_unreachable():
-            logging.warning(
-                "Redis inacessível (pré-check TCP); recálculo síncrono para gabarito %s",
-                gabarito_id,
-            )
-            try:
-                _run_sync_recalc()
-                recalculated_sync = True
-            except Exception as sync_err:
-                logging.error(
-                    "Recálculo síncrono falhou para gabarito %s: %s",
-                    gabarito_id,
-                    sync_err,
-                    exc_info=True,
-                )
-                return jsonify(
-                    {
-                        "error": "Recálculo falhou (Redis inacessível e execução síncrona falhou).",
-                        "details": str(sync_err),
-                        "job_id": job_id,
-                    }
-                ), 500
-        else:
-            try:
-                # ignore_result reduz uso do result backend (Redis) ao publicar a task
-                task = recalculate_answer_sheet_results_for_gabarito.apply_async(
-                    args=[str(gabarito_id), job_id, city_id],
-                    ignore_result=True,
-                )
-                task_id = task.id
-                update_job(job_id, {"task_ids": [task.id]})
-                try:
-                    update_answer_sheet_job(job_id, {"task_ids": [task.id]})
-                except Exception as upd_db_err:
-                    logging.debug(
-                        "Não foi possível gravar task_ids no job DB %s: %s", job_id, upd_db_err
-                    )
-            except Exception as enqueue_err:
-                logging.warning(
-                    "Fila Celery indisponível (%s); executando recálculo síncrono",
-                    enqueue_err,
-                )
-                try:
-                    _run_sync_recalc()
-                    recalculated_sync = True
-                except Exception as sync_err:
-                    logging.error(
-                        "Recálculo síncrono falhou para gabarito %s: %s",
-                        gabarito_id,
-                        sync_err,
-                        exc_info=True,
-                    )
-                    return jsonify(
-                        {
-                            "error": "Recálculo falhou (Celery indisponível e execução síncrona falhou).",
-                            "details": str(sync_err),
-                            "job_id": job_id,
-                        }
-                    ), 500
-
-        payload_status = "completed" if recalculated_sync else "processing"
-
-        # Sempre 202: clientes que só aceitam 202 como “iniciou” quebravam com 200
-        # quando o recálculo rodava síncrono (Redis/Celery indisponível).
-        return (
-            jsonify(
-                {
-                    "status": payload_status,
-                    "job_id": job_id,
-                    "task_id": task_id,
-                    "gabarito_id": str(gabarito_id),
-                    "polling_url": f"/answer-sheets/recalculate-jobs/{job_id}/status",
-                    "recalculated_sync": recalculated_sync,
-                }
-            ),
-            202,
+        return _start_gabarito_recalculation(
+            str(gabarito_id),
+            user.get("id"),
         )
     except Exception as e:
         db.session.rollback()

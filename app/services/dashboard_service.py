@@ -2515,6 +2515,27 @@ class DashboardService:
             )
         return ranking
 
+    @staticmethod
+    def _parse_ranking_instrument_ids(filters: Dict[str, Any], multi_key: str, single_key: str) -> List[str]:
+        raw_multi = filters.get(multi_key)
+        ids: List[str] = []
+        if isinstance(raw_multi, (list, tuple)):
+            ids = [str(x).strip() for x in raw_multi if str(x).strip()]
+        elif raw_multi is not None and str(raw_multi).strip():
+            ids = [part.strip() for part in str(raw_multi).split(",") if part.strip()]
+        if not ids:
+            single = str(filters.get(single_key) or "").strip()
+            if single:
+                ids = [single]
+        seen: set[str] = set()
+        unique: List[str] = []
+        for item in ids:
+            if item in seen:
+                continue
+            seen.add(item)
+            unique.append(item)
+        return unique
+
     @classmethod
     def _build_teacher_ranking(
         cls,
@@ -2526,13 +2547,35 @@ class DashboardService:
         from sqlalchemy.dialects.postgresql import VARCHAR
 
         normalized_filters = filters or {}
-        evaluation_id = str(normalized_filters.get("evaluation_id") or "").strip()
-        answer_sheet_id = str(normalized_filters.get("answer_sheet_id") or "").strip()
+        evaluation_ids = cls._parse_ranking_instrument_ids(
+            normalized_filters, "evaluation_ids", "evaluation_id"
+        )
+        answer_sheet_ids = cls._parse_ranking_instrument_ids(
+            normalized_filters, "answer_sheet_ids", "answer_sheet_id"
+        )
+        evaluation_id = evaluation_ids[0] if evaluation_ids else ""
+        answer_sheet_id = answer_sheet_ids[0] if answer_sheet_ids else ""
         selected_school_id = str(normalized_filters.get("escola") or "").strip()
         selected_grade_id = str(normalized_filters.get("serie") or "").strip()
         selected_class_id = str(normalized_filters.get("turma") or "").strip()
         discipline_id = str(normalized_filters.get("disciplina") or "").strip()
-        use_answer_sheet = bool(answer_sheet_id and not evaluation_id)
+        use_answer_sheet = bool(answer_sheet_ids and not evaluation_ids)
+
+        # Multi-instrumento (ex.: 1º/2º LP+MAT): média igual-peso por aluno entre
+        # instrumentos, depois AVG por professor — equivalente ao GERAL do 4º ano.
+        instrument_ids = answer_sheet_ids if use_answer_sheet else evaluation_ids
+        if len(instrument_ids) > 1:
+            return cls._build_teacher_ranking_multi_instruments(
+                scope,
+                limit=limit,
+                filters=normalized_filters,
+                instrument_ids=instrument_ids,
+                use_answer_sheet=use_answer_sheet,
+                selected_school_id=selected_school_id,
+                selected_grade_id=selected_grade_id,
+                selected_class_id=selected_class_id,
+                discipline_id=discipline_id,
+            )
 
         teacher_alias = aliased(Teacher)
         class_grade_alias = aliased(Grade)
@@ -2720,6 +2763,206 @@ class DashboardService:
                     "total_evaluations": int(row.total_evaluations or 0),
                     "classes_count": int(row.classes_count or 0),
                     "grade_names": [str(name) for name in (row.grade_names or []) if name],
+                    "position": idx + 1,
+                }
+            )
+        return ranking
+
+    @classmethod
+    def _build_teacher_ranking_multi_instruments(
+        cls,
+        scope: Dict[str, Any],
+        *,
+        limit: Optional[int],
+        filters: Dict[str, Any],
+        instrument_ids: List[str],
+        use_answer_sheet: bool,
+        selected_school_id: str,
+        selected_grade_id: str,
+        selected_class_id: str,
+        discipline_id: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Unifica vários instrumentos (LP+MAT em dias distintos) como no 4º ano:
+        1) média aritmética igual-peso de grade/proficiency por aluno entre instrumentos;
+        2) AVG dessas médias por professor.
+        """
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
+        score_model = AnswerSheetResult if use_answer_sheet else EvaluationResult
+        teacher_alias = aliased(Teacher)
+        class_grade_alias = aliased(Grade)
+        student_grade_alias = aliased(Grade)
+
+        if discipline_id:
+            if use_answer_sheet:
+                score_grade_expr = cast(
+                    AnswerSheetResult.proficiency_by_subject[discipline_id]["grade"].astext, db.Float
+                )
+                score_prof_expr = cast(
+                    AnswerSheetResult.proficiency_by_subject[discipline_id]["proficiency"].astext, db.Float
+                )
+            else:
+                score_grade_expr = cast(
+                    EvaluationResult.subject_results[discipline_id]["grade"].astext, db.Float
+                )
+                score_prof_expr = cast(
+                    EvaluationResult.subject_results[discipline_id]["proficiency"].astext, db.Float
+                )
+        else:
+            score_grade_expr = score_model.grade
+            score_prof_expr = score_model.proficiency
+
+        instrument_filter = (
+            score_model.gabarito_id.in_(instrument_ids)
+            if use_answer_sheet
+            else score_model.test_id.in_(instrument_ids)
+        )
+        result_class_match = (
+            Student.class_id == Class.id
+            if use_answer_sheet
+            else or_(
+                score_model.class_id_snapshot == Class.id,
+                and_(
+                    score_model.class_id_snapshot.is_(None),
+                    Student.class_id == Class.id,
+                ),
+            )
+        )
+        discipline_present = (
+            score_prof_expr.isnot(None) if discipline_id else True
+        )
+
+        # Passo 1: por (professor, aluno) = média igual-peso entre instrumentos.
+        per_student = (
+            db.session.query(
+                TeacherClass.teacher_id.label("teacher_id"),
+                Student.id.label("student_id"),
+                func.avg(score_grade_expr).label("student_grade"),
+                func.avg(score_prof_expr).label("student_proficiency"),
+                func.count(distinct(
+                    score_model.gabarito_id if use_answer_sheet else score_model.test_id
+                )).label("instruments_count"),
+                func.array_remove(
+                    func.array_agg(
+                        distinct(func.coalesce(class_grade_alias.name, student_grade_alias.name))
+                    ),
+                    None,
+                ).label("grade_names"),
+                func.array_remove(
+                    func.array_agg(distinct(TeacherClass.class_id)),
+                    None,
+                ).label("class_ids"),
+            )
+            .select_from(TeacherClass)
+            .join(Class, Class.id == TeacherClass.class_id)
+            .join(Student, Student.class_id == Class.id)
+            .outerjoin(class_grade_alias, class_grade_alias.id == Class.grade_id)
+            .outerjoin(student_grade_alias, student_grade_alias.id == Student.grade_id)
+            .join(
+                score_model,
+                and_(
+                    score_model.student_id == Student.id,
+                    instrument_filter,
+                    discipline_present,
+                    result_class_match,
+                ),
+            )
+        )
+
+        school_ids = scope.get("school_ids") or []
+        city_id = scope.get("city_id")
+        if school_ids:
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+            if not school_ids_str:
+                return []
+            per_student = per_student.filter(cast(Class._school_id, VARCHAR).in_(school_ids_str))
+        elif city_id:
+            municipal_school_ids = [
+                str(row[0])
+                for row in School.query.with_entities(School.id).filter(School.city_id == str(city_id)).all()
+                if row[0]
+            ]
+            if not municipal_school_ids:
+                return []
+            per_student = per_student.filter(cast(Class._school_id, VARCHAR).in_(municipal_school_ids))
+        if selected_school_id:
+            per_student = per_student.filter(Class._school_id == selected_school_id)
+        if selected_grade_id:
+            per_student = per_student.filter(
+                or_(Class.grade_id == selected_grade_id, Student.grade_id == selected_grade_id)
+            )
+        if selected_class_id:
+            per_student = per_student.filter(Student.class_id == selected_class_id)
+
+        per_student_sq = per_student.group_by(TeacherClass.teacher_id, Student.id).subquery()
+
+        # Passo 2: AVG das médias do aluno por professor (igual ao AVG do GERAL no 4º).
+        avg_grade_expr = func.coalesce(func.avg(per_student_sq.c.student_grade), 0)
+        avg_proficiency_expr = func.coalesce(func.avg(per_student_sq.c.student_proficiency), 0)
+        total_evaluations_expr = func.coalesce(func.max(per_student_sq.c.instruments_count), 0)
+
+        query = (
+            db.session.query(
+                teacher_alias.id.label("teacher_id"),
+                teacher_alias.name.label("teacher_name"),
+                User.email.label("teacher_email"),
+                avg_grade_expr.label("average_grade"),
+                avg_proficiency_expr.label("average_proficiency"),
+                total_evaluations_expr.label("total_evaluations"),
+                func.count(distinct(per_student_sq.c.student_id)).label("students_count"),
+            )
+            .select_from(teacher_alias)
+            .join(per_student_sq, per_student_sq.c.teacher_id == teacher_alias.id)
+            .outerjoin(User, User.id == teacher_alias.user_id)
+            .group_by(teacher_alias.id, teacher_alias.name, User.email)
+            .having(func.count(distinct(per_student_sq.c.student_id)) > 0)
+            .order_by(avg_proficiency_expr.desc(), avg_grade_expr.desc())
+        )
+
+        # grade_names / classes_count: agrega em Python a partir do subquery raw.
+        grade_names_by_teacher: Dict[str, List[str]] = {}
+        class_ids_by_teacher: Dict[str, set] = {}
+        for row in db.session.query(
+            per_student_sq.c.teacher_id,
+            per_student_sq.c.grade_names,
+            per_student_sq.c.class_ids,
+        ).all():
+            tid = str(row.teacher_id)
+            names = grade_names_by_teacher.setdefault(tid, [])
+            for name in row.grade_names or []:
+                if name and str(name) not in names:
+                    names.append(str(name))
+            class_ids_by_teacher.setdefault(tid, set()).update(
+                [cid for cid in (row.class_ids or []) if cid]
+            )
+
+        def _classification_from_proficiency(proficiency: float) -> str:
+            if proficiency < 200:
+                return "Abaixo do Básico"
+            if proficiency < 500:
+                return "Básico"
+            if proficiency < 750:
+                return "Adequado"
+            return "Avançado"
+
+        effective_limit = limit if isinstance(limit, int) and limit > 0 else DashboardService.MAX_LIST_SIZE
+        ranking: List[Dict[str, Any]] = []
+        for idx, row in enumerate(query.limit(effective_limit).all()):
+            tid = str(row.teacher_id)
+            average_proficiency = float(row.average_proficiency or 0)
+            ranking.append(
+                {
+                    "teacher_id": row.teacher_id,
+                    "teacher_name": row.teacher_name,
+                    "teacher_email": row.teacher_email,
+                    "average_score": float(row.average_grade or 0),
+                    "average_proficiency": average_proficiency,
+                    "classification": _classification_from_proficiency(average_proficiency),
+                    "total_evaluations": int(row.total_evaluations or 0),
+                    "classes_count": len(class_ids_by_teacher.get(tid) or []),
+                    "grade_names": grade_names_by_teacher.get(tid) or [],
                     "position": idx + 1,
                 }
             )

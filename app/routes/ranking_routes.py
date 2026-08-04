@@ -25,19 +25,63 @@ def _clean_arg(value: str | None, *, allow_all: bool = False) -> str | None:
     return cleaned
 
 
+def _parse_id_list(args, *, multi_key: str, single_keys: tuple[str, ...]) -> list[str]:
+    """Aceita CSV em multi_key ou um único ID em qualquer single_key (compatibilidade)."""
+    ids: list[str] = []
+    raw_multi = args.get(multi_key)
+    if raw_multi and str(raw_multi).strip():
+        ids = [part.strip() for part in str(raw_multi).split(",") if part.strip()]
+    if not ids:
+        for key in single_keys:
+            single = _clean_arg(args.get(key))
+            if single:
+                ids = [single]
+                break
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in ids:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
 def parse_ranking_request_args(args) -> Tuple[str, int, int, Dict[str, str]]:
     ranking_type = (args.get("ranking_type") or "general").strip().lower()
     page = int(args.get("page", 1))
     per_page = int(args.get("per_page", 20))
     avaliacao = _clean_arg(args.get("avaliacao"))
     gabarito_id = _clean_arg(args.get("gabarito_id"))
-    evaluation_id = _clean_arg(args.get("evaluation_id"))
-    answer_sheet_id = _clean_arg(args.get("answer_sheet_id"))
+
+    evaluation_ids = _parse_id_list(
+        args, multi_key="evaluation_ids", single_keys=("evaluation_id",)
+    )
+    answer_sheet_ids = _parse_id_list(
+        args, multi_key="answer_sheet_ids", single_keys=("answer_sheet_id", "gabarito_id")
+    )
+
+    # Compat: campos singulares continuam preenchidos com o primeiro ID.
+    evaluation_id = evaluation_ids[0] if evaluation_ids else None
+    answer_sheet_id = answer_sheet_ids[0] if answer_sheet_ids else None
 
     if ranking_type == "specific_evaluation" and not evaluation_id:
         evaluation_id = avaliacao
+        if evaluation_id:
+            evaluation_ids = [evaluation_id]
     if ranking_type == "specific_answer_sheet" and not answer_sheet_id:
         answer_sheet_id = avaliacao or gabarito_id
+        if answer_sheet_id:
+            answer_sheet_ids = [answer_sheet_id]
+
+    # Fallback legado: "avaliacao" genérico quando nenhum ID explícito veio.
+    if not evaluation_ids and not answer_sheet_ids and avaliacao:
+        if ranking_type == "specific_answer_sheet":
+            answer_sheet_ids = [avaliacao]
+            answer_sheet_id = avaliacao
+        else:
+            evaluation_ids = [avaliacao]
+            evaluation_id = avaliacao
 
     filters = {
         "scope": (_clean_arg(args.get("scope")) or "").lower() or None,
@@ -52,6 +96,9 @@ def parse_ranking_request_args(args) -> Tuple[str, int, int, Dict[str, str]]:
         "gabarito_id": gabarito_id,
         "evaluation_id": evaluation_id,
         "answer_sheet_id": answer_sheet_id,
+        # Listas CSV — consumidas por _build_teacher_ranking (1º/2º LP+MAT).
+        "evaluation_ids": ",".join(evaluation_ids) if evaluation_ids else None,
+        "answer_sheet_ids": ",".join(answer_sheet_ids) if answer_sheet_ids else None,
     }
     return ranking_type, page, per_page, filters
 
@@ -78,11 +125,14 @@ def validate_ranking_filters(ranking_type: str, filters: Dict[str, str]) -> None
     if filtros_aplicados < 2:
         raise ValueError("É necessário aplicar pelo menos 2 filtros válidos (excluindo 'all').")
 
-    if ranking_type == "specific_evaluation" and not filters.get("evaluation_id"):
+    has_evaluation = bool(filters.get("evaluation_id") or filters.get("evaluation_ids"))
+    has_answer_sheet = bool(filters.get("answer_sheet_id") or filters.get("answer_sheet_ids"))
+
+    if ranking_type == "specific_evaluation" and not has_evaluation:
         raise ValueError(
             "Selecione uma avaliação no filtro 'avaliacao' para ranking_type=specific_evaluation."
         )
-    if ranking_type == "specific_answer_sheet" and not filters.get("answer_sheet_id"):
+    if ranking_type == "specific_answer_sheet" and not has_answer_sheet:
         raise ValueError(
             "Selecione um cartão resposta no filtro 'avaliacao' para ranking_type=specific_answer_sheet."
         )
@@ -101,7 +151,8 @@ def ranking_report():
       - scope: turma | escola | municipio
       - estado, municipio, escola, serie, turma, periodo
       - avaliacao (id selecionado na lista de filtros)
-      - evaluation_id e answer_sheet_id seguem aceitos por compatibilidade
+      - evaluation_id / evaluation_ids (CSV) — multi para unificar LP+MAT (ex.: 1º/2º ano)
+      - answer_sheet_id / answer_sheet_ids (CSV) — idem para cartão-resposta
       - page, per_page
     """
     try:

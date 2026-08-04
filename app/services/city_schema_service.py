@@ -1278,6 +1278,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_gabaritos (
     test_id VARCHAR REFERENCES "{schema}".test(id),
     class_id UUID REFERENCES "{schema}".class(id),
     grade_id UUID REFERENCES public.grade(id),
+    grades JSON,
     num_questions INTEGER NOT NULL,
     use_blocks BOOLEAN DEFAULT false,
     blocks_config JSON,
@@ -1309,6 +1310,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_gabaritos (
     last_generation_job_id VARCHAR(36)
 );
 COMMENT ON TABLE "{schema}".answer_sheet_gabaritos IS 'Gabaritos de cartões resposta';
+COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.grades IS 'Séries aplicáveis ao gabarito: [{{id, name}}, ...]';
 
 CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_generations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

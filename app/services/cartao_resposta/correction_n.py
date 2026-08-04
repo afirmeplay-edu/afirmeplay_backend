@@ -499,7 +499,7 @@ class AnswerSheetCorrectionN:
                 'municipality': gabarito_obj.municipality or '',
                 'state': gabarito_obj.state or '',
                 'institution': gabarito_obj.institution or '',
-                'grade_name': gabarito_obj.grade_name or gabarito_obj.title or ''
+                'grade_name': (gabarito_obj.grade_name or '')
             }
             
             # Configuração de blocos

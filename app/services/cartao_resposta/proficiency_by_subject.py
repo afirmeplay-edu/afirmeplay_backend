@@ -55,24 +55,31 @@ def infer_has_matematica_from_blocks_config(blocks_config: Optional[Dict]) -> bo
     return False
 
 
-def course_name_and_has_matematica_for_gabarito(gabarito_id: Optional[str]) -> Tuple[str, bool]:
+def course_name_and_has_matematica_for_gabarito(
+    gabarito_id: Optional[str],
+    serie_id: Optional[str] = None,
+) -> Tuple[str, bool]:
     """
-    Curso (a partir de grade_name/título) e se o gabarito inclui Matemática nos blocos.
-    Usado em agregações/API para alinhar regra do GERAL sem depender só do que foi persistido
-    em AnswerSheetResult antes de um recálculo em massa.
+    Curso (a partir da série do gabarito / filtro serie — NUNCA do title) e se inclui Matemática.
+    Usado em agregações/API para alinhar regra do GERAL.
 
-    Fallback: se blocks_config não indicar disciplinas, usa presença de "matem" no título.
+    Fallback de has_matematica: se blocks_config não indicar, usa "matem" no título só como
+    heurística de disciplina (não de série).
     """
     if not gabarito_id:
-        return infer_course_name_from_grade(""), False
+        return "", False
     try:
         from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.services.cartao_resposta.gabarito_grades import course_meta_for_gabarito_serie
 
         gab = AnswerSheetGabarito.query.get(str(gabarito_id).strip())
         if not gab:
-            return infer_course_name_from_grade(""), False
-        grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gab)
-        course_name = infer_course_name_from_grade(grade_name)
+            return "", False
+        course_name, grade_label, _ = course_meta_for_gabarito_serie(gab, serie_id)
+        if not course_name:
+            # Única série resolvível via resolver clássico (sem title)
+            grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gab)
+            course_name = infer_course_name_from_grade(grade_name) if grade_name else ""
         bc = getattr(gab, "blocks_config", None) or {}
         if isinstance(bc, str):
             import json
@@ -88,10 +95,10 @@ def course_name_and_has_matematica_for_gabarito(gabarito_id: Optional[str]) -> T
             title = (gab.title or "").lower()
             if "matem" in title:
                 has_matematica = True
-        return course_name, has_matematica
+        return course_name or "", has_matematica
     except Exception as e:
         logger.debug("course_name_and_has_matematica_for_gabarito: %s", e)
-        return infer_course_name_from_grade(""), False
+        return "", False
 
 
 def calcular_proficiencia_por_disciplina(

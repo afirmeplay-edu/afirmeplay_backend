@@ -1003,19 +1003,30 @@ def generate_answer_sheets_batch_async(
                 _state = (city.state or '') if city else ''
                 _school_id = None
                 _school_name = ''
-                _grade_id = None
-                _grade_name = ''
                 _class_id = None
-                if generated_pdfs and scope != 'city':
-                    first_class = Class.query.get(generated_pdfs[0]['class_id'])
-                    if first_class:
+                classes_for_grades = []
+                if generated_pdfs:
+                    class_ids_gen = list({str(p['class_id']) for p in generated_pdfs if p.get('class_id')})
+                    if class_ids_gen:
+                        classes_for_grades = Class.query.filter(Class.id.in_(class_ids_gen)).all()
+                    if scope != 'city' and classes_for_grades:
+                        first_class = classes_for_grades[0]
                         if first_class.school_id:
                             _school_id = str(first_class.school_id)
                             _school_name = (first_class.school.name or '') if first_class.school else ''
-                        if first_class.grade_id:
-                            _grade_id = first_class.grade_id
-                            _grade_name = (first_class.grade.name or '') if first_class.grade else generated_pdfs[0].get('grade_name', '')
-                        _class_id = first_class.id
+                        if scope == 'class' and len(classes_for_grades) == 1:
+                            _class_id = first_class.id
+                from app.services.cartao_resposta.gabarito_grades import (
+                    apply_grades_to_gabarito,
+                    grades_from_classes,
+                    get_gabarito_grades,
+                    merge_grade_sources,
+                )
+                grades_from_test = (test_data or {}).get('grades')
+                grades_resolved = merge_grade_sources(
+                    payload_grades=grades_from_test,
+                    classes=classes_for_grades,
+                )
                 uniq_classes = len({str(p['class_id']) for p in generated_pdfs}) if generated_pdfs else 0
                 updated = 0
                 for gabarito_id in gabarito_ids:
@@ -1031,9 +1042,13 @@ def generate_answer_sheets_batch_async(
                     gabarito.state = _state
                     gabarito.school_id = _school_id
                     gabarito.school_name = _school_name
-                    gabarito.grade_id = _grade_id
-                    gabarito.grade_name = _grade_name
                     gabarito.class_id = _class_id
+                    # Séries: payload/turmas da geração; se já houver grades no gabarito e
+                    # a geração não trouxe novas, mantém as existentes.
+                    if grades_resolved:
+                        apply_grades_to_gabarito(gabarito, grades_resolved)
+                    elif not get_gabarito_grades(gabarito) and classes_for_grades:
+                        apply_grades_to_gabarito(gabarito, grades_from_classes(classes_for_grades))
                     gabarito.last_generation_classes_count = uniq_classes
                     gabarito.last_generation_students_count = total_students
                     updated += 1
@@ -1349,15 +1364,26 @@ def build_zip_and_upload_answer_sheets(
                 _scope = scope
                 _municipality = (city.name or '') if city else ''
                 _state = (city.state or '') if city else ''
-                _school_id = _school_name = _grade_id = _grade_name = _class_id = None
+                _school_id = _school_name = _class_id = None
+                classes_for_grades = []
                 if group_results and city:
-                    first_class = Class.query.get(group_results[0].get('class_id'))
-                    if first_class:
+                    class_ids_chord = list({
+                        str(r.get('class_id')) for r in group_results if r.get('class_id')
+                    })
+                    if class_ids_chord:
+                        classes_for_grades = Class.query.filter(Class.id.in_(class_ids_chord)).all()
+                    if classes_for_grades:
+                        first_class = classes_for_grades[0]
                         _school_id = str(first_class.school_id) if first_class.school_id else None
                         _school_name = (first_class.school.name or '') if first_class.school else ''
-                        _grade_id = first_class.grade_id
-                        _grade_name = (first_class.grade.name or '') if first_class.grade else ''
-                        _class_id = first_class.id
+                        if _scope == 'class' and len(classes_for_grades) == 1:
+                            _class_id = first_class.id
+                    from app.services.cartao_resposta.gabarito_grades import (
+                        apply_grades_to_gabarito,
+                        grades_from_classes,
+                        get_gabarito_grades,
+                    )
+                    grades_resolved = grades_from_classes(classes_for_grades)
 
                     for gabarito_id in gabarito_ids:
                         gab = db.session.query(AnswerSheetGabarito).filter_by(id=gabarito_id).first()
@@ -1372,9 +1398,11 @@ def build_zip_and_upload_answer_sheets(
                         gab.state = _state
                         gab.school_id = _school_id
                         gab.school_name = _school_name
-                        gab.grade_id = _grade_id
-                        gab.grade_name = _grade_name
                         gab.class_id = _class_id
+                        if grades_resolved:
+                            apply_grades_to_gabarito(gab, grades_resolved)
+                        elif not get_gabarito_grades(gab) and classes_for_grades:
+                            apply_grades_to_gabarito(gab, grades_from_classes(classes_for_grades))
                         gab.last_generation_classes_count = len([r for r in group_results if r.get('total_students', 0) > 0])
                         gab.last_generation_students_count = total_students
                     try:

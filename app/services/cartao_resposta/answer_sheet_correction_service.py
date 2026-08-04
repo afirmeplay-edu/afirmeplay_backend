@@ -252,14 +252,17 @@ class AnswerSheetCorrectionService:
         """Calcula proficiência e classificação"""
         try:
             from app.services.evaluation_calculator import EvaluationCalculator, CourseLevel, Subject
-            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+            from app.services.cartao_resposta.course_name_resolver import (
+                infer_course_name_from_grade,
+                resolve_grade_name_for_proficiency,
+            )
             
-            # Inferir nível e disciplina do gabarito
+            # Inferir nível e disciplina do gabarito (série — nunca title)
             course_level = CourseLevel.ANOS_INICIAIS
             subject = Subject.OUTRAS
             
-            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
-            course_name = infer_course_name_from_grade(grade_name)
+            grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gabarito_obj)
+            course_name = infer_course_name_from_grade(grade_name) if grade_name else 'Anos Iniciais'
             if course_name == 'Educação Infantil':
                 course_level = CourseLevel.EDUCACAO_INFANTIL
             elif course_name == 'Anos Iniciais':

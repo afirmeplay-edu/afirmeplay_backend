@@ -184,15 +184,15 @@ class AnswerSheetCorrection:
                 score_percentage=percentage,
                 gabarito_id=gabarito_id
             )
-            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+            from app.services.cartao_resposta.course_name_resolver import (
+                infer_course_name_from_grade,
+                resolve_grade_name_for_proficiency,
+            )
             from app.services.evaluation_calculator import EvaluationCalculator
             from app.models.answerSheetGabarito import AnswerSheetGabarito
             gabarito_obj_grade = AnswerSheetGabarito.query.get(gabarito_id)
-            grade_name = (
-                (gabarito_obj_grade.grade_name if gabarito_obj_grade else "")
-                or (gabarito_obj_grade.title if gabarito_obj_grade else "")
-            )
-            course_name = infer_course_name_from_grade(grade_name)
+            grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gabarito_obj_grade)
+            course_name = infer_course_name_from_grade(grade_name) if grade_name else "Anos Iniciais"
             # Inferir se há Matemática no gabarito para alinhar regra do GERAL
             has_matematica = False
             try:
@@ -343,7 +343,10 @@ class AnswerSheetCorrection:
         """
         try:
             from app.services.evaluation_calculator import EvaluationCalculator, CourseLevel, Subject
-            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+            from app.services.cartao_resposta.course_name_resolver import (
+                infer_course_name_from_grade,
+                resolve_grade_name_for_proficiency,
+            )
             
             # Tentar buscar informações do gabarito para inferir nível e disciplina
             course_level = CourseLevel.ANOS_INICIAIS  # Padrão
@@ -353,9 +356,9 @@ class AnswerSheetCorrection:
                 from app.models.answerSheetGabarito import AnswerSheetGabarito
                 gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
                 if gabarito_obj:
-                    # Tentar inferir nível de curso do grade_name
-                    grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
-                    course_name = infer_course_name_from_grade(grade_name)
+                    # Inferir nível de curso da série (nunca do title)
+                    grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gabarito_obj)
+                    course_name = infer_course_name_from_grade(grade_name) if grade_name else "Anos Iniciais"
                     if course_name == 'Educação Infantil':
                         course_level = CourseLevel.EDUCACAO_INFANTIL
                     elif course_name == 'Anos Iniciais':

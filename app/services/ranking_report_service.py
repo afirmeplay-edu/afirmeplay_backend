@@ -509,6 +509,25 @@ class RankingReportService:
         )
 
     @classmethod
+    def _teacher_average_score_from_proficiency(
+        cls,
+        *,
+        average_proficiency: float,
+        grade_names: List[str],
+        filters: Dict[str, Any],
+    ) -> float:
+        """Nota agregada canônica do professor: calculate_grade(média_prof), não AVG das notas."""
+        from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
+
+        return float(
+            aggregated_grade_from_proficiency(
+                float(average_proficiency or 0),
+                cls._resolve_teacher_course_label(grade_names, filters),
+                subject_name=cls._resolve_subject_name_for_filters(filters),
+            )
+        )
+
+    @classmethod
     def _build_general_course_sections(
         cls,
         school_rows: List[Dict[str, Any]],
@@ -1028,8 +1047,25 @@ class RankingReportService:
             filters,
         )
 
+        normalized_teacher_rows: List[Dict[str, Any]] = []
+        for row in teacher_rows:
+            grade_names = [str(name) for name in (row.get("grade_names") or []) if name]
+            average_proficiency = float(row.get("average_proficiency") or 0)
+            normalized_teacher_rows.append(
+                {
+                    **row,
+                    "grade_names": grade_names,
+                    "average_proficiency": average_proficiency,
+                    "average_score": cls._teacher_average_score_from_proficiency(
+                        average_proficiency=average_proficiency,
+                        grade_names=grade_names,
+                        filters=filters,
+                    ),
+                }
+            )
+
         teacher_sorted = sorted(
-            teacher_rows,
+            normalized_teacher_rows,
             key=lambda row: (
                 -float(row.get("average_proficiency") or 0),
                 -float(row.get("average_score") or 0),
@@ -1041,8 +1077,9 @@ class RankingReportService:
         for idx, row in enumerate(teacher_sorted):
             teacher_id = str(row.get("teacher_id") or "")
             grade_names = [str(name) for name in (row.get("grade_names") or []) if name]
+            average_proficiency = float(row.get("average_proficiency") or 0)
             classification = cls._classification_for_teacher(
-                average_proficiency=float(row.get("average_proficiency") or 0),
+                average_proficiency=average_proficiency,
                 grade_names=grade_names,
                 filters=filters,
             )
@@ -1068,7 +1105,7 @@ class RankingReportService:
                     "participating_students": participating_students,
                     "adequado_avancado_count": adequado_avancado_count,
                     "adequado_avancado_pct": adequado_avancado_pct,
-                    "average_proficiency": round(float(row.get("average_proficiency") or 0), 1),
+                    "average_proficiency": round(average_proficiency, 1),
                     "average_score": round(float(row.get("average_score") or 0), 1),
                     "classification": classification or "N/A",
                     "level_tag": classification or "N/A",
@@ -2765,9 +2802,35 @@ class RankingReportService:
             cls._resolve_school_ids_for_scope(scope, req.filters),
             req.filters,
         )
-        total = len(teachers)
+        normalized_teachers: List[Dict[str, Any]] = []
+        for row in teachers:
+            grade_names = [str(name) for name in (row.get("grade_names") or []) if name]
+            average_proficiency = float(row.get("average_proficiency") or 0)
+            normalized_teachers.append(
+                {
+                    **row,
+                    "grade_names": grade_names,
+                    "average_proficiency": average_proficiency,
+                    "average_score": cls._teacher_average_score_from_proficiency(
+                        average_proficiency=average_proficiency,
+                        grade_names=grade_names,
+                        filters=req.filters,
+                    ),
+                }
+            )
+        normalized_teachers.sort(
+            key=lambda row: (
+                -float(row.get("average_proficiency") or 0),
+                -float(row.get("average_score") or 0),
+                str(row.get("teacher_name") or ""),
+            )
+        )
+        for idx, row in enumerate(normalized_teachers):
+            row["position"] = idx + 1
+
+        total = len(normalized_teachers)
         offset = (req.page - 1) * req.per_page
-        selected = teachers[offset : offset + req.per_page]
+        selected = normalized_teachers[offset : offset + req.per_page]
         items = []
         for row in selected:
             teacher_id = str(row.get("teacher_id") or "")
@@ -2794,8 +2857,8 @@ class RankingReportService:
                     "teacher_id": row.get("teacher_id"),
                     "teacher_name": row.get("teacher_name"),
                     "teacher_email": row.get("teacher_email"),
-                    "average_score": row.get("average_score"),
-                    "average_proficiency": row.get("average_proficiency"),
+                    "average_score": round(float(row.get("average_score") or 0), 1),
+                    "average_proficiency": round(float(row.get("average_proficiency") or 0), 1),
                     "classification": classification,
                     "level_tag": classification,
                     "total_evaluations": row.get("total_evaluations"),

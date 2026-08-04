@@ -28,6 +28,9 @@ class AnswerSheetGabarito(db.Model):
     test_id = db.Column(db.String, db.ForeignKey('tenant.test.id'), nullable=True)
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('tenant.class.id'), nullable=True)
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'), nullable=True)
+    # Séries aplicáveis (1..N): [{"id": "<uuid>", "name": "9º Ano"}, ...]
+    # Fonte da verdade para multi-série; grade_id/grade_name = atalho quando há exatamente 1.
+    grades = db.Column(JSON, nullable=True)
     
     # Configuração do cartão
     num_questions = db.Column(db.Integer, nullable=False)

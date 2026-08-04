@@ -310,6 +310,43 @@ class TestTeachersTopSection(unittest.TestCase):
         self.assertEqual(item["classification"], "Adequado")
         self.assertEqual(item["level_tag"], "Adequado")
 
+    def test_teachers_top_derives_score_from_proficiency_not_avg_grades(self):
+        # AVG das notas dos alunos seria ~8.5 (com teto em 10); canônico = calculate_grade(287.4) = 8.7
+        teacher_rows = [
+            {
+                "teacher_id": "teacher-1",
+                "teacher_name": "IZA KEYLLA",
+                "teacher_email": "iza@example.com",
+                "average_proficiency": 287.4,
+                "average_score": 8.5,
+                "classification": "Avançado",
+                "grade_names": ["1º Ano"],
+            }
+        ]
+        with patch.object(RankingReportService, "_build_school_grade_teacher_map", return_value={}):
+            with patch.object(RankingReportService, "_build_teacher_school_map", return_value={}):
+                with patch.object(
+                    RankingReportService,
+                    "_resolve_subject_name_for_filters",
+                    return_value="Português",
+                ):
+                    sections = RankingReportService._build_model_sections(
+                        school_rows=[],
+                        schools_by_course_sections=[],
+                        series_by_school_sections=[],
+                        classes_by_series_sections=[],
+                        class_rows=[],
+                        teacher_rows=teacher_rows,
+                        filters={
+                            "evaluation_id": "eval-1",
+                            "disciplina": "subj-lp",
+                        },
+                    )
+        item = sections["teachers_top"]["items"][0]
+        self.assertEqual(item["average_proficiency"], 287.4)
+        self.assertEqual(item["average_score"], 8.7)
+        self.assertNotEqual(item["average_score"], 8.5)
+
     def test_teachers_top_series_class_name_includes_grade_and_class(self):
         teacher_rows = [
             {

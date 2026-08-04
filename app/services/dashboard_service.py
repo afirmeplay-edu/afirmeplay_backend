@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,6 +20,7 @@ from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
 from app.models.grades import Grade
+from app.models.subject import Subject
 from app.models.teacher import Teacher
 from app.models.teacherClass import TeacherClass
 from app.models.test import Test
@@ -31,6 +33,7 @@ from app.services.calendar_event_service import CalendarEventService
 from app.models.evaluationResult import EvaluationResult
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.answerSheetResult import AnswerSheetResult
+from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
 from app.utils.uuid_helpers import ensure_uuid_list, uuid_list_to_str
 from app.permissions.utils import (
     get_manager_school,
@@ -2537,6 +2540,49 @@ class DashboardService:
         return unique
 
     @classmethod
+    def _course_label_from_grade_names(cls, grade_names: List[str]) -> str:
+        for name in grade_names or []:
+            normalized = str(name or "").strip().lower()
+            if "anos iniciais" in normalized or "inicial" in normalized:
+                return "Anos Iniciais"
+            if "anos finais" in normalized or "final" in normalized:
+                return "Anos Finais"
+            numeric_match = re.search(r"\d+", normalized)
+            if numeric_match:
+                grade_number = int(numeric_match.group(0))
+                if 1 <= grade_number <= 5:
+                    return "Anos Iniciais"
+                if 6 <= grade_number <= 9:
+                    return "Anos Finais"
+        return "Anos Iniciais"
+
+    @classmethod
+    def _subject_name_from_discipline_id(cls, discipline_id: str) -> str:
+        sid = str(discipline_id or "").strip()
+        if not sid:
+            return "GERAL"
+        row = Subject.query.filter(Subject.id == sid).first()
+        if row and row.name:
+            return str(row.name)
+        return "GERAL"
+
+    @classmethod
+    def _teacher_score_from_proficiency(
+        cls,
+        average_proficiency: float,
+        grade_names: List[str],
+        discipline_id: str = "",
+    ) -> float:
+        """Nota agregada canônica: calculate_grade(média_prof), não AVG das notas dos alunos."""
+        return float(
+            aggregated_grade_from_proficiency(
+                float(average_proficiency or 0),
+                cls._course_label_from_grade_names(grade_names),
+                subject_name=cls._subject_name_from_discipline_id(discipline_id),
+            )
+        )
+
+    @classmethod
     def _build_teacher_ranking(
         cls,
         scope: Dict[str, Any],
@@ -2752,17 +2798,20 @@ class DashboardService:
         effective_limit = limit if isinstance(limit, int) and limit > 0 else DashboardService.MAX_LIST_SIZE
         for idx, row in enumerate(query.limit(effective_limit).all()):
             average_proficiency = float(row.average_proficiency or 0)
+            grade_names = [str(name) for name in (row.grade_names or []) if name]
             ranking.append(
                 {
                     "teacher_id": row.teacher_id,
                     "teacher_name": row.teacher_name,
                     "teacher_email": row.teacher_email,
-                    "average_score": float(row.average_grade or 0),
+                    "average_score": cls._teacher_score_from_proficiency(
+                        average_proficiency, grade_names, discipline_id
+                    ),
                     "average_proficiency": average_proficiency,
                     "classification": _classification_from_proficiency(average_proficiency),
                     "total_evaluations": int(row.total_evaluations or 0),
                     "classes_count": int(row.classes_count or 0),
-                    "grade_names": [str(name) for name in (row.grade_names or []) if name],
+                    "grade_names": grade_names,
                     "position": idx + 1,
                 }
             )
@@ -2952,17 +3001,20 @@ class DashboardService:
         for idx, row in enumerate(query.limit(effective_limit).all()):
             tid = str(row.teacher_id)
             average_proficiency = float(row.average_proficiency or 0)
+            grade_names = grade_names_by_teacher.get(tid) or []
             ranking.append(
                 {
                     "teacher_id": row.teacher_id,
                     "teacher_name": row.teacher_name,
                     "teacher_email": row.teacher_email,
-                    "average_score": float(row.average_grade or 0),
+                    "average_score": cls._teacher_score_from_proficiency(
+                        average_proficiency, grade_names, discipline_id
+                    ),
                     "average_proficiency": average_proficiency,
                     "classification": _classification_from_proficiency(average_proficiency),
                     "total_evaluations": int(row.total_evaluations or 0),
                     "classes_count": len(class_ids_by_teacher.get(tid) or []),
-                    "grade_names": grade_names_by_teacher.get(tid) or [],
+                    "grade_names": grade_names,
                     "position": idx + 1,
                 }
             )

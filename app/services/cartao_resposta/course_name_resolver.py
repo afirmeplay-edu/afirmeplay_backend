@@ -49,12 +49,22 @@ def infer_course_name_from_grade(grade_name: str) -> str:
     - "1º médio", "2 medio"
 
     Títulos sem contexto de série (ex.: "1º AVALIA MUNICIPAL") não inferem número.
+    Nunca usar título de gabarito com nome de município aqui — passe só o rótulo de série.
     """
     grade_lower = (grade_name or "").strip().lower()
     if not grade_lower:
         return "Anos Iniciais"
 
-    if "infantil" in grade_lower or "pré" in grade_lower or "pre" in grade_lower:
+    if "infantil" in grade_lower:
+        return "Educação Infantil"
+
+    # Evita falso positivo: "pre" em "preta" (ex.: município CHÃ PRETA no title).
+    if (
+        "pré" in grade_lower
+        or "pre-escola" in grade_lower
+        or "pre escola" in grade_lower
+        or re.search(r"(?:^|[\s\-])pre(?:[\s\-]|$)", grade_lower)
+    ):
         return "Educação Infantil"
 
     if "especial" in grade_lower:
@@ -105,6 +115,24 @@ def _grade_name_from_student(student: Any) -> Optional[str]:
     return None
 
 
+def _grade_name_from_result_snapshot(result_obj: Any) -> Optional[str]:
+    if not result_obj:
+        return None
+    try:
+        grade_id = getattr(result_obj, "grade_id_snapshot", None)
+        if not grade_id:
+            return None
+        from app.models.grades import Grade
+
+        grade = Grade.query.get(grade_id)
+        if grade and getattr(grade, "name", None):
+            name = str(grade.name).strip()
+            return name or None
+    except Exception:
+        return None
+    return None
+
+
 def _grade_names_from_scope_snapshot(gabarito_obj: Any) -> Set[str]:
     names: Set[str] = set()
     if not gabarito_obj or not getattr(gabarito_obj, "id", None):
@@ -138,34 +166,57 @@ def _pick_single_grade_name(names: Set[str]) -> Optional[str]:
         return None
     if len(names) == 1:
         return next(iter(names))
-    ordered = sorted(names)
-    return ordered[0]
+    return None
+
+
+def _grade_name_from_gabarito_grades(gabarito_obj: Any) -> Optional[str]:
+    """Só retorna nome se o gabarito tiver exatamente uma série em ``grades``."""
+    try:
+        from app.services.cartao_resposta.gabarito_grades import get_gabarito_grades
+
+        grades = get_gabarito_grades(gabarito_obj)
+        if len(grades) == 1:
+            name = (grades[0].get("name") or "").strip()
+            return name or None
+    except Exception:
+        return None
+    return None
 
 
 def resolve_grade_name_for_proficiency(
     gabarito_obj: Any = None,
     grade_name: str = "",
     student: Any = None,
+    result_obj: Any = None,
 ) -> str:
     """
-    Resolve o rótulo de série usado no cálculo de proficiência.
+    Resolve o rótulo de série usado no cálculo de proficiência/nota.
 
-    Ordem:
+    Ordem (NUNCA usa title do gabarito):
     1. grade_name explícito (se parecer série)
-    2. gabarito.grade_name
-    3. gabarito.grade_id → Grade.name
-    4. scope_snapshot das gerações (única série ou primeira ordenada)
-    5. gabarito.title (somente se parecer série)
-    6. série da turma do aluno
-    7. fallback: grade_name explícito ou title do gabarito (legado)
+    2. série do aluno (turma atual)
+    3. grade_id_snapshot do resultado (se informado)
+    4. gabarito.grade_name (atalho 1 série)
+    5. gabarito.grade_id → Grade.name
+    6. gabarito.grades com exatamente 1 série
+    7. scope_snapshot das gerações (somente se série única)
+    8. fallback: string vazia (caller trata; não defaultar via title)
     """
     explicit = (grade_name or "").strip()
     if explicit and looks_like_grade_label(explicit):
         return explicit
 
+    from_student = _grade_name_from_student(student)
+    if from_student:
+        return from_student
+
+    from_snap = _grade_name_from_result_snapshot(result_obj)
+    if from_snap:
+        return from_snap
+
     if gabarito_obj is not None:
         gab_grade = (getattr(gabarito_obj, "grade_name", None) or "").strip()
-        if gab_grade:
+        if gab_grade and looks_like_grade_label(gab_grade):
             return gab_grade
 
         grade_id = getattr(gabarito_obj, "grade_id", None)
@@ -181,20 +232,14 @@ def resolve_grade_name_for_proficiency(
             except Exception:
                 pass
 
+        from_grades = _grade_name_from_gabarito_grades(gabarito_obj)
+        if from_grades:
+            return from_grades
+
         from_scope = _pick_single_grade_name(_grade_names_from_scope_snapshot(gabarito_obj))
         if from_scope:
             return from_scope
 
-        title = (getattr(gabarito_obj, "title", None) or "").strip()
-        if title and looks_like_grade_label(title):
-            return title
-
-    from_student = _grade_name_from_student(student)
-    if from_student:
-        return from_student
-
     if explicit:
         return explicit
-    if gabarito_obj is not None:
-        return (getattr(gabarito_obj, "title", None) or "").strip()
     return ""

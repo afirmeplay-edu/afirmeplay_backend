@@ -45,6 +45,7 @@ class MinIOService:
         'CERTIFICATE_TEMPLATES': 'certificate-templates',
         'USER_UPLOADS': 'user-uploads',
         'PLAY_TV_RESOURCES': 'play-tv-resources',
+        'AFIRME_READING_AUDIO': 'afirme-reading-audio',
     }
     
     def __init__(self):

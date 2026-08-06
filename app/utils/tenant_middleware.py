@@ -80,6 +80,11 @@ IGNORED_HOSTS = [
     '127.0.0.1'
 ]
 
+# Subdomínios de produto (não são slug de município). Ex.: afirme-ler.afirmeplay.com.br
+RESERVED_APP_SUBDOMAINS = frozenset({
+    "afirme-ler",
+})
+
 
 class TenantContext:
     """
@@ -138,6 +143,8 @@ def extract_subdomain(host):
     # Verificar se é um host ignorado (sem subdomínio)
     if host in IGNORED_HOSTS:
         return None
+
+    slug = None
     
     # ================================
     # Ambiente de PRODUÇÃO
@@ -150,11 +157,12 @@ def extract_subdomain(host):
         parts = host.split('.')
         # Exemplo válido: jiparana.afirmeplay.com.br
         if len(parts) > 3:
-            slug = parts[0]
-            if re.match(r'^[a-z0-9-]+$', slug):
-                return slug
-        
-        return None
+            candidate = parts[0]
+            if re.match(r'^[a-z0-9-]+$', candidate):
+                slug = candidate
+        if slug and slug in RESERVED_APP_SUBDOMAINS:
+            return None
+        return slug
     
     # ================================
     # Ambiente de HOMOLOGAÇÃO (*.afirmeplay.com)
@@ -168,10 +176,12 @@ def extract_subdomain(host):
         parts = host.split(".")
         # slug.afirmeplay.com → ex.: jaru.afirmeplay.com
         if len(parts) == 3 and parts[1] == "afirmeplay" and parts[2] == "com":
-            slug = parts[0]
-            if re.match(r"^[a-z0-9-]+$", slug):
-                return slug
-        return None
+            candidate = parts[0]
+            if re.match(r"^[a-z0-9-]+$", candidate):
+                slug = candidate
+        if slug and slug in RESERVED_APP_SUBDOMAINS:
+            return None
+        return slug
     
     # ================================
     # Ambiente de DESENVOLVIMENTO
@@ -182,28 +192,30 @@ def extract_subdomain(host):
     if 'afirmeplay.com.br' in host:
         parts = host.split('.')
         if len(parts) > 3:
-            slug = parts[0]
-            if re.match(r'^[a-z0-9-]+$', slug):
-                return slug
+            candidate = parts[0]
+            if re.match(r'^[a-z0-9-]+$', candidate):
+                slug = candidate
     
     # 1b) *.afirmeplay.com (paridade com homolog em testes locais / hosts)
-    if host.endswith('.afirmeplay.com') and not host.endswith('.afirmeplay.com.br'):
+    if not slug and host.endswith('.afirmeplay.com') and not host.endswith('.afirmeplay.com.br'):
         parts = host.split('.')
         if len(parts) == 3 and parts[1] == 'afirmeplay' and parts[2] == 'com':
-            slug = parts[0]
-            if re.match(r'^[a-z0-9-]+$', slug):
-                return slug
+            candidate = parts[0]
+            if re.match(r'^[a-z0-9-]+$', candidate):
+                slug = candidate
     
     # 2) Suporte a subdomínios em localhost: ex: jiparana.localhost, jaru.localhost
-    if host.endswith('.localhost'):
+    if not slug and host.endswith('.localhost'):
         parts = host.split('.')
         # Ex: ["jiparana", "localhost"]
         if len(parts) >= 2:
-            slug = parts[0]
-            if re.match(r'^[a-z0-9-]+$', slug):
-                return slug
-    
-    return None
+            candidate = parts[0]
+            if re.match(r'^[a-z0-9-]+$', candidate):
+                slug = candidate
+
+    if slug and slug in RESERVED_APP_SUBDOMAINS:
+        return None
+    return slug
 
 
 def resolve_city_from_slug(slug):
@@ -344,6 +356,49 @@ def _resolve_mobile_login_tenant_context():
     return context
 
 
+def _resolve_web_login_tenant_context():
+    """
+    POST /login/ sem JWT: resolve município por header (Afirme Ler / app hosts) ou
+    subdomínio municipal clássico. Não falha se ausente (admin pode logar sem cidade;
+    não-admin é validado em login.py).
+
+    Prioridade: X-City-ID → X-City-Slug → Host/Origin (slugs de produto como
+    ``afirme-ler`` são ignorados por ``extract_subdomain``).
+    """
+    context = TenantContext()
+    city = None
+    city_id_header = request.headers.get("X-City-ID")
+    city_slug_header = request.headers.get("X-City-Slug")
+    if city_id_header:
+        city = resolve_city_from_id(city_id_header)
+        if not city:
+            raise Exception(f"Município não encontrado para o id: {city_id_header}")
+    elif city_slug_header:
+        city = resolve_city_from_slug(str(city_slug_header).strip().lower())
+        if not city:
+            raise Exception(
+                f"Município não encontrado para o slug: {city_slug_header}"
+            )
+    if not city:
+        host = request.headers.get("Host")
+        slug = extract_subdomain(host)
+        if not slug and _allow_subdomain_from_origin_when_host_has_no_slug():
+            slug = extract_subdomain(request.headers.get("Origin"))
+        if slug:
+            city = resolve_city_from_slug(slug)
+            if not city:
+                raise Exception(f"Município não encontrado para o slug: {slug}")
+    if city:
+        context.city_id = city.id
+        context.city_slug = city.slug
+        context.schema = city_id_to_schema_name(city.id)
+        context.has_tenant_context = True
+        return context
+    context.schema = "public"
+    context.has_tenant_context = False
+    return context
+
+
 def resolve_tenant_context():
     """
     Resolve o contexto do tenant para o request atual.
@@ -368,6 +423,8 @@ def resolve_tenant_context():
         return _resolve_mobile_discovery_public_context()
     if path.endswith("/mobile/v1/auth/login") and request.method in ("POST", "OPTIONS"):
         return _resolve_mobile_login_tenant_context()
+    if path.endswith("/login") and request.method == "POST":
+        return _resolve_web_login_tenant_context()
     if path.endswith("/mobile/v1/offline-pack/redeem") and request.method == "POST":
         return _resolve_mobile_offline_pack_redeem_preflight()
 

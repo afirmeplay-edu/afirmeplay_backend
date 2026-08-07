@@ -70,4 +70,56 @@ CREATE TABLE IF NOT EXISTS "{schema}".reading_comprehension_answer (
 CREATE INDEX IF NOT EXISTS ix_reading_comp_answer_session
     ON "{schema}".reading_comprehension_answer(session_id);
 COMMENT ON TABLE "{schema}".reading_comprehension_answer IS 'Respostas de compreensão na avaliação de leitura';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_guided_session (
+    id VARCHAR PRIMARY KEY,
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
+    class_id UUID REFERENCES "{schema}".class(id),
+    reading_text_id VARCHAR NOT NULL,
+    words_read INTEGER NOT NULL,
+    reading_time_seconds INTEGER NOT NULL,
+    errors_count INTEGER NOT NULL DEFAULT 0,
+    prosody_level INTEGER NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'finalizada',
+    calculated_plcm DOUBLE PRECISION,
+    calculated_accuracy DOUBLE PRECISION,
+    comprehension_correct_count INTEGER,
+    comprehension_total INTEGER,
+    comprehension_score DOUBLE PRECISION,
+    audio_bucket VARCHAR(100),
+    audio_key TEXT,
+    audio_mime_type VARCHAR(100),
+    audio_size_bytes INTEGER,
+    applied_by VARCHAR REFERENCES public.users(id),
+    submitted_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_reading_guided_session_status
+        CHECK (status IN ('em_andamento', 'finalizada')),
+    CONSTRAINT chk_reading_guided_prosody
+        CHECK (prosody_level BETWEEN 1 AND 5),
+    CONSTRAINT chk_reading_guided_words
+        CHECK (words_read >= 0 AND reading_time_seconds >= 0 AND errors_count >= 0)
+);
+CREATE INDEX IF NOT EXISTS ix_reading_guided_session_student
+    ON "{schema}".reading_guided_session(student_id);
+CREATE INDEX IF NOT EXISTS ix_reading_guided_session_text
+    ON "{schema}".reading_guided_session(reading_text_id);
+CREATE INDEX IF NOT EXISTS ix_reading_guided_session_created
+    ON "{schema}".reading_guided_session(created_at DESC);
+COMMENT ON TABLE "{schema}".reading_guided_session IS 'Sessão de leitura guiada (1 aluno + 1 texto + métricas + áudio)';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_guided_comprehension_answer (
+    id VARCHAR PRIMARY KEY,
+    session_id VARCHAR NOT NULL
+        REFERENCES "{schema}".reading_guided_session(id) ON DELETE CASCADE,
+    reading_text_question_id VARCHAR NOT NULL,
+    selected_option INTEGER NOT NULL,
+    is_correct BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_reading_guided_comp_answer UNIQUE(session_id, reading_text_question_id)
+);
+CREATE INDEX IF NOT EXISTS ix_reading_guided_comp_answer_session
+    ON "{schema}".reading_guided_comprehension_answer(session_id);
+COMMENT ON TABLE "{schema}".reading_guided_comprehension_answer IS 'Respostas de compreensão na leitura guiada';
 """

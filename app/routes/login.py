@@ -14,6 +14,46 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
 bp = Blueprint('login', __name__, url_prefix='/login')
 
+
+def _apply_login_city_from_body(data: dict) -> None:
+    """
+    Fallback Afirme Ler / app hosts: se o middleware ainda não resolveu município
+    (sem X-City-* e sem subdomínio municipal), aceita cityId/citySlug no body.
+    """
+    from app.utils.tenant_middleware import (
+        TenantContext,
+        city_id_to_schema_name,
+        resolve_city_from_id,
+        resolve_city_from_slug,
+    )
+
+    tenant_context = getattr(g, "tenant_context", None)
+    if tenant_context and getattr(tenant_context, "city_id", None):
+        return
+
+    city_id = data.get("cityId") or data.get("city_id")
+    city_slug = data.get("citySlug") or data.get("city_slug")
+    city = None
+    if city_id:
+        city = resolve_city_from_id(str(city_id).strip())
+        if not city:
+            raise ValueError(f"Município não encontrado para o id: {city_id}")
+    elif city_slug:
+        city = resolve_city_from_slug(str(city_slug).strip().lower())
+        if not city:
+            raise ValueError(f"Município não encontrado para o slug: {city_slug}")
+    else:
+        return
+
+    if tenant_context is None:
+        tenant_context = TenantContext()
+        g.tenant_context = tenant_context
+    tenant_context.city_id = city.id
+    tenant_context.city_slug = city.slug
+    tenant_context.schema = city_id_to_schema_name(city.id)
+    tenant_context.has_tenant_context = True
+
+
 @bp.route('/', methods=['POST', 'OPTIONS'])
 def login():
     # Tratar requisições OPTIONS (preflight)
@@ -34,6 +74,8 @@ def login():
         print(f"APP_ENV: {app_env}")
         print(f"Host header: {host}")
         print(f"Origin header: {origin}")
+        print(f"X-City-ID: {request.headers.get('X-City-ID')}")
+        print(f"X-City-Slug: {request.headers.get('X-City-Slug')}")
         if tenant_context:
             print(f"TenantContext.city_id: {tenant_context.city_id}")
             print(f"TenantContext.city_slug: {tenant_context.city_slug}")
@@ -45,7 +87,7 @@ def login():
     except Exception as debug_exc:
         print(f"Erro ao imprimir debug de tenant no login: {debug_exc}")
     
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     identificador = data.get('registration')
     password = data.get('password')
     print(identificador, password)
@@ -53,6 +95,11 @@ def login():
         return jsonify({"erro": "Identificador (e-mail ou matrícula) e senha são obrigatórios."}), 400
 
     try:
+        try:
+            _apply_login_city_from_body(data)
+        except ValueError as city_err:
+            return jsonify({"erro": "Município inválido", "mensagem": str(city_err)}), 404
+
         tenant_context = getattr(g, "tenant_context", None)
         login_city_id = (
             str(tenant_context.city_id)
@@ -66,39 +113,39 @@ def login():
             return jsonify({"erro": "Credenciais inválidas."}), 401
 
         # ========================================
-        # VALIDAÇÃO DE SUBDOMÍNIO (SEGURANÇA)
+        # VALIDAÇÃO DE MUNICÍPIO (SEGURANÇA)
         # ========================================
-        # Usuários comuns DEVEM acessar via subdomínio do seu município
-        # Admin pode acessar qualquer subdomínio
+        # Usuários comuns: município via subdomínio municipal, X-City-* ou body
+        # (Afirme Ler / localhost). Admin pode logar sem município.
         
         if usuario.role != RoleEnum('admin'):
-            # Obter contexto do subdomínio resolvido pelo middleware
-            from flask import g
             tenant_context = getattr(g, 'tenant_context', None)
             
-            # Verificar se há city_id no contexto (subdomínio especificado)
             if not tenant_context or not tenant_context.city_id:
                 logging.warning(
-                    f"Tentativa de login sem subdomínio: "
+                    f"Tentativa de login sem município: "
                     f"Usuário {usuario.email} (role: {usuario.role.value}, city_id: {usuario.city_id})"
                 )
                 return jsonify({
                     "erro": "Acesso negado",
-                    "mensagem": "Você deve acessar através do subdomínio do seu município. "
-                               f"Exemplo: <seu-municipio>.afirmeplay.com.br"
+                    "mensagem": (
+                        "Informe o município no login (header X-City-Slug ou X-City-ID, "
+                        "ou body citySlug/cityId), ou acesse pelo subdomínio do município "
+                        "(ex.: <seu-municipio>.afirmeplay.com.br)."
+                    ),
                 }), 403
             
-            # Validar se o usuário pertence ao município do subdomínio
+            # Validar se o usuário pertence ao município informado
             if usuario.city_id != tenant_context.city_id:
                 logging.warning(
                     f"Tentativa de login em município incorreto: "
                     f"Usuário {usuario.email} (city_id: {usuario.city_id}) "
-                    f"tentou acessar subdomínio da cidade {tenant_context.city_id} (slug: {tenant_context.city_slug})"
+                    f"tentou acessar município {tenant_context.city_id} (slug: {tenant_context.city_slug})"
                 )
                 return jsonify({
                     "erro": "Acesso negado",
                     "mensagem": "Você não tem permissão para acessar este município. "
-                               "Verifique se está usando o subdomínio correto."
+                               "Verifique se selecionou o município correto."
                 }), 403
         
         tenant_id = None
@@ -151,6 +198,7 @@ def login():
         token_payload = {
             "sub": usuario.id,
             "tenant_id": tenant_id,
+            "city_id": tenant_id,  # alias para middleware / persist-user
             "role": usuario.role.value,
             "city_slug": city_slug,  # Incluir slug no token para facilitar resolução
             "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=3)
@@ -166,6 +214,7 @@ def login():
             "email": usuario.email,
             "registration": usuario.registration,
             "tenant_id": tenant_id,
+            "city_id": tenant_id,
             "city_slug": city_slug,  # Incluir slug na resposta
             "created_at": usuario.created_at,
             "role": usuario.role.value,

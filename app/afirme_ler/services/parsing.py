@@ -40,6 +40,11 @@ ALLOWED_SESSION_STATUSES = frozenset({
     "ausente",
 })
 
+ALLOWED_GUIDED_SESSION_STATUSES = frozenset({
+    "em_andamento",
+    "finalizada",
+})
+
 SCOPE_GLOBAL = "GLOBAL"
 SCOPE_CITY = "CITY"
 SCOPE_PRIVATE = "PRIVATE"
@@ -127,3 +132,35 @@ def validate_question_options(
         if correct_option < 0 or correct_option >= len(parsed):
             raise ValueError("correctOption fora do intervalo das alternativas.")
     return parsed, correct_option
+
+
+def validate_guided_session_status(value: str) -> str:
+    if not value or not isinstance(value, str):
+        raise ValueError("status é obrigatório.")
+    normalized = value.strip().lower()
+    if normalized not in ALLOWED_GUIDED_SESSION_STATUSES:
+        allowed = ", ".join(sorted(ALLOWED_GUIDED_SESSION_STATUSES))
+        raise ValueError(f"status inválido. Valores permitidos: {allowed}.")
+    return normalized
+
+
+def validate_prosody_level(value: Any) -> int:
+    try:
+        level = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("prosodyLevel deve ser um inteiro entre 1 e 5.") from exc
+    if level < 1 or level > 5:
+        raise ValueError("prosodyLevel deve ser um inteiro entre 1 e 5.")
+    return level
+
+
+def calculate_guided_metrics(words_read: int, errors_count: int, reading_time_seconds: int):
+    """Retorna (calculated_plcm, calculated_accuracy)."""
+    correct_words = max(0, words_read - errors_count)
+    accuracy = None
+    plcm = None
+    if words_read > 0:
+        accuracy = round(100.0 * correct_words / words_read, 2)
+    if reading_time_seconds > 0:
+        plcm = round(correct_words / (reading_time_seconds / 60.0), 2)
+    return plcm, accuracy

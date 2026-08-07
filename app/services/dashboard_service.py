@@ -1590,6 +1590,7 @@ class DashboardService:
                 .group_by(Student.class_id)
             ).subquery()
 
+            avg_prof_expr = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
             query = (
                 db.session.query(
                     Class.id.label("class_id"),
@@ -1597,7 +1598,7 @@ class DashboardService:
                     Class.shift.label("shift"),
                     Grade.name.label("serie"),
                     func.count(distinct(Student.id)).label("alunos"),
-                    func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
+                    avg_prof_expr.label("average_proficiency"),
                     func.coalesce(func.sum(EvaluationResult.correct_answers), 0).label("acerto_total"),
                     func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("acerto_percent"),
                     (
@@ -1638,9 +1639,7 @@ class DashboardService:
                 Grade.name,
                 er_by_class.c.cnt,
                 asr_by_class.c.cnt,
-            ).order_by(
-                func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
-            )
+            ).order_by(avg_prof_expr.desc())
 
             class_stats = query.limit(cls.MAX_LIST_SIZE).all()
 
@@ -1665,6 +1664,9 @@ class DashboardService:
                 class_id_str = str(row.class_id)
                 completed, total = completion_map.get(class_id_str, (0, 0))
                 conclusao = round((completed / total) * 100, 2) if total else 0.0
+                avg_prof = float(row.average_proficiency or 0)
+                grade_names = [str(row.serie)] if row.serie else []
+                media = cls._teacher_score_from_proficiency(avg_prof, grade_names)
                 rankings.append(
                     {
                         "position": idx + 1,
@@ -1672,7 +1674,9 @@ class DashboardService:
                         "turma": row.turma or "",
                         "serie": row.serie or "",
                         "shift": (row.shift or "").strip() if getattr(row, "shift", None) else "",
-                        "media": float(row.media or 0),
+                        "media": media,
+                        "average_score": media,
+                        "average_proficiency": avg_prof,
                         "acerto": int(row.acerto_total or 0),
                         "acerto_percent": float(row.acerto_percent or 0),
                         "conclusao": conclusao,
@@ -1721,13 +1725,14 @@ class DashboardService:
                 .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
                 .group_by(Student.school_id)
             ).subquery()
+            avg_prof_expr = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
             query = (
                 db.session.query(
                     School.id.label("school_id"),
                     School.name.label("school_name"),
                     City.name.label("municipality"),
                     func.count(distinct(Student.id)).label("total_students"),
-                    func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
+                    avg_prof_expr.label("average_proficiency"),
                     func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("media_score_percent"),
                     (
                         func.coalesce(er_by_school.c.cnt, 0) + func.coalesce(asr_by_school.c.cnt, 0)
@@ -1765,9 +1770,7 @@ class DashboardService:
                 City.name,
                 er_by_school.c.cnt,
                 asr_by_school.c.cnt,
-            ).order_by(
-                func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
-            )
+            ).order_by(avg_prof_expr.desc())
 
             # Contar total de escolas (sem limit/offset) para paginação
             total_count = query.count()
@@ -1808,13 +1811,17 @@ class DashboardService:
                 school_id_str = str(row.school_id)
                 completed, total = completion_map.get(school_id_str, (0, 0))
                 taxa_conclusao = round((completed / total) * 100, 2) if total else 0.0
+                avg_prof = float(row.average_proficiency or 0)
+                # Card sem instrumento: nota canônica a partir da média de proficiência
+                media = cls._teacher_score_from_proficiency(avg_prof, ["Anos Iniciais"])
 
                 ranking.append({
                     "posicao": offset + idx + 1,
                     "escola_id": school_id_str,
                     "nome_escola": row.school_name,
                     "municipio": row.municipality,
-                    "media": float(row.media or 0),
+                    "media": media,
+                    "average_proficiency": avg_prof,
                     "media_score_percent": float(row.media_score_percent or 0),
                     "quantidade_alunos": int(row.total_students or 0),
                     "taxa_conclusao": taxa_conclusao,
@@ -1874,6 +1881,7 @@ class DashboardService:
                 .group_by(Student.class_id)
             ).subquery()
 
+            avg_prof_expr = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
             query = (
                 db.session.query(
                     Class.id.label("class_id"),
@@ -1881,7 +1889,7 @@ class DashboardService:
                     Class.shift.label("shift"),
                     Grade.name.label("serie"),
                     func.count(distinct(Student.id)).label("alunos"),
-                    func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
+                    avg_prof_expr.label("average_proficiency"),
                     func.coalesce(func.sum(EvaluationResult.correct_answers), 0).label("acerto_total"),
                     func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("acerto_percent"),
                     (
@@ -1922,9 +1930,7 @@ class DashboardService:
                 Grade.name,
                 er_by_class.c.cnt,
                 asr_by_class.c.cnt,
-            ).order_by(
-                func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
-            )
+            ).order_by(avg_prof_expr.desc())
 
             total_count = query.count()
             class_stats = query.offset(offset).limit(limit).all()
@@ -1949,13 +1955,18 @@ class DashboardService:
                 class_id_str = str(row.class_id)
                 completed, total = completion_map.get(class_id_str, (0, 0))
                 conclusao = round((completed / total) * 100, 2) if total else 0.0
+                avg_prof = float(row.average_proficiency or 0)
+                grade_names = [str(row.serie)] if row.serie else []
+                media = cls._teacher_score_from_proficiency(avg_prof, grade_names)
                 ranking.append({
                     "posicao": offset + idx + 1,
                     "class_id": class_id_str,
                     "turma": row.turma or "",
                     "serie": row.serie or "",
                     "shift": (row.shift or "").strip() if getattr(row, "shift", None) else "",
-                    "media": float(row.media or 0),
+                    "media": media,
+                    "average_score": media,
+                    "average_proficiency": avg_prof,
                     "acerto": int(row.acerto_total or 0),
                     "acerto_percent": float(row.acerto_percent or 0),
                     "conclusao": conclusao,
@@ -2469,16 +2480,19 @@ class DashboardService:
 
     @classmethod
     def _build_class_ranking(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+        avg_prof_expr = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
         query = (
             db.session.query(
                 Class.id.label("class_id"),
                 Class.name.label("class_name"),
-                func.avg(EvaluationResult.grade).label("average_grade"),
+                Grade.name.label("serie"),
+                avg_prof_expr.label("average_proficiency"),
                 func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed_sessions"),
                 func.count(TestSession.id).label("total_sessions"),
                 func.count(distinct(Student.id)).label("active_students"),
             )
             .join(Student, Student.class_id == Class.id)
+            .outerjoin(Grade, Grade.id == Class.grade_id)
             .outerjoin(
                 EvaluationResult,
                 and_(
@@ -2498,19 +2512,23 @@ class DashboardService:
         if scope.get("class_ids"):
             query = query.filter(Class.id.in_(scope["class_ids"]))
 
-        query = query.group_by(Class.id, Class.name).order_by(func.avg(EvaluationResult.grade).desc())
+        query = query.group_by(Class.id, Class.name, Grade.name).order_by(avg_prof_expr.desc())
 
         ranking = []
         for idx, row in enumerate(query.limit(DashboardService.MAX_LIST_SIZE).all()):
             total_sessions = int(row.total_sessions or 0)
             completed_sessions = int(row.completed_sessions or 0)
             completion_rate = round((completed_sessions / total_sessions) * 100, 2) if total_sessions else 0.0
+            avg_prof = float(row.average_proficiency or 0)
+            grade_names = [str(row.serie)] if getattr(row, "serie", None) else []
+            average_score = cls._teacher_score_from_proficiency(avg_prof, grade_names)
 
             ranking.append(
                 {
                     "class_id": row.class_id,
                     "class_name": row.class_name,
-                    "average_score": float(row.average_grade or 0),
+                    "average_score": average_score,
+                    "average_proficiency": avg_prof,
                     "completion_rate": completion_rate,
                     "active_students": int(row.active_students or 0),
                     "position": idx + 1,

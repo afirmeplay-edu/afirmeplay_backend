@@ -24,6 +24,15 @@ Referências: evaluation-results, participation-report, socioeconômico (INSE).
 Documentação: docs/FONTE_DA_VERDADE_CALCULOS_RESULTADOS.md (§8)
 
 ═══════════════════════════════════════════════════════════════════════════════
+⚠️ REGRA OBRIGATÓRIA — CURSO / ESCALA POR SÉRIE (NÃO PELO 1º ITEM)
+═══════════════════════════════════════════════════════════════════════════════
+
+Nota agregada = calculate_grade(média_prof, course_name_da_série_da_célula).
+Nunca usar um único course_name de tests[0] / gabs[0] para a matriz inteira
+(isso aplicava escala de Anos Iniciais em colunas de Anos Finais).
+Ordem dos itens selecionados = ordem dos IDs na requisição (determinismo).
+
+═══════════════════════════════════════════════════════════════════════════════
 """
 from __future__ import annotations
 
@@ -117,6 +126,148 @@ def _series_sort_key(serie_nome: str) -> Tuple[Any, ...]:
     if m2:
         return (0, int(m2.group(1)), 0, text.upper())
     return (1, 0, 0, text.upper())
+
+
+def _order_rows_by_requested_ids(
+    rows: List[Any],
+    requested_ids: List[str],
+    id_getter: Callable[[Any], Any],
+) -> List[Any]:
+    """
+    Preserva a ordem dos IDs da requisição (determinismo entre gerações).
+
+    Queries com ``IN (...)`` sem ORDER BY não garantem ordem estável no Postgres;
+    o consolidado não pode depender de ``rows[0]`` com ordem indefinida.
+    """
+    by_id = {str(id_getter(r)): r for r in rows}
+    ordered = [by_id[str(i)] for i in requested_ids if str(i) in by_id]
+    return ordered
+
+
+def _serie_nome_from_scope(scope: ScopeIndex, serie_id: str) -> str:
+    sid = str(serie_id)
+    for col in scope.series_colunas:
+        if str(col.get("serie_id") or "") == sid:
+            return str(col.get("serie_nome") or "")
+    return ""
+
+
+def _course_name_for_serie(serie_nome: str) -> str:
+    """Infere Anos Iniciais / Finais / etc. a partir do rótulo da coluna série."""
+    from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+
+    return infer_course_name_from_grade(serie_nome or "")
+
+
+def _course_name_for_scope_serie(scope: ScopeIndex, serie_id: str) -> str:
+    return _course_name_for_serie(_serie_nome_from_scope(scope, serie_id))
+
+
+def _unique_course_names_from_series_colunas(series_colunas: List[Dict[str, str]]) -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+    for col in series_colunas or []:
+        cn = _course_name_for_serie(str(col.get("serie_nome") or ""))
+        if cn and cn not in seen:
+            seen.add(cn)
+            out.append(cn)
+    return out
+
+
+def _classify_proficiency_nivel(
+    proficiency: Optional[float],
+    course_name: str,
+    *,
+    subject_name: str = GERAL_KEY,
+    has_matematica: Optional[bool] = None,
+) -> Optional[str]:
+    if proficiency is None or not course_name:
+        return None
+    try:
+        return EvaluationCalculator.determine_classification(
+            float(proficiency),
+            course_name,
+            subject_name,
+            has_matematica=has_matematica,
+        )
+    except Exception:
+        logger.debug("Falha ao classificar nível de proficiência agregada", exc_info=True)
+        return None
+
+
+def _annotate_proficiency_level_labels(
+    matriz: Dict[str, Any],
+    series_colunas: List[Dict[str, str]],
+    *,
+    subject_name: str = GERAL_KEY,
+    has_matematica: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Preenche niveis_por_serie / nivel_media_* usando a escala da série (não um curso global).
+
+    nivel_media_escola / nivel_media_geral só são preenchidos quando todas as séries
+    com valor compartilham o mesmo course_name (evita misturar Iniciais × Finais).
+    """
+    if not matriz:
+        return matriz
+    cols = series_colunas or []
+    course_by_idx = [_course_name_for_serie(str(c.get("serie_nome") or "")) for c in cols]
+
+    for linha in matriz.get("linhas") or []:
+        valores = linha.get("valores_por_serie") or []
+        niveis: List[Optional[str]] = []
+        courses_present: List[str] = []
+        for idx, val in enumerate(valores):
+            cn = course_by_idx[idx] if idx < len(course_by_idx) else ""
+            nivel = _classify_proficiency_nivel(
+                val if val is not None else None,
+                cn,
+                subject_name=subject_name,
+                has_matematica=has_matematica,
+            )
+            niveis.append(nivel)
+            if val is not None and cn:
+                courses_present.append(cn)
+        linha["niveis_por_serie"] = niveis
+        unique_courses = list(dict.fromkeys(courses_present))
+        if len(unique_courses) == 1 and linha.get("taxa_geral_escola") is not None:
+            linha["nivel_media_escola"] = _classify_proficiency_nivel(
+                linha.get("taxa_geral_escola"),
+                unique_courses[0],
+                subject_name=subject_name,
+                has_matematica=has_matematica,
+            )
+        else:
+            linha["nivel_media_escola"] = None
+
+    rede = matriz.get("medias_da_rede") or {}
+    por_serie = rede.get("por_serie") or []
+    niveis_rede: List[Optional[str]] = []
+    courses_rede: List[str] = []
+    for idx, val in enumerate(por_serie):
+        cn = course_by_idx[idx] if idx < len(course_by_idx) else ""
+        nivel = _classify_proficiency_nivel(
+            val if val is not None else None,
+            cn,
+            subject_name=subject_name,
+            has_matematica=has_matematica,
+        )
+        niveis_rede.append(nivel)
+        if val is not None and cn:
+            courses_rede.append(cn)
+    rede["niveis_por_serie"] = niveis_rede
+    unique_rede = list(dict.fromkeys(courses_rede))
+    if len(unique_rede) == 1 and rede.get("taxa_geral") is not None:
+        rede["nivel_media_geral"] = _classify_proficiency_nivel(
+            rede.get("taxa_geral"),
+            unique_rede[0],
+            subject_name=subject_name,
+            has_matematica=has_matematica,
+        )
+    else:
+        rede["nivel_media_geral"] = None
+    matriz["medias_da_rede"] = rede
+    return matriz
 
 
 def parse_csv_ids(raw: Optional[str], param_name: str = "ids") -> List[str]:
@@ -1008,7 +1159,6 @@ def _build_medias_section_digital(
     tests_by_id: Dict[str, Test],
     all_disciplines: Set[str],
     field: str,
-    course_name: str = "Anos Iniciais",
     has_matematica: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
@@ -1021,6 +1171,10 @@ def _build_medias_section_digital(
     
     NUNCA calcular média das escolas para obter taxa_geral, pois escolas com mais
     séries teriam mais peso (média ponderada).
+
+    O ``course_name`` da conversão nota←proficiência é o da **série da célula**
+    (não o do primeiro item selecionado), para não aplicar escala de Anos Iniciais
+    em colunas de Anos Finais.
     """
     mk = _matriz_kwargs(ctx)
 
@@ -1034,6 +1188,7 @@ def _build_medias_section_digital(
         cell_results = _filter_digital_results_in_cell(scope, results, escola_id, serie_id)
         if not cell_results:
             return None
+        course_name = _course_name_for_scope_serie(scope, serie_id)
         if discipline is None:
             mg, mp = hierarchical_mean_grade_and_proficiency(
                 cell_results,
@@ -1061,11 +1216,22 @@ def _build_medias_section_digital(
         kw = dict(mk)
         if ctx.comparativo_municipio:
             kw["cell_fn_rede"] = lambda e, s: _media_cell(ctx.scope_rede, results_rede, e, s, discipline)
-        return _build_numeric_matriz(
+        matriz = _build_numeric_matriz(
             ctx.scope_linhas,
             lambda e, s: _media_cell(ctx.scope_linhas, results_linhas, e, s, discipline),
             **kw,
         )
+        if field == "proficiency":
+            subj = discipline or GERAL_KEY
+            # GERAL usa has_matematica; disciplina nomeada usa a própria escala
+            hm = has_matematica if discipline is None else None
+            _annotate_proficiency_level_labels(
+                matriz,
+                ctx.series_colunas,
+                subject_name=subj,
+                has_matematica=hm,
+            )
+        return matriz
 
     return _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
 
@@ -1076,7 +1242,6 @@ def _build_medias_section_answer_sheet(
     results_rede: List[AnswerSheetResult],
     all_disciplines: Set[str],
     field: str,
-    course_name: str = "Anos Iniciais",
     has_matematica: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
@@ -1089,6 +1254,8 @@ def _build_medias_section_answer_sheet(
     
     NUNCA calcular média das escolas para obter taxa_geral, pois escolas com mais
     séries teriam mais peso (média ponderada).
+
+    O ``course_name`` da conversão nota←proficiência é o da **série da célula**.
     """
     mk = _matriz_kwargs(ctx)
 
@@ -1102,6 +1269,7 @@ def _build_medias_section_answer_sheet(
         cell_results = _filter_answer_sheet_in_cell(scope, results, escola_id, serie_id)
         if not cell_results:
             return None
+        course_name = _course_name_for_scope_serie(scope, serie_id)
         if discipline is None:
             mg, mp = hierarchical_mean_grade_and_proficiency(
                 cell_results,
@@ -1128,11 +1296,21 @@ def _build_medias_section_answer_sheet(
         kw = dict(mk)
         if ctx.comparativo_municipio:
             kw["cell_fn_rede"] = lambda e, s: _media_cell(ctx.scope_rede, results_rede, e, s, discipline)
-        return _build_numeric_matriz(
+        matriz = _build_numeric_matriz(
             ctx.scope_linhas,
             lambda e, s: _media_cell(ctx.scope_linhas, results_linhas, e, s, discipline),
             **kw,
         )
+        if field == "proficiency":
+            subj = discipline or GERAL_KEY
+            hm = has_matematica if discipline is None else None
+            _annotate_proficiency_level_labels(
+                matriz,
+                ctx.series_colunas,
+                subject_name=subj,
+                has_matematica=hm,
+            )
+        return matriz
 
     return _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
 
@@ -1143,7 +1321,6 @@ def _build_distribuicao_section_digital(
     results_rede: List[EvaluationResult],
     tests_by_id: Dict[str, Test],
     all_disciplines: Set[str],
-    course_name: str,
     has_matematica: bool,
 ) -> Dict[str, Any]:
     mk = _matriz_kwargs(ctx)
@@ -1182,18 +1359,20 @@ def _build_distribuicao_section_digital(
         )
 
     out = _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
-    _, mp = (
-        hierarchical_mean_grade_and_proficiency(
+    # Nível da média da rede: só quando todas as séries usam a mesma escala de curso.
+    courses = _unique_course_names_from_series_colunas(ctx.series_colunas)
+    if len(courses) == 1 and results_rede:
+        course_name = courses[0]
+        _, mp = hierarchical_mean_grade_and_proficiency(
             results_rede, "municipio", course_name=course_name, has_matematica=has_matematica
         )
-        if results_rede
-        else (0.0, 0.0)
-    )
-    out[GERAL_KEY]["medias_da_rede"]["media_da_rede_nivel"] = (
-        EvaluationCalculator.determine_classification(mp, course_name, GERAL_KEY, has_matematica=has_matematica)
-        if results_rede
-        else None
-    )
+        out[GERAL_KEY]["medias_da_rede"]["media_da_rede_nivel"] = (
+            EvaluationCalculator.determine_classification(
+                mp, course_name, GERAL_KEY, has_matematica=has_matematica
+            )
+        )
+    else:
+        out[GERAL_KEY]["medias_da_rede"]["media_da_rede_nivel"] = None
     return out
 
 
@@ -1202,7 +1381,6 @@ def _build_distribuicao_section_answer_sheet(
     results_linhas: List[AnswerSheetResult],
     results_rede: List[AnswerSheetResult],
     all_disciplines: Set[str],
-    course_name: str,
     has_matematica: bool,
 ) -> Dict[str, Any]:
     mk = _matriz_kwargs(ctx)
@@ -1240,18 +1418,19 @@ def _build_distribuicao_section_answer_sheet(
         )
 
     out = _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
-    _, mp = (
-        hierarchical_mean_grade_and_proficiency(
+    courses = _unique_course_names_from_series_colunas(ctx.series_colunas)
+    if len(courses) == 1 and results_rede:
+        course_name = courses[0]
+        _, mp = hierarchical_mean_grade_and_proficiency(
             results_rede, "municipio", course_name=course_name, has_matematica=has_matematica
         )
-        if results_rede
-        else (0.0, 0.0)
-    )
-    out[GERAL_KEY]["medias_da_rede"]["media_da_rede_nivel"] = (
-        EvaluationCalculator.determine_classification(mp, course_name, GERAL_KEY, has_matematica=has_matematica)
-        if results_rede
-        else None
-    )
+        out[GERAL_KEY]["medias_da_rede"]["media_da_rede_nivel"] = (
+            EvaluationCalculator.determine_classification(
+                mp, course_name, GERAL_KEY, has_matematica=has_matematica
+            )
+        )
+    else:
+        out[GERAL_KEY]["medias_da_rede"]["media_da_rede_nivel"] = None
     return out
 
 
@@ -2109,6 +2288,8 @@ def build_digital_consolidated_report(
     missing = [t for t in test_ids if str(t) not in found]
     if missing:
         raise ValueError(f"Avaliações não encontradas: {', '.join(missing)}")
+    # Ordem estável = ordem dos IDs na requisição (evita flip de tests[0] entre gerações).
+    tests = _order_rows_by_requested_ids(tests, [str(t) for t in test_ids], lambda t: t.id)
     tests_by_id = {str(t.id): t for t in tests}
     itens = [_digital_item_selecionado(t) for t in tests]
 
@@ -2151,7 +2332,6 @@ def build_digital_consolidated_report(
     for t in tests:
         all_disciplines |= _disciplinas_from_test(t)
     discipline_list = sorted(all_disciplines) + [GERAL_KEY]
-    course_name = _obter_nome_curso(tests[0]) if tests else "Anos Iniciais"
     has_mat = any("matem" in d.lower() for d in all_disciplines)
 
     return _assemble_payload(
@@ -2166,17 +2346,17 @@ def build_digital_consolidated_report(
         ),
         consolidado_medias_nota=_build_medias_section_digital(
             ctx, results_linhas, results_rede, tests_by_id, all_disciplines, "grade",
-            course_name=course_name, has_matematica=has_mat,
+            has_matematica=has_mat,
         ),
         consolidado_medias_proficiencia=_build_medias_section_digital(
             ctx, results_linhas, results_rede, tests_by_id, all_disciplines, "proficiency",
-            course_name=course_name, has_matematica=has_mat,
+            has_matematica=has_mat,
         ),
         acertos_por_habilidade=_digital_acertos_data(
             ctx, tests_by_id, test_ids, class_ids_linhas, class_ids_rede, all_disciplines
         ),
         distribuicao_niveis_proficiencia=_build_distribuicao_section_digital(
-            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, course_name, has_mat
+            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, has_mat
         ),
     )
 
@@ -2262,6 +2442,10 @@ def build_answer_sheet_consolidated_report(
     missing = [g for g in gabarito_ids if str(g) not in found]
     if missing:
         raise ValueError(f"Gabaritos não encontrados: {', '.join(missing)}")
+    # Ordem estável = ordem dos IDs na requisição.
+    gabs_linhas = _order_rows_by_requested_ids(
+        gabs_linhas, [str(g) for g in gabarito_ids], lambda g: g.id
+    )
     gabs_by_id = {str(g.id): g for g in gabs_linhas}
     itens = [_answer_sheet_item_selecionado(g) for g in gabs_linhas]
 
@@ -2310,9 +2494,18 @@ def build_answer_sheet_consolidated_report(
         all_disciplines |= _disciplinas_from_gabarito(g)
     discipline_list = sorted(all_disciplines) + [GERAL_KEY]
 
-    from app.services.cartao_resposta.proficiency_by_subject import course_name_and_has_matematica_for_gabarito
+    has_mat = False
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        course_name_and_has_matematica_for_gabarito,
+    )
 
-    course_name, has_mat = course_name_and_has_matematica_for_gabarito(str(gabs_linhas[0].id))
+    for g in gabs_linhas:
+        _, gab_has_mat = course_name_and_has_matematica_for_gabarito(str(g.id))
+        if gab_has_mat:
+            has_mat = True
+            break
+    if not has_mat:
+        has_mat = any("matem" in d.lower() for d in all_disciplines)
 
     return _assemble_payload(
         tipo_entidade="cartao_resposta",
@@ -2326,17 +2519,17 @@ def build_answer_sheet_consolidated_report(
         ),
         consolidado_medias_nota=_build_medias_section_answer_sheet(
             ctx, results_linhas, results_rede, all_disciplines, "grade",
-            course_name=course_name, has_matematica=has_mat,
+            has_matematica=has_mat,
         ),
         consolidado_medias_proficiencia=_build_medias_section_answer_sheet(
             ctx, results_linhas, results_rede, all_disciplines, "proficiency",
-            course_name=course_name, has_matematica=has_mat,
+            has_matematica=has_mat,
         ),
         acertos_por_habilidade=_answer_sheet_acertos_data(
             ctx, gabs_by_id, gabarito_ids, results_linhas, results_rede, all_disciplines
         ),
         distribuicao_niveis_proficiencia=_build_distribuicao_section_answer_sheet(
-            ctx, results_linhas, results_rede, all_disciplines, course_name, has_mat
+            ctx, results_linhas, results_rede, all_disciplines, has_mat
         ),
     )
 

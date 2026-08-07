@@ -67,8 +67,8 @@ class RankingReportService:
     @staticmethod
     def _class_row_sort_key(row: Dict[str, Any]) -> tuple:
         return (
-            -float(row.get("average_score") or row.get("media") or 0),
             -float(row.get("average_proficiency") or 0),
+            -float(row.get("average_score") or row.get("media") or 0),
             str(row.get("turma") or row.get("class_name") or ""),
         )
 
@@ -144,7 +144,11 @@ class RankingReportService:
                 if not participation_rate and total_students > 0:
                     participation_rate = round((participating / total_students) * 100, 1)
                 avg_prof = float(raw.get("average_proficiency") or 0)
-                avg_score = float(raw.get("average_score") or raw.get("media") or 0)
+                avg_score = cls._aggregated_score_from_proficiency(
+                    average_proficiency=avg_prof,
+                    course_label=course_label,
+                    subject_name=subject_name,
+                )
                 classification = str(raw.get("classification") or "") or cls._classification_from_proficiency(
                     avg_prof,
                     course_label=course_label,
@@ -517,13 +521,28 @@ class RankingReportService:
         filters: Dict[str, Any],
     ) -> float:
         """Nota agregada canônica do professor: calculate_grade(média_prof), não AVG das notas."""
+        return cls._aggregated_score_from_proficiency(
+            average_proficiency=average_proficiency,
+            course_label=cls._resolve_teacher_course_label(grade_names, filters),
+            subject_name=cls._resolve_subject_name_for_filters(filters),
+        )
+
+    @classmethod
+    def _aggregated_score_from_proficiency(
+        cls,
+        *,
+        average_proficiency: float,
+        course_label: str,
+        subject_name: str = "GERAL",
+    ) -> float:
+        """Nota agregada canônica: calculate_grade(média_prof), não AVG das notas."""
         from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
 
         return float(
             aggregated_grade_from_proficiency(
                 float(average_proficiency or 0),
-                cls._resolve_teacher_course_label(grade_names, filters),
-                subject_name=cls._resolve_subject_name_for_filters(filters),
+                str(course_label or "Anos Iniciais"),
+                subject_name=str(subject_name or "GERAL"),
             )
         )
 
@@ -728,6 +747,8 @@ class RankingReportService:
         cls,
         class_rows: List[Dict[str, Any]],
         selected_grade_name: Optional[str] = None,
+        *,
+        subject_name: str = "GERAL",
     ) -> List[Dict[str, Any]]:
         grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         selected_grade_name_norm = cls._normalize_text(selected_grade_name or "")
@@ -737,13 +758,20 @@ class RankingReportService:
                 continue
             participating = int(row.get("participating_students") or row.get("alunos") or 0)
             total_students = int(row.get("total_students") or participating)
+            avg_prof = float(row.get("average_proficiency") or 0)
+            course_label = cls._derive_course_label(grade_name)
+            average_score = cls._aggregated_score_from_proficiency(
+                average_proficiency=avg_prof,
+                course_label=course_label,
+                subject_name=subject_name,
+            )
             grouped[grade_name].append(
                 {
                     "class_id": row.get("class_id"),
                     "class_name": row.get("turma"),
                     "grade_name": grade_name,
-                    "average_score": float(row.get("media") or 0),
-                    "average_proficiency": float(row.get("average_proficiency") or 0),
+                    "average_score": average_score,
+                    "average_proficiency": avg_prof,
                     "accuracy_percent": float(row.get("acerto_percent") or 0),
                     "completion_rate": float(row.get("conclusao") or 0),
                     "students_count": participating,
@@ -762,8 +790,8 @@ class RankingReportService:
             rows = grouped[grade_name]
             rows.sort(
                 key=lambda row: (
+                    -float(row.get("average_proficiency") or 0),
                     -float(row.get("average_score") or 0),
-                    -float(row.get("accuracy_percent") or 0),
                     str(row.get("class_name") or ""),
                 )
             )
@@ -1676,7 +1704,11 @@ class RankingReportService:
         )
         series_by_school_sections = cls._build_series_by_school_and_course(school_rows) if visibility["series_by_school_and_course"] else []
         classes_by_series_sections = (
-            cls._build_classes_by_series(class_rows, selected_grade_name=selected_grade_name)
+            cls._build_classes_by_series(
+                class_rows,
+                selected_grade_name=selected_grade_name,
+                subject_name=subject_name,
+            )
             if visibility["classes_by_series"]
             else []
         )
@@ -2444,6 +2476,12 @@ class RankingReportService:
             avg_prof = float(row.average_proficiency or 0)
             grade_name = str(row.serie or "Sem série")
             course_label = cls._derive_course_label(grade_name)
+            # Nota canônica: calculate_grade(média_prof), não AVG das notas (teto/piso distorce)
+            average_score = cls._aggregated_score_from_proficiency(
+                average_proficiency=avg_prof,
+                course_label=course_label,
+                subject_name=subject_name,
+            )
             adequado_avancado_count = int(adequado_avancado_by_class.get(class_id, 0))
             adequado_avancado_pct = (
                 round((adequado_avancado_count / participating) * 100, 1)
@@ -2458,8 +2496,8 @@ class RankingReportService:
                     "shift": (row.shift or "").strip() if getattr(row, "shift", None) else "",
                     "serie": grade_name,
                     "grade_id": str(row.grade_id or ""),
-                    "media": round(float(row.media or 0), 1),
-                    "average_score": round(float(row.media or 0), 1),
+                    "media": round(average_score, 1),
+                    "average_score": round(average_score, 1),
                     "average_proficiency": round(avg_prof, 1),
                     "alunos": participating,
                     "participating_students": participating,
@@ -2491,7 +2529,12 @@ class RankingReportService:
             grade = db.session.query(Grade.name).filter(Grade.id == selected_grade_id).first()
             selected_grade_name = str(getattr(grade, "name", "") or "").strip() if grade else None
 
-        sections = cls._build_classes_by_series(class_rows, selected_grade_name=selected_grade_name)
+        subject_name = cls._resolve_subject_name_for_filters(filters)
+        sections = cls._build_classes_by_series(
+            class_rows,
+            selected_grade_name=selected_grade_name,
+            subject_name=subject_name,
+        )
         items: List[Dict[str, Any]] = []
         for section in sections:
             for raw in section.get("items") or []:
@@ -2503,7 +2546,11 @@ class RankingReportService:
                     participation_rate = round((participating / total_students) * 100, 1)
                 grade_name = str(raw.get("grade_name") or "Sem série")
                 course_label = cls._derive_course_label(grade_name)
-                subject_name = cls._resolve_subject_name_for_filters(filters)
+                average_score = cls._aggregated_score_from_proficiency(
+                    average_proficiency=avg_prof,
+                    course_label=course_label,
+                    subject_name=subject_name,
+                )
                 classification = str(raw.get("classification") or "") or cls._classification_from_proficiency(
                     avg_prof,
                     course_label=course_label,
@@ -2519,7 +2566,7 @@ class RankingReportService:
                         "participating_students": participating,
                         "total_students": total_students,
                         "average_proficiency": round(avg_prof, 1),
-                        "average_score": round(float(raw.get("average_score") or 0), 1),
+                        "average_score": round(average_score, 1),
                         "adequado_avancado_count": int(raw.get("adequado_avancado_count") or 0),
                         "adequado_avancado_pct": round(float(raw.get("adequado_avancado_pct") or 0), 1),
                         "level_tag": classification,
@@ -2528,8 +2575,8 @@ class RankingReportService:
                 )
         items.sort(
             key=lambda row: (
-                -float(row.get("average_score") or 0),
                 -float(row.get("average_proficiency") or 0),
+                -float(row.get("average_score") or 0),
                 str(row.get("class_name") or ""),
             )
         )

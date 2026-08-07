@@ -408,6 +408,45 @@ class TestClassRankingAdequadoAvancado(unittest.TestCase):
         self.assertEqual(item["adequado_avancado_count"], 8)
         self.assertEqual(item["adequado_avancado_pct"], 40.0)
 
+    def test_classes_by_series_derives_score_from_proficiency_not_avg_grades(self):
+        # AVG das notas seria 4.64; canônico Mat AI: calculate_grade(168.75) ≈ 4.15 → 4.2 arredondado no payload
+        class_rows = [
+            {
+                "class_id": "class-a",
+                "turma": "A",
+                "serie": "2º Ano",
+                "media": 4.64,
+                "average_score": 4.64,
+                "average_proficiency": 168.75,
+                "participating_students": 14,
+                "total_students": 14,
+                "participation_rate": 100.0,
+                "adequado_avancado_count": 0,
+                "adequado_avancado_pct": 0.0,
+                "classification": "Básico",
+                "acerto_percent": 0.0,
+                "conclusao": 100.0,
+                "avaliacoes": 1,
+            }
+        ]
+        with patch.object(
+            RankingReportService,
+            "_resolve_subject_name_for_filters",
+            return_value="Matemática",
+        ):
+            sections = RankingReportService._build_classes_by_series(
+                class_rows,
+                subject_name="Matemática",
+            )
+            payload = RankingReportService._build_class_ranking_payload(
+                class_rows,
+                filters={"disciplina": "subj-mat", "answer_sheet_id": "gab-1"},
+            )
+        self.assertEqual(len(sections), 1)
+        self.assertAlmostEqual(sections[0]["items"][0]["average_score"], 4.15, places=2)
+        self.assertNotAlmostEqual(sections[0]["items"][0]["average_score"], 4.64, places=2)
+        self.assertEqual(payload["items"][0]["average_score"], 4.2)
+
 
 class TestDisciplineOptions(unittest.TestCase):
     def test_looks_like_course_label(self):
@@ -581,7 +620,8 @@ class TestHierarchicalMeanCalculations(unittest.TestCase):
         result = RankingReportService._build_network_series_averages(schools)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["grade_name"], "5º Ano")
-        self.assertAlmostEqual(result[0]["average_score"], 6.0, places=1)
+        # Nota canônica = calculate_grade(média_prof 200), não média das notas (4+8)/2=6
+        self.assertAlmostEqual(result[0]["average_score"], 5.5, places=1)
         self.assertAlmostEqual(result[0]["average_proficiency"], 200.0, places=1)
 
     def test_build_general_course_sections_uses_equal_weight_per_serie(self):
@@ -612,7 +652,8 @@ class TestHierarchicalMeanCalculations(unittest.TestCase):
         sections = RankingReportService._build_general_course_sections(school_rows)
         self.assertEqual(len(sections), 1)
         school_entry = sections[0]["items"][0]
-        self.assertAlmostEqual(school_entry["average_score"], 6.0, places=1)
+        # Nota canônica = calculate_grade(média_prof 200), não média das notas
+        self.assertAlmostEqual(school_entry["average_score"], 5.5, places=1)
         self.assertAlmostEqual(school_entry["average_proficiency"], 200.0, places=1)
 
 

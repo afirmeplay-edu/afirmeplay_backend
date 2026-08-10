@@ -73,6 +73,7 @@ celery_app = Celery(
         'app.socioeconomic_forms.services.results_tasks',  # Tasks de resultados socioeconômicos
         'app.socioeconomic_forms.services.results_migration_tasks',  # Tasks de migração/população inicial
         'app.services.celery_tasks.competition_tasks',  # Tasks de finalização de competições
+        'app.afirme_ler.tasks',  # Leitura Guiada Automática (STT + avaliação)
     ]
 )
 

@@ -12,11 +12,26 @@ from app.afirme_ler.models import (
     ReadingEvaluationSession,
     ReadingTextQuestion,
 )
+from app.afirme_ler.services.fluency_metrics_service import (
+    build_fluency_record,
+    refresh_ica_in_fluency_data,
+)
 from app.afirme_ler.services.parsing import get_field
 from app.afirme_ler.services.reading_evaluation_service import ReadingEvaluationService
 
 
 class ReadingSessionService:
+    @staticmethod
+    def _apply_fluency_columns(session: ReadingEvaluationSession, flat: dict) -> None:
+        session.calculated_plcm = flat.get("calculated_plcm")
+        session.calculated_accuracy = flat.get("calculated_accuracy")
+        session.precision_level = flat.get("precision_level")
+        session.fluency_level = flat.get("fluency_level")
+        session.ica_score = flat.get("ica_score")
+        session.ica_breakdown = flat.get("ica_breakdown")
+        if flat.get("prosody_level") is not None:
+            session.prosody_level = flat.get("prosody_level")
+
     @staticmethod
     def list_sessions(evaluation_id: str) -> List[ReadingEvaluationSession]:
         ReadingEvaluationService.get_evaluation(evaluation_id)
@@ -83,12 +98,18 @@ class ReadingSessionService:
         if not isinstance(fluency_data, dict):
             raise ValueError("fluencyData deve ser um objeto JSON.")
 
-        session.fluency_data = fluency_data
+        record, flat = build_fluency_record(
+            fluency_data,
+            comprehension_score=session.comprehension_score,
+        )
+        session.fluency_data = record
+        ReadingSessionService._apply_fluency_columns(session, flat)
+
         if session.status == "pendente":
             session.status = "em_andamento"
             session.started_at = session.started_at or datetime.utcnow()
         db.session.commit()
-        return session
+        return ReadingSessionService.get_session(evaluation_id, session_id)
 
     @staticmethod
     def save_comprehension_answers(
@@ -122,7 +143,10 @@ class ReadingSessionService:
             if not question:
                 raise ValueError(f"Questão não pertence ao texto da avaliação: {question_id}")
             if not isinstance(selected, int):
-                raise ValueError("selectedOption deve ser inteiro.")
+                try:
+                    selected = int(selected)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("selectedOption deve ser inteiro.") from exc
             options = question.options if isinstance(question.options, list) else []
             if selected < 0 or selected >= len(options):
                 raise ValueError(f"selectedOption inválido para a questão {question_id}.")
@@ -154,12 +178,73 @@ class ReadingSessionService:
         session.comprehension_correct_count = correct
         session.comprehension_total = total_questions
         session.comprehension_score = (
-            (correct / total_questions) * 100 if total_questions else 0.0
+            round((correct / total_questions) * 100, 2) if total_questions else 0.0
         )
+
+        # Recalcula ICA se já houver fluência persistida
+        updated_fluency, flat = refresh_ica_in_fluency_data(
+            session.fluency_data,
+            comprehension_score=session.comprehension_score,
+        )
+        if updated_fluency is not None:
+            session.fluency_data = updated_fluency
+            ReadingSessionService._apply_fluency_columns(session, flat)
+
         db.session.commit()
         return ReadingSessionService.get_session(
             evaluation_id, session_id, include_answers=True
         )
+
+    @staticmethod
+    def build_report(evaluation_id: str, session_id: str) -> dict:
+        """Relatório consolidado (Leiturômetro) da sessão."""
+        evaluation = ReadingEvaluationService.get_evaluation(evaluation_id)
+        session = ReadingSessionService.get_session(
+            evaluation_id, session_id, include_answers=True
+        )
+        fluency = session.fluency_data if isinstance(session.fluency_data, dict) else {}
+        metrics = fluency.get("metrics") if isinstance(fluency.get("metrics"), dict) else {}
+
+        return {
+            "evaluationId": evaluation.id,
+            "evaluationTitle": evaluation.title,
+            "assessmentType": evaluation.assessment_type,
+            "sessionId": session.id,
+            "studentId": session.student_id,
+            "studentName": session.student.name if session.student else None,
+            "classId": str(session.class_id) if session.class_id else None,
+            "status": session.status,
+            "readingTextId": evaluation.reading_text_id,
+            "wordsWordListId": evaluation.words_word_list_id,
+            "uncommonWordListId": evaluation.uncommon_word_list_id,
+            "q1": fluency.get("q1"),
+            "q2": fluency.get("q2"),
+            "q3": fluency.get("q3"),
+            "prosodyLevel": session.prosody_level or fluency.get("prosodyLevel"),
+            "caderno": fluency.get("caderno"),
+            "notReadReason": fluency.get("notReadReason"),
+            "extras": fluency.get("extras") or {},
+            "comprehension": {
+                "correctCount": session.comprehension_correct_count,
+                "total": session.comprehension_total,
+                "score": session.comprehension_score,
+                "answers": [a.to_dict() for a in (session.answers or [])],
+            },
+            "calculatedPlcm": session.calculated_plcm
+            if session.calculated_plcm is not None
+            else metrics.get("calculatedPlcm"),
+            "calculatedAccuracy": session.calculated_accuracy
+            if session.calculated_accuracy is not None
+            else metrics.get("calculatedAccuracy"),
+            "precisionLevel": session.precision_level or metrics.get("precisionLevel"),
+            "fluencyLevel": session.fluency_level or metrics.get("fluencyLevel"),
+            "icaScore": session.ica_score
+            if session.ica_score is not None
+            else metrics.get("icaScore"),
+            "icaBreakdown": session.ica_breakdown or metrics.get("icaBreakdown"),
+            "startedAt": session.started_at.isoformat() if session.started_at else None,
+            "submittedAt": session.submitted_at.isoformat() if session.submitted_at else None,
+        }
 
     @staticmethod
     def finalize_session(evaluation_id: str, session_id: str) -> ReadingEvaluationSession:

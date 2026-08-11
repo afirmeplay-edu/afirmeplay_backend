@@ -93,9 +93,9 @@ Faixas **exatas** estão no dicionário `CLASSIFICATION_CONFIG` no arquivo Pytho
 
 | Proficiência | Classificação |
 |--------------|----------------|
-| 0 – 174 | Abaixo do Básico |
-| 175 – 224 | Básico |
-| 225 – 274 | Adequado |
+| 0 – 174,99 | Abaixo do Básico |
+| 175 – 224,99 | Básico |
+| 225 – 274,99 | Adequado |
 | 275 – 375 | Avançado |
 
 **Outras — Anos Finais / Ensino Médio**

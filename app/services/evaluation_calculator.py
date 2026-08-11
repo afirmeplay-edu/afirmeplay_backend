@@ -112,28 +112,30 @@ class EvaluationCalculator:
         ],
         
         # Educação Infantil, Anos Iniciais, Educação Especial, EJA - Matemática
+        # Limites .99 fecham buracos entre faixas inteiras (ex.: 224.9 não pode cair
+        # no fallback "Abaixo do Básico" entre Básico max 224 e Adequado min 225).
         (CourseLevel.EDUCACAO_INFANTIL, Subject.MATEMATICA): [
-            (0, 174, Classification.ABAIXO_BASICO),
-            (175, 224, Classification.BASICO),
-            (225, 274, Classification.ADEQUADO),
+            (0, 174.99, Classification.ABAIXO_BASICO),
+            (175, 224.99, Classification.BASICO),
+            (225, 274.99, Classification.ADEQUADO),
             (275, 375, Classification.AVANCADO)
         ],
         (CourseLevel.ANOS_INICIAIS, Subject.MATEMATICA): [
-            (0, 174, Classification.ABAIXO_BASICO),
-            (175, 224, Classification.BASICO),
-            (225, 274, Classification.ADEQUADO),
+            (0, 174.99, Classification.ABAIXO_BASICO),
+            (175, 224.99, Classification.BASICO),
+            (225, 274.99, Classification.ADEQUADO),
             (275, 375, Classification.AVANCADO)
         ],
         (CourseLevel.EDUCACAO_ESPECIAL, Subject.MATEMATICA): [
-            (0, 174, Classification.ABAIXO_BASICO),
-            (175, 224, Classification.BASICO),
-            (225, 274, Classification.ADEQUADO),
+            (0, 174.99, Classification.ABAIXO_BASICO),
+            (175, 224.99, Classification.BASICO),
+            (225, 274.99, Classification.ADEQUADO),
             (275, 375, Classification.AVANCADO)
         ],
         (CourseLevel.EJA, Subject.MATEMATICA): [
-            (0, 174, Classification.ABAIXO_BASICO),
-            (175, 224, Classification.BASICO),
-            (225, 274, Classification.ADEQUADO),
+            (0, 174.99, Classification.ABAIXO_BASICO),
+            (175, 224.99, Classification.BASICO),
+            (225, 274.99, Classification.ADEQUADO),
             (275, 375, Classification.AVANCADO)
         ],
         
@@ -387,9 +389,9 @@ class EvaluationCalculator:
                     ]
                 else:
                     ranges = [
-                        (0, 174, Classification.ABAIXO_BASICO),
-                        (175, 224, Classification.BASICO),
-                        (225, 274, Classification.ADEQUADO),
+                        (0, 174.99, Classification.ABAIXO_BASICO),
+                        (175, 224.99, Classification.BASICO),
+                        (225, 274.99, Classification.ADEQUADO),
                         (275, 375, Classification.AVANCADO)
                     ]
         else:

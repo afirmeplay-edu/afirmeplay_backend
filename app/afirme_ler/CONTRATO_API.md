@@ -461,7 +461,9 @@ Base: `/afirme-reading/evaluations/:evaluationId/sessions`
 | Gabarito de compreensão | **Backend** |
 | Persistência e relatório | **Backend** |
 
-> O front **não** envia só áudio nesta sessão. Áudio, se houver, fica no cliente (ou em `extras`); a fonte oficial são as contagens.
+> O front **não** envia só áudio nesta sessão oficial sob `/evaluations`.  
+> Para o wizard CAEd ad-hoc com áudio por parte, use `/fluency-sessions` (seção 8).  
+> `PATCH .../fluency` agora faz **merge incremental** (partes omitidas são preservadas).
 
 ### Rotas da sessão (referência rápida)
 
@@ -1236,3 +1238,236 @@ ICA só é preenchido quando existem as 3 precisões + compreensão + PLCM.
 ### Provisionamento
 
 Tabelas tenant via `provision_afirme_ler_for_city_schema` / DDL em `app/afirme_ler/ddl.py` (idempotente). Reaplicar nos schemas `city_*` existentes após deploy.
+
+---
+
+## 8. Sessão ad-hoc de Fluência Leitora (`/fluency-sessions`) — Opção A
+
+Fluxo **sem** avaliação pré-aplicada (wizard CAEd). STT / silêncio / Web Speech ficam no **frontend**.
+
+Roles: aplicação. Contexto de município obrigatório.  
+Base: `/afirme-reading/fluency-sessions`
+
+### Rotas
+
+| Método | Path | Status | Função |
+|--------|------|--------|--------|
+| `POST` | `/fluency-sessions` | `201` | Cria sessão `em_andamento` |
+| `GET` | `/fluency-sessions/:id` | `200` | Detalhe (+ answers) |
+| `PATCH` | `/fluency-sessions/:id/fluency` | `200` | Salva Q1/Q2/Q3 (**merge incremental**) |
+| `POST` | `/fluency-sessions/:id/comprehension-answers` | `200` | Compreensão + recalcula ICA |
+| `POST` | `/fluency-sessions/:id/audio` | `200` | Upload multipart por parte |
+| `GET` | `/fluency-sessions/:id/audio?part=` | `200` | Playback (JWT) |
+| `GET` | `/fluency-sessions/:id/report` | `200` | Leiturômetro + `hasAudio` |
+| `POST` | `/fluency-sessions/:id/submit` | `200` | Recalcula ICA e finaliza |
+| `POST` | `/fluency-sessions/:id/absent` | `200` | Ausência |
+
+### `POST /fluency-sessions` → `201`
+
+```json
+{
+  "studentId": "uuid",
+  "classId": "uuid",
+  "schoolId": "uuid",
+  "readingTextId": "uuid",
+  "wordsWordListId": "uuid",
+  "uncommonWordListId": "uuid",
+  "caderno": "A"
+}
+```
+
+**Response (exemplo):**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "studentId": "11111111-1111-1111-1111-111111111111",
+  "studentName": "Maria Silva",
+  "classId": "22222222-2222-2222-2222-222222222222",
+  "schoolId": "33333333-3333-3333-3333-333333333333",
+  "readingTextId": "44444444-4444-4444-4444-444444444444",
+  "wordsWordListId": "55555555-5555-5555-5555-555555555555",
+  "uncommonWordListId": "66666666-6666-6666-6666-666666666666",
+  "caderno": "A",
+  "status": "em_andamento",
+  "fluencyData": {
+    "kind": "FLUENCY",
+    "caderno": "A",
+    "q1": null,
+    "q2": null,
+    "q3": null,
+    "extras": {}
+  },
+  "partAudios": {},
+  "hasAudio": false,
+  "audioUrls": {},
+  "calculatedPlcm": null,
+  "calculatedAccuracy": null,
+  "precisionLevel": null,
+  "fluencyLevel": null,
+  "icaScore": null,
+  "icaBreakdown": null,
+  "prosodyLevel": null,
+  "comprehensionCorrectCount": null,
+  "comprehensionTotal": null,
+  "comprehensionScore": null,
+  "startedAt": "2026-08-12T13:40:00",
+  "submittedAt": null,
+  "appliedBy": "user-uuid",
+  "createdAt": "2026-08-12T13:40:00",
+  "updatedAt": "2026-08-12T13:40:00",
+  "answers": []
+}
+```
+
+### `PATCH .../fluency` — merge incremental
+
+Partes **omitidas** são preservadas. Enviar só `q1` não apaga `q2`/`q3` já salvos.  
+`"q2": null` remove Q2.
+
+Enums:
+
+- `WordStatus`: `nao_leu` | `acertou` | `inventou` | `soletrou` | `errou`
+- `NotReadReason`: `nao_se_aplica` | `recusou` | `nao_consegue` | `nao_sabe`
+- `source` (marking): `ia` | `manual` | `timeout`
+
+Se `skipped: true` (ou `notReadReason` ≠ `nao_se_aplica`): aceita markings vazios / zeros.
+
+O mesmo merge incremental vale para `PATCH /evaluations/:id/sessions/:sid/fluency`.
+
+### `POST .../audio` (multipart)
+
+Fields: `part` = `q1` | `q2` | `q3` | `mic_test`, `audio` = blob webm/ogg.
+
+```json
+{
+  "part": "q1",
+  "audioUrl": "/afirme-reading/fluency-sessions/.../audio?part=q1",
+  "audioMimeType": "audio/webm",
+  "audioSizeBytes": 245760,
+  "hasAudio": true
+}
+```
+
+### ICA com skip + Leiturômetro
+
+Pesos base: Q1 0,25 · Q2 0,15 · Q3 0,30 · Comp 0,20 · Fluência 0,10.
+
+Partes skipped são **excluídas** e os pesos restantes **renormalizados**. Se Q3 for skipped, o componente Fluência (PLCM) também sai.
+
+Leiturômetro (`leiturimetroLevel` 1–6) a partir do ICA:
+
+| ICA | Nível |
+|-----|-------|
+| ≤ 20 | 1 |
+| ≤ 40 | 2 |
+| ≤ 55 | 3 |
+| ≤ 70 | 4 |
+| ≤ 85 | 5 |
+| > 85 | 6 |
+
+`POST .../submit` recalcula ICA antes de marcar `finalizada`.
+
+### `GET .../report` (exemplo)
+
+```json
+{
+  "sessionId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "studentId": "11111111-1111-1111-1111-111111111111",
+  "studentName": "Maria Silva",
+  "classId": "22222222-2222-2222-2222-222222222222",
+  "schoolId": "33333333-3333-3333-3333-333333333333",
+  "status": "finalizada",
+  "readingTextId": "44444444-4444-4444-4444-444444444444",
+  "wordsWordListId": "55555555-5555-5555-5555-555555555555",
+  "uncommonWordListId": "66666666-6666-6666-6666-666666666666",
+  "caderno": "A",
+  "q1": {
+    "wordsRead": 42,
+    "lastWordPosition": 42,
+    "errorsCount": 3,
+    "readingTimeSeconds": 60,
+    "skipped": false,
+    "notReadReason": null,
+    "transcript": "casa bola...",
+    "markings": [
+      { "index": 0, "word": "casa", "status": "acertou", "source": "manual" }
+    ],
+    "accuracy": 92.86,
+    "plcm": 39.0,
+    "hasAudio": true,
+    "audioUrl": "/afirme-reading/fluency-sessions/.../audio?part=q1"
+  },
+  "q2": {
+    "wordsRead": 0,
+    "lastWordPosition": 0,
+    "errorsCount": 0,
+    "readingTimeSeconds": 0,
+    "skipped": true,
+    "notReadReason": "recusou",
+    "markings": [],
+    "accuracy": null,
+    "plcm": null,
+    "hasAudio": false
+  },
+  "q3": {
+    "wordsRead": 90,
+    "totalWords": 117,
+    "errorsCount": 6,
+    "unreadAfterEnd": 27,
+    "readingTimeSeconds": 60,
+    "skipped": false,
+    "obeyedSensePauses": true,
+    "lines": [
+      { "lineIndex": 0, "text": "SOFIA E MARTIN...", "wrongWordsCount": 1 }
+    ],
+    "accuracy": 93.33,
+    "plcm": 84.0,
+    "hasAudio": true,
+    "audioUrl": "/afirme-reading/fluency-sessions/.../audio?part=q3"
+  },
+  "micTest": { "hasAudio": true, "audioUrl": ".../audio?part=mic_test" },
+  "prosodyLevel": 3,
+  "comprehension": {
+    "correctCount": 2,
+    "total": 3,
+    "score": 66.67,
+    "answers": []
+  },
+  "calculatedPlcm": 84.0,
+  "calculatedAccuracy": 93.33,
+  "precisionLevel": "Instrucional",
+  "fluencyLevel": "acima",
+  "icaScore": 88.12,
+  "leiturimetroLevel": 6,
+  "icaBreakdown": {
+    "icaScore": 88.12,
+    "leiturimetroLevel": 6,
+    "skippedParts": ["lista2"],
+    "weights": {
+      "lista1": 0.25,
+      "lista2": 0.15,
+      "texto": 0.3,
+      "compreensao": 0.2,
+      "fluencia": 0.1
+    },
+    "weightsUsed": {
+      "lista1": 0.2941,
+      "texto": 0.3529,
+      "compreensao": 0.2353,
+      "fluencia": 0.1176
+    },
+    "components": {
+      "lista1Accuracy": 92.86,
+      "lista2Accuracy": null,
+      "textoAccuracy": 93.33,
+      "comprehension": 66.67,
+      "fluency": 100.0,
+      "plcm": 84.0
+    }
+  },
+  "startedAt": "2026-08-12T13:40:00",
+  "submittedAt": "2026-08-12T13:55:00"
+}
+```
+

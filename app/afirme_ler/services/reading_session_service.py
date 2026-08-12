@@ -98,11 +98,17 @@ class ReadingSessionService:
         if not isinstance(fluency_data, dict):
             raise ValueError("fluencyData deve ser um objeto JSON.")
 
+        from sqlalchemy.orm.attributes import flag_modified
+
         record, flat = build_fluency_record(
             fluency_data,
             comprehension_score=session.comprehension_score,
+            existing=session.fluency_data
+            if isinstance(session.fluency_data, dict)
+            else None,
         )
         session.fluency_data = record
+        flag_modified(session, "fluency_data")
         ReadingSessionService._apply_fluency_columns(session, flat)
 
         if session.status == "pendente":
@@ -242,6 +248,12 @@ class ReadingSessionService:
             if session.ica_score is not None
             else metrics.get("icaScore"),
             "icaBreakdown": session.ica_breakdown or metrics.get("icaBreakdown"),
+            "leiturimetroLevel": (
+                (session.ica_breakdown or {}).get("leiturimetroLevel")
+                if isinstance(session.ica_breakdown, dict)
+                else None
+            )
+            or metrics.get("leiturimetroLevel"),
             "startedAt": session.started_at.isoformat() if session.started_at else None,
             "submittedAt": session.submitted_at.isoformat() if session.submitted_at else None,
         }
@@ -255,6 +267,17 @@ class ReadingSessionService:
             return session
         if session.status not in ("em_andamento", "pendente"):
             raise ValueError("Sessão não pode ser finalizada.")
+
+        from sqlalchemy.orm.attributes import flag_modified
+
+        updated_fluency, flat = refresh_ica_in_fluency_data(
+            session.fluency_data,
+            comprehension_score=session.comprehension_score,
+        )
+        if updated_fluency is not None:
+            session.fluency_data = updated_fluency
+            flag_modified(session, "fluency_data")
+            ReadingSessionService._apply_fluency_columns(session, flat)
 
         session.status = "finalizada"
         session.submitted_at = datetime.utcnow()

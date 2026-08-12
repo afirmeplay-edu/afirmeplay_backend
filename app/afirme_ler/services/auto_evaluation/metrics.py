@@ -80,6 +80,35 @@ def calculate_comprehension(correct: int, total: int) -> Optional[float]:
     return round(100.0 * correct / total, 2)
 
 
+ICA_BASE_WEIGHTS = {
+    "lista1": 0.25,
+    "lista2": 0.15,
+    "texto": 0.30,
+    "compreensao": 0.20,
+    "fluencia": 0.10,
+}
+
+
+def leiturimetro_level(ica_score: Optional[float]) -> Optional[int]:
+    """Níveis 1–6 do Leiturômetro a partir do ICA (0–100)."""
+    if ica_score is None:
+        return None
+    score = float(ica_score)
+    if score < 0:
+        return 1
+    if score <= 20:
+        return 1
+    if score <= 40:
+        return 2
+    if score <= 55:
+        return 3
+    if score <= 70:
+        return 4
+    if score <= 85:
+        return 5
+    return 6
+
+
 def calculate_ica(
     *,
     accuracy_lista1: Optional[float],
@@ -87,6 +116,7 @@ def calculate_ica(
     accuracy_texto: Optional[float],
     comprehension: Optional[float],
     plcm: Optional[float],
+    skipped_components: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     ICA =
@@ -95,31 +125,51 @@ def calculate_ica(
     + 0.30 * Precisão Texto
     + 0.20 * Compreensão
     + 0.10 * Fluência(min(100, PLCM/60*100))
+
+    Partes em ``skipped_components`` são excluídas e os pesos restantes
+    são renormalizados (soma = 1). Componentes não-skipped com valor
+    ``None`` deixam o ICA incompleto (``null``), exceto quando há skip.
     """
     fluency = fluency_score_for_ica(plcm)
-    components = {
-        "lista1": (accuracy_lista1, 0.25),
-        "lista2": (accuracy_lista2, 0.15),
-        "texto": (accuracy_texto, 0.30),
-        "compreensao": (comprehension, 0.20),
-        "fluencia": (fluency, 0.10),
+    skipped = {str(s).strip().lower() for s in (skipped_components or []) if s}
+    raw = {
+        "lista1": accuracy_lista1,
+        "lista2": accuracy_lista2,
+        "texto": accuracy_texto,
+        "compreensao": comprehension,
+        "fluencia": fluency,
     }
-    if any(value is None for value, _ in components.values()):
+
+    active: Dict[str, tuple] = {}
+    for key, base_weight in ICA_BASE_WEIGHTS.items():
+        if key in skipped:
+            continue
+        value = raw[key]
+        if value is None:
+            # Sem skip: exige todos os componentes (compat).
+            if not skipped:
+                return None
+            continue
+        active[key] = (float(value), base_weight)
+
+    if not active:
         return None
 
-    score = 0.0
-    for value, weight in components.values():
-        score += float(value) * weight
+    weight_sum = sum(w for _, w in active.values())
+    if weight_sum <= 0:
+        return None
+
+    weights_used = {
+        key: round(weight / weight_sum, 4) for key, (_, weight) in active.items()
+    }
+    score = sum(value * weights_used[key] for key, (value, _) in active.items())
 
     return {
         "icaScore": round(score, 2),
-        "weights": {
-            "lista1": 0.25,
-            "lista2": 0.15,
-            "texto": 0.30,
-            "compreensao": 0.20,
-            "fluencia": 0.10,
-        },
+        "weights": dict(ICA_BASE_WEIGHTS),
+        "weightsUsed": weights_used,
+        "skippedParts": sorted(skipped),
+        "leiturimetroLevel": leiturimetro_level(score),
         "components": {
             "lista1Accuracy": accuracy_lista1,
             "lista2Accuracy": accuracy_lista2,

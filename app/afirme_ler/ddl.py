@@ -228,4 +228,58 @@ CREATE TABLE IF NOT EXISTS "{schema}".reading_guided_auto_comprehension_answer (
 CREATE INDEX IF NOT EXISTS ix_reading_guided_auto_comp_answer_session
     ON "{schema}".reading_guided_auto_comprehension_answer(session_id);
 COMMENT ON TABLE "{schema}".reading_guided_auto_comprehension_answer IS 'Respostas de compreensão na leitura guiada automática';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_fluency_session (
+    id VARCHAR PRIMARY KEY,
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
+    class_id UUID REFERENCES "{schema}".class(id),
+    school_id VARCHAR(36),
+    reading_text_id VARCHAR NOT NULL,
+    words_word_list_id VARCHAR,
+    uncommon_word_list_id VARCHAR,
+    caderno VARCHAR(8) NOT NULL DEFAULT 'A',
+    status VARCHAR(20) NOT NULL DEFAULT 'em_andamento',
+    fluency_data JSON,
+    part_audios JSON,
+    calculated_plcm DOUBLE PRECISION,
+    calculated_accuracy DOUBLE PRECISION,
+    precision_level VARCHAR(30),
+    fluency_level VARCHAR(30),
+    ica_score DOUBLE PRECISION,
+    ica_breakdown JSON,
+    prosody_level INTEGER,
+    comprehension_correct_count INTEGER,
+    comprehension_total INTEGER,
+    comprehension_score DOUBLE PRECISION,
+    started_at TIMESTAMP,
+    submitted_at TIMESTAMP,
+    applied_by VARCHAR REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_reading_fluency_session_status
+        CHECK (status IN ('em_andamento', 'finalizada', 'ausente')),
+    CONSTRAINT chk_reading_fluency_prosody
+        CHECK (prosody_level IS NULL OR prosody_level BETWEEN 1 AND 5)
+);
+CREATE INDEX IF NOT EXISTS ix_reading_fluency_session_student
+    ON "{schema}".reading_fluency_session(student_id);
+CREATE INDEX IF NOT EXISTS ix_reading_fluency_session_status
+    ON "{schema}".reading_fluency_session(status);
+CREATE INDEX IF NOT EXISTS ix_reading_fluency_session_created
+    ON "{schema}".reading_fluency_session(created_at DESC);
+COMMENT ON TABLE "{schema}".reading_fluency_session IS 'Sessão ad-hoc de Fluência Leitora (CAEd) sem avaliação pré-aplicada';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_fluency_comprehension_answer (
+    id VARCHAR PRIMARY KEY,
+    session_id VARCHAR NOT NULL
+        REFERENCES "{schema}".reading_fluency_session(id) ON DELETE CASCADE,
+    reading_text_question_id VARCHAR NOT NULL,
+    selected_option INTEGER NOT NULL,
+    is_correct BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_reading_fluency_comp_answer UNIQUE(session_id, reading_text_question_id)
+);
+CREATE INDEX IF NOT EXISTS ix_reading_fluency_comp_answer_session
+    ON "{schema}".reading_fluency_comprehension_answer(session_id);
+COMMENT ON TABLE "{schema}".reading_fluency_comprehension_answer IS 'Respostas de compreensão na sessão ad-hoc de fluência';
 """

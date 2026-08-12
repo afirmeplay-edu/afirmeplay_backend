@@ -95,7 +95,7 @@ Após o login, o JWT já carrega o município — requests autenticadas de profe
 | Grupo | Roles | Uso |
 |-------|-------|-----|
 | Cadastro | `admin`, `tecadm`, `professor`, `coordenador`, `diretor` | Textos, listas, questões, CRUD de avaliação, apply |
-| Aplicação | Cadastro + `aplicador` | Listar/obter avaliações e sessões; start, fluency, answers, submit, absent |
+| Aplicação | Cadastro + `aplicador` | Listar/obter avaliações e sessões; start, fluency, report, answers, submit, absent |
 
 ---
 
@@ -446,17 +446,47 @@ Aplica a turmas e cria sessões por aluno.
 
 ---
 
-## 5. Sessões de aplicação
+## 5. Sessões de aplicação (Fluência Leitora)
 
-Roles: aplicação. Contexto de município obrigatório.
+Roles: aplicação. Contexto de município obrigatório.  
+Base: `/afirme-reading/evaluations/:evaluationId/sessions`
+
+### Divisão de responsabilidades
+
+| Responsabilidade | Quem |
+|------------------|------|
+| STT / microfone / contagem Q1–Q3 | Frontend (Web Speech + override do professor) |
+| Envio de contagens + extras | Frontend → `PATCH .../fluency` |
+| Cálculo PLCM, precisão, níveis, ICA | **Backend** |
+| Gabarito de compreensão | **Backend** |
+| Persistência e relatório | **Backend** |
+
+> O front **não** envia só áudio nesta sessão oficial sob `/evaluations`.  
+> Para o wizard CAEd ad-hoc com áudio por parte, use `/fluency-sessions` (seção 8).  
+> `PATCH .../fluency` agora faz **merge incremental** (partes omitidas são preservadas).
+
+### Rotas da sessão (referência rápida)
+
+| Método | Path | Status | Função |
+|--------|------|--------|--------|
+| `GET` | `/evaluations/:evaluationId/sessions` | `200` | Lista sessões da avaliação |
+| `GET` | `/evaluations/:evaluationId/sessions/:sessionId` | `200` | Detalhe da sessão (+ `answers`) |
+| `POST` | `/evaluations/:evaluationId/sessions/:sessionId/start` | `200` | Inicia aplicação |
+| `PATCH` | `/evaluations/:evaluationId/sessions/:sessionId/fluency` | `200` | Salva Q1/Q2/Q3; backend calcula métricas |
+| `GET` | `/evaluations/:evaluationId/sessions/:sessionId/report` | `200` | Relatório Leiturômetro (PLCM/ICA) |
+| `POST` | `/evaluations/:evaluationId/sessions/:sessionId/comprehension-answers` | `200` | Respostas de compreensão + recalcula ICA |
+| `POST` | `/evaluations/:evaluationId/sessions/:sessionId/submit` | `200` | Finaliza sessão |
+| `POST` | `/evaluations/:evaluationId/sessions/:sessionId/absent` | `200` | Marca ausência |
 
 Fluxo sugerido no frontend:
 
-1. `GET .../sessions` — lista alunos/sessões
-2. `POST .../sessions/:id/start` — inicia
-3. `PATCH .../fluency` e/ou `POST .../comprehension-answers` — salva progresso
-4. `POST .../submit` — finaliza  
-   ou `POST .../absent` — marca ausência
+1. `GET .../sessions` — lista alunos/sessões  
+2. `POST .../sessions/:sessionId/start` — inicia  
+3. `PATCH .../sessions/:sessionId/fluency` — Q1 / Q2 / Q3  
+4. `POST .../sessions/:sessionId/comprehension-answers` — se `completa` e Q3 feito  
+5. `GET .../sessions/:sessionId/report` — Leiturômetro  
+6. `POST .../sessions/:sessionId/submit` — finaliza  
+   ou `POST .../sessions/:sessionId/absent` — ausência  
 
 ### `GET /afirme-reading/evaluations/:evaluationId/sessions` → `200`
 
@@ -477,6 +507,13 @@ Inclui `answers`.
   "classId": "uuid",
   "status": "pendente",
   "fluencyData": null,
+  "calculatedPlcm": null,
+  "calculatedAccuracy": null,
+  "precisionLevel": null,
+  "fluencyLevel": null,
+  "icaScore": null,
+  "icaBreakdown": null,
+  "prosodyLevel": null,
   "comprehensionCorrectCount": null,
   "comprehensionTotal": null,
   "comprehensionScore": null,
@@ -500,36 +537,239 @@ Inclui `answers`.
 
 (`answers` só no GET da sessão e após salvar compreensão / submit.)
 
-### `POST .../sessions/:sessionId/start` → `200`
+### `POST /afirme-reading/evaluations/:evaluationId/sessions/:sessionId/start` → `200`
 
 - Avaliação deve estar `agendada` ou `em_andamento`
 - Sessão não pode estar `finalizada` / `ausente`
 - Sessão → `em_andamento`; se avaliação era `agendada` → `em_andamento`
 - Preenche `startedAt` e `appliedBy`
 
-### `PATCH .../sessions/:sessionId/fluency` → `200`
+**Response:** `Session`.
 
-Só se `assessmentType` ∈ `fluencia` | `completa`.
+### `PATCH /afirme-reading/evaluations/:evaluationId/sessions/:sessionId/fluency` → `200`
+
+Só se `assessmentType` ∈ `fluencia` | `completa`.  
+Avaliação de **Fluência Leitora** (CAEd / ICA / Leiturômetro).
+
+O backend **calcula** PLCM, precisão, níveis e ICA. O cliente envia contagens por questão (e extras); pode sobrescrever marcações do STT do protótipo.
+
+**Request:**
+
+```http
+PATCH /afirme-reading/evaluations/{evaluationId}/sessions/{sessionId}/fluency
+Authorization: Bearer <jwt>
+X-City-Slug: jaru
+Content-Type: application/json
+```
 
 ```json
 {
-  "fluencyData": {
-    "wordsCorrect": 40,
-    "wordsTotal": 50,
-    "timeSeconds": 60,
-    "ppm": 80,
-    "errors": []
+  "kind": "FLUENCY",
+  "caderno": "A",
+  "notReadReason": null,
+  "prosodyLevel": 3,
+  "q1": {
+    "wordsRead": 55,
+    "errorsCount": 3,
+    "readingTimeSeconds": 60,
+    "transcript": "opcional",
+    "markings": [],
+    "overrides": {}
+  },
+  "q2": {
+    "wordsRead": 32,
+    "errorsCount": 4,
+    "readingTimeSeconds": 60
+  },
+  "q3": {
+    "wordsRead": 120,
+    "errorsCount": 8,
+    "readingTimeSeconds": 90,
+    "transcript": "opcional"
+  },
+  "extras": {
+    "sttProvider": "web-speech",
+    "notes": "qualquer detalhe do wizard"
   }
 }
 ```
 
-Também aceita o objeto de fluência **direto no root** (sem wrapper).
+Também aceita:
 
-`fluencyData` é JSON livre (o backend persiste o objeto; o frontend define a estrutura CAEd).
+- wrapper `{ "fluencyData": { ... } }`
+- aliases `lista1`/`lista2`/`texto` no lugar de `q1`/`q2`/`q3`
+- payload flat do protótipo (`wordsRead`, `errorsCount`, `readingTimeSeconds`) → mapeado para **q3**
 
 Sessão deve estar `em_andamento` ou `pendente` (neste caso promove para `em_andamento`).
 
-### `POST .../sessions/:sessionId/comprehension-answers` → `200`
+**Response `200` (trecho):**
+
+```json
+{
+  "id": "session-uuid",
+  "status": "em_andamento",
+  "calculatedPlcm": 74.67,
+  "calculatedAccuracy": 93.33,
+  "precisionLevel": "Instrucional",
+  "fluencyLevel": "acima",
+  "icaScore": null,
+  "icaBreakdown": null,
+  "prosodyLevel": 3,
+  "fluencyData": {
+    "kind": "FLUENCY",
+    "caderno": "A",
+    "prosodyLevel": 3,
+    "q1": {
+      "wordsRead": 55,
+      "errorsCount": 3,
+      "readingTimeSeconds": 60,
+      "accuracy": 94.55,
+      "plcm": 52.0,
+      "precisionLevel": "Instrucional",
+      "fluencyLevel": "esperado"
+    },
+    "q2": {
+      "wordsRead": 32,
+      "errorsCount": 4,
+      "readingTimeSeconds": 60,
+      "accuracy": 87.5,
+      "plcm": 28.0
+    },
+    "q3": {
+      "wordsRead": 120,
+      "errorsCount": 8,
+      "readingTimeSeconds": 90,
+      "accuracy": 93.33,
+      "plcm": 74.67
+    },
+    "extras": { "sttProvider": "web-speech" },
+    "metrics": {
+      "calculatedPlcm": 74.67,
+      "calculatedAccuracy": 93.33,
+      "precisionLevel": "Instrucional",
+      "fluencyLevel": "acima",
+      "icaScore": null,
+      "algorithmVersion": "1.0.0",
+      "evaluationVersion": "1.0.0"
+    }
+  }
+}
+```
+
+- `icaScore` só é preenchido quando existem **q1 + q2 + q3 + compreensão**
+- Após `comprehension-answers`, o ICA é recalculado automaticamente
+
+Fórmulas:
+
+```
+PLCM = max(0, palavrasLidas - erros) / (tempoSegundos / 60)
+Precisão = max(0, palavrasLidas - erros) / palavrasLidas × 100
+Nível precisão: >=95 Independente | >=90 Instrucional | <90 Frustração
+Fluência 2º ano: PLCM <40 abaixo | 40–60 esperado | >60 acima
+Fluência ICA = min(100, PLCM/60 × 100)
+ICA = 0,25×Q1 + 0,15×Q2 + 0,30×Q3 + 0,20×Compreensão + 0,10×Fluência
+```
+
+Mapeamento protótipo → API:
+
+| Protótipo | Backend |
+|-----------|---------|
+| `kind: "FLUENCY"` | `assessmentType: "fluencia"` ou `"completa"` na avaliação + `kind` no fluencyData |
+| Q1 lista comuns | `q1` + lista `PALAVRAS` (`wordsWordListId`) |
+| Q2 pouco comuns | `q2` + lista `POUCO_COMUNS` (`uncommonWordListId`) |
+| Q3 texto | `q3` + `readingTextId` |
+
+### `GET /afirme-reading/evaluations/:evaluationId/sessions/:sessionId/report` → `200`
+
+Relatório consolidado da Fluência Leitora (Leiturômetro).
+
+**Request:**
+
+```http
+GET /afirme-reading/evaluations/{evaluationId}/sessions/{sessionId}/report
+Authorization: Bearer <jwt>
+X-City-Slug: jaru
+```
+
+**Response `200`:**
+
+```json
+{
+  "evaluationId": "eval-uuid",
+  "evaluationTitle": "Fluência Leitora — 2º ano",
+  "assessmentType": "completa",
+  "sessionId": "session-uuid",
+  "studentId": "uuid-aluno",
+  "studentName": "Maria Silva",
+  "classId": "uuid-turma",
+  "status": "em_andamento",
+  "readingTextId": "uuid-texto",
+  "wordsWordListId": "uuid-lista-1",
+  "uncommonWordListId": "uuid-lista-2",
+  "q1": {
+    "wordsRead": 55,
+    "errorsCount": 3,
+    "readingTimeSeconds": 60,
+    "accuracy": 94.55,
+    "plcm": 52.0,
+    "precisionLevel": "Instrucional",
+    "fluencyLevel": "esperado"
+  },
+  "q2": {
+    "wordsRead": 32,
+    "errorsCount": 4,
+    "readingTimeSeconds": 60,
+    "accuracy": 87.5,
+    "plcm": 28.0
+  },
+  "q3": {
+    "wordsRead": 120,
+    "errorsCount": 8,
+    "readingTimeSeconds": 90,
+    "accuracy": 93.33,
+    "plcm": 74.67,
+    "precisionLevel": "Instrucional",
+    "fluencyLevel": "acima"
+  },
+  "prosodyLevel": 3,
+  "caderno": "A",
+  "notReadReason": null,
+  "extras": { "sttProvider": "web-speech" },
+  "comprehension": {
+    "correctCount": 2,
+    "total": 3,
+    "score": 66.67,
+    "answers": []
+  },
+  "calculatedPlcm": 74.67,
+  "calculatedAccuracy": 93.33,
+  "precisionLevel": "Instrucional",
+  "fluencyLevel": "acima",
+  "icaScore": 88.5,
+  "icaBreakdown": {
+    "icaScore": 88.5,
+    "weights": {
+      "lista1": 0.25,
+      "lista2": 0.15,
+      "texto": 0.3,
+      "compreensao": 0.2,
+      "fluencia": 0.1
+    },
+    "components": {
+      "lista1Accuracy": 94.55,
+      "lista2Accuracy": 87.5,
+      "textoAccuracy": 93.33,
+      "comprehension": 66.67,
+      "fluency": 100.0,
+      "plcm": 74.67
+    }
+  },
+  "startedAt": "2026-08-10T14:00:00",
+  "submittedAt": null
+}
+```
+
+### `POST /afirme-reading/evaluations/:evaluationId/sessions/:sessionId/comprehension-answers` → `200`
 
 Só se `assessmentType` ∈ `compreensao` | `completa`.
 
@@ -546,17 +786,22 @@ Ou body = array direto de respostas.
 
 - Upsert por questão (atualiza se já existir)
 - Recalcula `comprehensionCorrectCount`, `comprehensionTotal`, `comprehensionScore` (0–100)
-- Response inclui `answers`
+- Se já houver `fluencyData` com q1/q2/q3, **recalcula `icaScore` / `icaBreakdown`**
+- Response: `Session` com `answers`
 
-### `POST .../sessions/:sessionId/submit` → `200`
+### `POST /afirme-reading/evaluations/:evaluationId/sessions/:sessionId/submit` → `200`
 
 Finaliza sessão (`finalizada` + `submittedAt`).  
 Se não restar sessão `pendente`/`em_andamento`, avaliação → `concluida`.  
 Idempotente se já `finalizada`.
 
-### `POST .../sessions/:sessionId/absent` → `200`
+**Response:** `Session` (com `answers`).
+
+### `POST /afirme-reading/evaluations/:evaluationId/sessions/:sessionId/absent` → `200`
 
 Marca `ausente` + `submittedAt`. Bloqueado se já `finalizada`.
+
+**Response:** `Session`.
 
 ---
 
@@ -572,7 +817,7 @@ Marca `ausente` + `submittedAt`. Bloqueado se já `finalizada`.
         │  POST /apply
         ▼
   agendada + N sessões pendentes
-        │  start → fluency / comprehension → submit|absent
+        │  start → fluency → comprehension → report → submit|absent
         ▼
   em_andamento → concluida (quando todas as sessões encerram)
 ```
@@ -879,10 +1124,350 @@ DELETE /afirme-reading/guided-sessions/fffbcff5-2d61-411a-8b67-90118cdc4060
 ## Checklist rápido para o frontend
 
 1. JWT + feature `afirme_reading`
-2. Em `/evaluations*` e `/guided-sessions*`: sempre enviar `X-City-ID` (ou slug/subdomínio)
+2. Em `/evaluations*`, `/guided-sessions*` e `/guided-auto-sessions*`: sempre enviar `X-City-ID` (ou slug/subdomínio)
 3. Preferir camelCase nos bodies
 4. Montar catálogo (`texts`, `word-lists`) antes de criar avaliação por turma
 5. `apply` com `classIds` antes de abrir tela de aplicação CAEd
-6. Persistência de fluência CAEd = objeto livre em `fluencyData`
-7. Compreensão: índices 0-based alinhados a `options` / `correctOption`
-8. Leitura guiada: `POST /guided-sessions` (JSON) → `POST .../audio` (Blob webm) → playback via `GET audioUrl` com JWT (fetch + blob URL)
+6. Fluência Leitora (sessão): `start` → `PATCH .../fluency` (q1/q2/q3) → `comprehension-answers` → `GET .../report` → `submit`
+7. Compreensão: índices 0-based alinhados a `options` / `correctOption`; ICA recalculado no backend
+8. Leitura guiada manual: `POST /guided-sessions` (JSON) → `POST .../audio` (Blob webm) → playback via `GET audioUrl` com JWT (fetch + blob URL)
+9. Leitura guiada automática: ver seção 7 abaixo
+
+---
+
+## 7. Leitura Guiada Automática (`/guided-auto-sessions`)
+
+Mesmo produto da leitura guiada, com **correção automática**. O frontend **não** envia scores.
+
+Roles: aplicação (`admin`, `tecadm`, `professor`, `coordenador`, `diretor`, `aplicador`).  
+Contexto de município obrigatório. Feature: `afirme_reading`.
+
+### Fluxo
+
+```
+POST /guided-auto-sessions          → cria sessão (ids + snapshot do conteúdo)
+POST /guided-auto-sessions/:id/audio  (multipart) → MinIO + fila STT (202)
+GET  /guided-auto-sessions/:id        → status (queued|processing|...)
+GET  /guided-auto-sessions/:id/result → resultado oficial (só se completed)
+GET  /guided-auto-sessions/:id/words  → alinhamento por palavra
+```
+
+### `POST /afirme-reading/guided-auto-sessions` → `201`
+
+```json
+{
+  "studentId": "uuid-aluno",
+  "readingTextId": "uuid-texto",
+  "wordsWordListId": "uuid-lista-1",
+  "uncommonWordListId": "uuid-lista-2",
+  "answers": [
+    { "readingTextQuestionId": "uuid-q1", "selectedOption": 1 }
+  ]
+}
+```
+
+- Pelo menos um de: `readingTextId`, `wordsWordListId`, `uncommonWordListId`
+- **Proibido** enviar: `plcm`, `accuracy`, `ica`, `wordsRead`, `errorsCount`, `score`, etc. → `400`
+- Response: status `awaiting_audio`
+
+### `POST /afirme-reading/guided-auto-sessions/:id/audio` → `202`
+
+Multipart:
+
+| Campo | Obrigatório | Notas |
+|-------|-------------|-------|
+| `audio` ou `file` | sim | webm/ogg/mp4/mpeg/wav |
+| `part` | se houver mais de uma parte | `words` \| `uncommon` \| `text` |
+| `durationSeconds` | não | hint; STT pode sobrescrever |
+
+Enfileira Celery (`queued` → `processing` → `completed` \| `failed`).  
+Se a sessão tiver várias partes (listas + texto), envie um áudio por `part`. A sessão só fica `completed` quando **todas** as partes configuradas forem processadas.
+
+### `GET .../result` → `200` | `409` | `422`
+
+- `409` se ainda não `completed` (body inclui `status`)
+- `422` se `failed`
+- `200` com métricas oficiais:
+
+```json
+{
+  "id": "uuid",
+  "status": "completed",
+  "calculatedPlcm": 74.67,
+  "calculatedAccuracy": 93.33,
+  "precisionLevel": "Instrucional",
+  "fluencyLevel": "acima",
+  "comprehensionScore": 50.0,
+  "icaScore": 88.5,
+  "icaBreakdown": {},
+  "partResults": {
+    "text": { "accuracy": 93.33, "plcm": 74.67, "transcript": "..." }
+  },
+  "transcriptRaw": "...",
+  "sttProvider": "whisper_api",
+  "sttModel": "whisper-1",
+  "algorithmVersion": "1.0.0",
+  "evaluationVersion": "1.0.0",
+  "hasAudio": true,
+  "audioUrl": "/afirme-reading/guided-auto-sessions/{id}/audio"
+}
+```
+
+### Fórmulas (backend)
+
+```
+PLCM = max(0, palavrasLidas - erros) / (tempoSegundos / 60)
+Precisão = max(0, palavrasLidas - erros) / palavrasLidas × 100
+Nível: >=95 Independente | >=90 Instrucional | <90 Frustração
+Fluência 2º ano: <40 abaixo | 40–60 esperado | >60 acima
+Fluência ICA = min(100, PLCM/60 × 100)
+ICA = 0,25×Lista1 + 0,15×Lista2 + 0,30×Texto + 0,20×Compreensão + 0,10×Fluência
+```
+
+ICA só é preenchido quando existem as 3 precisões + compreensão + PLCM.
+
+### Env
+
+| Variável | Default | Uso |
+|----------|---------|-----|
+| `OPENAI_API_KEY` ou `AFIRME_READING_OPENAI_API_KEY` | — | Whisper API |
+| `AFIRME_READING_STT_PROVIDER` | `whisper_api` | provider STT |
+| `AFIRME_READING_STT_MODEL` | `whisper-1` | modelo |
+| `AFIRME_READING_MAX_AUDIO_MB` | `40` | limite upload |
+
+### Provisionamento
+
+Tabelas tenant via `provision_afirme_ler_for_city_schema` / DDL em `app/afirme_ler/ddl.py` (idempotente). Reaplicar nos schemas `city_*` existentes após deploy.
+
+---
+
+## 8. Sessão ad-hoc de Fluência Leitora (`/fluency-sessions`) — Opção A
+
+Fluxo **sem** avaliação pré-aplicada (wizard CAEd). STT / silêncio / Web Speech ficam no **frontend**.
+
+Roles: aplicação. Contexto de município obrigatório.  
+Base: `/afirme-reading/fluency-sessions`
+
+### Rotas
+
+| Método | Path | Status | Função |
+|--------|------|--------|--------|
+| `POST` | `/fluency-sessions` | `201` | Cria sessão `em_andamento` |
+| `GET` | `/fluency-sessions/:id` | `200` | Detalhe (+ answers) |
+| `PATCH` | `/fluency-sessions/:id/fluency` | `200` | Salva Q1/Q2/Q3 (**merge incremental**) |
+| `POST` | `/fluency-sessions/:id/comprehension-answers` | `200` | Compreensão + recalcula ICA |
+| `POST` | `/fluency-sessions/:id/audio` | `200` | Upload multipart por parte |
+| `GET` | `/fluency-sessions/:id/audio?part=` | `200` | Playback (JWT) |
+| `GET` | `/fluency-sessions/:id/report` | `200` | Leiturômetro + `hasAudio` |
+| `POST` | `/fluency-sessions/:id/submit` | `200` | Recalcula ICA e finaliza |
+| `POST` | `/fluency-sessions/:id/absent` | `200` | Ausência |
+
+### `POST /fluency-sessions` → `201`
+
+```json
+{
+  "studentId": "uuid",
+  "classId": "uuid",
+  "schoolId": "uuid",
+  "readingTextId": "uuid",
+  "wordsWordListId": "uuid",
+  "uncommonWordListId": "uuid",
+  "caderno": "A"
+}
+```
+
+**Response (exemplo):**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "studentId": "11111111-1111-1111-1111-111111111111",
+  "studentName": "Maria Silva",
+  "classId": "22222222-2222-2222-2222-222222222222",
+  "schoolId": "33333333-3333-3333-3333-333333333333",
+  "readingTextId": "44444444-4444-4444-4444-444444444444",
+  "wordsWordListId": "55555555-5555-5555-5555-555555555555",
+  "uncommonWordListId": "66666666-6666-6666-6666-666666666666",
+  "caderno": "A",
+  "status": "em_andamento",
+  "fluencyData": {
+    "kind": "FLUENCY",
+    "caderno": "A",
+    "q1": null,
+    "q2": null,
+    "q3": null,
+    "extras": {}
+  },
+  "partAudios": {},
+  "hasAudio": false,
+  "audioUrls": {},
+  "calculatedPlcm": null,
+  "calculatedAccuracy": null,
+  "precisionLevel": null,
+  "fluencyLevel": null,
+  "icaScore": null,
+  "icaBreakdown": null,
+  "prosodyLevel": null,
+  "comprehensionCorrectCount": null,
+  "comprehensionTotal": null,
+  "comprehensionScore": null,
+  "startedAt": "2026-08-12T13:40:00",
+  "submittedAt": null,
+  "appliedBy": "user-uuid",
+  "createdAt": "2026-08-12T13:40:00",
+  "updatedAt": "2026-08-12T13:40:00",
+  "answers": []
+}
+```
+
+### `PATCH .../fluency` — merge incremental
+
+Partes **omitidas** são preservadas. Enviar só `q1` não apaga `q2`/`q3` já salvos.  
+`"q2": null` remove Q2.
+
+Enums:
+
+- `WordStatus`: `nao_leu` | `acertou` | `inventou` | `soletrou` | `errou`
+- `NotReadReason`: `nao_se_aplica` | `recusou` | `nao_consegue` | `nao_sabe`
+- `source` (marking): `ia` | `manual` | `timeout`
+
+Se `skipped: true` (ou `notReadReason` ≠ `nao_se_aplica`): aceita markings vazios / zeros.
+
+O mesmo merge incremental vale para `PATCH /evaluations/:id/sessions/:sid/fluency`.
+
+### `POST .../audio` (multipart)
+
+Fields: `part` = `q1` | `q2` | `q3` | `mic_test`, `audio` = blob webm/ogg.
+
+```json
+{
+  "part": "q1",
+  "audioUrl": "/afirme-reading/fluency-sessions/.../audio?part=q1",
+  "audioMimeType": "audio/webm",
+  "audioSizeBytes": 245760,
+  "hasAudio": true
+}
+```
+
+### ICA com skip + Leiturômetro
+
+Pesos base: Q1 0,25 · Q2 0,15 · Q3 0,30 · Comp 0,20 · Fluência 0,10.
+
+Partes skipped são **excluídas** e os pesos restantes **renormalizados**. Se Q3 for skipped, o componente Fluência (PLCM) também sai.
+
+Leiturômetro (`leiturimetroLevel` 1–6) a partir do ICA:
+
+| ICA | Nível |
+|-----|-------|
+| ≤ 20 | 1 |
+| ≤ 40 | 2 |
+| ≤ 55 | 3 |
+| ≤ 70 | 4 |
+| ≤ 85 | 5 |
+| > 85 | 6 |
+
+`POST .../submit` recalcula ICA antes de marcar `finalizada`.
+
+### `GET .../report` (exemplo)
+
+```json
+{
+  "sessionId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "studentId": "11111111-1111-1111-1111-111111111111",
+  "studentName": "Maria Silva",
+  "classId": "22222222-2222-2222-2222-222222222222",
+  "schoolId": "33333333-3333-3333-3333-333333333333",
+  "status": "finalizada",
+  "readingTextId": "44444444-4444-4444-4444-444444444444",
+  "wordsWordListId": "55555555-5555-5555-5555-555555555555",
+  "uncommonWordListId": "66666666-6666-6666-6666-666666666666",
+  "caderno": "A",
+  "q1": {
+    "wordsRead": 42,
+    "lastWordPosition": 42,
+    "errorsCount": 3,
+    "readingTimeSeconds": 60,
+    "skipped": false,
+    "notReadReason": null,
+    "transcript": "casa bola...",
+    "markings": [
+      { "index": 0, "word": "casa", "status": "acertou", "source": "manual" }
+    ],
+    "accuracy": 92.86,
+    "plcm": 39.0,
+    "hasAudio": true,
+    "audioUrl": "/afirme-reading/fluency-sessions/.../audio?part=q1"
+  },
+  "q2": {
+    "wordsRead": 0,
+    "lastWordPosition": 0,
+    "errorsCount": 0,
+    "readingTimeSeconds": 0,
+    "skipped": true,
+    "notReadReason": "recusou",
+    "markings": [],
+    "accuracy": null,
+    "plcm": null,
+    "hasAudio": false
+  },
+  "q3": {
+    "wordsRead": 90,
+    "totalWords": 117,
+    "errorsCount": 6,
+    "unreadAfterEnd": 27,
+    "readingTimeSeconds": 60,
+    "skipped": false,
+    "obeyedSensePauses": true,
+    "lines": [
+      { "lineIndex": 0, "text": "SOFIA E MARTIN...", "wrongWordsCount": 1 }
+    ],
+    "accuracy": 93.33,
+    "plcm": 84.0,
+    "hasAudio": true,
+    "audioUrl": "/afirme-reading/fluency-sessions/.../audio?part=q3"
+  },
+  "micTest": { "hasAudio": true, "audioUrl": ".../audio?part=mic_test" },
+  "prosodyLevel": 3,
+  "comprehension": {
+    "correctCount": 2,
+    "total": 3,
+    "score": 66.67,
+    "answers": []
+  },
+  "calculatedPlcm": 84.0,
+  "calculatedAccuracy": 93.33,
+  "precisionLevel": "Instrucional",
+  "fluencyLevel": "acima",
+  "icaScore": 88.12,
+  "leiturimetroLevel": 6,
+  "icaBreakdown": {
+    "icaScore": 88.12,
+    "leiturimetroLevel": 6,
+    "skippedParts": ["lista2"],
+    "weights": {
+      "lista1": 0.25,
+      "lista2": 0.15,
+      "texto": 0.3,
+      "compreensao": 0.2,
+      "fluencia": 0.1
+    },
+    "weightsUsed": {
+      "lista1": 0.2941,
+      "texto": 0.3529,
+      "compreensao": 0.2353,
+      "fluencia": 0.1176
+    },
+    "components": {
+      "lista1Accuracy": 92.86,
+      "lista2Accuracy": null,
+      "textoAccuracy": 93.33,
+      "comprehension": 66.67,
+      "fluency": 100.0,
+      "plcm": 84.0
+    }
+  },
+  "startedAt": "2026-08-12T13:40:00",
+  "submittedAt": "2026-08-12T13:55:00"
+}
+```
+

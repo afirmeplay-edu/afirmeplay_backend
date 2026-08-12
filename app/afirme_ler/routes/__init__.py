@@ -8,6 +8,8 @@ from app.afirme_ler.routes import (  # noqa: E402, F401
     word_lists_routes,
     evaluations_routes,
     guided_sessions_routes,
+    guided_auto_sessions_routes,
+    fluency_sessions_routes,
 )
 
 __all__ = ["bp"]

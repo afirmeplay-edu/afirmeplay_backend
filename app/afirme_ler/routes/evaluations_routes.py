@@ -223,6 +223,23 @@ def save_reading_fluency(evaluation_id, session_id):
         return _handle_service_error(error)
 
 
+@bp.route("/evaluations/<evaluation_id>/sessions/<session_id>/report", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*_APLICACAO_ROLES)
+@requires_city_context
+def get_reading_session_report(evaluation_id, session_id):
+    """Relatório consolidado da Fluência Leitora (PLCM, precisão, ICA / Leiturômetro)."""
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        report = ReadingSessionService.build_report(evaluation_id, session_id)
+        return jsonify(report), 200
+    except Exception as error:
+        return _handle_service_error(error)
+
+
 @bp.route("/evaluations/<evaluation_id>/sessions/<session_id>/comprehension-answers", methods=["POST"])
 @jwt_required()
 @require_feature("afirme_reading")

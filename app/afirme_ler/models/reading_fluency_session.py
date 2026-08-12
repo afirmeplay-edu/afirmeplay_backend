@@ -4,20 +4,23 @@ import uuid
 from sqlalchemy.dialects.postgresql import JSON, UUID
 
 
-class ReadingEvaluationSession(db.Model):
-    __tablename__ = "reading_evaluation_session"
+class ReadingFluencySession(db.Model):
+    """Sessão ad-hoc de Fluência Leitora (CAEd) — sem avaliação pré-aplicada."""
+
+    __tablename__ = "reading_fluency_session"
     __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    reading_evaluation_id = db.Column(
-        db.String,
-        db.ForeignKey("tenant.reading_evaluation.id", ondelete="CASCADE"),
-        nullable=False,
-    )
     student_id = db.Column(db.String, db.ForeignKey("tenant.student.id"), nullable=False)
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey("tenant.class.id"), nullable=True)
-    status = db.Column(db.String(20), nullable=False, default="pendente")
+    school_id = db.Column(db.String(36), nullable=True)
+    reading_text_id = db.Column(db.String, nullable=False)
+    words_word_list_id = db.Column(db.String, nullable=True)
+    uncommon_word_list_id = db.Column(db.String, nullable=True)
+    caderno = db.Column(db.String(8), nullable=False, default="A")
+    status = db.Column(db.String(20), nullable=False, default="em_andamento")
     fluency_data = db.Column(JSON, nullable=True)
+    part_audios = db.Column(JSON, nullable=True)
     calculated_plcm = db.Column(db.Float, nullable=True)
     calculated_accuracy = db.Column(db.Float, nullable=True)
     precision_level = db.Column(db.String(30), nullable=True)
@@ -38,23 +41,29 @@ class ReadingEvaluationSession(db.Model):
         onupdate=db.text("CURRENT_TIMESTAMP"),
     )
 
-    evaluation = db.relationship("ReadingEvaluation", back_populates="sessions")
     student = db.relationship("Student", foreign_keys=[student_id])
     applier = db.relationship("User", foreign_keys=[applied_by])
     answers = db.relationship(
-        "ReadingComprehensionAnswer",
+        "ReadingFluencyComprehensionAnswer",
         back_populates="session",
         cascade="all, delete-orphan",
     )
 
-    def to_dict(self, include_answers=False):
+    def to_dict(self, include_answers=False, audio_urls=None):
+        audio_urls = audio_urls or {}
+        part_audios = self.part_audios if isinstance(self.part_audios, dict) else {}
         data = {
             "id": self.id,
-            "readingEvaluationId": self.reading_evaluation_id,
             "studentId": self.student_id,
             "classId": str(self.class_id) if self.class_id else None,
+            "schoolId": str(self.school_id) if self.school_id else None,
+            "readingTextId": self.reading_text_id,
+            "wordsWordListId": self.words_word_list_id,
+            "uncommonWordListId": self.uncommon_word_list_id,
+            "caderno": self.caderno,
             "status": self.status,
             "fluencyData": self.fluency_data,
+            "partAudios": part_audios,
             "calculatedPlcm": self.calculated_plcm,
             "calculatedAccuracy": self.calculated_accuracy,
             "precisionLevel": self.precision_level,
@@ -65,6 +74,8 @@ class ReadingEvaluationSession(db.Model):
             "comprehensionCorrectCount": self.comprehension_correct_count,
             "comprehensionTotal": self.comprehension_total,
             "comprehensionScore": self.comprehension_score,
+            "hasAudio": bool(part_audios),
+            "audioUrls": audio_urls,
             "startedAt": self.started_at.isoformat() if self.started_at else None,
             "submittedAt": self.submitted_at.isoformat() if self.submitted_at else None,
             "appliedBy": self.applied_by,

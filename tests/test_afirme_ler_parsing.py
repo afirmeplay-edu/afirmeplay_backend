@@ -57,3 +57,57 @@ def test_validate_assessment_type():
 def test_validate_question_options_rejects_out_of_range():
     with pytest.raises(ValueError, match="fora do intervalo"):
         validate_question_options(["A", "B"], 5)
+
+
+def test_validate_question_options_requires_correct_answer():
+    with pytest.raises(ValueError, match="alternativa correta"):
+        validate_question_options(["A", "B", "C"], None)
+
+
+def test_validate_question_options_accepts_is_correct_objects():
+    options, correct = validate_question_options(
+        [
+            {"text": "Correu", "isCorrect": False},
+            {"text": "Andou devagar", "isCorrect": True},
+            {"text": "Voou", "isCorrect": False},
+        ]
+    )
+    assert options == ["Correu", "Andou devagar", "Voou"]
+    assert correct == 1
+
+
+def test_validate_question_options_rejects_multiple_is_correct():
+    with pytest.raises(ValueError, match="exatamente uma"):
+        validate_question_options(
+            [
+                {"text": "A", "isCorrect": True},
+                {"text": "B", "isCorrect": True},
+            ]
+        )
+
+
+def test_validate_question_options_rejects_is_correct_mismatch():
+    with pytest.raises(ValueError, match="não corresponde"):
+        validate_question_options(
+            [
+                {"text": "A", "isCorrect": False},
+                {"text": "B", "isCorrect": True},
+            ],
+            0,
+        )
+
+
+def test_parse_reading_question_payload_accepts_enunciado():
+    from app.afirme_ler.services.parsing import parse_reading_question_payload
+
+    payload = parse_reading_question_payload(
+        {
+            "enunciado": "Quem ganhou a corrida?",
+            "options": ["Lebre", "Tartaruga"],
+            "correctOption": 1,
+            "descriptor": "Localizar informação",
+        }
+    )
+    assert payload["statement"] == "Quem ganhou a corrida?"
+    assert payload["correct_option"] == 1
+    assert payload["options"] == ["Lebre", "Tartaruga"]

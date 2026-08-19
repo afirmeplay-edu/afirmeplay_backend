@@ -119,19 +119,115 @@ def validate_evaluation_status(value: str) -> str:
     return normalized
 
 
+def _coerce_correct_option(value: Any, options_count: int) -> int:
+    if isinstance(value, bool) or value is None:
+        raise ValueError("correctOption deve ser um número inteiro.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("correctOption deve ser um número inteiro.") from exc
+    if parsed < 0 or parsed >= options_count:
+        raise ValueError("correctOption fora do intervalo das alternativas.")
+    return parsed
+
+
+def _parse_option_entries(options: Any) -> Tuple[List[str], List[Optional[bool]]]:
+    raw = options
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("options deve ser uma lista.") from exc
+    if not isinstance(raw, list):
+        raise ValueError("options deve ser uma lista.")
+
+    texts: List[str] = []
+    flags: List[Optional[bool]] = []
+    for index, item in enumerate(raw):
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                raise ValueError(f"Alternativa no índice {index} não pode ser vazia.")
+            texts.append(text)
+            flags.append(None)
+            continue
+        if isinstance(item, dict):
+            text = get_field(item, "text", "answer")
+            if text is None or not str(text).strip():
+                raise ValueError(f"Alternativa no índice {index} deve ter text.")
+            texts.append(str(text).strip())
+            if "isCorrect" in item or "is_correct" in item:
+                flags.append(bool(get_field(item, "isCorrect", "is_correct")))
+            else:
+                flags.append(None)
+            continue
+        raise ValueError(f"Alternativa no índice {index} inválida.")
+    return texts, flags
+
+
+def options_declare_correct_flags(options: Any) -> bool:
+    try:
+        _, flags = _parse_option_entries(options)
+    except ValueError:
+        return False
+    return any(flag is True for flag in flags)
+
+
 def validate_question_options(
     options: Any,
-    correct_option: Optional[int],
+    correct_option: Optional[int] = None,
+    *,
+    require_correct: bool = True,
 ) -> Tuple[List[str], Optional[int]]:
-    parsed = parse_string_list(options)
-    if len(parsed) < 2:
+    texts, flags = _parse_option_entries(options)
+    if len(texts) < 2:
         raise ValueError("options deve conter pelo menos 2 alternativas.")
-    if correct_option is not None:
-        if not isinstance(correct_option, int):
-            raise ValueError("correctOption deve ser um número inteiro.")
-        if correct_option < 0 or correct_option >= len(parsed):
-            raise ValueError("correctOption fora do intervalo das alternativas.")
-    return parsed, correct_option
+
+    marked = [index for index, flag in enumerate(flags) if flag is True]
+    if len(marked) > 1:
+        raise ValueError("Informe exatamente uma alternativa correta.")
+
+    resolved: Optional[int] = None
+    if len(marked) == 1:
+        resolved = marked[0]
+        if correct_option is not None:
+            explicit = _coerce_correct_option(correct_option, len(texts))
+            if explicit != resolved:
+                raise ValueError(
+                    "correctOption não corresponde à alternativa marcada com isCorrect."
+                )
+    elif correct_option is not None:
+        resolved = _coerce_correct_option(correct_option, len(texts))
+    elif require_correct:
+        raise ValueError(
+            "Informe a alternativa correta (correctOption ou isCorrect em exatamente uma opção)."
+        )
+
+    return texts, resolved
+
+
+def parse_reading_question_payload(data: Any) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("Cada questão deve ser um objeto.")
+
+    statement = get_field(data, "statement", "enunciado")
+    if not statement or not str(statement).strip():
+        raise ValueError("statement é obrigatório.")
+
+    descriptor = get_field(data, "descriptor")
+    if not descriptor or not str(descriptor).strip():
+        raise ValueError("descriptor é obrigatório.")
+
+    options, correct_option = validate_question_options(
+        get_field(data, "options", default=[]),
+        get_field(data, "correctOption", "correct_option"),
+    )
+    return {
+        "statement": str(statement).strip(),
+        "options": options,
+        "correct_option": correct_option,
+        "descriptor": str(descriptor).strip(),
+    }
 
 
 def validate_guided_session_status(value: str) -> str:

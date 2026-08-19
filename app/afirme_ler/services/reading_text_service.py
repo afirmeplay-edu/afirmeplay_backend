@@ -8,8 +8,13 @@ from sqlalchemy.orm import joinedload
 from app import db
 from app.models.grades import Grade
 from app.permissions.roles import Roles
-from app.afirme_ler.models import ReadingText
-from app.afirme_ler.services.parsing import get_field, parse_string_list, validate_difficulty_level
+from app.afirme_ler.models import ReadingText, ReadingTextQuestion
+from app.afirme_ler.services.parsing import (
+    get_field,
+    parse_reading_question_payload,
+    parse_string_list,
+    validate_difficulty_level,
+)
 from app.afirme_ler.services.scope_service import (
     apply_visibility_filter,
     resolve_scope_on_create,
@@ -44,6 +49,13 @@ class ReadingTextService:
         difficulty_level = validate_difficulty_level(difficulty)
         target_skills = parse_string_list(get_field(data, "targetSkills", "target_skills", default=[]))
 
+        questions_payload = get_field(data, "questions", "perguntas")
+        parsed_questions: List[dict] = []
+        if questions_payload is not None:
+            if not isinstance(questions_payload, list):
+                raise ValueError("questions deve ser uma lista.")
+            parsed_questions = [parse_reading_question_payload(item) for item in questions_payload]
+
         scope_type, owner_city_id, owner_user_id = resolve_scope_on_create(user)
         user_id = user.get("id") or user.get("user_id")
 
@@ -61,6 +73,11 @@ class ReadingTextService:
             created_by=user_id,
         )
         db.session.add(text)
+        db.session.flush()
+
+        for fields in parsed_questions:
+            db.session.add(ReadingTextQuestion(reading_text_id=text.id, **fields))
+
         db.session.commit()
         return ReadingText.query.options(
             joinedload(ReadingText.grade),

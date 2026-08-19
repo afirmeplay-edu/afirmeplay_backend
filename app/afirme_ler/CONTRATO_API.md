@@ -218,7 +218,30 @@ Roles: cadastro.
 
 Obrigatórios: `title`, `content`, `gradeId`, `difficultyLevel`.
 
-**Response** — `ReadingText` com `questions: []`:
+`questions` é **opcional**. Ausente, `null` ou `[]` cria o texto sem questões. Se enviado, cada item segue o mesmo contrato de `POST /texts/:textId/questions` (enunciado, alternativas e gabarito obrigatório). Item inválido → `400` e **nada** é persistido.
+
+```json
+{
+  "title": "A lebre e a tartaruga",
+  "content": "Texto completo...",
+  "gradeId": "uuid-da-serie",
+  "difficultyLevel": "EASY",
+  "targetSkills": ["fluência", "vocabulário"],
+  "questions": [
+    {
+      "statement": "O que a tartaruga fez?",
+      "options": [
+        { "text": "Correu", "isCorrect": false },
+        { "text": "Andou devagar", "isCorrect": true },
+        { "text": "Voou", "isCorrect": false }
+      ],
+      "descriptor": "Identificar informação explícita"
+    }
+  ]
+}
+```
+
+**Response** — `ReadingText`. Sem `questions` no body → `questions: []`. Com questões → array preenchido (sempre `options` como strings + `correctOption`):
 
 ```json
 {
@@ -232,7 +255,18 @@ Obrigatórios: `title`, `content`, `gradeId`, `difficultyLevel`.
   "source": null,
   "isCalibrated": false,
   "scopeType": "PRIVATE",
-  "questions": [],
+  "questions": [
+    {
+      "id": "uuid",
+      "readingTextId": "uuid",
+      "statement": "O que a tartaruga fez?",
+      "options": ["Correu", "Andou devagar", "Voou"],
+      "correctOption": 1,
+      "descriptor": "Identificar informação explícita",
+      "createdAt": "...",
+      "updatedAt": "..."
+    }
+  ],
   "createdAt": "...",
   "updatedAt": "..."
 }
@@ -275,6 +309,8 @@ Roles: cadastro. Exige permissão de escrita no texto pai.
 
 ### `POST /afirme-reading/texts/:textId/questions` → `201`
 
+Formato A — strings + índice da correta:
+
 ```json
 {
   "statement": "O que a tartaruga fez?",
@@ -284,9 +320,27 @@ Roles: cadastro. Exige permissão de escrita no texto pai.
 }
 ```
 
-- `statement`, `descriptor` obrigatórios
-- `options`: ≥ 2 alternativas
-- `correctOption`: índice 0-based (pode ser `null`)
+Formato B — objetos com `isCorrect` (igual à avaliação online):
+
+```json
+{
+  "statement": "O que a tartaruga fez?",
+  "options": [
+    { "text": "Correu", "isCorrect": false },
+    { "text": "Andou devagar", "isCorrect": true },
+    { "text": "Voou", "isCorrect": false },
+    { "text": "Nadou", "isCorrect": false }
+  ],
+  "descriptor": "Identificar informação explícita"
+}
+```
+
+- `statement` obrigatório (alias: `enunciado`)
+- `descriptor` obrigatório
+- `options`: ≥ 2 alternativas (strings **ou** `{ text, isCorrect }`)
+- gabarito **obrigatório**: `correctOption` (índice 0-based) **ou** exatamente uma opção com `isCorrect: true`
+- se os dois forem enviados, devem apontar para a mesma alternativa
+- persistido sempre como `options: string[]` + `correctOption: number`
 
 **Response** — `ReadingQuestion`:
 
@@ -319,17 +373,72 @@ Body: **array** de objetos no mesmo formato da criação unitária.
 
 ### `GET /afirme-reading/texts/:textId/questions/:questionId` → `200`
 
+Mesmo objeto `ReadingQuestion` do POST.
+
 ### `PATCH /afirme-reading/texts/:textId/questions/:questionId` → `200`
 
-Body parcial: `statement`, `descriptor`, `options`, `correctOption`.
+Body **parcial**. Envie só o que mudou. Campos: `statement` (alias `enunciado`), `descriptor`, `options`, `correctOption`.
+
+Exemplo — só enunciado e descritor:
+
+```json
+{
+  "statement": "Por que a tartaruga venceu?",
+  "descriptor": "Inferir informação implícita"
+}
+```
+
+Exemplo — alternativas + gabarito (formato A):
+
+```json
+{
+  "options": ["Porque correu mais", "Porque não desistiu", "Porque voou"],
+  "correctOption": 1
+}
+```
+
+Exemplo — alternativas + gabarito (formato B):
+
+```json
+{
+  "options": [
+    { "text": "Porque correu mais", "isCorrect": false },
+    { "text": "Porque não desistiu", "isCorrect": true },
+    { "text": "Porque voou", "isCorrect": false }
+  ]
+}
+```
+
+Regras:
+
+- gabarito continua obrigatório se `options` ou `correctOption` forem enviados
+- não é possível deixar a correta vazia (`correctOption: null` → `400`)
+- resposta: objeto `ReadingQuestion` atualizado (sempre `options: string[]` + `correctOption`)
+
+```json
+{
+  "id": "uuid-da-questao",
+  "readingTextId": "uuid-do-texto",
+  "statement": "Por que a tartaruga venceu?",
+  "options": ["Porque correu mais", "Porque não desistiu", "Porque voou"],
+  "correctOption": 1,
+  "descriptor": "Inferir informação implícita",
+  "createdAt": "...",
+  "updatedAt": "..."
+}
+```
+
+`PATCH /texts/:id` **não** edita questões. Use esta rota.
 
 ### `DELETE /afirme-reading/texts/:textId/questions/:questionId` → `200`
 
-Falha se já houver respostas de alunos vinculadas.
+Sem body. Falha com `400` se já houver respostas de alunos vinculadas.
 
 ```json
 { "message": "Questão excluída com sucesso." }
 ```
+
+`404` se a questão não existir ou não pertencer àquele texto.
 
 ---
 

@@ -54,7 +54,9 @@ class WordListService:
         if not name or not str(name).strip():
             raise ValueError("name é obrigatório.")
 
-        kind = validate_word_list_kind(get_field(data, "kind", default="PALAVRAS"))
+        kind = validate_word_list_kind(
+            get_field(data, "kind", default="PALAVRAS_CONHECIDAS")
+        )
         items = parse_string_list(get_field(data, "items", default=[]), split_words=True)
         scope_type, owner_city_id, owner_user_id = resolve_scope_on_create(user)
         user_id = user.get("id") or user.get("user_id")

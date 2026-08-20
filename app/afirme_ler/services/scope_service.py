@@ -30,7 +30,7 @@ def resolve_scope_on_create(user: Dict[str, Any]) -> Tuple[str, Optional[str], O
         if not city_id:
             raise ValueError("Não foi possível identificar o município para criar conteúdo municipal.")
         return SCOPE_CITY, str(city_id), None
-    if role in (Roles.PROFESSOR, Roles.COORDENADOR, Roles.DIRETOR):
+    if role in (Roles.PROFESSOR, Roles.COORDENADOR, Roles.DIRETOR, Roles.APLICADOR):
         if not uid:
             raise ValueError("Usuário inválido para criar conteúdo privado.")
         return SCOPE_PRIVATE, None, str(uid)

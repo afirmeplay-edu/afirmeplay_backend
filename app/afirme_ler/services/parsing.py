@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any, List, Optional, Tuple
 
 ALLOWED_TEXT_DIFFICULTIES = frozenset({
@@ -15,9 +16,44 @@ ALLOWED_TEXT_DIFFICULTIES = frozenset({
 })
 
 ALLOWED_WORD_LIST_KINDS = frozenset({
-    "PALAVRAS",
+    "PALAVRAS_CONHECIDAS",
     "POUCO_COMUNS",
 })
+
+WORD_LIST_KIND_ALIASES = {
+    "PALAVRAS": "PALAVRAS_CONHECIDAS",
+    "CONHECIDAS": "PALAVRAS_CONHECIDAS",
+    "KNOWN": "PALAVRAS_CONHECIDAS",
+}
+
+ALLOWED_EVALUATION_KINDS = frozenset({
+    "entrada",
+    "formativa",
+    "saida",
+})
+
+EVALUATION_KIND_LABELS = {
+    "entrada": "Avaliação de Entrada",
+    "formativa": "Avaliação Formativa",
+    "saida": "Avaliação de Saída",
+}
+
+EVALUATION_KIND_ALIASES = {
+    "entrada": "entrada",
+    "avaliacao de entrada": "entrada",
+    "avaliacao_de_entrada": "entrada",
+    "avaliacao_entrada": "entrada",
+    "formativa": "formativa",
+    "avaliacao formativa": "formativa",
+    "avaliacao_formativa": "formativa",
+    "saida": "saida",
+    "avaliacao de saida": "saida",
+    "avaliacao_de_saida": "saida",
+    "avaliacao_saida": "saida",
+}
+
+KIND_PALAVRAS_CONHECIDAS = "PALAVRAS_CONHECIDAS"
+KIND_POUCO_COMUNS = "POUCO_COMUNS"
 
 ALLOWED_ASSESSMENT_TYPES = frozenset({
     "fluencia",
@@ -92,11 +128,29 @@ def validate_difficulty_level(value: str) -> str:
 def validate_word_list_kind(value: str) -> str:
     if not value or not isinstance(value, str):
         raise ValueError("kind é obrigatório.")
-    normalized = value.strip().upper()
+    normalized = value.strip().upper().replace("-", "_").replace(" ", "_")
+    normalized = WORD_LIST_KIND_ALIASES.get(normalized, normalized)
     if normalized not in ALLOWED_WORD_LIST_KINDS:
         allowed = ", ".join(sorted(ALLOWED_WORD_LIST_KINDS))
         raise ValueError(f"kind inválido. Valores permitidos: {allowed}.")
     return normalized
+
+
+def _strip_accents(value: str) -> str:
+    decomposed = unicodedata.normalize("NFD", value)
+    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
+
+
+def validate_evaluation_kind(value: str) -> str:
+    if not value or not isinstance(value, str):
+        raise ValueError("evaluationKind é obrigatório.")
+    normalized = _strip_accents(value.strip().lower())
+    normalized = " ".join(normalized.split())
+    mapped = EVALUATION_KIND_ALIASES.get(normalized, normalized)
+    if mapped not in ALLOWED_EVALUATION_KINDS:
+        allowed = ", ".join(sorted(ALLOWED_EVALUATION_KINDS))
+        raise ValueError(f"evaluationKind inválido. Valores permitidos: {allowed}.")
+    return mapped
 
 
 def validate_assessment_type(value: str) -> str:

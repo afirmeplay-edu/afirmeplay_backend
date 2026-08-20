@@ -11,10 +11,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from app import db
 from app.entitlements import require_feature
 from app.permissions import get_current_user_from_token, role_required
-from app.afirme_ler.routes import bp
+from app.afirme_ler.routes import AFIRME_LER_ROLES, bp
 from app.afirme_ler.services.word_list_service import WordListService
 
-_CADASTRO_ROLES = ("admin", "tecadm", "professor", "coordenador", "diretor")
+_CADASTRO_ROLES = AFIRME_LER_ROLES
 
 
 def _error_response(message: str, status: int):

@@ -17,6 +17,8 @@ class ReadingEvaluation(db.Model):
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("public.grade.id"), nullable=True)
     class_ids = db.Column(JSON, nullable=False, default=list)
     school_ids = db.Column(JSON, nullable=True)
+    student_ids = db.Column(JSON, nullable=False, default=list)
+    evaluation_kind = db.Column(db.String(20), nullable=False, default="formativa")
     assessment_type = db.Column(db.String(20), nullable=False, default="completa")
     status = db.Column(db.String(20), nullable=False, default="rascunho")
     application_start = db.Column(db.TIMESTAMP, nullable=True)
@@ -39,11 +41,16 @@ class ReadingEvaluation(db.Model):
     )
 
     def to_dict(self, include_sessions=False):
+        from app.afirme_ler.services.parsing import EVALUATION_KIND_LABELS
+
         data = {
             "id": self.id,
             "title": self.title,
             "description": self.description,
+            "evaluationKind": self.evaluation_kind,
+            "evaluationKindLabel": EVALUATION_KIND_LABELS.get(self.evaluation_kind),
             "readingTextId": self.reading_text_id,
+            "knownWordListId": self.words_word_list_id,
             "wordsWordListId": self.words_word_list_id,
             "uncommonWordListId": self.uncommon_word_list_id,
             "gradeId": str(self.grade_id) if self.grade_id else None,
@@ -54,8 +61,13 @@ class ReadingEvaluation(db.Model):
             ),
             "classIds": self.class_ids if isinstance(self.class_ids, list) else [],
             "schoolIds": self.school_ids if isinstance(self.school_ids, list) else [],
-            "assessmentType": self.assessment_type,
+            "studentIds": self.student_ids if isinstance(self.student_ids, list) else [],
             "status": self.status,
+            "createdBy": (
+                {"id": self.created_by, "name": self.creator.name}
+                if self.creator
+                else {"id": self.created_by, "name": None}
+            ),
             "applicationStart": (
                 self.application_start.isoformat() if self.application_start else None
             ),

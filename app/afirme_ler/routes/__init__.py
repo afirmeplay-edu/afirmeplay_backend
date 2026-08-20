@@ -3,6 +3,15 @@ from flask import Blueprint
 
 bp = Blueprint("afirme_ler", __name__, url_prefix="/afirme-reading")
 
+AFIRME_LER_ROLES = (
+    "admin",
+    "tecadm",
+    "professor",
+    "coordenador",
+    "diretor",
+    "aplicador",
+)
+
 from app.afirme_ler.routes import (  # noqa: E402, F401
     texts_routes,
     word_lists_routes,
@@ -12,4 +21,4 @@ from app.afirme_ler.routes import (  # noqa: E402, F401
     fluency_sessions_routes,
 )
 
-__all__ = ["bp"]
+__all__ = ["bp", "AFIRME_LER_ROLES"]

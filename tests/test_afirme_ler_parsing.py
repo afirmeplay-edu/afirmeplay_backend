@@ -20,8 +20,17 @@ def test_validate_difficulty_level_rejects_invalid():
 
 
 def test_validate_word_list_kind():
-    assert validate_word_list_kind("palavras") == "PALAVRAS"
+    assert validate_word_list_kind("palavras") == "PALAVRAS_CONHECIDAS"
+    assert validate_word_list_kind("PALAVRAS_CONHECIDAS") == "PALAVRAS_CONHECIDAS"
     assert validate_word_list_kind("POUCO_COMUNS") == "POUCO_COMUNS"
+
+
+def test_validate_evaluation_kind():
+    from app.afirme_ler.services.parsing import validate_evaluation_kind
+
+    assert validate_evaluation_kind("entrada") == "entrada"
+    assert validate_evaluation_kind("Avaliação de Saída") == "saida"
+    assert validate_evaluation_kind("formativa") == "formativa"
 
 
 def test_parse_string_list_from_json_string():
@@ -45,6 +54,13 @@ def test_validate_question_options_correct_index():
     options, correct = validate_question_options(["A", "B", "C"], 1)
     assert options == ["A", "B", "C"]
     assert correct == 1
+
+
+def test_validate_evaluation_kind_rejects_invalid():
+    from app.afirme_ler.services.parsing import validate_evaluation_kind
+
+    with pytest.raises(ValueError, match="evaluationKind inválido"):
+        validate_evaluation_kind("diagnostica")
 
 
 def test_validate_assessment_type():

@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS "{schema}".reading_evaluation (
     grade_id UUID REFERENCES public.grade(id),
     class_ids JSON NOT NULL DEFAULT '[]'::json,
     school_ids JSON,
+    student_ids JSON NOT NULL DEFAULT '[]'::json,
+    evaluation_kind VARCHAR(20) NOT NULL DEFAULT 'formativa',
     assessment_type VARCHAR(20) NOT NULL DEFAULT 'completa',
     status VARCHAR(20) NOT NULL DEFAULT 'rascunho',
     application_start TIMESTAMP,
@@ -24,12 +26,26 @@ CREATE TABLE IF NOT EXISTS "{schema}".reading_evaluation (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_reading_evaluation_assessment_type
         CHECK (assessment_type IN ('fluencia', 'compreensao', 'completa')),
+    CONSTRAINT chk_reading_evaluation_kind
+        CHECK (evaluation_kind IN ('entrada', 'formativa', 'saida')),
     CONSTRAINT chk_reading_evaluation_status
         CHECK (status IN ('rascunho', 'agendada', 'em_andamento', 'concluida', 'cancelada'))
 );
 CREATE INDEX IF NOT EXISTS ix_reading_evaluation_status ON "{schema}".reading_evaluation(status);
+CREATE INDEX IF NOT EXISTS ix_reading_evaluation_kind ON "{schema}".reading_evaluation(evaluation_kind);
 CREATE INDEX IF NOT EXISTS ix_reading_evaluation_reading_text_id ON "{schema}".reading_evaluation(reading_text_id);
-COMMENT ON TABLE "{schema}".reading_evaluation IS 'Avaliações de leitura (fluência/compreensão) do município';
+CREATE INDEX IF NOT EXISTS ix_reading_evaluation_created_by ON "{schema}".reading_evaluation(created_by);
+COMMENT ON TABLE "{schema}".reading_evaluation IS 'Instrumento de avaliação de fluência leitora (entrada/formativa/saída)';
+
+ALTER TABLE "{schema}".reading_evaluation
+    ADD COLUMN IF NOT EXISTS evaluation_kind VARCHAR(20) NOT NULL DEFAULT 'formativa';
+ALTER TABLE "{schema}".reading_evaluation
+    ADD COLUMN IF NOT EXISTS student_ids JSON NOT NULL DEFAULT '[]'::json;
+ALTER TABLE "{schema}".reading_evaluation
+    DROP CONSTRAINT IF EXISTS chk_reading_evaluation_kind;
+ALTER TABLE "{schema}".reading_evaluation
+    ADD CONSTRAINT chk_reading_evaluation_kind
+        CHECK (evaluation_kind IN ('entrada', 'formativa', 'saida'));
 
 CREATE TABLE IF NOT EXISTS "{schema}".reading_evaluation_session (
     id VARCHAR PRIMARY KEY,
@@ -231,6 +247,7 @@ COMMENT ON TABLE "{schema}".reading_guided_auto_comprehension_answer IS 'Respost
 
 CREATE TABLE IF NOT EXISTS "{schema}".reading_fluency_session (
     id VARCHAR PRIMARY KEY,
+    reading_evaluation_id VARCHAR REFERENCES "{schema}".reading_evaluation(id),
     student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
     class_id UUID REFERENCES "{schema}".class(id),
     school_id VARCHAR(36),
@@ -267,7 +284,13 @@ CREATE INDEX IF NOT EXISTS ix_reading_fluency_session_status
     ON "{schema}".reading_fluency_session(status);
 CREATE INDEX IF NOT EXISTS ix_reading_fluency_session_created
     ON "{schema}".reading_fluency_session(created_at DESC);
-COMMENT ON TABLE "{schema}".reading_fluency_session IS 'Sessão ad-hoc de Fluência Leitora (CAEd) sem avaliação pré-aplicada';
+COMMENT ON TABLE "{schema}".reading_fluency_session IS 'Aplicação de Fluência Leitora amarrada a uma avaliação já criada';
+
+ALTER TABLE "{schema}".reading_fluency_session
+    ADD COLUMN IF NOT EXISTS reading_evaluation_id VARCHAR
+        REFERENCES "{schema}".reading_evaluation(id);
+CREATE INDEX IF NOT EXISTS ix_reading_fluency_session_evaluation
+    ON "{schema}".reading_fluency_session(reading_evaluation_id);
 
 CREATE TABLE IF NOT EXISTS "{schema}".reading_fluency_comprehension_answer (
     id VARCHAR PRIMARY KEY,

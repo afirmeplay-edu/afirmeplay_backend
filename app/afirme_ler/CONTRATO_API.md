@@ -94,8 +94,18 @@ Após o login, o JWT já carrega o município — requests autenticadas de profe
 
 | Grupo | Roles | Uso |
 |-------|-------|-----|
-| Cadastro | `admin`, `tecadm`, `professor`, `coordenador`, `diretor` | Textos, listas, questões, CRUD de avaliação, apply |
-| Aplicação | Cadastro + `aplicador` | Listar/obter avaliações e sessões; start, fluency, report, answers, submit, absent |
+| Cadastro e aplicação | `admin`, `tecadm`, `professor`, `coordenador`, `diretor`, `aplicador` | Textos, listas, questões, CRUD de avaliação e realização (`/fluency-sessions`) |
+
+`aplicador` tem o **mesmo** acesso de professor / coordenador / diretor neste módulo.
+
+### Permissões da avaliação (instrumento)
+
+| Ação | Criador | Admin / Tecadm | Demais |
+|------|---------|----------------|--------|
+| Listar / visualizar | as próprias | todas do município | só as que criou |
+| Editar | sim | só se for o criador | só as que criou |
+| Excluir | sim | todas do município | só as que criou |
+| Aplicar (`/fluency-sessions`) | sim | só as que **eles** criaram | só as que criou |
 
 ---
 
@@ -107,7 +117,7 @@ Resolvido automaticamente no create (não envie `scopeType`):
 |------|-------------|
 | `admin` | `GLOBAL` |
 | `tecadm` | `CITY` (município do usuário) |
-| `professor` / `coordenador` / `diretor` | `PRIVATE` (dono = usuário) |
+| `professor` / `coordenador` / `diretor` / `aplicador` | `PRIVATE` (dono = usuário) |
 
 Visibilidade na listagem: GLOBAL + CITY do município atual + PRIVATE do usuário.
 
@@ -123,11 +133,21 @@ Edição/exclusão: `admin` pode tudo; conteúdo GLOBAL só `admin`; CITY só `t
 
 ### `kind` (listas de palavras)
 
-`PALAVRAS` | `POUCO_COMUNS`
+`PALAVRAS_CONHECIDAS` | `POUCO_COMUNS`
 
-### `assessmentType` (avaliações)
+(`PALAVRAS` ainda é aceito como alias e gravado como `PALAVRAS_CONHECIDAS`.)
 
-`fluencia` | `compreensao` | `completa`
+### `evaluationKind` (avaliações)
+
+`entrada` | `formativa` | `saida`
+
+| Valor | Rótulo |
+|-------|--------|
+| `entrada` | Avaliação de Entrada |
+| `formativa` | Avaliação Formativa |
+| `saida` | Avaliação de Saída |
+
+Toda avaliação é de **fluência leitora** (Q1 conhecidas + Q2 pouco comuns + Q3 texto + compreensão). Não existe mais `assessmentType` no contrato.
 
 ### `status` (avaliação)
 
@@ -148,7 +168,7 @@ Roles: cadastro.
 ```json
 {
   "name": "Lista 1º ano",
-  "kind": "PALAVRAS",
+  "kind": "PALAVRAS_CONHECIDAS",
   "items": ["casa", "bola", "mesa"],
   "description": "opcional",
   "isDefault": false,
@@ -157,7 +177,7 @@ Roles: cadastro.
 ```
 
 - `name` obrigatório
-- `kind` default `PALAVRAS`
+- `kind` default `PALAVRAS_CONHECIDAS`
 - `items`: array de strings **ou** string com palavras separadas por `,` `;` ou quebra de linha
 - `isDefault: true` remove o default anterior do mesmo `kind` + escopo
 
@@ -167,7 +187,7 @@ Roles: cadastro.
 {
   "id": "uuid",
   "name": "Lista 1º ano",
-  "kind": "PALAVRAS",
+  "kind": "PALAVRAS_CONHECIDAS",
   "items": ["casa", "bola", "mesa"],
   "description": null,
   "isDefault": false,
@@ -444,6 +464,8 @@ Sem body. Falha com `400` se já houver respostas de alunos vinculadas.
 
 ## 4. Avaliações (`/evaluations`)
 
+Instrumento de **fluência leitora**. Criar = escolher tipo + texto + lista conhecidas + lista pouco comuns + escopo. Realizar = `/fluency-sessions` (seção 8). Relatórios consolidados vêm depois; o `submit` da sessão é o save oficial.
+
 **Contexto de município obrigatório** (`@requires_city_context`):
 
 - Header `X-City-ID` ou `X-City-Slug`, ou subdomínio da cidade
@@ -451,47 +473,53 @@ Sem body. Falha com `400` se já houver respostas de alunos vinculadas.
 
 Dados em schema **tenant** (por município).
 
-### `POST /afirme-reading/evaluations` → `201` (cadastro)
+### `POST /afirme-reading/evaluations` → `201`
 
 ```json
 {
   "title": "Diagnóstico 1º bimestre",
   "description": "opcional",
+  "evaluationKind": "entrada",
   "readingTextId": "uuid",
-  "wordsWordListId": "uuid",
+  "knownWordListId": "uuid",
   "uncommonWordListId": "uuid",
   "gradeId": "uuid",
-  "classIds": [],
-  "schoolIds": [],
-  "assessmentType": "completa",
+  "schoolIds": ["uuid-escola"],
+  "classIds": ["uuid-turma"],
+  "studentIds": ["uuid-aluno"],
   "timezone": "America/Sao_Paulo"
 }
 ```
 
 Regras:
 
-- `title`, `readingTextId` obrigatórios
-- `assessmentType` default `completa`
-- Para `fluencia` ou `completa`: `wordsWordListId` obrigatório
-- Status inicial: `rascunho`
+- `title`, `evaluationKind`, `readingTextId` obrigatórios
+- `knownWordListId` (alias: `wordsWordListId`) obrigatório — lista `PALAVRAS_CONHECIDAS`
+- `uncommonWordListId` obrigatório — lista `POUCO_COMUNS`
 - Texto e listas devem estar **visíveis** ao usuário
+- Status inicial: `rascunho`
+- `aplicador` pode criar (mesmo grupo de professor)
 
-**Response** — `ReadingEvaluation`:
+**Response** — resumo `ReadingEvaluation`:
 
 ```json
 {
   "id": "uuid",
   "title": "Diagnóstico 1º bimestre",
   "description": null,
+  "evaluationKind": "entrada",
+  "evaluationKindLabel": "Avaliação de Entrada",
   "readingTextId": "uuid",
+  "knownWordListId": "uuid",
   "wordsWordListId": "uuid",
   "uncommonWordListId": "uuid",
   "gradeId": "uuid",
   "grade": { "id": "uuid", "name": "1º Ano" },
-  "classIds": [],
-  "schoolIds": [],
-  "assessmentType": "completa",
+  "classIds": ["uuid-turma"],
+  "schoolIds": ["uuid-escola"],
+  "studentIds": ["uuid-aluno"],
   "status": "rascunho",
+  "createdBy": { "id": "user-uuid", "name": "Maria Professora" },
   "applicationStart": null,
   "applicationEnd": null,
   "timezone": "America/Sao_Paulo",
@@ -500,44 +528,87 @@ Regras:
 }
 ```
 
-### `GET /afirme-reading/evaluations` → `200` (aplicação)
+### `GET /afirme-reading/evaluations` → `200`
 
-Query: `status`, `assessmentType`.
+Query: `status`, `evaluationKind`.
 
-### `GET /afirme-reading/evaluations/:id` → `200` (aplicação)
+Admin/tecadm: todas do município. Demais roles: **somente as que criaram**.
 
-Query: `includeSessions=true` → inclui `sessions: Session[]` (sem answers).
+### `GET /afirme-reading/evaluations/:id` → `200` (visualizar)
 
-### `PATCH /afirme-reading/evaluations/:id` → `200` (cadastro)
+Ficha completa: escopo (escolas, série, turmas, alunos), texto anexado (com questões) e as duas listas.
 
-Body parcial: `title`, `description`, `readingTextId`, `wordsWordListId`, `uncommonWordListId`, `assessmentType`, `gradeId`, `classIds`, `schoolIds`, `applicationStart`, `applicationEnd`, `timezone`, `status`.
+Query: `includeSessions=true` → inclui `sessions` das sessões antigas em lote (opcional).
+
+Quem não for criador (nem admin/tecadm) recebe `403`.
+
+**Response (trecho da ficha):**
+
+```json
+{
+  "id": "uuid",
+  "title": "Diagnóstico 1º bimestre",
+  "evaluationKind": "entrada",
+  "evaluationKindLabel": "Avaliação de Entrada",
+  "status": "rascunho",
+  "createdBy": { "id": "user-uuid", "name": "Maria Professora" },
+  "readingText": {
+    "id": "uuid",
+    "title": "A lebre e a tartaruga",
+    "questions": []
+  },
+  "knownWordList": {
+    "id": "uuid",
+    "name": "Lista 1º ano",
+    "kind": "PALAVRAS_CONHECIDAS",
+    "items": ["casa", "bola"]
+  },
+  "uncommonWordList": {
+    "id": "uuid",
+    "name": "Pouco comuns 1º ano",
+    "kind": "POUCO_COMUNS",
+    "items": ["nave", "cristal"]
+  },
+  "scope": {
+    "grade": { "id": "uuid", "name": "1º Ano" },
+    "schools": [{ "id": "uuid", "name": "EMEF Centro" }],
+    "classes": [{ "id": "uuid", "name": "A", "schoolId": "uuid", "gradeId": "uuid" }],
+    "students": [{ "id": "uuid", "name": "João", "classId": "uuid", "schoolId": "uuid" }]
+  }
+}
+```
+
+### `PATCH /afirme-reading/evaluations/:id` → `200`
+
+**Somente o criador.** Body parcial: `title`, `description`, `evaluationKind`, `readingTextId`, `knownWordListId` / `wordsWordListId`, `uncommonWordListId`, `gradeId`, `classIds`, `schoolIds`, `studentIds`, `applicationStart`, `applicationEnd`, `timezone`, `status`.
 
 Datas: ISO-8601 (`2026-08-06T08:00:00` ou com `Z`).
 
-Bloqueado se status `concluida` ou `cancelada`.
+Bloqueado se status `concluida` ou `cancelada`. Admin/tecadm **não** editam avaliação de terceiro.
 
-### `DELETE /afirme-reading/evaluations/:id` → `200` (cadastro)
+### `DELETE /afirme-reading/evaluations/:id` → `200`
 
-Bloqueado se status `em_andamento`.
+Criador **ou** admin/tecadm. Bloqueado se status `em_andamento` ou se já houver aplicações em `/fluency-sessions`.
 
 ```json
 { "message": "Avaliação excluída com sucesso." }
 ```
 
-### `POST /afirme-reading/evaluations/:id/apply` → `200` (cadastro)
+### `POST /afirme-reading/evaluations/:id/apply` → `200`
 
-Aplica a turmas e cria sessões por aluno.
+Caminho legado (lote por turma). A realização oficial é `POST /fluency-sessions`. Só o criador pode aplicar.
 
 ```json
 {
   "classIds": ["uuid-turma-1", "uuid-turma-2"],
+  "studentIds": ["uuid-aluno"],
   "applicationStart": "2026-08-10T08:00:00",
   "applicationEnd": "2026-08-20T18:00:00"
 }
 ```
 
-- Se omitir `classIds`, usa os da avaliação
-- Pelo menos uma turma obrigatória
+- Se omitir `classIds` / `studentIds`, usa os da avaliação
+- Informe ao menos uma turma **ou** alunos
 - Status da avaliação → `agendada`
 - Sessões novas: `pendente`; alunos já com sessão são ignorados (`sessionsSkipped`)
 
@@ -657,8 +728,7 @@ Inclui `answers`.
 
 ### `PATCH /afirme-reading/evaluations/:evaluationId/sessions/:sessionId/fluency` → `200`
 
-Só se `assessmentType` ∈ `fluencia` | `completa`.  
-Avaliação de **Fluência Leitora** (CAEd / ICA / Leiturômetro).
+Parte da realização (Q1/Q2/Q3). Sempre disponível na avaliação de fluência leitora.
 
 O backend **calcula** PLCM, precisão, níveis e ICA. O cliente envia contagens por questão (e extras); pode sobrescrever marcações do STT do protótipo.
 
@@ -783,8 +853,8 @@ Mapeamento protótipo → API:
 
 | Protótipo | Backend |
 |-----------|---------|
-| `kind: "FLUENCY"` | `assessmentType: "fluencia"` ou `"completa"` na avaliação + `kind` no fluencyData |
-| Q1 lista comuns | `q1` + lista `PALAVRAS` (`wordsWordListId`) |
+| `kind: "FLUENCY"` | `kind` no fluencyData da sessão |
+| Q1 lista conhecidas | `q1` + lista `PALAVRAS_CONHECIDAS` (`knownWordListId`) |
 | Q2 pouco comuns | `q2` + lista `POUCO_COMUNS` (`uncommonWordListId`) |
 | Q3 texto | `q3` + `readingTextId` |
 
@@ -806,7 +876,7 @@ X-City-Slug: jaru
 {
   "evaluationId": "eval-uuid",
   "evaluationTitle": "Fluência Leitora — 2º ano",
-  "assessmentType": "completa",
+  "evaluationKind": "entrada",
   "sessionId": "session-uuid",
   "studentId": "uuid-aluno",
   "studentName": "Maria Silva",
@@ -880,7 +950,7 @@ X-City-Slug: jaru
 
 ### `POST /afirme-reading/evaluations/:evaluationId/sessions/:sessionId/comprehension-answers` → `200`
 
-Só se `assessmentType` ∈ `compreensao` | `completa`.
+Questões de compreensão do texto. Sempre fazem parte da realização.
 
 ```json
 {
@@ -919,16 +989,17 @@ Marca `ausente` + `submittedAt`. Bloqueado se já `finalizada`.
 ```
 [Catálogo GLOBAL/CITY/PRIVATE]
   Textos + Questões
-  Word lists (PALAVRAS / POUCO_COMUNS)
+  Word lists (PALAVRAS_CONHECIDAS / POUCO_COMUNS)
         │
         ▼
-[Tenant] Avaliação (rascunho)
-        │  POST /apply
+[Tenant] Avaliação (evaluationKind + texto + 2 listas + escopo)
+        │
         ▼
-  agendada + N sessões pendentes
-        │  start → fluency → comprehension → report → submit|absent
+POST /fluency-sessions { evaluationId, studentId }
+  (só o criador da avaliação)
+        │  fluency → compreensão → submit
         ▼
-  em_andamento → concluida (quando todas as sessões encerram)
+  sessão finalizada (save oficial; relatórios depois)
 ```
 
 Fluxo paralelo — **Leitura Guiada** (não usa `/evaluations`):
@@ -1233,14 +1304,15 @@ DELETE /afirme-reading/guided-sessions/fffbcff5-2d61-411a-8b67-90118cdc4060
 ## Checklist rápido para o frontend
 
 1. JWT + feature `afirme_reading`
-2. Em `/evaluations*`, `/guided-sessions*` e `/guided-auto-sessions*`: sempre enviar `X-City-ID` (ou slug/subdomínio)
+2. Em `/evaluations*` e `/fluency-sessions*`: sempre enviar `X-City-ID` (ou slug/subdomínio)
 3. Preferir camelCase nos bodies
-4. Montar catálogo (`texts`, `word-lists`) antes de criar avaliação por turma
-5. `apply` com `classIds` antes de abrir tela de aplicação CAEd
-6. Fluência Leitora (sessão): `start` → `PATCH .../fluency` (q1/q2/q3) → `comprehension-answers` → `GET .../report` → `submit`
-7. Compreensão: índices 0-based alinhados a `options` / `correctOption`; ICA recalculado no backend
-8. Leitura guiada manual: `POST /guided-sessions` (JSON) → `POST .../audio` (Blob webm) → playback via `GET audioUrl` com JWT (fetch + blob URL)
-9. Leitura guiada automática: ver seção 7 abaixo
+4. Montar catálogo (`texts` com questões, `word-lists` `PALAVRAS_CONHECIDAS` e `POUCO_COMUNS`)
+5. Criar avaliação: `evaluationKind` + texto + duas listas + escopo
+6. Realizar: `POST /fluency-sessions` `{ evaluationId, studentId }` (só as que você criou)
+7. Wizard: `PATCH .../fluency` (Q1/Q2/Q3) → `comprehension-answers` → **`POST .../submit`** (save)
+8. Compreensão: índices 0-based alinhados a `options` / `correctOption`
+9. Relatórios filtrados por `evaluationKind` ficam para uma entrega posterior
+10. Leitura guiada (manual/auto) continua à parte e **não** entra no filtro de tipo pedagógico
 
 ---
 
@@ -1350,51 +1422,60 @@ Tabelas tenant via `provision_afirme_ler_for_city_schema` / DDL em `app/afirme_l
 
 ---
 
-## 8. Sessão ad-hoc de Fluência Leitora (`/fluency-sessions`) — Opção A
+## 8. Realizar avaliação (`/fluency-sessions`)
 
-Fluxo **sem** avaliação pré-aplicada (wizard CAEd). STT / silêncio / Web Speech ficam no **frontend**.
+Aplicação da **avaliação já criada**. Texto e listas vêm do instrumento; o cliente **não** escolhe material de novo.
 
-Roles: aplicação. Contexto de município obrigatório.  
+STT / silêncio / Web Speech ficam no **frontend**. O save oficial é `POST .../submit` (recalcula ICA e marca `finalizada`). Relatórios consolidados por `evaluationKind` vêm em entrega posterior.
+
+Só o **criador** da avaliação pode aplicar. Se já existir sessão `em_andamento` do mesmo aluno na mesma avaliação, o POST devolve essa sessão (não cria outra).
+
+Roles: as mesmas do CRUD. Contexto de município obrigatório.  
 Base: `/afirme-reading/fluency-sessions`
 
 ### Rotas
 
 | Método | Path | Status | Função |
 |--------|------|--------|--------|
-| `POST` | `/fluency-sessions` | `201` | Cria sessão `em_andamento` |
+| `POST` | `/fluency-sessions` | `201` | Inicia aplicação (`em_andamento`) |
 | `GET` | `/fluency-sessions/:id` | `200` | Detalhe (+ answers) |
-| `PATCH` | `/fluency-sessions/:id/fluency` | `200` | Salva Q1/Q2/Q3 (**merge incremental**) |
-| `POST` | `/fluency-sessions/:id/comprehension-answers` | `200` | Compreensão + recalcula ICA |
+| `PATCH` | `/fluency-sessions/:id/fluency` | `200` | Rascunho Q1/Q2/Q3 (**merge incremental**) |
+| `POST` | `/fluency-sessions/:id/comprehension-answers` | `200` | Questões do texto + recalcula ICA |
 | `POST` | `/fluency-sessions/:id/audio` | `200` | Upload multipart por parte |
 | `GET` | `/fluency-sessions/:id/audio?part=` | `200` | Playback (JWT) |
-| `GET` | `/fluency-sessions/:id/report` | `200` | Leiturômetro + `hasAudio` |
-| `POST` | `/fluency-sessions/:id/submit` | `200` | Recalcula ICA e finaliza |
+| `GET` | `/fluency-sessions/:id/report` | `200` | Snapshot interno (não é o relatório de produto) |
+| `POST` | `/fluency-sessions/:id/submit` | `200` | **Salvar**: recalcula ICA e finaliza |
 | `POST` | `/fluency-sessions/:id/absent` | `200` | Ausência |
 
 ### `POST /fluency-sessions` → `201`
 
 ```json
 {
-  "studentId": "uuid",
+  "evaluationId": "uuid-da-avaliacao",
+  "studentId": "uuid-aluno",
   "classId": "uuid",
   "schoolId": "uuid",
-  "readingTextId": "uuid",
-  "wordsWordListId": "uuid",
-  "uncommonWordListId": "uuid",
   "caderno": "A"
 }
 ```
+
+- `evaluationId` e `studentId` obrigatórios
+- Aluno deve estar no escopo da avaliação (`studentIds` / `classIds` / `schoolIds` / `gradeId`)
+- `readingTextId`, `knownWordListId` e `uncommonWordListId` são copiados da avaliação (ignorados se enviados)
 
 **Response (exemplo):**
 
 ```json
 {
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "evaluationId": "uuid-da-avaliacao",
+  "evaluationKind": "entrada",
   "studentId": "11111111-1111-1111-1111-111111111111",
   "studentName": "Maria Silva",
-  "classId": "22222222-2222-2222-2222-222222222222",
+  "classId": "22222222-2222-2222-3333-444444444444",
   "schoolId": "33333333-3333-3333-3333-333333333333",
   "readingTextId": "44444444-4444-4444-4444-444444444444",
+  "knownWordListId": "55555555-5555-5555-5555-555555555555",
   "wordsWordListId": "55555555-5555-5555-5555-555555555555",
   "uncommonWordListId": "66666666-6666-6666-6666-666666666666",
   "caderno": "A",
@@ -1475,7 +1556,7 @@ Leiturômetro (`leiturimetroLevel` 1–6) a partir do ICA:
 | ≤ 85 | 5 |
 | > 85 | 6 |
 
-`POST .../submit` recalcula ICA antes de marcar `finalizada`.
+`POST .../submit` é o **salvar** da realização: recalcula ICA e marca `finalizada`.
 
 ### `GET .../report` (exemplo)
 

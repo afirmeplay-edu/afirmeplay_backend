@@ -192,35 +192,6 @@ def create_reading_session(evaluation_id):
         return _handle_service_error(error)
 
 
-@bp.route("/fluency-sessions", methods=["POST"])
-@jwt_required()
-@require_feature("afirme_reading")
-@role_required(*_APLICACAO_ROLES)
-@requires_city_context
-def create_fluency_session_alias():
-    user = get_current_user_from_token()
-    if not user:
-        return _error_response("Usuário não encontrado.", 401)
-    data = request.get_json(silent=True) or {}
-    evaluation_id = get_field(data, "evaluationId", "evaluation_id")
-    student_id = get_field(data, "studentId", "student_id")
-    if not evaluation_id:
-        return _error_response("evaluationId é obrigatório.", 400)
-    if not student_id:
-        return _error_response("studentId é obrigatório.", 400)
-    try:
-        session = ReadingSessionService.create_or_get_session(
-            str(evaluation_id),
-            str(student_id),
-            class_id=get_field(data, "classId", "class_id"),
-        )
-        session = ReadingSessionService.start_session(user, str(evaluation_id), session.id)
-        return jsonify(ReadingSessionService.serialize_for_aplicador(session)), 201
-    except Exception as error:
-        db.session.rollback()
-        return _handle_service_error(error)
-
-
 @bp.route("/evaluations/<evaluation_id>/sessions/<session_id>", methods=["GET"])
 @jwt_required()
 @require_feature("afirme_reading")

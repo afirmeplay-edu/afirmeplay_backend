@@ -65,8 +65,10 @@ class ReadingEvaluationService:
         assessment_type = validate_assessment_type(
             get_field(data, "assessmentType", "assessment_type", default="completa")
         )
-        if assessment_type in ("fluencia", "completa") and not refs["words_word_list_id"]:
-            raise ValueError("wordsWordListId é obrigatório para fluência ou avaliação completa.")
+        if assessment_type in ("fluencia", "completa", "entrada", "formativa", "saida") and not (
+            refs["words_word_list_id"] or refs["uncommon_word_list_id"]
+        ):
+            raise ValueError("Selecione uma lista de palavras para a avaliação.")
 
         grade_id = get_field(data, "gradeId", "grade_id")
         if grade_id:
@@ -99,13 +101,17 @@ class ReadingEvaluationService:
         )
         db.session.add(evaluation)
         db.session.commit()
-        return ReadingEvaluation.query.options(joinedload(ReadingEvaluation.grade)).get(
-            evaluation.id
-        )
+        return ReadingEvaluation.query.options(
+            joinedload(ReadingEvaluation.grade),
+            joinedload(ReadingEvaluation.creator),
+        ).get(evaluation.id)
 
     @staticmethod
     def list_evaluations(user: Dict[str, Any], filters: dict) -> List[ReadingEvaluation]:
-        query = ReadingEvaluation.query.options(joinedload(ReadingEvaluation.grade))
+        query = ReadingEvaluation.query.options(
+            joinedload(ReadingEvaluation.grade),
+            joinedload(ReadingEvaluation.creator),
+        )
 
         status = filters.get("status")
         if status:
@@ -123,7 +129,10 @@ class ReadingEvaluationService:
 
     @staticmethod
     def get_evaluation(evaluation_id: str, *, include_sessions=False) -> ReadingEvaluation:
-        options = [joinedload(ReadingEvaluation.grade)]
+        options = [
+            joinedload(ReadingEvaluation.grade),
+            joinedload(ReadingEvaluation.creator),
+        ]
         if include_sessions:
             options.append(joinedload(ReadingEvaluation.sessions))
 
@@ -205,9 +214,10 @@ class ReadingEvaluationService:
             evaluation.status = validate_evaluation_status(get_field(data, "status"))
 
         db.session.commit()
-        return ReadingEvaluation.query.options(joinedload(ReadingEvaluation.grade)).get(
-            evaluation.id
-        )
+        return ReadingEvaluation.query.options(
+            joinedload(ReadingEvaluation.grade),
+            joinedload(ReadingEvaluation.creator),
+        ).get(evaluation.id)
 
     @staticmethod
     def _parse_datetime(value: Any) -> Optional[datetime]:

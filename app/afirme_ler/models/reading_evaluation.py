@@ -63,6 +63,19 @@ class ReadingEvaluation(db.Model):
                 self.application_end.isoformat() if self.application_end else None
             ),
             "timezone": self.timezone,
+            "createdBy": (
+                {
+                    "id": self.creator.id,
+                    "name": self.creator.name or "",
+                }
+                if self.creator
+                else (
+                    {"id": self.created_by, "name": ""}
+                    if self.created_by
+                    else None
+                )
+            ),
+            "knownWordListId": self.words_word_list_id,
             "createdAt": self.created_at.isoformat() if self.created_at else None,
             "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
         }

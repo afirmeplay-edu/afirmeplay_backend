@@ -5,12 +5,17 @@ from sqlalchemy.dialects.postgresql import JSON, UUID
 
 
 class ReadingFluencySession(db.Model):
-    """Sessão ad-hoc de Fluência Leitora (CAEd) — sem avaliação pré-aplicada."""
+    """Aplicação de Fluência Leitora amarrada a uma avaliação já criada."""
 
     __tablename__ = "reading_fluency_session"
     __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    reading_evaluation_id = db.Column(
+        db.String,
+        db.ForeignKey("tenant.reading_evaluation.id"),
+        nullable=True,
+    )
     student_id = db.Column(db.String, db.ForeignKey("tenant.student.id"), nullable=False)
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey("tenant.class.id"), nullable=True)
     school_id = db.Column(db.String(36), nullable=True)
@@ -41,6 +46,7 @@ class ReadingFluencySession(db.Model):
         onupdate=db.text("CURRENT_TIMESTAMP"),
     )
 
+    evaluation = db.relationship("ReadingEvaluation", foreign_keys=[reading_evaluation_id])
     student = db.relationship("Student", foreign_keys=[student_id])
     applier = db.relationship("User", foreign_keys=[applied_by])
     answers = db.relationship(
@@ -54,10 +60,15 @@ class ReadingFluencySession(db.Model):
         part_audios = self.part_audios if isinstance(self.part_audios, dict) else {}
         data = {
             "id": self.id,
+            "evaluationId": self.reading_evaluation_id,
+            "evaluationKind": (
+                self.evaluation.evaluation_kind if self.evaluation else None
+            ),
             "studentId": self.student_id,
             "classId": str(self.class_id) if self.class_id else None,
             "schoolId": str(self.school_id) if self.school_id else None,
             "readingTextId": self.reading_text_id,
+            "knownWordListId": self.words_word_list_id,
             "wordsWordListId": self.words_word_list_id,
             "uncommonWordListId": self.uncommon_word_list_id,
             "caderno": self.caderno,

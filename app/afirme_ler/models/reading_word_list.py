@@ -10,7 +10,7 @@ class ReadingWordList(db.Model):
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = db.Column(db.String(255), nullable=False)
-    kind = db.Column(db.String(20), nullable=False, default="PALAVRAS")
+    kind = db.Column(db.String(20), nullable=False, default="PALAVRAS_CONHECIDAS")
     items = db.Column(JSON, nullable=False, default=list)
     description = db.Column(db.Text, nullable=True)
     is_default = db.Column(db.Boolean, nullable=False, default=False)

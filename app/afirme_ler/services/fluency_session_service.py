@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Sessões ad-hoc de Fluência Leitora (Opção A — sem avaliação pré-aplicada)."""
+"""Aplicação de Fluência Leitora amarrada a uma avaliação já criada."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -23,8 +23,7 @@ from app.afirme_ler.services.fluency_metrics_service import (
     refresh_ica_in_fluency_data,
 )
 from app.afirme_ler.services.parsing import get_field
-from app.afirme_ler.services.reading_text_service import ReadingTextService
-from app.afirme_ler.services.word_list_service import WordListService
+from app.afirme_ler.services.reading_evaluation_service import ReadingEvaluationService
 
 
 class FluencySessionService:
@@ -73,7 +72,10 @@ class FluencySessionService:
         *,
         include_answers: bool = False,
     ) -> ReadingFluencySession:
-        options = [joinedload(ReadingFluencySession.student)]
+        options = [
+            joinedload(ReadingFluencySession.student),
+            joinedload(ReadingFluencySession.evaluation),
+        ]
         if include_answers:
             options.append(joinedload(ReadingFluencySession.answers))
 
@@ -87,7 +89,39 @@ class FluencySessionService:
         return session
 
     @staticmethod
+    def assert_can_access(
+        user: Dict[str, Any],
+        session: ReadingFluencySession,
+        *,
+        mutate: bool = False,
+    ) -> None:
+        if session.reading_evaluation_id:
+            evaluation = session.evaluation
+            if evaluation is None:
+                evaluation = ReadingEvaluationService.get_evaluation(
+                    session.reading_evaluation_id
+                )
+            if mutate:
+                ReadingEvaluationService.assert_can_apply(user, evaluation)
+            else:
+                ReadingEvaluationService.assert_can_view(user, evaluation)
+            return
+        uid = user.get("id") or user.get("user_id")
+        if uid and str(session.applied_by) == str(uid):
+            return
+        raise PermissionError("Você não tem permissão para acessar esta sessão.")
+
+    @staticmethod
     def create(user: Dict[str, Any], data: dict) -> ReadingFluencySession:
+        evaluation_id = get_field(data, "evaluationId", "evaluation_id")
+        if not evaluation_id:
+            raise ValueError("evaluationId é obrigatório.")
+
+        evaluation = ReadingEvaluationService.get_evaluation(str(evaluation_id))
+        ReadingEvaluationService.assert_can_apply(user, evaluation)
+        if evaluation.status in ("concluida", "cancelada"):
+            raise ValueError("Avaliação já encerrada.")
+
         student_id = get_field(data, "studentId", "student_id")
         if not student_id:
             raise ValueError("studentId é obrigatório.")
@@ -95,11 +129,22 @@ class FluencySessionService:
         student = Student.query.get(str(student_id))
         if not student:
             raise LookupError("Aluno não encontrado.")
+        ReadingEvaluationService.assert_student_in_scope(evaluation, student)
 
-        reading_text_id = get_field(data, "readingTextId", "reading_text_id")
-        if not reading_text_id:
-            raise ValueError("readingTextId é obrigatório.")
-        ReadingTextService.get_visible_text(user, str(reading_text_id))
+        existing = (
+            ReadingFluencySession.query.options(
+                joinedload(ReadingFluencySession.student),
+                joinedload(ReadingFluencySession.evaluation),
+            )
+            .filter_by(
+                reading_evaluation_id=evaluation.id,
+                student_id=str(student_id),
+                status="em_andamento",
+            )
+            .first()
+        )
+        if existing:
+            return existing
 
         class_id_raw = get_field(data, "classId", "class_id")
         class_id = FluencySessionService._parse_uuid(class_id_raw, "classId")
@@ -116,27 +161,19 @@ class FluencySessionService:
         if school_id is None and student.school_id:
             school_id = str(student.school_id)
 
-        words_id = get_field(data, "wordsWordListId", "words_word_list_id")
-        uncommon_id = get_field(
-            data, "uncommonWordListId", "uncommon_word_list_id"
-        )
-        if words_id:
-            WordListService.get_visible(user, str(words_id))
-        if uncommon_id:
-            WordListService.get_visible(user, str(uncommon_id))
-
         caderno = get_field(data, "caderno", default="A") or "A"
         caderno = str(caderno).strip().upper() or "A"
 
         user_id = user.get("id") or user.get("user_id")
         now = datetime.utcnow()
         session = ReadingFluencySession(
+            reading_evaluation_id=evaluation.id,
             student_id=str(student_id),
             class_id=class_id,
             school_id=school_id,
-            reading_text_id=str(reading_text_id),
-            words_word_list_id=str(words_id) if words_id else None,
-            uncommon_word_list_id=str(uncommon_id) if uncommon_id else None,
+            reading_text_id=str(evaluation.reading_text_id),
+            words_word_list_id=evaluation.words_word_list_id,
+            uncommon_word_list_id=evaluation.uncommon_word_list_id,
             caderno=caderno,
             status="em_andamento",
             fluency_data={
@@ -152,6 +189,8 @@ class FluencySessionService:
             applied_by=user_id,
         )
         db.session.add(session)
+        if evaluation.status in ("rascunho", "agendada"):
+            evaluation.status = "em_andamento"
         db.session.commit()
         return FluencySessionService.get_session(session.id, include_answers=True)
 
@@ -312,12 +351,17 @@ class FluencySessionService:
 
         return {
             "sessionId": session.id,
+            "evaluationId": session.reading_evaluation_id,
+            "evaluationKind": (
+                session.evaluation.evaluation_kind if session.evaluation else None
+            ),
             "studentId": session.student_id,
             "studentName": session.student.name if session.student else None,
             "classId": str(session.class_id) if session.class_id else None,
             "schoolId": str(session.school_id) if session.school_id else None,
             "status": session.status,
             "readingTextId": session.reading_text_id,
+            "knownWordListId": session.words_word_list_id,
             "wordsWordListId": session.words_word_list_id,
             "uncommonWordListId": session.uncommon_word_list_id,
             "caderno": session.caderno or fluency.get("caderno"),

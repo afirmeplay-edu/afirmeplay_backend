@@ -26,6 +26,15 @@ from app.afirme_ler.services.parsing import get_field
 from app.afirme_ler.services.reading_evaluation_service import ReadingEvaluationService
 
 
+class FluencyApplicationConflict(Exception):
+    """Aluno já possui aplicação finalizada nesta avaliação."""
+
+    def __init__(self, message: str, *, session_id: str, status: str):
+        super().__init__(message)
+        self.session_id = session_id
+        self.status = status
+
+
 class FluencySessionService:
     @staticmethod
     def _apply_fluency_columns(session: ReadingFluencySession, flat: dict) -> None:
@@ -131,7 +140,7 @@ class FluencySessionService:
             raise LookupError("Aluno não encontrado.")
         ReadingEvaluationService.assert_student_in_scope(evaluation, student)
 
-        existing = (
+        existing_sessions = (
             ReadingFluencySession.query.options(
                 joinedload(ReadingFluencySession.student),
                 joinedload(ReadingFluencySession.evaluation),
@@ -139,12 +148,34 @@ class FluencySessionService:
             .filter_by(
                 reading_evaluation_id=evaluation.id,
                 student_id=str(student_id),
-                status="em_andamento",
             )
-            .first()
+            .all()
         )
-        if existing:
-            return existing
+        in_progress = [
+            session
+            for session in existing_sessions
+            if session.status == "em_andamento"
+        ]
+        if in_progress:
+            return in_progress[0]
+        finalized = [
+            session
+            for session in existing_sessions
+            if session.status == "finalizada"
+        ]
+        if finalized:
+            latest = max(
+                finalized,
+                key=lambda session: session.submitted_at
+                or session.updated_at
+                or session.created_at
+                or datetime.min,
+            )
+            raise FluencyApplicationConflict(
+                "Este aluno já possui aplicação finalizada nesta avaliação.",
+                session_id=latest.id,
+                status=latest.status,
+            )
 
         class_id_raw = get_field(data, "classId", "class_id")
         class_id = FluencySessionService._parse_uuid(class_id_raw, "classId")

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from app import db
 import uuid
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, UUID
 
 
 class ReadingWordList(db.Model):
@@ -11,6 +11,7 @@ class ReadingWordList(db.Model):
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = db.Column(db.String(255), nullable=False)
     kind = db.Column(db.String(20), nullable=False, default="PALAVRAS_CONHECIDAS")
+    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("public.grade.id"), nullable=True)
     items = db.Column(JSON, nullable=False, default=list)
     description = db.Column(db.Text, nullable=True)
     is_default = db.Column(db.Boolean, nullable=False, default=False)
@@ -27,6 +28,7 @@ class ReadingWordList(db.Model):
     )
 
     creator = db.relationship("User", foreign_keys=[created_by])
+    grade = db.relationship("Grade", foreign_keys=[grade_id])
 
     def to_dict(self):
         items = self.items if isinstance(self.items, list) else []
@@ -34,6 +36,12 @@ class ReadingWordList(db.Model):
             "id": self.id,
             "name": self.name,
             "kind": self.kind,
+            "gradeId": str(self.grade_id) if self.grade_id else None,
+            "grade": (
+                {"id": str(self.grade.id), "name": self.grade.name}
+                if self.grade
+                else None
+            ),
             "items": items,
             "description": self.description,
             "isDefault": bool(self.is_default),

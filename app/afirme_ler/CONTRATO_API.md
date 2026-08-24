@@ -24,6 +24,7 @@ Erros padrão:
 | 401 | Usuário não encontrado / JWT inválido |
 | 403 | Sem permissão / sem contexto de cidade (avaliações) / sem feature |
 | 404 | Recurso não encontrado (`LookupError`) |
+| 409 | Aluno já tem aplicação `finalizada` nesta avaliação (`POST /fluency-sessions`) |
 | 500 | Erro interno / banco |
 
 ---
@@ -169,6 +170,7 @@ Roles: cadastro.
 {
   "name": "Lista 1º ano",
   "kind": "PALAVRAS_CONHECIDAS",
+  "gradeId": "uuid-da-serie",
   "items": ["casa", "bola", "mesa"],
   "description": "opcional",
   "isDefault": false,
@@ -176,10 +178,10 @@ Roles: cadastro.
 }
 ```
 
-- `name` obrigatório
+- `name` e `gradeId` obrigatórios
 - `kind` default `PALAVRAS_CONHECIDAS`
 - `items`: array de strings **ou** string com palavras separadas por `,` `;` ou quebra de linha
-- `isDefault: true` remove o default anterior do mesmo `kind` + escopo
+- `isDefault: true` remove o default anterior do mesmo `kind` + série + escopo
 
 **Response** — objeto `WordList`:
 
@@ -188,6 +190,8 @@ Roles: cadastro.
   "id": "uuid",
   "name": "Lista 1º ano",
   "kind": "PALAVRAS_CONHECIDAS",
+  "gradeId": "uuid-da-serie",
+  "grade": { "id": "uuid-da-serie", "name": "1º Ano" },
   "items": ["casa", "bola", "mesa"],
   "description": null,
   "isDefault": false,
@@ -200,7 +204,9 @@ Roles: cadastro.
 
 ### `GET /afirme-reading/word-lists` → `200`
 
-Query: `kind`, `active` (`true`/`false`/`1`/`0`).
+Query: `kind`, `active` (`true`/`false`/`1`/`0`), `gradeId` ou `gradeIds` (CSV).
+
+Com `gradeId` / `gradeIds`: só listas **dessa(s) série(s)**. Listas sem série (`gradeId` nulo) **não** entram nesse filtro.
 
 Response: `WordList[]` (ordenadas: default primeiro, depois mais recentes).
 
@@ -208,7 +214,7 @@ Response: `WordList[]` (ordenadas: default primeiro, depois mais recentes).
 
 ### `PATCH /afirme-reading/word-lists/:id` → `200`
 
-Body parcial: `name`, `kind`, `items`, `description`, `isDefault`, `active`.
+Body parcial: `name`, `kind`, `gradeId`, `items`, `description`, `isDefault`, `active`.
 
 ### `DELETE /afirme-reading/word-lists/:id` → `200`
 
@@ -298,7 +304,8 @@ Query:
 
 | Param | Descrição |
 |-------|-----------|
-| `gradeId` | Filtra série |
+| `gradeId` | Filtra uma série |
+| `gradeIds` | Várias séries (CSV, ex. `uuid1,uuid2`) |
 | `difficultyLevel` | Filtra dificuldade |
 | `isCalibrated` | `true` / `false` |
 | `orderBy` | `title` (default), `difficulty`, `grade` |
@@ -483,10 +490,9 @@ Dados em schema **tenant** (por município).
   "readingTextId": "uuid",
   "knownWordListId": "uuid",
   "uncommonWordListId": "uuid",
-  "gradeId": "uuid",
+  "gradeIds": ["uuid-serie-1", "uuid-serie-2"],
   "schoolIds": ["uuid-escola"],
-  "classIds": ["uuid-turma"],
-  "studentIds": ["uuid-aluno"],
+  "classIds": ["uuid-turma-1", "uuid-turma-2"],
   "timezone": "America/Sao_Paulo"
 }
 ```
@@ -496,7 +502,12 @@ Regras:
 - `title`, `evaluationKind`, `readingTextId` obrigatórios
 - `knownWordListId` (alias: `wordsWordListId`) obrigatório — lista `PALAVRAS_CONHECIDAS`
 - `uncommonWordListId` obrigatório — lista `POUCO_COMUNS`
+- Escopo obrigatório: `gradeIds` (≥1 série) + `schoolIds` (≥1) + `classIds` (≥1)
+- `gradeId` (singular) ainda é aceito e vira uma lista de um item
+- Turmas devem pertencer às escolas **e** a alguma das séries informadas
+- `studentIds` é **opcional** (omitir ou `[]`). A criação **não** exige aluno; o roster da tela de aplicar vem de `GET .../applicants`
 - Texto e listas devem estar **visíveis** ao usuário
+- Texto e listas devem ter série ∈ `gradeIds` (senão `400`)
 - Status inicial: `rascunho`
 - `aplicador` pode criar (mesmo grupo de professor)
 
@@ -513,11 +524,16 @@ Regras:
   "knownWordListId": "uuid",
   "wordsWordListId": "uuid",
   "uncommonWordListId": "uuid",
-  "gradeId": "uuid",
-  "grade": { "id": "uuid", "name": "1º Ano" },
-  "classIds": ["uuid-turma"],
+  "gradeIds": ["uuid-serie-1", "uuid-serie-2"],
+  "grades": [
+    { "id": "uuid-serie-1", "name": "1º Ano" },
+    { "id": "uuid-serie-2", "name": "2º Ano" }
+  ],
+  "gradeId": "uuid-serie-1",
+  "grade": { "id": "uuid-serie-1", "name": "1º Ano" },
+  "classIds": ["uuid-turma-1", "uuid-turma-2"],
   "schoolIds": ["uuid-escola"],
-  "studentIds": ["uuid-aluno"],
+  "studentIds": [],
   "status": "rascunho",
   "createdBy": { "id": "user-uuid", "name": "Maria Professora" },
   "applicationStart": null,
@@ -536,7 +552,7 @@ Admin/tecadm: todas do município. Demais roles: **somente as que criaram**.
 
 ### `GET /afirme-reading/evaluations/:id` → `200` (visualizar)
 
-Ficha completa: escopo (escolas, série, turmas, alunos), texto anexado (com questões) e as duas listas.
+Ficha completa: escopo (escolas, séries, turmas, alunos), texto anexado (com questões) e as duas listas.
 
 Query: `includeSessions=true` → inclui `sessions` das sessões antigas em lote (opcional).
 
@@ -570,17 +586,105 @@ Quem não for criador (nem admin/tecadm) recebe `403`.
     "items": ["nave", "cristal"]
   },
   "scope": {
-    "grade": { "id": "uuid", "name": "1º Ano" },
+    "grades": [
+      { "id": "uuid-serie-1", "name": "1º Ano" },
+      { "id": "uuid-serie-2", "name": "2º Ano" }
+    ],
+    "grade": { "id": "uuid-serie-1", "name": "1º Ano" },
     "schools": [{ "id": "uuid", "name": "EMEF Centro" }],
     "classes": [{ "id": "uuid", "name": "A", "schoolId": "uuid", "gradeId": "uuid" }],
-    "students": [{ "id": "uuid", "name": "João", "classId": "uuid", "schoolId": "uuid" }]
+    "students": []
   }
 }
 ```
 
+`scope.students` só lista `studentIds` persistidos na avaliação (em geral vazio). O roster para aplicar é `GET .../applicants`.
+
+### `GET /afirme-reading/evaluations/:id/applicants` → `200`
+
+Tela de aplicar: turmas do escopo com os alunos atuais, e o status da aplicação de cada um.
+
+Só o **criador** (quem pode aplicar). Admin/tecadm vêem só se forem o criador.
+
+Alunos = matrícula atual das turmas (`classIds`) da avaliação, filtrados pelas séries (`gradeIds`) e escolas. Se a avaliação tiver `studentIds` preenchido, restringe a esses alunos.
+
+**Response:**
+
+```json
+{
+  "evaluationId": "uuid",
+  "evaluationTitle": "Diagnóstico 1º bimestre",
+  "evaluationKind": "entrada",
+  "evaluationKindLabel": "Avaliação de Entrada",
+  "gradeIds": ["uuid-serie"],
+  "grades": [{ "id": "uuid-serie", "name": "1º Ano" }],
+  "grade": { "id": "uuid-serie", "name": "1º Ano" },
+  "classes": [
+    {
+      "id": "uuid-turma-a",
+      "name": "A",
+      "schoolId": "uuid-escola",
+      "schoolName": "EMEF Centro",
+      "gradeId": "uuid-serie",
+      "students": [
+        {
+          "id": "uuid-aluno-1",
+          "name": "Ana Souza",
+          "classId": "uuid-turma-a",
+          "schoolId": "uuid-escola",
+          "application": null,
+          "canStart": true,
+          "canContinue": false,
+          "canView": false
+        },
+        {
+          "id": "uuid-aluno-2",
+          "name": "Bruno Lima",
+          "classId": "uuid-turma-a",
+          "schoolId": "uuid-escola",
+          "application": {
+            "sessionId": "uuid-sessao",
+            "status": "em_andamento",
+            "startedAt": "2026-08-24T11:00:00",
+            "submittedAt": null
+          },
+          "canStart": false,
+          "canContinue": true,
+          "canView": false
+        },
+        {
+          "id": "uuid-aluno-3",
+          "name": "Carla Dias",
+          "classId": "uuid-turma-a",
+          "schoolId": "uuid-escola",
+          "application": {
+            "sessionId": "uuid-sessao-ok",
+            "status": "finalizada",
+            "startedAt": "2026-08-24T09:00:00",
+            "submittedAt": "2026-08-24T09:18:00"
+          },
+          "canStart": false,
+          "canContinue": false,
+          "canView": true
+        }
+      ]
+    }
+  ]
+}
+```
+
+Como usar no frontend:
+
+| Flag | Ação |
+|------|------|
+| `canStart` | `POST /fluency-sessions` `{ evaluationId, studentId }` |
+| `canContinue` | `GET /fluency-sessions/{sessionId}` e retomar o wizard |
+| `canView` | `GET /fluency-sessions/{sessionId}/report` (ou o GET da sessão) |
+| `application.status == "ausente"` | `canStart: true` — permite nova sessão |
+
 ### `PATCH /afirme-reading/evaluations/:id` → `200`
 
-**Somente o criador.** Body parcial: `title`, `description`, `evaluationKind`, `readingTextId`, `knownWordListId` / `wordsWordListId`, `uncommonWordListId`, `gradeId`, `classIds`, `schoolIds`, `studentIds`, `applicationStart`, `applicationEnd`, `timezone`, `status`.
+**Somente o criador.** Body parcial: `title`, `description`, `evaluationKind`, `readingTextId`, `knownWordListId` / `wordsWordListId`, `uncommonWordListId`, `gradeIds` (ou `gradeId`), `classIds`, `schoolIds`, `studentIds`, `applicationStart`, `applicationEnd`, `timezone`, `status`.
 
 Datas: ISO-8601 (`2026-08-06T08:00:00` ou com `Z`).
 
@@ -992,11 +1096,15 @@ Marca `ausente` + `submittedAt`. Bloqueado se já `finalizada`.
   Word lists (PALAVRAS_CONHECIDAS / POUCO_COMUNS)
         │
         ▼
-[Tenant] Avaliação (evaluationKind + texto + 2 listas + escopo)
+[Tenant] Avaliação (evaluationKind + texto + 2 listas + escola/série/turmas)
+        │
+        ▼
+GET /evaluations/:id/applicants
+  (turmas do escopo + alunos atuais + status)
         │
         ▼
 POST /fluency-sessions { evaluationId, studentId }
-  (só o criador da avaliação)
+  (só o criador; 201 inicia ou retoma; 409 se já finalizada)
         │  fluency → compreensão → submit
         ▼
   sessão finalizada (save oficial; relatórios depois)
@@ -1306,13 +1414,14 @@ DELETE /afirme-reading/guided-sessions/fffbcff5-2d61-411a-8b67-90118cdc4060
 1. JWT + feature `afirme_reading`
 2. Em `/evaluations*` e `/fluency-sessions*`: sempre enviar `X-City-ID` (ou slug/subdomínio)
 3. Preferir camelCase nos bodies
-4. Montar catálogo (`texts` com questões, `word-lists` `PALAVRAS_CONHECIDAS` e `POUCO_COMUNS`)
-5. Criar avaliação: `evaluationKind` + texto + duas listas + escopo
-6. Realizar: `POST /fluency-sessions` `{ evaluationId, studentId }` (só as que você criou)
-7. Wizard: `PATCH .../fluency` (Q1/Q2/Q3) → `comprehension-answers` → **`POST .../submit`** (save)
-8. Compreensão: índices 0-based alinhados a `options` / `correctOption`
-9. Relatórios filtrados por `evaluationKind` ficam para uma entrega posterior
-10. Leitura guiada (manual/auto) continua à parte e **não** entra no filtro de tipo pedagógico
+4. Montar catálogo com `?gradeId=` (ou `gradeIds`): textos e listas `PALAVRAS_CONHECIDAS` / `POUCO_COMUNS` da série
+5. Criar avaliação: `evaluationKind` + texto + duas listas + `gradeIds` + `schoolIds` + `classIds` (sem aluno)
+6. Tela aplicar: `GET /evaluations/:id/applicants` → flags `canStart` / `canContinue` / `canView`
+7. Realizar: `POST /fluency-sessions` `{ evaluationId, studentId }` (só as que você criou)
+8. Wizard: `PATCH .../fluency` (Q1/Q2/Q3) → `comprehension-answers` → **`POST .../submit`** (save)
+9. Compreensão: índices 0-based alinhados a `options` / `correctOption`
+10. Relatórios filtrados por `evaluationKind` ficam para uma entrega posterior
+11. Leitura guiada (manual/auto) continua à parte e **não** entra no filtro de tipo pedagógico
 
 ---
 
@@ -1428,7 +1537,11 @@ Aplicação da **avaliação já criada**. Texto e listas vêm do instrumento; o
 
 STT / silêncio / Web Speech ficam no **frontend**. O save oficial é `POST .../submit` (recalcula ICA e marca `finalizada`). Relatórios consolidados por `evaluationKind` vêm em entrega posterior.
 
-Só o **criador** da avaliação pode aplicar. Se já existir sessão `em_andamento` do mesmo aluno na mesma avaliação, o POST devolve essa sessão (não cria outra).
+Só o **criador** da avaliação pode aplicar. Uma aplicação vigente por aluno:
+
+- `em_andamento` → o POST **devolve a sessão existente** (retomar), status `201`
+- `finalizada` → `409` com `sessionId` e `status` (não cria outra)
+- `ausente` → permite nova sessão
 
 Roles: as mesmas do CRUD. Contexto de município obrigatório.  
 Base: `/afirme-reading/fluency-sessions`
@@ -1437,7 +1550,7 @@ Base: `/afirme-reading/fluency-sessions`
 
 | Método | Path | Status | Função |
 |--------|------|--------|--------|
-| `POST` | `/fluency-sessions` | `201` | Inicia aplicação (`em_andamento`) |
+| `POST` | `/fluency-sessions` | `201` / `409` | Inicia ou retoma (`em_andamento`); `409` se já `finalizada` |
 | `GET` | `/fluency-sessions/:id` | `200` | Detalhe (+ answers) |
 | `PATCH` | `/fluency-sessions/:id/fluency` | `200` | Rascunho Q1/Q2/Q3 (**merge incremental**) |
 | `POST` | `/fluency-sessions/:id/comprehension-answers` | `200` | Questões do texto + recalcula ICA |
@@ -1460,8 +1573,19 @@ Base: `/afirme-reading/fluency-sessions`
 ```
 
 - `evaluationId` e `studentId` obrigatórios
-- Aluno deve estar no escopo da avaliação (`studentIds` / `classIds` / `schoolIds` / `gradeId`)
+- Aluno deve estar no escopo: turma ∈ `classIds`, escola ∈ `schoolIds`, série ∈ `gradeIds`. `studentIds` só restringe se estiver preenchido
+- `classId` / `schoolId` opcionais (preenchidos pela matrícula do aluno)
 - `readingTextId`, `knownWordListId` e `uncommonWordListId` são copiados da avaliação (ignorados se enviados)
+
+**Conflict `409` (já finalizada):**
+
+```json
+{
+  "error": "Este aluno já possui aplicação finalizada nesta avaliação.",
+  "sessionId": "uuid-sessao",
+  "status": "finalizada"
+}
+```
 
 **Response (exemplo):**
 

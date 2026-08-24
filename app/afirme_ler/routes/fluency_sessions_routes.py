@@ -15,7 +15,10 @@ from app.entitlements import require_feature
 from app.permissions import get_current_user_from_token, role_required
 from app.afirme_ler.routes import AFIRME_LER_ROLES, bp
 from app.afirme_ler.services.fluency_audio_service import FluencyAudioService
-from app.afirme_ler.services.fluency_session_service import FluencySessionService
+from app.afirme_ler.services.fluency_session_service import (
+    FluencyApplicationConflict,
+    FluencySessionService,
+)
 from app.afirme_ler.services.parsing import get_field
 from app.utils.tenant_middleware import get_current_tenant_context
 
@@ -27,6 +30,14 @@ def _error_response(message: str, status: int):
 
 
 def _handle_service_error(error: Exception):
+    if isinstance(error, FluencyApplicationConflict):
+        return jsonify(
+            {
+                "error": str(error),
+                "sessionId": error.session_id,
+                "status": error.status,
+            }
+        ), 409
     if isinstance(error, LookupError):
         return _error_response(str(error), 404)
     if isinstance(error, PermissionError):

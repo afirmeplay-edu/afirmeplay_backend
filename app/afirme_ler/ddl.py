@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".reading_evaluation (
     words_word_list_id VARCHAR,
     uncommon_word_list_id VARCHAR,
     grade_id UUID REFERENCES public.grade(id),
+    grade_ids JSON NOT NULL DEFAULT '[]'::json,
     class_ids JSON NOT NULL DEFAULT '[]'::json,
     school_ids JSON,
     student_ids JSON NOT NULL DEFAULT '[]'::json,
@@ -41,6 +42,12 @@ ALTER TABLE "{schema}".reading_evaluation
     ADD COLUMN IF NOT EXISTS evaluation_kind VARCHAR(20) NOT NULL DEFAULT 'formativa';
 ALTER TABLE "{schema}".reading_evaluation
     ADD COLUMN IF NOT EXISTS student_ids JSON NOT NULL DEFAULT '[]'::json;
+ALTER TABLE "{schema}".reading_evaluation
+    ADD COLUMN IF NOT EXISTS grade_ids JSON NOT NULL DEFAULT '[]'::json;
+UPDATE "{schema}".reading_evaluation
+SET grade_ids = json_build_array(grade_id::text)
+WHERE grade_id IS NOT NULL
+  AND (grade_ids IS NULL OR COALESCE(json_array_length(grade_ids), 0) = 0);
 ALTER TABLE "{schema}".reading_evaluation
     DROP CONSTRAINT IF EXISTS chk_reading_evaluation_kind;
 ALTER TABLE "{schema}".reading_evaluation

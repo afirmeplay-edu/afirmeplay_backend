@@ -17,10 +17,12 @@ from app.permissions.roles import Roles
 from app.afirme_ler.models import (
     ReadingEvaluation,
     ReadingEvaluationSession,
+    ReadingFluencySession,
     ReadingText,
     ReadingWordList,
 )
 from app.afirme_ler.services.parsing import (
+    EVALUATION_KIND_LABELS,
     KIND_PALAVRAS_CONHECIDAS,
     KIND_POUCO_COMUNS,
     get_field,
@@ -107,7 +109,7 @@ class ReadingEvaluationService:
         reading_text_id = get_field(data, "readingTextId", "reading_text_id")
         if not reading_text_id:
             raise ValueError("readingTextId é obrigatório.")
-        ReadingTextService.get_visible_text(user, str(reading_text_id))
+        text = ReadingTextService.get_visible_text(user, str(reading_text_id))
 
         words_id = ReadingEvaluationService._known_list_id_from_data(data)
         uncommon_id = get_field(data, "uncommonWordListId", "uncommon_word_list_id")
@@ -130,6 +132,132 @@ class ReadingEvaluationService:
             "reading_text_id": str(reading_text_id),
             "words_word_list_id": str(words_id),
             "uncommon_word_list_id": str(uncommon_id),
+            "text": text,
+            "known_list": known_list,
+            "uncommon_list": uncommon_list,
+        }
+
+    @staticmethod
+    def _assert_materials_match_grades(
+        text: ReadingText,
+        known_list: ReadingWordList,
+        uncommon_list: ReadingWordList,
+        grade_ids: List[str],
+    ) -> None:
+        allowed = {str(item) for item in grade_ids}
+        text_grade = str(text.grade_id) if text and text.grade_id else None
+        if not text_grade or text_grade not in allowed:
+            raise ValueError("O texto não pertence às séries selecionadas.")
+        known_grade = str(known_list.grade_id) if known_list and known_list.grade_id else None
+        if not known_grade or known_grade not in allowed:
+            raise ValueError(
+                "knownWordListId não pertence às séries selecionadas."
+            )
+        uncommon_grade = (
+            str(uncommon_list.grade_id)
+            if uncommon_list and uncommon_list.grade_id
+            else None
+        )
+        if not uncommon_grade or uncommon_grade not in allowed:
+            raise ValueError(
+                "uncommonWordListId não pertence às séries selecionadas."
+            )
+
+    @staticmethod
+    def _class_uuids(class_ids: List[str]) -> List[UUID]:
+        parsed: List[UUID] = []
+        for class_id in class_ids:
+            try:
+                parsed.append(UUID(str(class_id)))
+            except (TypeError, ValueError):
+                continue
+        return parsed
+
+    @staticmethod
+    def _stored_grade_ids(evaluation: ReadingEvaluation) -> List[str]:
+        return evaluation.grade_id_list()
+
+    @staticmethod
+    def _resolve_grade_ids(data: dict, *, default: Optional[List[str]] = None) -> List[str]:
+        raw = get_field(data, "gradeIds", "grade_ids")
+        if raw is None:
+            single = get_field(data, "gradeId", "grade_id")
+            if single is None:
+                raw = default if default is not None else []
+            elif isinstance(single, list):
+                raw = single
+            else:
+                raw = [single]
+        return ReadingEvaluationService._parse_uuid_list(raw, "gradeIds")
+
+    @staticmethod
+    def _grades_payload(grade_ids: List[str]) -> List[dict]:
+        if not grade_ids:
+            return []
+        rows = Grade.query.filter(Grade.id.in_(grade_ids)).all()
+        by_id = {str(row.id): row for row in rows}
+        return [
+            {"id": gid, "name": by_id[gid].name if gid in by_id else None}
+            for gid in grade_ids
+        ]
+
+    @staticmethod
+    def _validate_scope(data: dict) -> dict:
+        grade_ids = ReadingEvaluationService._resolve_grade_ids(data)
+        if not grade_ids:
+            raise ValueError("Informe ao menos uma série em gradeIds.")
+        found_grades = {
+            str(row.id)
+            for row in Grade.query.filter(Grade.id.in_(grade_ids)).all()
+        }
+        missing_grades = [item for item in grade_ids if item not in found_grades]
+        if missing_grades:
+            raise ValueError(f"Série (gradeId) não encontrada: {missing_grades[0]}.")
+        grade_id_set = set(grade_ids)
+
+        school_ids = ReadingEvaluationService._parse_uuid_list(
+            get_field(data, "schoolIds", "school_ids", default=[]),
+            "schoolIds",
+        )
+        if not school_ids:
+            raise ValueError("Informe ao menos uma escola em schoolIds.")
+        found_schools = {
+            str(row.id)
+            for row in School.query.filter(School.id.in_(school_ids)).all()
+        }
+        missing_schools = [item for item in school_ids if item not in found_schools]
+        if missing_schools:
+            raise ValueError(f"Escola não encontrada: {missing_schools[0]}.")
+
+        class_ids = ReadingEvaluationService._parse_uuid_list(
+            get_field(data, "classIds", "class_ids", default=[]),
+            "classIds",
+        )
+        if not class_ids:
+            raise ValueError("Informe ao menos uma turma em classIds.")
+
+        class_uuids = ReadingEvaluationService._class_uuids(class_ids)
+        klasses = Class.query.filter(Class.id.in_(class_uuids)).all() if class_uuids else []
+        by_id = {str(klass.id): klass for klass in klasses}
+        for class_id in class_ids:
+            klass = by_id.get(class_id)
+            if not klass:
+                raise ValueError(f"Turma não encontrada: {class_id}.")
+            if str(klass.school_id) not in school_ids:
+                raise ValueError("Turma não pertence às escolas selecionadas.")
+            if klass.grade_id and str(klass.grade_id) not in grade_id_set:
+                raise ValueError("Turma não pertence às séries selecionadas.")
+
+        student_ids = ReadingEvaluationService._parse_uuid_list(
+            get_field(data, "studentIds", "student_ids", default=[]),
+            "studentIds",
+        )
+        return {
+            "grade_ids": grade_ids,
+            "grade_id": grade_ids[0],
+            "school_ids": school_ids,
+            "class_ids": class_ids,
+            "student_ids": student_ids,
         }
 
     @staticmethod
@@ -142,23 +270,12 @@ class ReadingEvaluationService:
             get_field(data, "evaluationKind", "evaluation_kind")
         )
         refs = ReadingEvaluationService._validate_catalog_refs(user, data)
-
-        grade_id = get_field(data, "gradeId", "grade_id")
-        if grade_id:
-            if not Grade.query.get(grade_id):
-                raise ValueError("Série (gradeId) não encontrada.")
-
-        class_ids = ReadingEvaluationService._parse_uuid_list(
-            get_field(data, "classIds", "class_ids", default=[]),
-            "classIds",
-        )
-        school_ids = ReadingEvaluationService._parse_uuid_list(
-            get_field(data, "schoolIds", "school_ids", default=[]),
-            "schoolIds",
-        ) if get_field(data, "schoolIds", "school_ids") else []
-        student_ids = ReadingEvaluationService._parse_uuid_list(
-            get_field(data, "studentIds", "student_ids", default=[]),
-            "studentIds",
+        scope = ReadingEvaluationService._validate_scope(data)
+        ReadingEvaluationService._assert_materials_match_grades(
+            refs["text"],
+            refs["known_list"],
+            refs["uncommon_list"],
+            scope["grade_ids"],
         )
 
         user_id = _user_id(user)
@@ -168,10 +285,11 @@ class ReadingEvaluationService:
             reading_text_id=refs["reading_text_id"],
             words_word_list_id=refs["words_word_list_id"],
             uncommon_word_list_id=refs["uncommon_word_list_id"],
-            grade_id=grade_id,
-            class_ids=class_ids,
-            school_ids=school_ids or None,
-            student_ids=student_ids,
+            grade_id=scope["grade_id"],
+            grade_ids=scope["grade_ids"],
+            class_ids=scope["class_ids"],
+            school_ids=scope["school_ids"],
+            student_ids=scope["student_ids"],
             evaluation_kind=evaluation_kind,
             assessment_type="completa",
             status="rascunho",
@@ -301,6 +419,7 @@ class ReadingEvaluationService:
                 )
 
         data["scope"] = {
+            "grades": data.get("grades") or [],
             "grade": data.get("grade"),
             "schools": schools,
             "classes": classes,
@@ -357,29 +476,55 @@ class ReadingEvaluationService:
                 get_field(data, "evaluationKind", "evaluation_kind")
             )
 
-        if get_field(data, "gradeId", "grade_id") is not None:
-            grade_id = get_field(data, "gradeId", "grade_id")
-            if grade_id and not Grade.query.get(grade_id):
-                raise ValueError("Série (gradeId) não encontrada.")
-            evaluation.grade_id = grade_id
-
-        if get_field(data, "classIds", "class_ids") is not None:
-            evaluation.class_ids = ReadingEvaluationService._parse_uuid_list(
-                get_field(data, "classIds", "class_ids"),
-                "classIds",
-            )
-
-        if get_field(data, "schoolIds", "school_ids") is not None:
-            evaluation.school_ids = ReadingEvaluationService._parse_uuid_list(
-                get_field(data, "schoolIds", "school_ids"),
-                "schoolIds",
-            )
-
-        if get_field(data, "studentIds", "student_ids") is not None:
-            evaluation.student_ids = ReadingEvaluationService._parse_uuid_list(
-                get_field(data, "studentIds", "student_ids"),
-                "studentIds",
-            )
+        scope_keys = (
+            "gradeId",
+            "grade_id",
+            "gradeIds",
+            "grade_ids",
+            "classIds",
+            "class_ids",
+            "schoolIds",
+            "school_ids",
+            "studentIds",
+            "student_ids",
+        )
+        if any(key in data for key in scope_keys):
+            merged_scope = {
+                "gradeIds": get_field(
+                    data,
+                    "gradeIds",
+                    "grade_ids",
+                    default=ReadingEvaluationService._stored_grade_ids(evaluation),
+                ),
+                "schoolIds": get_field(
+                    data,
+                    "schoolIds",
+                    "school_ids",
+                    default=evaluation.school_ids or [],
+                ),
+                "classIds": get_field(
+                    data,
+                    "classIds",
+                    "class_ids",
+                    default=evaluation.class_ids or [],
+                ),
+                "studentIds": get_field(
+                    data,
+                    "studentIds",
+                    "student_ids",
+                    default=evaluation.student_ids or [],
+                ),
+            }
+            if "gradeId" in data or "grade_id" in data:
+                if "gradeIds" not in data and "grade_ids" not in data:
+                    merged_scope["gradeIds"] = None
+                    merged_scope["gradeId"] = get_field(data, "gradeId", "grade_id")
+            scope = ReadingEvaluationService._validate_scope(merged_scope)
+            evaluation.grade_id = scope["grade_id"]
+            evaluation.grade_ids = scope["grade_ids"]
+            evaluation.school_ids = scope["school_ids"]
+            evaluation.class_ids = scope["class_ids"]
+            evaluation.student_ids = scope["student_ids"]
 
         if get_field(data, "applicationStart", "application_start") is not None:
             evaluation.application_start = ReadingEvaluationService._parse_datetime(
@@ -396,6 +541,29 @@ class ReadingEvaluationService:
 
         if get_field(data, "status") is not None:
             evaluation.status = validate_evaluation_status(get_field(data, "status"))
+
+        catalog_changed = any(key in data for key in catalog_keys)
+        scope_changed = any(key in data for key in scope_keys)
+        if catalog_changed or scope_changed:
+            text = ReadingText.query.get(evaluation.reading_text_id)
+            known_list = (
+                ReadingWordList.query.get(evaluation.words_word_list_id)
+                if evaluation.words_word_list_id
+                else None
+            )
+            uncommon_list = (
+                ReadingWordList.query.get(evaluation.uncommon_word_list_id)
+                if evaluation.uncommon_word_list_id
+                else None
+            )
+            if not text or not known_list or not uncommon_list:
+                raise ValueError("Texto ou listas da avaliação não encontrados.")
+            ReadingEvaluationService._assert_materials_match_grades(
+                text,
+                known_list,
+                uncommon_list,
+                ReadingEvaluationService._stored_grade_ids(evaluation),
+            )
 
         db.session.commit()
         return ReadingEvaluation.query.options(
@@ -416,8 +584,6 @@ class ReadingEvaluationService:
 
     @staticmethod
     def delete(user: Dict[str, Any], evaluation_id: str) -> None:
-        from app.afirme_ler.models import ReadingFluencySession
-
         evaluation = ReadingEvaluationService.get_evaluation(evaluation_id)
         ReadingEvaluationService.assert_can_delete(user, evaluation)
         if evaluation.status == "em_andamento":
@@ -429,6 +595,158 @@ class ReadingEvaluationService:
             raise ValueError("Não é possível excluir avaliação com aplicações registradas.")
         db.session.delete(evaluation)
         db.session.commit()
+
+    @staticmethod
+    def _session_sort_key(session: ReadingFluencySession):
+        return (
+            session.updated_at
+            or session.submitted_at
+            or session.created_at
+            or datetime.min
+        )
+
+    @staticmethod
+    def _pick_application(sessions: List[ReadingFluencySession]):
+        if not sessions:
+            return None
+        in_progress = [item for item in sessions if item.status == "em_andamento"]
+        if in_progress:
+            return max(in_progress, key=ReadingEvaluationService._session_sort_key)
+        finalized = [item for item in sessions if item.status == "finalizada"]
+        if finalized:
+            return max(finalized, key=ReadingEvaluationService._session_sort_key)
+        return max(sessions, key=ReadingEvaluationService._session_sort_key)
+
+    @staticmethod
+    def list_applicants(user: Dict[str, Any], evaluation_id: str) -> dict:
+        evaluation = ReadingEvaluationService.get_evaluation(evaluation_id)
+        ReadingEvaluationService.assert_can_apply(user, evaluation)
+
+        class_ids = (
+            [str(item) for item in evaluation.class_ids]
+            if isinstance(evaluation.class_ids, list)
+            else []
+        )
+        school_ids = (
+            [str(item) for item in evaluation.school_ids]
+            if isinstance(evaluation.school_ids, list)
+            else []
+        )
+        student_allow = (
+            [str(item) for item in evaluation.student_ids]
+            if isinstance(evaluation.student_ids, list)
+            else []
+        )
+
+        class_uuids = ReadingEvaluationService._class_uuids(class_ids)
+        klasses = (
+            Class.query.filter(Class.id.in_(class_uuids)).all() if class_uuids else []
+        )
+        klass_by_id = {str(klass.id): klass for klass in klasses}
+
+        school_id_set = {str(klass.school_id) for klass in klasses if klass.school_id}
+        school_id_set.update(school_ids)
+        schools_by_id = {}
+        if school_id_set:
+            schools_by_id = {
+                str(row.id): row
+                for row in School.query.filter(School.id.in_(list(school_id_set))).all()
+            }
+
+        students_query = Student.query
+        if class_uuids:
+            students_query = students_query.filter(Student.class_id.in_(class_uuids))
+        else:
+            students_query = students_query.filter(Student.id.in_([]))
+        if school_ids:
+            students_query = students_query.filter(Student.school_id.in_(school_ids))
+        grade_ids = ReadingEvaluationService._stored_grade_ids(evaluation)
+        if grade_ids:
+            students_query = students_query.filter(Student.grade_id.in_(grade_ids))
+        if student_allow:
+            students_query = students_query.filter(Student.id.in_(student_allow))
+
+        students = students_query.order_by(Student.name.asc()).all()
+        student_ids = [student.id for student in students]
+        sessions: List[ReadingFluencySession] = []
+        if student_ids:
+            sessions = ReadingFluencySession.query.filter(
+                ReadingFluencySession.reading_evaluation_id == evaluation.id,
+                ReadingFluencySession.student_id.in_(student_ids),
+            ).all()
+
+        sessions_by_student: Dict[str, List[ReadingFluencySession]] = {}
+        for session in sessions:
+            sessions_by_student.setdefault(session.student_id, []).append(session)
+
+        students_by_class: Dict[str, List[Student]] = {}
+        for student in students:
+            class_key = str(student.class_id) if student.class_id else ""
+            students_by_class.setdefault(class_key, []).append(student)
+
+        classes_payload = []
+        for class_id in class_ids:
+            klass = klass_by_id.get(class_id)
+            school_id = str(klass.school_id) if klass and klass.school_id else None
+            school = schools_by_id.get(school_id) if school_id else None
+            class_students = []
+            for student in students_by_class.get(class_id, []):
+                picked = ReadingEvaluationService._pick_application(
+                    sessions_by_student.get(student.id) or []
+                )
+                application = None
+                if picked:
+                    application = {
+                        "sessionId": picked.id,
+                        "status": picked.status,
+                        "startedAt": (
+                            picked.started_at.isoformat() if picked.started_at else None
+                        ),
+                        "submittedAt": (
+                            picked.submitted_at.isoformat()
+                            if picked.submitted_at
+                            else None
+                        ),
+                    }
+                status = application["status"] if application else None
+                class_students.append(
+                    {
+                        "id": student.id,
+                        "name": student.name,
+                        "classId": class_id,
+                        "schoolId": (
+                            str(student.school_id) if student.school_id else school_id
+                        ),
+                        "application": application,
+                        "canStart": status is None or status == "ausente",
+                        "canContinue": status == "em_andamento",
+                        "canView": status == "finalizada",
+                    }
+                )
+            classes_payload.append(
+                {
+                    "id": class_id,
+                    "name": klass.name if klass else None,
+                    "schoolId": school_id,
+                    "schoolName": school.name if school else None,
+                    "gradeId": str(klass.grade_id) if klass and klass.grade_id else None,
+                    "students": class_students,
+                }
+            )
+
+        grades = ReadingEvaluationService._grades_payload(grade_ids)
+        return {
+            "evaluationId": evaluation.id,
+            "evaluationTitle": evaluation.title,
+            "evaluationKind": evaluation.evaluation_kind,
+            "evaluationKindLabel": EVALUATION_KIND_LABELS.get(
+                evaluation.evaluation_kind
+            ),
+            "gradeIds": grade_ids,
+            "grades": grades,
+            "grade": grades[0] if grades else None,
+            "classes": classes_payload,
+        }
 
     @staticmethod
     def assert_student_in_scope(evaluation: ReadingEvaluation, student: Student) -> None:
@@ -459,9 +777,10 @@ class ReadingEvaluationService:
             if not student.school_id or str(student.school_id) not in school_ids:
                 raise ValueError("Aluno não pertence às escolas desta avaliação.")
 
-        if evaluation.grade_id and student.grade_id:
-            if str(student.grade_id) != str(evaluation.grade_id):
-                raise ValueError("Aluno não pertence à série desta avaliação.")
+        grade_ids = ReadingEvaluationService._stored_grade_ids(evaluation)
+        if grade_ids and student.grade_id:
+            if str(student.grade_id) not in grade_ids:
+                raise ValueError("Aluno não pertence às séries desta avaliação.")
 
     @staticmethod
     def apply_to_classes(user: Dict[str, Any], evaluation_id: str, data: dict) -> dict:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+import uuid
 from typing import Any, List, Optional, Tuple
 
 ALLOWED_TEXT_DIFFICULTIES = frozenset({
@@ -123,6 +124,37 @@ def validate_difficulty_level(value: str) -> str:
         allowed = ", ".join(sorted(ALLOWED_TEXT_DIFFICULTIES))
         raise ValueError(f"difficultyLevel inválido. Valores permitidos: {allowed}.")
     return normalized
+
+
+def parse_grade_id_filters(filters: dict) -> List[str]:
+    """Extrai gradeId / gradeIds de query string (um UUID, lista ou CSV)."""
+    collected: List[str] = []
+
+    def _add(value: Any) -> None:
+        if value is None or value == "":
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                _add(item)
+            return
+        for part in str(value).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                collected.append(str(uuid.UUID(part)))
+            except ValueError as exc:
+                raise ValueError(f"gradeId inválido: {part}") from exc
+
+    _add(get_field(filters, "gradeIds", "grade_ids"))
+    _add(get_field(filters, "gradeId", "grade_id"))
+    seen = set()
+    unique: List[str] = []
+    for item in collected:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
 
 
 def validate_word_list_kind(value: str) -> str:

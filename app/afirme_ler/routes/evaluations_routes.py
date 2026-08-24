@@ -150,6 +150,22 @@ def delete_reading_evaluation(evaluation_id):
         return _handle_service_error(error)
 
 
+@bp.route("/evaluations/<evaluation_id>/applicants", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*_ROLES)
+@requires_city_context
+def list_reading_evaluation_applicants(evaluation_id):
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        payload = ReadingEvaluationService.list_applicants(user, evaluation_id)
+        return jsonify(payload), 200
+    except Exception as error:
+        return _handle_service_error(error)
+
+
 @bp.route("/evaluations/<evaluation_id>/apply", methods=["POST"])
 @jwt_required()
 @require_feature("afirme_reading")

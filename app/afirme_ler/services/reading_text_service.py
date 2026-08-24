@@ -11,6 +11,7 @@ from app.permissions.roles import Roles
 from app.afirme_ler.models import ReadingText, ReadingTextQuestion
 from app.afirme_ler.services.parsing import (
     get_field,
+    parse_grade_id_filters,
     parse_reading_question_payload,
     parse_string_list,
     validate_difficulty_level,
@@ -89,9 +90,9 @@ class ReadingTextService:
         query = ReadingText.query.options(joinedload(ReadingText.grade))
         query = apply_visibility_filter(query, ReadingText, user)
 
-        grade_id = filters.get("gradeId") or filters.get("grade_id")
-        if grade_id:
-            query = query.filter(ReadingText.grade_id == grade_id)
+        grade_ids = parse_grade_id_filters(filters)
+        if grade_ids:
+            query = query.filter(ReadingText.grade_id.in_(grade_ids))
 
         difficulty = filters.get("difficultyLevel") or filters.get("difficulty_level")
         if difficulty:

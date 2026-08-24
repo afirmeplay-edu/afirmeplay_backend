@@ -113,6 +113,19 @@ def test_validate_question_options_rejects_is_correct_mismatch():
         )
 
 
+def test_parse_grade_id_filters():
+    from app.afirme_ler.services.parsing import parse_grade_id_filters
+
+    one = "11111111-1111-1111-1111-111111111111"
+    two = "22222222-2222-2222-2222-222222222222"
+    assert parse_grade_id_filters({"gradeId": one}) == [one]
+    assert parse_grade_id_filters({"gradeIds": f"{one},{two}"}) == [one, two]
+    assert parse_grade_id_filters({"gradeId": one, "gradeIds": two}) == [two, one]
+    assert parse_grade_id_filters({}) == []
+    with pytest.raises(ValueError, match="gradeId inválido"):
+        parse_grade_id_filters({"gradeId": "nao-e-uuid"})
+
+
 def test_parse_reading_question_payload_accepts_enunciado():
     from app.afirme_ler.services.parsing import parse_reading_question_payload
 

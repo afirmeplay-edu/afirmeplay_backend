@@ -115,6 +115,14 @@ class AnswerSheetCorrectionNewGrid:
     APPLICATOR_SEARCH_ABOVE_BLOCKS_PX = int(4.2 * 118.11)  # ~496
     # Pula títulos A–D imediatamente acima da borda preta do bloco.
     APPLICATOR_SEARCH_SKIP_NEAR_BLOCKS_PX = int(1.0 * 118.11)  # ~118
+    # Calibração 2026-08-24 (scan Paulo Ricardo, A4 2480×3508):
+    # o Hough pegava o título roxo (~0.55 cm do topo da faixa). A bolinha 1
+    # está 1.12 cm abaixo do topo e ~3 px à direita da fórmula CSS.
+    APPLICATOR_AUSENTE_CY_OFFSET_CM = 1.12
+    APPLICATOR_AUSENTE_CX_TWEAK_PX = 3
+    APPLICATOR_AUSENTE_RADIUS_PX = 31
+    APPLICATOR_HOUGH_SKIP_HEADER_PX = int(0.75 * 118.11)  # ~89, título do aplicador
+    APPLICATOR_HOUGH_MAX_OFFSET_PX = int(0.45 * 118.11)  # ~53, 1 diâmetro de bolinha
     
     def __init__(self, debug: bool = False):
         """
@@ -1795,14 +1803,15 @@ class AnswerSheetCorrectionNewGrid:
         return x1, y1, x2, y2
 
     def _fallback_ausente_center(self, band: Tuple[int, int, int, int]) -> Tuple[int, int, int]:
-        """Centro estimado da 1ª bolinha (Aluno ausente) via CSS, sem Hough."""
+        """Centro estimado da 1ª bolinha (Aluno ausente) via CSS + calibração, sem Hough."""
         x1, y1, x2, y2 = band
-        r = max(8, int((self.APPLICATOR_CHECKBOX_CSS_PX / 2.0) * self.CSS_PX_TO_A4))
+        r = max(8, int(self.APPLICATOR_AUSENTE_RADIUS_PX))
         # padding-left do cartão (2cm) − âncora (~0.2cm) + padding do conteúdo + raio
         cx = int((2.0 - 0.2) * self.PX_PER_CM_A4 + (8 + 9) * self.CSS_PX_TO_A4)
+        cx += int(self.APPLICATOR_AUSENTE_CX_TWEAK_PX)
         cx = min(max(cx, x1 + r), x2 - r)
-        # Título roxo (~0.5cm) + padding + raio, a partir do topo da faixa
-        cy = y1 + int(0.55 * self.PX_PER_CM_A4)
+        # Centro da bolinha 1 (não o título roxo). Calibrado: 1.12 cm abaixo do topo da faixa.
+        cy = y1 + int(self.APPLICATOR_AUSENTE_CY_OFFSET_CM * self.PX_PER_CM_A4)
         cy = min(max(cy, y1 + r), y2 - r)
         return cx, cy, r
 
@@ -1827,46 +1836,53 @@ class AnswerSheetCorrectionNewGrid:
             return empty
 
         x1, y1, x2, y2 = band
-        roi = img_a4[y1:y2, x1:x2]
-        if roi.size == 0:
+        if y2 <= y1 or x2 <= x1:
             return empty
 
         fb_cx, fb_cy, r = self._fallback_ausente_center(band)
         method = "fallback"
         cx, cy = fb_cx, fb_cy
 
-        if len(roi.shape) == 3:
-            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = roi.copy()
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        min_r = max(12, int(r * 0.65))
-        max_r = max(min_r + 2, int(r * 1.45))
-        try:
-            circles = cv2.HoughCircles(
-                blurred,
-                cv2.HOUGH_GRADIENT,
-                dp=1.2,
-                minDist=int(0.35 * self.PX_PER_CM_A4),
-                param1=80,
-                param2=18,
-                minRadius=min_r,
-                maxRadius=max_r,
-            )
-        except cv2.error:
-            circles = None
+        header_skip = int(self.APPLICATOR_HOUGH_SKIP_HEADER_PX)
+        hough_y1 = min(y2 - 8, y1 + header_skip)
+        hough_roi = img_a4[hough_y1:y2, x1:x2]
+        if hough_roi.size > 0:
+            if len(hough_roi.shape) == 3:
+                gray = cv2.cvtColor(hough_roi, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = hough_roi.copy()
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            min_r = max(12, int(r * 0.65))
+            max_r = max(min_r + 2, int(r * 1.45))
+            try:
+                circles = cv2.HoughCircles(
+                    blurred,
+                    cv2.HOUGH_GRADIENT,
+                    dp=1.2,
+                    minDist=int(0.35 * self.PX_PER_CM_A4),
+                    param1=80,
+                    param2=18,
+                    minRadius=min_r,
+                    maxRadius=max_r,
+                )
+            except cv2.error:
+                circles = None
 
-        if circles is not None and len(circles) > 0:
-            found = []
-            for c in np.round(circles[0]).astype(int):
-                rcx, rcy, rr = int(c[0]), int(c[1]), int(c[2])
-                found.append((rcy, rcx, rr))
-            found.sort(key=lambda t: t[0])
-            rcy, rcx, rr = found[0]
-            cx = x1 + rcx
-            cy = y1 + rcy
-            r = rr
-            method = "hough"
+            if circles is not None and len(circles) > 0:
+                best = None
+                best_dist = None
+                max_off = float(self.APPLICATOR_HOUGH_MAX_OFFSET_PX)
+                for c in np.round(circles[0]).astype(int):
+                    rcx, rcy, rr = int(c[0]), int(c[1]), int(c[2])
+                    abs_cx = x1 + rcx
+                    abs_cy = hough_y1 + rcy
+                    dist = float(np.hypot(abs_cx - fb_cx, abs_cy - fb_cy))
+                    if dist <= max_off and (best_dist is None or dist < best_dist):
+                        best = (abs_cx, abs_cy, rr)
+                        best_dist = dist
+                if best is not None:
+                    cx, cy, r = best
+                    method = "hough"
 
         fill_ratio = self._circle_fill_ratio(img_a4, cx, cy, r)
         marked = fill_ratio > self.FILL_THRESHOLD

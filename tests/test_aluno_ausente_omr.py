@@ -81,6 +81,27 @@ class TestAlunoAusenteOmr(unittest.TestCase):
         }
         self.assertFalse(self.omr._cartao_sem_nenhuma_resposta(correction))
 
+    def test_header_false_circle_is_not_aluno_ausente(self):
+        """Círculo no título roxo (topo da faixa) não pode marcar ausência."""
+        img, blocks = self._synthetic_a4(fill_first=False)
+        band = self.omr._applicator_search_band(img, blocks)
+        x1, y1, x2, _y2 = band
+        fb_cx, _fb_cy, r = self.omr._fallback_ausente_center(band)
+        cv2.rectangle(img, (x1, y1), (x2, y1 + int(0.5 * self.omr.PX_PER_CM_A4)), (60, 60, 60), -1)
+        cv2.circle(img, (fb_cx, y1 + 20), r, (0, 0, 0), -1)
+        info = self.omr._detect_aluno_ausente(img, blocks)
+        self.assertFalse(info["marked"])
+        self.assertLess(info["fill_ratio"], self.omr.FILL_THRESHOLD)
+        self.assertGreater(info["cy"], y1 + int(0.7 * self.omr.PX_PER_CM_A4))
+
+    def test_fallback_center_sits_below_applicator_title(self):
+        img = np.full((self.omr.A4_HEIGHT_PX, self.omr.A4_WIDTH_PX, 3), 255, dtype=np.uint8)
+        blocks = [{"x": 200, "y": 1800, "w": 400, "h": 1200}]
+        band = self.omr._applicator_search_band(img, blocks)
+        _cx, cy, _r = self.omr._fallback_ausente_center(band)
+        y1 = band[1]
+        self.assertGreaterEqual(cy - y1, int(1.0 * self.omr.PX_PER_CM_A4))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ from app.afirme_ler.routes import (  # noqa: E402, F401
     guided_sessions_routes,
     guided_auto_sessions_routes,
     fluency_sessions_routes,
+    results_routes,
 )
 
 __all__ = ["bp", "AFIRME_LER_ROLES"]

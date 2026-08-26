@@ -1420,7 +1420,7 @@ DELETE /afirme-reading/guided-sessions/fffbcff5-2d61-411a-8b67-90118cdc4060
 7. Realizar: `POST /fluency-sessions` `{ evaluationId, studentId }` (só as que você criou)
 8. Wizard: `PATCH .../fluency` (Q1/Q2/Q3) → `comprehension-answers` → **`POST .../submit`** (save)
 9. Compreensão: índices 0-based alinhados a `options` / `correctOption`
-10. Relatórios filtrados por `evaluationKind` ficam para uma entrega posterior
+10. Relatórios: `GET /afirme-reading/resultados/filtros`, `GET /resultados`, `GET /resultados/estudantes/:id` (seção 9)
 11. Leitura guiada (manual/auto) continua à parte e **não** entra no filtro de tipo pedagógico
 
 ---
@@ -1641,7 +1641,7 @@ Partes **omitidas** são preservadas. Enviar só `q1` não apaga `q2`/`q3` já s
 
 Enums:
 
-- `WordStatus`: `nao_leu` | `acertou` | `inventou` | `soletrou` | `errou`
+- `WordStatus`: `nao_leu` | `acertou` | `inventou` | `silabou` | `soletrou` | `errou`
 - `NotReadReason`: `nao_se_aplica` | `recusou` | `nao_consegue` | `nao_sabe`
 - `source` (marking): `ia` | `manual` | `timeout`
 
@@ -1784,4 +1784,99 @@ Leiturômetro (`leiturimetroLevel` 1–6) a partir do ICA:
   "submittedAt": "2026-08-12T13:55:00"
 }
 ```
+
+---
+
+## 9. Resultados da fluência leitora (`/resultados`)
+
+Três GETs. Os números são **da avaliação** (`avaliacaoId`). O backend aplica recorte geo **dentro** do escopo dela e calcula com `FluencyScoring`. O front não agrega.
+
+Auth / feature / município: iguais ao restante do módulo.
+
+Cálculo: só `status === "presente"` entra em perfil e IFL. Participação = `avaliados / previstos × 100`.  
+IFL = Σ (% do nível × peso) / 100. Pesos: PL1 0 · PL2 1 · PL3 2,5 · PL4 4 · LI 6 · LF 10.  
+LF: mais de 65 palavras corretas no **texto** e precisão ≥ 90%. PPM ≥ 60 é só taxa de velocidade.
+
+Cascata dos selects: `ano` → `edicao` → **`avaliacaoId`** → escola / série / turma.
+
+### `GET /afirme-reading/resultados/filtros` → `200`
+
+```json
+{
+  "anos": [2026],
+  "edicoes": [
+    { "id": "entrada", "label": "Avaliação de Entrada" },
+    { "id": "formativa", "label": "Avaliação Formativa" },
+    { "id": "saida", "label": "Avaliação de Saída" }
+  ],
+  "avaliacoes": [
+    {
+      "id": "uuid-da-avaliacao",
+      "titulo": "Diagnóstico 1º bimestre",
+      "ano": 2026,
+      "edicao": "formativa",
+      "edicaoLabel": "Avaliação Formativa",
+      "status": "em_andamento",
+      "escolaIds": ["uuid-escola"],
+      "serieIds": ["uuid-serie"],
+      "turmaIds": ["uuid-turma"]
+    }
+  ],
+  "redes": [{ "id": "uuid-cidade", "nome": "Rede Municipal" }],
+  "municipios": [{ "id": "uuid-cidade", "redeId": "uuid-cidade", "nome": "Jaru" }],
+  "escolas": [{ "id": "uuid", "municipioId": "uuid-cidade", "nome": "EMEF Centro" }],
+  "series": [{ "id": "uuid", "nome": "3º Ano" }],
+  "turmas": [{ "id": "uuid", "escolaId": "uuid", "serieId": "uuid", "nome": "3º Ano A", "turno": "Matutino" }]
+}
+```
+
+O front filtra `avaliacoes` por `ano` + `edicao` (e, se quiser, por `escolaIds`). `turno`: `Matutino` | `Vespertino` | `Noturno` | `Integral`. Avaliações `cancelada` não entram.
+
+### `GET /afirme-reading/resultados` → `200`
+
+Query:
+
+| Param | Obrigatório | Notas |
+|---|---|---|
+| `avaliacaoId` | **sim** | id do instrumento (`evaluationId` também aceito) |
+| `ano` | não | se enviado, deve bater com a avaliação |
+| `edicao` | não | se enviado, deve bater com `evaluationKind` |
+| `redeId`, `municipioId`, `escolaId`, `serieId`, `turmaId`, `turno` | não | recorte **dentro** da avaliação |
+| `por`, `itemId` | não | `escola` \| `turma` \| `estudante` |
+
+Sem `avaliacaoId` → `400`. Avaliação inexistente / sem permissão → `404`.
+
+```json
+{
+  "avaliacaoId": "uuid-da-avaliacao",
+  "avaliacaoTitulo": "Diagnóstico 1º bimestre",
+  "avaliacaoStatus": "em_andamento",
+  "ano": 2026,
+  "edicao": "formativa",
+  "tituloEdicao": "Avaliação Formativa 2026",
+  "escopoLabel": "Rede Municipal · Jaru · EMEF Centro · Todas as séries · Todas as turmas",
+  "emitidoEm": "2026-08-26T13:06:02.000Z",
+  "criterios": {
+    "pesosIfl": "PL1: peso 0 · PL2: peso 1 · PL3: peso 2,5 · PL4: peso 4 · LI: peso 6 · LF: peso 10",
+    "iflDescricao": "IFL = soma (percentual de cada nível × peso do nível) / 100. Escala 0 a 10. Só entram estudantes com status presente.",
+    "fluencia": "Leitor Fluente (LF): mais de 65 palavras corretas no texto e precisão ≥ 90%. …"
+  },
+  "indicadores": {},
+  "indicadoresAnteriores": null,
+  "leituraAnalitica": "Na avaliação formativa 2026, foram previstos 120 estudantes. …",
+  "alertas": [],
+  "porEscola": [],
+  "porTurma": [],
+  "estudantes": []
+}
+```
+
+`indicadoresAnteriores`: edição anterior **do mesmo ciclo** (turmas/escolas em comum). `formativa`←`entrada`, `saida`←`formativa`. `null` se não houver — o front esconde Δ. O delta já vem em `indicadores.distribuicao[]`.
+
+### `GET /afirme-reading/resultados/estudantes/:id` → `200`
+
+Query: `ano` **ou** `avaliacaoId` (recomendado os dois). `edicao` opcional. Com `avaliacaoId`, a linha do tempo usa o ciclo dessa avaliação.
+
+`linhaDoTempo` sempre 3 itens (`entrada` → `formativa` → `saida`). `exportacao.iflDoNivel` é o peso 0–10 (LI = 6).
+
 

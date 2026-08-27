@@ -122,9 +122,8 @@ class ReadingSessionService:
         session_id: str,
     ) -> ReadingEvaluationSession:
         evaluation = ReadingEvaluationService.get_evaluation(evaluation_id)
-        if evaluation.status == "rascunho":
-            evaluation.status = "agendada"
-        if evaluation.status not in ("agendada", "em_andamento"):
+        ReadingEvaluationService.assert_can_apply(user, evaluation)
+        if evaluation.status not in ("rascunho", "agendada", "em_andamento"):
             raise ValueError("Avaliação não está disponível para aplicação.")
 
         session = ReadingSessionService.get_session(evaluation_id, session_id)
@@ -136,7 +135,7 @@ class ReadingSessionService:
         session.status = "em_andamento"
         session.started_at = session.started_at or datetime.utcnow()
         session.applied_by = user.get("id") or user.get("user_id")
-        if evaluation.status == "agendada":
+        if evaluation.status in ("rascunho", "agendada"):
             evaluation.status = "em_andamento"
         db.session.commit()
         return ReadingSessionService.get_session(evaluation_id, session_id)
@@ -148,14 +147,6 @@ class ReadingSessionService:
         fluency_data: Any,
     ) -> ReadingEvaluationSession:
         evaluation = ReadingEvaluationService.get_evaluation(evaluation_id)
-        if evaluation.assessment_type not in (
-            "fluencia",
-            "completa",
-            "entrada",
-            "formativa",
-            "saida",
-        ):
-            raise ValueError("Esta avaliação não inclui fluência.")
 
         session = ReadingSessionService.get_session(evaluation_id, session_id)
         if session.status not in ("em_andamento", "pendente"):
@@ -190,14 +181,6 @@ class ReadingSessionService:
         answers_payload: List[dict],
     ) -> ReadingEvaluationSession:
         evaluation = ReadingEvaluationService.get_evaluation(evaluation_id)
-        if evaluation.assessment_type not in (
-            "compreensao",
-            "completa",
-            "entrada",
-            "formativa",
-            "saida",
-        ):
-            raise ValueError("Esta avaliação não inclui compreensão.")
 
         session = ReadingSessionService.get_session(
             evaluation_id, session_id, include_answers=True
@@ -286,13 +269,14 @@ class ReadingSessionService:
         return {
             "evaluationId": evaluation.id,
             "evaluationTitle": evaluation.title,
-            "assessmentType": evaluation.assessment_type,
+            "evaluationKind": evaluation.evaluation_kind,
             "sessionId": session.id,
             "studentId": session.student_id,
             "studentName": session.student.name if session.student else None,
             "classId": str(session.class_id) if session.class_id else None,
             "status": session.status,
             "readingTextId": evaluation.reading_text_id,
+            "knownWordListId": evaluation.words_word_list_id,
             "wordsWordListId": evaluation.words_word_list_id,
             "uncommonWordListId": evaluation.uncommon_word_list_id,
             "q1": fluency.get("q1"),

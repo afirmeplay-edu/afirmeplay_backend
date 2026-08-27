@@ -1142,7 +1142,11 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
                             'score_percentage': result.get('score', 0),
                             'detailed_answers': result.get('detailed_answers', []),
                             'student_answers': result.get('student_answers', {}),
-                            'evaluation_result_id': result.get('evaluation_result_id')
+                            'evaluation_result_id': result.get('evaluation_result_id'),
+                            'aluno_ausente': bool(result.get('aluno_ausente')),
+                            'motivo_ausencia': result.get('motivo_ausencia'),
+                            'saved': bool(result.get('saved')),
+                            'status': result.get('status', 'corrigido'),
                         }
                         
                         update_item_done(job_id, i, adapted_result)
@@ -1268,10 +1272,19 @@ def process_physical_correction(test_id):
             if result.get('success'):
                 # Adaptar formato do resultado para compatibilidade com novo pipeline
                 return jsonify({
-                    "message": "Correção processada com sucesso",
+                    "message": (
+                        "Aluno marcado como ausente. O cartão não gerou nota."
+                        if result.get("aluno_ausente")
+                        else "Correção processada com sucesso"
+                    ),
                     "system": "new_grid_pipeline",
                     "student_id": result.get('student_id'),
                     "test_id": result.get('test_id') or test_id,
+                    "aluno_ausente": bool(result.get("aluno_ausente")),
+                    "aluno_ausente_fill_ratio": result.get("aluno_ausente_fill_ratio"),
+                    "motivo_ausencia": result.get("motivo_ausencia"),
+                    "saved": bool(result.get("saved")),
+                    "status": result.get("status", "corrigido"),
                     "correct": result.get('correct_answers', 0),
                     "wrong": result.get('wrong_answers', 0),
                     "blank": result.get('blank_answers', 0),

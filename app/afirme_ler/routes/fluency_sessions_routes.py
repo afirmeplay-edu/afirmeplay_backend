@@ -13,20 +13,16 @@ from app import db
 from app.decorators.tenant_required import requires_city_context
 from app.entitlements import require_feature
 from app.permissions import get_current_user_from_token, role_required
-from app.afirme_ler.routes import bp
+from app.afirme_ler.routes import AFIRME_LER_ROLES, bp
 from app.afirme_ler.services.fluency_audio_service import FluencyAudioService
-from app.afirme_ler.services.fluency_session_service import FluencySessionService
+from app.afirme_ler.services.fluency_session_service import (
+    FluencyApplicationConflict,
+    FluencySessionService,
+)
 from app.afirme_ler.services.parsing import get_field
 from app.utils.tenant_middleware import get_current_tenant_context
 
-_APLICACAO_ROLES = (
-    "admin",
-    "tecadm",
-    "professor",
-    "coordenador",
-    "diretor",
-    "aplicador",
-)
+_APLICACAO_ROLES = AFIRME_LER_ROLES
 
 
 def _error_response(message: str, status: int):
@@ -34,6 +30,14 @@ def _error_response(message: str, status: int):
 
 
 def _handle_service_error(error: Exception):
+    if isinstance(error, FluencyApplicationConflict):
+        return jsonify(
+            {
+                "error": str(error),
+                "sessionId": error.session_id,
+                "status": error.status,
+            }
+        ), 409
     if isinstance(error, LookupError):
         return _error_response(str(error), 404)
     if isinstance(error, PermissionError):
@@ -51,6 +55,14 @@ def _require_city_id() -> str:
     if not ctx or not getattr(ctx, "city_id", None):
         raise ValueError("Contexto de município obrigatório.")
     return str(ctx.city_id)
+
+
+def _load_session(user, session_id, *, mutate=False, include_answers=False):
+    session = FluencySessionService.get_session(
+        session_id, include_answers=include_answers
+    )
+    FluencySessionService.assert_can_access(user, session, mutate=mutate)
+    return session
 
 
 @bp.route("/fluency-sessions", methods=["POST"])
@@ -83,9 +95,7 @@ def get_fluency_session(session_id):
     if not user:
         return _error_response("Usuário não encontrado.", 401)
     try:
-        session = FluencySessionService.get_session(
-            session_id, include_answers=True
-        )
+        session = _load_session(user, session_id, include_answers=True)
         return (
             jsonify(
                 FluencySessionService.serialize(session, include_answers=True)
@@ -108,6 +118,7 @@ def save_fluency_session_fluency(session_id):
     data = request.get_json(silent=True) or {}
     fluency_data = get_field(data, "fluencyData", "fluency_data", default=data)
     try:
+        _load_session(user, session_id, mutate=True)
         session = FluencySessionService.save_fluency(session_id, fluency_data)
         return jsonify(FluencySessionService.serialize(session, include_answers=True)), 200
     except Exception as error:
@@ -130,6 +141,7 @@ def save_fluency_session_comprehension(session_id):
     else:
         answers = data
     try:
+        _load_session(user, session_id, mutate=True)
         session = FluencySessionService.save_comprehension_answers(
             session_id, answers or []
         )
@@ -157,7 +169,7 @@ def upload_fluency_session_audio(session_id):
 
     try:
         city_id = _require_city_id()
-        session = FluencySessionService.get_session(session_id)
+        session = _load_session(user, session_id, mutate=True)
         if session.status not in ("em_andamento",):
             raise ValueError("Sessão não está em andamento.")
         part = FluencyAudioService.validate_part(
@@ -187,7 +199,7 @@ def download_fluency_session_audio(session_id):
     if not user:
         return _error_response("Usuário não encontrado.", 401)
     try:
-        session = FluencySessionService.get_session(session_id)
+        session = _load_session(user, session_id)
         part = request.args.get("part")
         data, mime = FluencyAudioService.download_part_audio(session, part=part)
         return send_file(
@@ -210,6 +222,7 @@ def get_fluency_session_report(session_id):
     if not user:
         return _error_response("Usuário não encontrado.", 401)
     try:
+        session = _load_session(user, session_id, include_answers=True)
         report = FluencySessionService.build_report(session_id)
         return jsonify(report), 200
     except Exception as error:
@@ -226,6 +239,7 @@ def submit_fluency_session(session_id):
     if not user:
         return _error_response("Usuário não encontrado.", 401)
     try:
+        _load_session(user, session_id, mutate=True)
         session = FluencySessionService.finalize_session(session_id)
         return jsonify(FluencySessionService.serialize(session, include_answers=True)), 200
     except Exception as error:
@@ -243,6 +257,7 @@ def mark_fluency_session_absent(session_id):
     if not user:
         return _error_response("Usuário não encontrado.", 401)
     try:
+        _load_session(user, session_id, mutate=True)
         session = FluencySessionService.mark_absent(session_id)
         return jsonify(FluencySessionService.serialize(session)), 200
     except Exception as error:

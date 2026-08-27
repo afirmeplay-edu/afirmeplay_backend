@@ -95,6 +95,34 @@ class AnswerSheetCorrectionNewGrid:
     BLOCK_BORDER_WIDTH_PX = 2      # CSS: border: 2px
     BLOCK_PADDING_TOP_PX = 8       # CSS: padding-top: 8px
     BLOCK_PADDING_LEFT_PX = 4      # CSS: padding-left: 4px
+
+    # =========================================================================
+    # BOLHA "ALUNO AUSENTE" (bloco do aplicador) — CONSTANTES ISOLADAS
+    # =========================================================================
+    # NÃO reutilizar ROW_HEIGHT / BLOCK_OFFSET / BUBBLE_* das questões.
+    # NÃO alterar o template HTML/CSS. Coordenadas só nesta leitura extra.
+    # CSS de referência (answer_sheet.html / institutional_test_hybrid.html):
+    #   .applicator-box { height: 2.6cm }
+    #   .applicator-checkbox { width: 18px; height: 18px }
+    #   .answer-sheet { padding-left: 2cm }
+    #   .applicator-content { padding: 4px 8px }
+    # A4 lógico 2480x3508 @ 300 DPI; âncoras ~0.2cm dos cantos.
+    PX_PER_CM_A4 = 118.11
+    CSS_PX_TO_A4 = 300.0 / 96.0  # 3.125
+    APPLICATOR_BOX_HEIGHT_CM = 2.6
+    APPLICATOR_CHECKBOX_CSS_PX = 18
+    # Faixa acima do topo dos retângulos de questão: caixa 2.6cm + header/padding.
+    APPLICATOR_SEARCH_ABOVE_BLOCKS_PX = int(4.2 * 118.11)  # ~496
+    # Pula títulos A–D imediatamente acima da borda preta do bloco.
+    APPLICATOR_SEARCH_SKIP_NEAR_BLOCKS_PX = int(1.0 * 118.11)  # ~118
+    # Calibração 2026-08-24 (scan Paulo Ricardo, A4 2480×3508):
+    # o Hough pegava o título roxo (~0.55 cm do topo da faixa). A bolinha 1
+    # está 1.12 cm abaixo do topo e ~3 px à direita da fórmula CSS.
+    APPLICATOR_AUSENTE_CY_OFFSET_CM = 1.12
+    APPLICATOR_AUSENTE_CX_TWEAK_PX = 3
+    APPLICATOR_AUSENTE_RADIUS_PX = 31
+    APPLICATOR_HOUGH_SKIP_HEADER_PX = int(0.75 * 118.11)  # ~89, título do aplicador
+    APPLICATOR_HOUGH_MAX_OFFSET_PX = int(0.45 * 118.11)  # ~53, 1 diâmetro de bolinha
     
     def __init__(self, debug: bool = False):
         """
@@ -1630,6 +1658,16 @@ class AnswerSheetCorrectionNewGrid:
             "student_answers": student_answers_str,  # Dicionário: {"1": "A", "2": "B", ...}
             "answer_key": answer_key_str  # Gabarito oficial: {"1": "A", "2": "C", ...}
         }
+
+    @staticmethod
+    def _cartao_sem_nenhuma_resposta(correction: Dict) -> bool:
+        """True se nenhuma questão foi marcada (nem letra, nem INVALID)."""
+        total = int(correction.get("total_questions") or 0)
+        if total <= 0:
+            return False
+        blank = int(correction.get("blank_answers") or 0)
+        invalid = int(correction.get("invalid_answers") or 0)
+        return blank == total and invalid == 0
     
     # =========================================================================
     # FORMATAÇÃO DE ERROS AMIGÁVEIS
@@ -1710,6 +1748,210 @@ class AnswerSheetCorrectionNewGrid:
             return f"Foram identificadas {found} áreas de resposta, mas esperava-se {expected}. Verifique se há elementos extras na imagem que possam estar sendo confundidos com áreas de resposta."
     
     # =========================================================================
+    # BOLHA "ALUNO AUSENTE" (bloco do aplicador)
+    # =========================================================================
+
+    def _circle_fill_ratio(self, img: np.ndarray, cx: int, cy: int, r: int) -> float:
+        """Taxa de preenchimento de uma bolha circular (Otsu no recorte local)."""
+        if img is None or r <= 0:
+            return 0.0
+        h, w = img.shape[:2]
+        cx, cy, r = int(cx), int(cy), int(r)
+        if not (0 <= cx < w and 0 <= cy < h):
+            return 0.0
+        pad = max(r * 3, 20)
+        x0 = max(0, cx - pad)
+        y0 = max(0, cy - pad)
+        x1 = min(w, cx + pad)
+        y1 = min(h, cy + pad)
+        patch = img[y0:y1, x0:x1]
+        if patch.size == 0:
+            return 0.0
+        if len(patch.shape) == 3:
+            gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = patch
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        local_cx = cx - x0
+        local_cy = cy - y0
+        mask = np.zeros_like(thresh)
+        cv2.circle(mask, (local_cx, local_cy), r, 255, -1)
+        masked = cv2.bitwise_and(thresh, mask)
+        total_pixels = cv2.countNonZero(mask)
+        if total_pixels <= 0:
+            return 0.0
+        return float(cv2.countNonZero(masked)) / float(total_pixels)
+
+    def _applicator_search_band(self, img_a4: np.ndarray, blocks: List[Dict]) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Faixa acima dos blocos de questão onde fica o .applicator-box.
+        Não altera a detecção dos blocos; só usa o Y já encontrado.
+        """
+        if not blocks:
+            return None
+        h, w = img_a4.shape[:2]
+        grid_top = min(int(b.get("y", 0)) for b in blocks)
+        y2 = max(0, grid_top - self.APPLICATOR_SEARCH_SKIP_NEAR_BLOCKS_PX)
+        y1 = max(0, grid_top - self.APPLICATOR_SEARCH_ABOVE_BLOCKS_PX)
+        if y2 - y1 < 40:
+            return None
+        x1 = int(w * 0.05)
+        x2 = int(w * 0.22)
+        if x2 - x1 < 40:
+            return None
+        return x1, y1, x2, y2
+
+    def _fallback_ausente_center(self, band: Tuple[int, int, int, int]) -> Tuple[int, int, int]:
+        """Centro estimado da 1ª bolinha (Aluno ausente) via CSS + calibração, sem Hough."""
+        x1, y1, x2, y2 = band
+        r = max(8, int(self.APPLICATOR_AUSENTE_RADIUS_PX))
+        # padding-left do cartão (2cm) − âncora (~0.2cm) + padding do conteúdo + raio
+        cx = int((2.0 - 0.2) * self.PX_PER_CM_A4 + (8 + 9) * self.CSS_PX_TO_A4)
+        cx += int(self.APPLICATOR_AUSENTE_CX_TWEAK_PX)
+        cx = min(max(cx, x1 + r), x2 - r)
+        # Centro da bolinha 1 (não o título roxo). Calibrado: 1.12 cm abaixo do topo da faixa.
+        cy = y1 + int(self.APPLICATOR_AUSENTE_CY_OFFSET_CM * self.PX_PER_CM_A4)
+        cy = min(max(cy, y1 + r), y2 - r)
+        return cx, cy, r
+
+    def _detect_aluno_ausente(self, img_a4: np.ndarray, blocks: List[Dict]) -> Dict[str, Any]:
+        """
+        Lê a bolinha "1. Aluno ausente" na imagem A4 já normalizada.
+
+        Isolado do grid de questões: não mexe em offsets/raio/espaçamento das bolhas
+        de resposta nem nos filtros de detecção de blocos.
+        """
+        empty = {
+            "marked": False,
+            "fill_ratio": 0.0,
+            "method": "none",
+            "cx": None,
+            "cy": None,
+            "r": None,
+        }
+        band = self._applicator_search_band(img_a4, blocks)
+        if band is None:
+            self.logger.warning("⚠️ Faixa do aplicador inválida — bolinha de ausente não lida")
+            return empty
+
+        x1, y1, x2, y2 = band
+        if y2 <= y1 or x2 <= x1:
+            return empty
+
+        fb_cx, fb_cy, r = self._fallback_ausente_center(band)
+        method = "fallback"
+        cx, cy = fb_cx, fb_cy
+
+        header_skip = int(self.APPLICATOR_HOUGH_SKIP_HEADER_PX)
+        hough_y1 = min(y2 - 8, y1 + header_skip)
+        hough_roi = img_a4[hough_y1:y2, x1:x2]
+        if hough_roi.size > 0:
+            if len(hough_roi.shape) == 3:
+                gray = cv2.cvtColor(hough_roi, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = hough_roi.copy()
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            min_r = max(12, int(r * 0.65))
+            max_r = max(min_r + 2, int(r * 1.45))
+            try:
+                circles = cv2.HoughCircles(
+                    blurred,
+                    cv2.HOUGH_GRADIENT,
+                    dp=1.2,
+                    minDist=int(0.35 * self.PX_PER_CM_A4),
+                    param1=80,
+                    param2=18,
+                    minRadius=min_r,
+                    maxRadius=max_r,
+                )
+            except cv2.error:
+                circles = None
+
+            if circles is not None and len(circles) > 0:
+                best = None
+                best_dist = None
+                max_off = float(self.APPLICATOR_HOUGH_MAX_OFFSET_PX)
+                for c in np.round(circles[0]).astype(int):
+                    rcx, rcy, rr = int(c[0]), int(c[1]), int(c[2])
+                    abs_cx = x1 + rcx
+                    abs_cy = hough_y1 + rcy
+                    dist = float(np.hypot(abs_cx - fb_cx, abs_cy - fb_cy))
+                    if dist <= max_off and (best_dist is None or dist < best_dist):
+                        best = (abs_cx, abs_cy, rr)
+                        best_dist = dist
+                if best is not None:
+                    cx, cy, r = best
+                    method = "hough"
+
+        fill_ratio = self._circle_fill_ratio(img_a4, cx, cy, r)
+        marked = fill_ratio > self.FILL_THRESHOLD
+
+        self.logger.info(
+            f"🟣 Aluno ausente: method={method} cx={cx} cy={cy} r={r} "
+            f"fill={fill_ratio:.3f} marked={marked}"
+        )
+
+        if self.debug:
+            debug_img = img_a4.copy()
+            if len(debug_img.shape) == 2:
+                debug_img = cv2.cvtColor(debug_img, cv2.COLOR_GRAY2BGR)
+            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 255), 3)
+            color = (0, 0, 255) if marked else (0, 255, 0)
+            cv2.circle(debug_img, (cx, cy), r, color, 3)
+            cv2.circle(debug_img, (cx, cy), 3, color, -1)
+            label = f"AUSENTE {'SIM' if marked else 'NAO'} {fill_ratio:.2f}"
+            cv2.putText(
+                debug_img, label, (x1, max(30, y1 - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2,
+            )
+            self._save_debug_image("04_aluno_ausente.jpg", debug_img)
+
+        return {
+            "marked": marked,
+            "fill_ratio": round(fill_ratio, 4),
+            "method": method,
+            "cx": cx,
+            "cy": cy,
+            "r": r,
+        }
+
+    def _descartar_resultado_se_ausente(
+        self, gabarito_id: Optional[str], student_id: Optional[str]
+    ) -> None:
+        """Se o cartão for reprocessado como ausente, remove nota 0 já gravada deste aluno."""
+        if not gabarito_id or not student_id:
+            return
+        try:
+            from app.models.answerSheetResult import AnswerSheetResult
+
+            existing = AnswerSheetResult.query.filter_by(
+                gabarito_id=gabarito_id,
+                student_id=student_id,
+            ).all()
+            if not existing:
+                return
+            for row in existing:
+                db.session.delete(row)
+            db.session.commit()
+            self.logger.info(
+                f"🗑️ AnswerSheetResult removido (aluno ausente): "
+                f"gabarito={gabarito_id[:8]}... student={student_id[:8]}..."
+            )
+            try:
+                from app.report_analysis.answer_sheet_aggregate_service import (
+                    invalidate_answer_sheet_report_cache_after_result,
+                )
+                invalidate_answer_sheet_report_cache_after_result(
+                    gabarito_id, student_id, commit=True
+                )
+            except Exception as inv_err:
+                self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
+        except Exception as e:
+            db.session.rollback()
+            self.logger.warning("Falha ao descartar resultado de ausente: %s", e)
+
+    # =========================================================================
     # PIPELINE PRINCIPAL
     # =========================================================================
     
@@ -1755,6 +1997,9 @@ class AnswerSheetCorrectionNewGrid:
                 "success": False,
                 "error": error_msg
             }
+
+        # Leitura isolada da bolinha "Aluno ausente" (acima do grid, sem alterar blocos)
+        ausente_info = self._detect_aluno_ausente(img_a4, blocks)
         
         # ETAPAS 6-9: Processar cada bloco
         self.logger.info("🔄 Etapas 6-9: Processar blocos")
@@ -1795,7 +2040,10 @@ class AnswerSheetCorrectionNewGrid:
         # ETAPA 9: Construir resultado (feito externamente)
         return {
             "success": True,
-            "answers": all_answers
+            "answers": all_answers,
+            "aluno_ausente": bool(ausente_info.get("marked")),
+            "aluno_ausente_fill_ratio": ausente_info.get("fill_ratio", 0.0),
+            "aluno_ausente_method": ausente_info.get("method"),
         }
     
     # =========================================================================
@@ -1966,6 +2214,21 @@ class AnswerSheetCorrectionNewGrid:
             # Comparar com gabarito
             answers = result["answers"]
             correction = self._build_result(answers, gabarito)
+            aluno_ausente = bool(result.get("aluno_ausente"))
+            motivo_ausencia = "bolinha_aplicador" if aluno_ausente else None
+            if not aluno_ausente and self._cartao_sem_nenhuma_resposta(correction):
+                aluno_ausente = True
+                motivo_ausencia = "cartao_em_branco"
+            correction["aluno_ausente"] = aluno_ausente
+            correction["motivo_ausencia"] = motivo_ausencia
+            correction["aluno_ausente_fill_ratio"] = result.get("aluno_ausente_fill_ratio", 0.0)
+            correction["aluno_ausente_method"] = (
+                result.get("aluno_ausente_method")
+                if motivo_ausencia == "bolinha_aplicador"
+                else motivo_ausencia
+            )
+            correction["saved"] = False
+            correction["status"] = "aluno_ausente" if aluno_ausente else "corrigido"
             
             # ============================================
             # IMPRIMIR RESUMO DETALHADO NO TERMINAL
@@ -1978,6 +2241,19 @@ class AnswerSheetCorrectionNewGrid:
                 correction['student_id'] = qr_data.get('student_id')
                 correction['test_id'] = qr_data.get('test_id')
             
+            if aluno_ausente:
+                self.logger.info(
+                    "Aluno ausente (%s, fill=%.3f, method=%s) — nota NAO sera persistida",
+                    motivo_ausencia,
+                    correction.get("aluno_ausente_fill_ratio") or 0.0,
+                    correction.get("aluno_ausente_method"),
+                )
+                self._descartar_resultado_se_ausente(
+                    correction.get("gabarito_id"),
+                    correction.get("student_id"),
+                )
+                return correction
+
             self.logger.info(
                 f"✅ Correção finalizada: "
                 f"{correction['correct_answers']}/{correction['total_questions']} corretas "
@@ -1991,6 +2267,7 @@ class AnswerSheetCorrectionNewGrid:
                 if saved_result:
                     correction['answer_sheet_result_id'] = saved_result.get('id')
                     correction['evaluation_result_id'] = saved_result.get('id')
+                    correction['saved'] = True
             
             return correction
             
@@ -2029,6 +2306,12 @@ class AnswerSheetCorrectionNewGrid:
         print(f"   ⭕ Em branco: {correction['blank_answers']}")
         print(f"   ⚠️  Inválidas: {correction['invalid_answers']}")
         print(f"   📈 Nota: {correction['score']:.2f}%")
+        if correction.get("aluno_ausente"):
+            print(
+                f"   ALUNO AUSENTE ({correction.get('motivo_ausencia')}) "
+                f"fill={correction.get('aluno_ausente_fill_ratio')} "
+                f"method={correction.get('aluno_ausente_method')} — resultado NAO salvo"
+            )
         
         # Detalhes por bloco
         if topology_json.get('use_blocks') and topology_json.get('topology', {}).get('blocks'):

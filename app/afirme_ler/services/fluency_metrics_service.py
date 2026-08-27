@@ -29,7 +29,7 @@ PART_ALIASES = {
 }
 
 WORD_STATUSES = frozenset(
-    {"nao_leu", "acertou", "inventou", "soletrou", "errou"}
+    {"nao_leu", "acertou", "inventou", "silabou", "soletrou", "errou"}
 )
 NOT_READ_REASONS = frozenset(
     {"nao_se_aplica", "recusou", "nao_consegue", "nao_sabe"}

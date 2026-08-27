@@ -1540,6 +1540,10 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None, t
                             "correct": result.get("correct_answers"),
                             "total": result.get("total_questions"),
                             "percentage": result.get("score"),
+                            "aluno_ausente": bool(result.get("aluno_ausente")),
+                            "motivo_ausencia": result.get("motivo_ausencia"),
+                            "saved": bool(result.get("saved")),
+                            "status": result.get("status", "corrigido"),
                         }
                         update_item_done(job_id, i, adapted)
                         logging.info(f"✅ Job {job_id}: Cartão resposta {i+1} processado com sucesso")
@@ -3020,15 +3024,27 @@ def correct_answer_sheet_new_pipeline():
                 f"✅ NOVO PIPELINE: Correção processada com sucesso - "
                 f"{result['correct_answers']}/{result['total_questions']} corretas "
                 f"({result['score']:.1f}%)"
+                f"{' [ALUNO AUSENTE — não salvo]' if result.get('aluno_ausente') else ''}"
+            )
+
+            message = (
+                "Aluno marcado como ausente. O cartão não gerou nota."
+                if result.get("aluno_ausente")
+                else "Correção processada com sucesso (NOVO PIPELINE)"
             )
             
             return jsonify({
-                "message": "Correção processada com sucesso (NOVO PIPELINE)",
+                "message": message,
                 "system": "new_grid_pipeline",
                 "student_id": result.get('student_id'),
                 "student_name": student_name,
                 "gabarito_id": result.get('gabarito_id'),
                 "test_id": result.get('test_id'),
+                "aluno_ausente": bool(result.get("aluno_ausente")),
+                "aluno_ausente_fill_ratio": result.get("aluno_ausente_fill_ratio"),
+                "motivo_ausencia": result.get("motivo_ausencia"),
+                "saved": bool(result.get("saved")),
+                "status": result.get("status", "corrigido"),
                 "correct": result['correct_answers'],
                 "wrong": result['wrong_answers'],
                 "blank": result['blank_answers'],

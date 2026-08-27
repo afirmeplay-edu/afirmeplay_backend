@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from sqlalchemy import and_
+from sqlalchemy.orm import joinedload
 
 from app import db
 from app.afirme_ler.models import ReadingWordList
@@ -12,6 +13,7 @@ from app.afirme_ler.services.parsing import (
     SCOPE_GLOBAL,
     SCOPE_PRIVATE,
     get_field,
+    parse_grade_id_filters,
     parse_string_list,
     validate_word_list_kind,
 )
@@ -20,9 +22,17 @@ from app.afirme_ler.services.scope_service import (
     resolve_scope_on_create,
     user_can_modify,
 )
+from app.models.grades import Grade
 
 
 class WordListService:
+    @staticmethod
+    def _get_grade(grade_id: str) -> Grade:
+        grade = Grade.query.get(grade_id)
+        if not grade:
+            raise ValueError("Série (gradeId) não encontrada.")
+        return grade
+
     @staticmethod
     def _clear_default_flag(word_list: ReadingWordList) -> None:
         query = ReadingWordList.query.filter(
@@ -30,6 +40,10 @@ class WordListService:
             ReadingWordList.is_default.is_(True),
             ReadingWordList.id != word_list.id,
         )
+        if word_list.grade_id:
+            query = query.filter(ReadingWordList.grade_id == word_list.grade_id)
+        else:
+            query = query.filter(ReadingWordList.grade_id.is_(None))
         if word_list.scope_type == SCOPE_GLOBAL:
             query = query.filter(ReadingWordList.scope_type == SCOPE_GLOBAL)
         elif word_list.scope_type == SCOPE_CITY:
@@ -54,7 +68,14 @@ class WordListService:
         if not name or not str(name).strip():
             raise ValueError("name é obrigatório.")
 
-        kind = validate_word_list_kind(get_field(data, "kind", default="PALAVRAS"))
+        grade_id = get_field(data, "gradeId", "grade_id")
+        if not grade_id:
+            raise ValueError("gradeId é obrigatório.")
+        WordListService._get_grade(str(grade_id))
+
+        kind = validate_word_list_kind(
+            get_field(data, "kind", default="PALAVRAS_CONHECIDAS")
+        )
         items = parse_string_list(get_field(data, "items", default=[]), split_words=True)
         scope_type, owner_city_id, owner_user_id = resolve_scope_on_create(user)
         user_id = user.get("id") or user.get("user_id")
@@ -62,6 +83,7 @@ class WordListService:
         word_list = ReadingWordList(
             name=str(name).strip(),
             kind=kind,
+            grade_id=grade_id,
             items=items,
             description=get_field(data, "description"),
             is_default=bool(get_field(data, "isDefault", "is_default", default=False)),
@@ -75,16 +97,22 @@ class WordListService:
             WordListService._clear_default_flag(word_list)
         db.session.add(word_list)
         db.session.commit()
-        return word_list
+        return ReadingWordList.query.options(
+            joinedload(ReadingWordList.grade)
+        ).get(word_list.id)
 
     @staticmethod
     def list_word_lists(user: Dict[str, Any], filters: dict) -> List[ReadingWordList]:
-        query = ReadingWordList.query
+        query = ReadingWordList.query.options(joinedload(ReadingWordList.grade))
         query = apply_visibility_filter(query, ReadingWordList, user)
 
         kind = filters.get("kind")
         if kind:
             query = query.filter(ReadingWordList.kind == validate_word_list_kind(kind))
+
+        grade_ids = parse_grade_id_filters(filters)
+        if grade_ids:
+            query = query.filter(ReadingWordList.grade_id.in_(grade_ids))
 
         active = filters.get("active")
         if active is not None:
@@ -100,7 +128,7 @@ class WordListService:
 
     @staticmethod
     def get_visible(user: Dict[str, Any], word_list_id: str) -> ReadingWordList:
-        query = ReadingWordList.query
+        query = ReadingWordList.query.options(joinedload(ReadingWordList.grade))
         query = apply_visibility_filter(query, ReadingWordList, user)
         word_list = query.filter(ReadingWordList.id == word_list_id).first()
         if not word_list:
@@ -124,6 +152,11 @@ class WordListService:
         if "kind" in data:
             word_list.kind = validate_word_list_kind(data["kind"])
 
+        if get_field(data, "gradeId", "grade_id") is not None:
+            grade_id = get_field(data, "gradeId", "grade_id")
+            WordListService._get_grade(str(grade_id))
+            word_list.grade_id = grade_id
+
         if "items" in data:
             word_list.items = parse_string_list(data["items"], split_words=True)
 
@@ -140,7 +173,9 @@ class WordListService:
             WordListService._clear_default_flag(word_list)
 
         db.session.commit()
-        return word_list
+        return ReadingWordList.query.options(
+            joinedload(ReadingWordList.grade)
+        ).get(word_list.id)
 
     @staticmethod
     def delete(user: Dict[str, Any], word_list_id: str) -> None:

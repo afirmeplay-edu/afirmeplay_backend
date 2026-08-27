@@ -1,0 +1,28 @@
+{
+  "saved_at": "2026-08-24T11:02:24",
+  "cx": 268,
+  "cy": 1474,
+  "r": 31,
+  "band": {
+    "x1": 122,
+    "y1": 1342,
+    "x2": 548,
+    "y2": 1725
+  },
+  "fill_ratio": 0.3849,
+  "marked_with_current_threshold": false,
+  "offset_from_overlay_px": {
+    "dx": 34,
+    "dy": 84
+  },
+  "cy_minus_band_top_px": 132,
+  "cy_minus_band_top_cm": 1.1176,
+  "suggested_fallback": {
+    "comment": "Valores aplicados em correction_new_grid.py (_fallback_ausente_center).",
+    "cy_offset_cm": 1.12,
+    "cx_tweak_px": 3,
+    "r": 31
+  },
+  "source_debug": "debug_corrections_new/20260824_105522_647599_04_aluno_ausente.jpg",
+  "source_a4": "debug_corrections_new/20260824_105522_647599_03_normalized_a4.jpg"
+}

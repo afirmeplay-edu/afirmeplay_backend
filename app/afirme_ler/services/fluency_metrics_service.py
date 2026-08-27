@@ -206,6 +206,31 @@ def collect_skipped_ica_components(
     return skipped
 
 
+def _default_last_word_position(
+    part_key: str,
+    words_read: Optional[int],
+    part: Dict[str, Any],
+) -> int:
+    """Posição 1-based da última palavra avaliada. 0 se não leu."""
+    if words_read:
+        return words_read
+    markings = part.get("markings") if isinstance(part.get("markings"), list) else []
+    evaluated = [
+        item.get("index")
+        for item in markings
+        if isinstance(item, dict) and item.get("status")
+    ]
+    evaluated = [idx for idx in evaluated if isinstance(idx, int)]
+    if evaluated:
+        return max(evaluated) + 1
+    if part_key == "q3":
+        total = part.get("totalWords")
+        unread = part.get("unreadAfterEnd")
+        if total is not None and unread is not None:
+            return max(0, int(total) - int(unread))
+    return 0
+
+
 def _normalize_part(part_key: str, raw: Optional[dict]) -> Optional[dict]:
     if not raw:
         return None
@@ -280,9 +305,6 @@ def _normalize_part(part_key: str, raw: Optional[dict]) -> Optional[dict]:
         part["lastWordPosition"] = _as_non_negative_int(
             last_pos, f"{part_key}.lastWordPosition"
         )
-    elif part_key in ("q1", "q2"):
-        # 1-based; 0 se não leu
-        part["lastWordPosition"] = words_read if words_read else 0
 
     transcript = get_field(raw, "transcript", "transcription", "recognizedText")
     if transcript is not None:
@@ -335,6 +357,15 @@ def _normalize_part(part_key: str, raw: Optional[dict]) -> Optional[dict]:
             part["lines"] = _normalize_lines(lines, f"{part_key}.lines")
         elif skipped:
             part["lines"] = []
+
+    if "lastWordPosition" not in part:
+        # 1-based; 0 se não leu. Q3 também persiste (enviado ou derivado).
+        if skipped:
+            part["lastWordPosition"] = 0
+        else:
+            part["lastWordPosition"] = _default_last_word_position(
+                part_key, words_read, part
+            )
 
     reserved = {
         "wordsRead",

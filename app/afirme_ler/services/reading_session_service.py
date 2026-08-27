@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import joinedload
 
 from app import db
+from app.models.student import Student
 from app.afirme_ler.models import (
     ReadingComprehensionAnswer,
     ReadingEvaluationSession,
@@ -56,6 +57,63 @@ class ReadingSessionService:
         if not session:
             raise LookupError("Sessão de avaliação não encontrada.")
         return session
+
+    @staticmethod
+    def create_or_get_session(
+        evaluation_id: str,
+        student_id: str,
+        class_id: Optional[str] = None,
+    ) -> ReadingEvaluationSession:
+        evaluation = ReadingEvaluationService.get_evaluation(evaluation_id)
+        if evaluation.status in ("concluida", "cancelada"):
+            raise ValueError("Avaliação já encerrada.")
+
+        student = Student.query.get(student_id)
+        if not student:
+            raise LookupError("Aluno não encontrado.")
+
+        session = (
+            ReadingEvaluationSession.query.options(joinedload(ReadingEvaluationSession.student))
+            .filter_by(reading_evaluation_id=evaluation.id, student_id=str(student.id))
+            .filter(ReadingEvaluationSession.status.in_(("pendente", "em_andamento")))
+            .order_by(ReadingEvaluationSession.created_at.desc())
+            .first()
+        )
+        if not session:
+            session = ReadingEvaluationSession(
+                reading_evaluation_id=evaluation.id,
+                student_id=str(student.id),
+                class_id=class_id or student.class_id,
+                status="pendente",
+            )
+            db.session.add(session)
+
+        if evaluation.status == "rascunho":
+            evaluation.status = "agendada"
+
+        db.session.commit()
+        return ReadingSessionService.get_session(evaluation.id, session.id)
+
+    @staticmethod
+    def serialize_for_aplicador(session: ReadingEvaluationSession) -> dict:
+        evaluation = session.evaluation or ReadingEvaluationService.get_evaluation(
+            session.reading_evaluation_id
+        )
+        data = session.to_dict()
+        data.update(
+            {
+                "evaluationId": evaluation.id,
+                "readingTextId": evaluation.reading_text_id,
+                "wordsWordListId": evaluation.words_word_list_id,
+                "knownWordListId": evaluation.words_word_list_id,
+                "uncommonWordListId": evaluation.uncommon_word_list_id,
+                "schoolId": (evaluation.school_ids or [None])[0]
+                if isinstance(evaluation.school_ids, list) and evaluation.school_ids
+                else None,
+                "caderno": "A",
+            }
+        )
+        return data
 
     @staticmethod
     def start_session(

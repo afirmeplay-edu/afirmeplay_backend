@@ -60,6 +60,9 @@ ALLOWED_ASSESSMENT_TYPES = frozenset({
     "fluencia",
     "compreensao",
     "completa",
+    "entrada",
+    "formativa",
+    "saida",
 })
 
 ALLOWED_EVALUATION_STATUSES = frozenset({

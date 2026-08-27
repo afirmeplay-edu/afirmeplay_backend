@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from sqlalchemy.orm import joinedload
+from sqlalchemy.orm.attributes import flag_modified
 
 from app import db
 from app.models.grades import Grade
@@ -88,6 +89,8 @@ class ReadingEvaluationService:
 
     @staticmethod
     def assert_can_apply(user: Dict[str, Any], evaluation: ReadingEvaluation) -> None:
+        if ReadingEvaluationService._is_admin_viewer(user):
+            return
         if ReadingEvaluationService._is_creator(user, evaluation):
             return
         raise PermissionError("Você só pode aplicar avaliações que você mesmo criou.")
@@ -119,7 +122,8 @@ class ReadingEvaluationService:
             raise ValueError("uncommonWordListId é obrigatório.")
 
         known_list = WordListService.get_visible(user, str(words_id))
-        if known_list.kind != KIND_PALAVRAS_CONHECIDAS:
+        known_kind = (known_list.kind or "").upper()
+        if known_kind not in (KIND_PALAVRAS_CONHECIDAS, "PALAVRAS"):
             raise ValueError(
                 "knownWordListId deve ser uma lista do tipo PALAVRAS_CONHECIDAS."
             )
@@ -149,7 +153,7 @@ class ReadingEvaluationService:
         if not text_grade or text_grade not in allowed:
             raise ValueError("O texto não pertence às séries selecionadas.")
         known_grade = str(known_list.grade_id) if known_list and known_list.grade_id else None
-        if not known_grade or known_grade not in allowed:
+        if known_grade and known_grade not in allowed:
             raise ValueError(
                 "knownWordListId não pertence às séries selecionadas."
             )
@@ -158,7 +162,7 @@ class ReadingEvaluationService:
             if uncommon_list and uncommon_list.grade_id
             else None
         )
-        if not uncommon_grade or uncommon_grade not in allowed:
+        if uncommon_grade and uncommon_grade not in allowed:
             raise ValueError(
                 "uncommonWordListId não pertence às séries selecionadas."
             )
@@ -521,10 +525,14 @@ class ReadingEvaluationService:
                     merged_scope["gradeId"] = get_field(data, "gradeId", "grade_id")
             scope = ReadingEvaluationService._validate_scope(merged_scope)
             evaluation.grade_id = scope["grade_id"]
-            evaluation.grade_ids = scope["grade_ids"]
-            evaluation.school_ids = scope["school_ids"]
-            evaluation.class_ids = scope["class_ids"]
-            evaluation.student_ids = scope["student_ids"]
+            evaluation.grade_ids = list(scope["grade_ids"] or [])
+            evaluation.school_ids = list(scope["school_ids"] or [])
+            evaluation.class_ids = list(scope["class_ids"] or [])
+            evaluation.student_ids = list(scope["student_ids"] or [])
+            flag_modified(evaluation, "grade_ids")
+            flag_modified(evaluation, "school_ids")
+            flag_modified(evaluation, "class_ids")
+            flag_modified(evaluation, "student_ids")
 
         if get_field(data, "applicationStart", "application_start") is not None:
             evaluation.application_start = ReadingEvaluationService._parse_datetime(

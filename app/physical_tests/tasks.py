@@ -18,6 +18,71 @@ from app import db
 
 logger = logging.getLogger(__name__)
 
+_NON_RETRYABLE_MARKERS = (
+    "não encontrada",
+    "nao encontrada",
+    "bind de tenant falhou",
+    "sem flask app context",
+)
+
+
+def _ensure_flask_app_context():
+    """Garante app context: FlaskTask pode não envolver o run() em alguns workers."""
+    from flask import has_app_context
+    from app.report_analysis.celery_app import _get_flask_app
+
+    if has_app_context():
+        return None
+    ctx = _get_flask_app().app_context()
+    ctx.push()
+    return ctx
+
+
+def _bind_physical_test_tenant(city_id: str) -> str:
+    """
+    Aplica schema_translate_map tenant → city_* ANTES de qualquer query tenant.
+
+    Não consulta City antes do bind: City.query.get() abre conexão no engine
+    sem tradução e a sessão reutiliza esse bind em Test.query.get().
+    """
+    from flask import has_app_context
+    from app.models.city import City
+    from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
+    from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
+
+    if not has_app_context():
+        raise RuntimeError("Task Celery sem Flask app context; bind de tenant não pode ser aplicado")
+
+    city_schema = city_id_to_schema_name(str(city_id))
+    set_search_path(city_schema)
+    try:
+        db.session.rollback()
+    except Exception:
+        pass
+    db.session.remove()
+
+    effective = get_effective_tenant_physical_schema()
+    if effective != city_schema:
+        raise RuntimeError(
+            f"Bind de tenant falhou: esperado {city_schema}, efetivo {effective}"
+        )
+
+    city = City.query.get(city_id)
+    if not city:
+        raise ValueError(f"Cidade {city_id} não encontrada")
+
+    logger.info(
+        "[CELERY] 🌐 Schema físico do tenant: %s (bind efetivo=%s)",
+        city_schema,
+        effective,
+    )
+    return city_schema
+
+
+def _is_non_retryable_generation_error(error_msg: str) -> bool:
+    text = (error_msg or "").lower()
+    return any(marker in text for marker in _NON_RETRYABLE_MARKERS)
+
 
 @celery_app.task(
     bind=True,
@@ -163,6 +228,7 @@ def generate_physical_forms_async(
             data = result.get()
     """
     job_id = None
+    pushed_ctx = None
     try:
         job_id = self.request.id
         print(f"[CELERY] ========== TASK CELERY INICIADA ==========")
@@ -171,7 +237,9 @@ def generate_physical_forms_async(
         print(f"[CELERY] force_regenerate: {force_regenerate}")
         print(f"[CELERY] blocks_config recebido: {blocks_config}")
         logger.info(f"[CELERY] 🚀 Iniciando geração de formulários físicos para test_id={test_id}, city_id={city_id}")
-        
+
+        pushed_ctx = _ensure_flask_app_context()
+
         # Imports locais para evitar problemas de circular import
         from app.models.test import Test
         from app.models.student import Student
@@ -183,21 +251,10 @@ def generate_physical_forms_async(
         from app.models.school import School
         from app.physical_tests.form_service import PhysicalTestFormService
         from app.models.city import City
-        from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
-        
-        # MULTITENANT: bind do schema físico da cidade
-        city = City.query.get(city_id)
-        if not city:
-            error_msg = f"Cidade {city_id} não encontrada"
-            logger.error(f"[CELERY] ❌ {error_msg}")
-            raise ValueError(error_msg)
-        
-        city_schema = city_id_to_schema_name(str(city.id))
-        logger.info(f"[CELERY] 🌐 Schema físico do tenant: {city_schema}")
-        
-        from app import db
-        set_search_path(city_schema)
-        
+        from app.utils.tenant_middleware import set_search_path
+
+        city_schema = _bind_physical_test_tenant(city_id)
+
         # Verificar se a prova existe
         test = Test.query.get(test_id)
         if not test:
@@ -810,7 +867,18 @@ def generate_physical_forms_async(
                 'is_minio_error': True
             }
 
-        # Retry apenas para erros críticos (não relacionados a MinIO)
+        if _is_non_retryable_generation_error(error_msg):
+            logger.warning(f"[CELERY] ⚠️ Erro não retryável: {error_msg}")
+            if job_id:
+                _complete_job(job_id)
+            return {
+                'success': False,
+                'error': error_msg,
+                'test_id': test_id,
+                'generated_forms': 0
+            }
+
+        # Retry apenas para erros críticos (não relacionados a MinIO / prova inexistente)
         if self.request.retries < self.max_retries:
             logger.info(f"[CELERY] 🔄 Tentando novamente (retry {self.request.retries + 1}/{self.max_retries})...")
             raise self.retry(exc=e)
@@ -823,3 +891,9 @@ def generate_physical_forms_async(
                 'test_id': test_id,
                 'generated_forms': 0
             }
+    finally:
+        if pushed_ctx is not None:
+            try:
+                pushed_ctx.pop()
+            except Exception:
+                pass

@@ -44,6 +44,14 @@ from app.models.studentAnswer import StudentAnswer
 from app.models.skill import Skill
 from app.models.subject import Subject
 from app.models.test import EVALUATION_MODES
+from app.utils.municipality_availability import (
+    apply_availability_fields,
+    apply_municipality_availability_filter,
+    municipality_availability_payload,
+    resolve_availability_for_create,
+    unavailable_to_municipality_response,
+    user_can_access_municipality_content,
+)
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
 
@@ -185,6 +193,12 @@ def criar_avaliacao():
                 "error": f"evaluation_mode inválido: {evaluation_mode}. Valores aceitos: {', '.join(EVALUATION_MODES)}"
             }), 400
 
+        available_to_municipality, available_from, availability_err = resolve_availability_for_create(
+            data, current_user
+        )
+        if availability_err:
+            return jsonify({"error": availability_err}), 400
+
         # Validação de escola se fornecida
         if data.get('schools'):
             if isinstance(data['schools'], list):
@@ -239,7 +253,9 @@ def criar_avaliacao():
             course=data.get('course'),
             model=data.get('model'),
             subjects_info=data.get('subjects') or data.get('subjects_info'),  # Aceita tanto 'subjects' quanto 'subjects_info'
-            status='pendente'  # Sempre inicia como pendente, passa para agendada quando for aplicada
+            status='pendente',  # Sempre inicia como pendente, passa para agendada quando for aplicada
+            available_to_municipality=available_to_municipality,
+            available_from=available_from,
         )
 
         db.session.add(nova_avaliacao)
@@ -355,7 +371,8 @@ def criar_avaliacao():
         return jsonify({
             "message": "Test created successfully",
             "id": nova_avaliacao.id,
-            "classes_applied": 0
+            "classes_applied": 0,
+            **municipality_availability_payload(nova_avaliacao),
         }), 201
 
     except ValueError as e:
@@ -518,6 +535,8 @@ def listar_avaliacoes():
                 query = query.filter(db.or_(*filters))
                 logging.info(f"Aplicados {len(filters)} filtros para diretor/coordenador")
 
+        query = apply_municipality_availability_filter(query, Test, user)
+
         # Filtros
         status_filter = request.args.get('status')
         if status_filter:
@@ -635,6 +654,8 @@ def listar_avaliacoes_por_usuario(user_id):
                 joinedload(Question.last_modifier)
             )
         ).filter(Test.created_by == user_id)
+
+        query = apply_municipality_availability_filter(query, Test, user)
         
         avaliacoes = query.all()
         
@@ -710,6 +731,7 @@ def listar_avaliacoes_por_escola(school_id):
         ).filter(
             Test.status == 'agendada'
         )
+        query = apply_municipality_availability_filter(query, Test, user)
 
         # Filtrar por escola (pode estar em schools como lista ou string)
         avaliacoes = []
@@ -889,6 +911,11 @@ def obter_avaliacao(test_id):
             set_search_path(path_initial)
             return jsonify({"error": "Test not found"}), 404
 
+        user = get_current_user_from_token()
+        if not user_can_access_municipality_content(user, test):
+            set_search_path(path_initial)
+            return unavailable_to_municipality_response()
+
         from app.models.testQuestion import TestQuestion
         from app.models.question import Question
         from sqlalchemy.orm import joinedload as jl
@@ -933,7 +960,6 @@ def obter_avaliacao(test_id):
 
         data = format_test_response(test, questions=ordered_questions)
         # Aluno abrindo olimpíada: garantir type OLIMPIADA quando aplicado via StudentTestOlimpics
-        user = get_current_user_from_token()
         if user and user.get('role') == 'aluno':
             if not data.get('type') or (isinstance(data.get('type'), str) and data.get('type', '').strip().upper() != 'OLIMPIADA'):
                 from app.models.student import Student
@@ -1007,6 +1033,9 @@ def atualizar_avaliacao(test_id):
             logging.warning(f"Acesso negado: user {user_id} ({user_role}) tentou editar test {test_id} criado por {test.created_by}")
             return jsonify({"erro": "Acesso negado. Você não tem permissão para editar esta avaliação."}), 403
 
+        if not user_can_access_municipality_content(user, test):
+            return unavailable_to_municipality_response()
+
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data provided"}), 400
@@ -1074,6 +1103,10 @@ def atualizar_avaliacao(test_id):
                     setattr(test, campo, data.get('subjects') or data.get('subjects_info'))
                 else:
                     setattr(test, campo, data[campo])
+
+        _, availability_err = apply_availability_fields(test, data, user)
+        if availability_err:
+            return jsonify({"error": availability_err}), 400
 
         # Processar questões se fornecidas
         if 'questions' in data and isinstance(data['questions'], list):
@@ -1196,7 +1229,10 @@ def atualizar_avaliacao(test_id):
 
         db.session.commit()
 
-        response = {'message': 'Test updated successfully'}
+        response = {
+            'message': 'Test updated successfully',
+            **municipality_availability_payload(test),
+        }
         if class_sync_result:
             if class_sync_result["removed_class_ids"]:
                 response["removed_class_tests"] = class_sync_result["removed_class_ids"]
@@ -1595,6 +1631,9 @@ def aplicar_avaliacao_classe(test_id):
         if not test:
             return jsonify({"error": "Test not found"}), 404
 
+        if not user_can_access_municipality_content(user, test):
+            return unavailable_to_municipality_response()
+
         # Validar campos obrigatórios
         if 'classes' not in data or not isinstance(data['classes'], list):
             return jsonify({"error": "Classes list is required"}), 400
@@ -1825,6 +1864,10 @@ def aplicar_avaliacao_olympics(test_id):
                 set_search_path(tenant_schema)
         if not test:
             return jsonify({"error": "Test not found"}), 404
+
+        user = get_current_user_from_token()
+        if not user_can_access_municipality_content(user, test):
+            return unavailable_to_municipality_response()
 
         student_id = data.get('student_id')
         if not student_id:
@@ -3592,6 +3635,10 @@ def get_test_pdf_data(test_id):
 
         if not test:
             return jsonify({"error": "Test not found"}), 404
+
+        current_user = get_current_user_from_token()
+        if not user_can_access_municipality_content(current_user, test):
+            return unavailable_to_municipality_response()
 
         # subjects_info com nomes resolvidos
         subjects_info = process_subjects_for_test(test) or []

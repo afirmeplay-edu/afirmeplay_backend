@@ -181,6 +181,24 @@ COMMENT ON TABLE "{schema}".monitoring_action_history IS 'Histórico de alteraç
 """
 
 
+def get_municipality_availability_column_migrations_ddl(schema: str) -> str:
+    """ALTER idempotente: disponibilidade municipal em test e answer_sheet_gabaritos."""
+    return f"""
+ALTER TABLE "{schema}".test
+    ADD COLUMN IF NOT EXISTS available_to_municipality BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE "{schema}".test
+    ADD COLUMN IF NOT EXISTS available_from TIMESTAMPTZ;
+ALTER TABLE "{schema}".answer_sheet_gabaritos
+    ADD COLUMN IF NOT EXISTS available_to_municipality BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE "{schema}".answer_sheet_gabaritos
+    ADD COLUMN IF NOT EXISTS available_from TIMESTAMPTZ;
+COMMENT ON COLUMN "{schema}".test.available_to_municipality IS 'Se false, a avaliação não aparece nem pode ser aplicada pelo município (exceto admin/tecadm)';
+COMMENT ON COLUMN "{schema}".test.available_from IS 'Se preenchido, o município só vê/aplica a partir desta data/hora';
+COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.available_to_municipality IS 'Se false, o cartão não aparece nem pode ser gerado/baixado pelo município (exceto admin/tecadm)';
+COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.available_from IS 'Se preenchido, o município só vê/gera a partir desta data/hora';
+"""
+
+
 def get_monitoring_action_column_migrations_ddl(schema: str) -> str:
     """ALTER idempotente para colunas adicionadas após a criação inicial."""
     return f"""
@@ -939,6 +957,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
         cursor.execute(ddl)
         cursor.execute(get_class_shift_column_migrations_ddl(schema_name))
         cursor.execute(get_answer_sheet_result_snapshot_columns_ddl(schema_name))
+        cursor.execute(get_municipality_availability_column_migrations_ddl(schema_name))
 
         mobile_ddl = get_mobile_tables_ddl(schema_name)
         cursor.execute(mobile_ddl)
@@ -1111,9 +1130,13 @@ CREATE TABLE IF NOT EXISTS "{schema}".test (
     model VARCHAR(50),
     subjects_info JSON,
     status VARCHAR(20) DEFAULT 'pendente',
-    grade_calculation_type VARCHAR(20) DEFAULT 'complex'
+    grade_calculation_type VARCHAR(20) DEFAULT 'complex',
+    available_to_municipality BOOLEAN NOT NULL DEFAULT true,
+    available_from TIMESTAMPTZ
 );
 COMMENT ON TABLE "{schema}".test IS 'Avaliações criadas no município';
+COMMENT ON COLUMN "{schema}".test.available_to_municipality IS 'Se false, a avaliação não aparece nem pode ser aplicada pelo município (exceto admin/tecadm)';
+COMMENT ON COLUMN "{schema}".test.available_from IS 'Se preenchido, o município só vê/aplica a partir desta data/hora';
 
 CREATE TABLE IF NOT EXISTS "{schema}".test_questions (
     id VARCHAR PRIMARY KEY,
@@ -1307,10 +1330,14 @@ CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_gabaritos (
     last_generation_classes_count INTEGER,
     last_generation_students_count INTEGER,
     batch_id VARCHAR(36),
-    last_generation_job_id VARCHAR(36)
+    last_generation_job_id VARCHAR(36),
+    available_to_municipality BOOLEAN NOT NULL DEFAULT true,
+    available_from TIMESTAMPTZ
 );
 COMMENT ON TABLE "{schema}".answer_sheet_gabaritos IS 'Gabaritos de cartões resposta';
 COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.grades IS 'Séries aplicáveis ao gabarito: [{{id, name}}, ...]';
+COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.available_to_municipality IS 'Se false, o cartão não aparece nem pode ser gerado/baixado pelo município (exceto admin/tecadm)';
+COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.available_from IS 'Se preenchido, o município só vê/gera a partir desta data/hora';
 
 CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_generations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

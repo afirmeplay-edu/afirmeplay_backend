@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 debug_corrections/
+debug_corrections_new/
 debug_bubbles/
 generated_pdfs/
 

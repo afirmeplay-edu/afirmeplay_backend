@@ -372,15 +372,36 @@ class PhysicalTestFormService:
         # quando não houver dados reais, em vez de exibir "Não informado".
         school_name = ''
         class_name = ''
+        school_address = ''
+        class_shift = ''
+        municipality_name = ''
+        state_name = ''
+        grade_name = ''
 
         if student.class_id:
             class_obj = Class.query.get(student.class_id)
             if class_obj:
                 class_name = class_obj.name
+                class_shift = class_obj.shift or ''
                 if class_obj.school_id:
                     school_obj = School.query.get(class_obj.school_id)
                     if school_obj:
                         school_name = school_obj.name
+                        school_address = school_obj.address or ''
+                        if school_obj.city_id:
+                            city_obj = City.query.get(school_obj.city_id)
+                            if city_obj:
+                                municipality_name = city_obj.name or ''
+                                state_name = city_obj.state or ''
+                grade_id = student.grade_id or class_obj.grade_id
+                if grade_id:
+                    grade_obj = Grade.query.get(grade_id)
+                    if grade_obj:
+                        grade_name = grade_obj.name or ''
+        elif student.grade_id:
+            grade_obj = Grade.query.get(student.grade_id)
+            if grade_obj:
+                grade_name = grade_obj.name or ''
 
         # Gerar QR Code com metadados simplificados (student_id + gabarito_id se disponível)
         # NOTA: test_id será preenchido quando o QR code for gerado no contexto da prova (institutional_test_weasyprint_generator.py)
@@ -419,9 +440,16 @@ class PhysicalTestFormService:
         return {
             'id': student.id,
             'name': student.name,
+            'registration': student.registration,
+            'birth_date': student.birth_date.isoformat() if student.birth_date else None,
             'class_id': student.class_id,
             'class_name': class_name,
+            'class_shift': class_shift,
             'school_name': school_name,
+            'school_address': school_address,
+            'grade_name': grade_name,
+            'municipality_name': municipality_name,
+            'state_name': state_name,
             'qr_code': qr_code_base64
         }
 

@@ -6,7 +6,12 @@ from typing import Any, Dict, List
 from app import db
 from app.permissions.roles import Roles
 from app.afirme_ler.models import ReadingTextQuestion
-from app.afirme_ler.services.parsing import get_field, validate_question_options
+from app.afirme_ler.services.parsing import (
+    get_field,
+    options_declare_correct_flags,
+    parse_reading_question_payload,
+    validate_question_options,
+)
 from app.afirme_ler.services.reading_text_service import ReadingTextService
 from app.afirme_ler.services.scope_service import user_can_modify
 from app.afirme_ler.services.tenant_usage import question_has_answers_in_tenant
@@ -23,26 +28,8 @@ class ReadingQuestionService:
     @staticmethod
     def create(user: Dict[str, Any], text_id: str, data: dict) -> ReadingTextQuestion:
         ReadingQuestionService._parent_for_write(user, text_id)
-
-        statement = get_field(data, "statement")
-        if not statement or not str(statement).strip():
-            raise ValueError("statement é obrigatório.")
-        descriptor = get_field(data, "descriptor")
-        if not descriptor or not str(descriptor).strip():
-            raise ValueError("descriptor é obrigatório.")
-
-        options, correct_option = validate_question_options(
-            get_field(data, "options", default=[]),
-            get_field(data, "correctOption", "correct_option"),
-        )
-
-        question = ReadingTextQuestion(
-            reading_text_id=text_id,
-            statement=str(statement).strip(),
-            options=options,
-            correct_option=correct_option,
-            descriptor=str(descriptor).strip(),
-        )
+        fields = parse_reading_question_payload(data)
+        question = ReadingTextQuestion(reading_text_id=text_id, **fields)
         db.session.add(question)
         db.session.commit()
         return question
@@ -55,23 +42,8 @@ class ReadingQuestionService:
 
         created: List[ReadingTextQuestion] = []
         for item in items:
-            if not isinstance(item, dict):
-                raise ValueError("Cada item do bulk deve ser um objeto.")
-            statement = get_field(item, "statement")
-            descriptor = get_field(item, "descriptor")
-            if not statement or not descriptor:
-                raise ValueError("Cada questão deve ter statement e descriptor.")
-            options, correct_option = validate_question_options(
-                get_field(item, "options", default=[]),
-                get_field(item, "correctOption", "correct_option"),
-            )
-            question = ReadingTextQuestion(
-                reading_text_id=text_id,
-                statement=str(statement).strip(),
-                options=options,
-                correct_option=correct_option,
-                descriptor=str(descriptor).strip(),
-            )
+            fields = parse_reading_question_payload(item)
+            question = ReadingTextQuestion(reading_text_id=text_id, **fields)
             db.session.add(question)
             created.append(question)
         db.session.commit()
@@ -102,8 +74,8 @@ class ReadingQuestionService:
         ReadingQuestionService._parent_for_write(user, text_id)
         question = ReadingQuestionService.get_question(user, text_id, question_id)
 
-        if "statement" in data:
-            statement = get_field(data, "statement")
+        if "statement" in data or "enunciado" in data:
+            statement = get_field(data, "statement", "enunciado")
             if not statement or not str(statement).strip():
                 raise ValueError("statement não pode ser vazio.")
             question.statement = str(statement).strip()
@@ -114,13 +86,16 @@ class ReadingQuestionService:
                 raise ValueError("descriptor não pode ser vazio.")
             question.descriptor = str(descriptor).strip()
 
+        has_correct = "correctOption" in data or "correct_option" in data
         options_value = get_field(data, "options")
-        correct_value = get_field(data, "correctOption", "correct_option")
-        if options_value is not None or correct_value is not None:
+        if options_value is not None or has_correct:
             options = options_value if options_value is not None else question.options
-            correct_option = (
-                correct_value if correct_value is not None else question.correct_option
-            )
+            if has_correct:
+                correct_option = get_field(data, "correctOption", "correct_option")
+            elif options_declare_correct_flags(options):
+                correct_option = None
+            else:
+                correct_option = question.correct_option
             parsed_options, parsed_correct = validate_question_options(options, correct_option)
             question.options = parsed_options
             question.correct_option = parsed_correct

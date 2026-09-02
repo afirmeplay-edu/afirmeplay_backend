@@ -18,6 +18,13 @@ class ReadingEvaluationSession(db.Model):
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey("tenant.class.id"), nullable=True)
     status = db.Column(db.String(20), nullable=False, default="pendente")
     fluency_data = db.Column(JSON, nullable=True)
+    calculated_plcm = db.Column(db.Float, nullable=True)
+    calculated_accuracy = db.Column(db.Float, nullable=True)
+    precision_level = db.Column(db.String(30), nullable=True)
+    fluency_level = db.Column(db.String(30), nullable=True)
+    ica_score = db.Column(db.Float, nullable=True)
+    ica_breakdown = db.Column(JSON, nullable=True)
+    prosody_level = db.Column(db.Integer, nullable=True)
     comprehension_correct_count = db.Column(db.Integer, nullable=True)
     comprehension_total = db.Column(db.Integer, nullable=True)
     comprehension_score = db.Column(db.Float, nullable=True)
@@ -48,6 +55,13 @@ class ReadingEvaluationSession(db.Model):
             "classId": str(self.class_id) if self.class_id else None,
             "status": self.status,
             "fluencyData": self.fluency_data,
+            "calculatedPlcm": self.calculated_plcm,
+            "calculatedAccuracy": self.calculated_accuracy,
+            "precisionLevel": self.precision_level,
+            "fluencyLevel": self.fluency_level,
+            "icaScore": self.ica_score,
+            "icaBreakdown": self.ica_breakdown,
+            "prosodyLevel": self.prosody_level,
             "comprehensionCorrectCount": self.comprehension_correct_count,
             "comprehensionTotal": self.comprehension_total,
             "comprehensionScore": self.comprehension_score,

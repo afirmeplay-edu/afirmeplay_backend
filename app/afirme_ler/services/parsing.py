@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
+import uuid
 from typing import Any, List, Optional, Tuple
 
 ALLOWED_TEXT_DIFFICULTIES = frozenset({
@@ -15,9 +17,44 @@ ALLOWED_TEXT_DIFFICULTIES = frozenset({
 })
 
 ALLOWED_WORD_LIST_KINDS = frozenset({
-    "PALAVRAS",
+    "PALAVRAS_CONHECIDAS",
     "POUCO_COMUNS",
 })
+
+WORD_LIST_KIND_ALIASES = {
+    "PALAVRAS": "PALAVRAS_CONHECIDAS",
+    "CONHECIDAS": "PALAVRAS_CONHECIDAS",
+    "KNOWN": "PALAVRAS_CONHECIDAS",
+}
+
+ALLOWED_EVALUATION_KINDS = frozenset({
+    "entrada",
+    "formativa",
+    "saida",
+})
+
+EVALUATION_KIND_LABELS = {
+    "entrada": "Avaliação de Entrada",
+    "formativa": "Avaliação Formativa",
+    "saida": "Avaliação de Saída",
+}
+
+EVALUATION_KIND_ALIASES = {
+    "entrada": "entrada",
+    "avaliacao de entrada": "entrada",
+    "avaliacao_de_entrada": "entrada",
+    "avaliacao_entrada": "entrada",
+    "formativa": "formativa",
+    "avaliacao formativa": "formativa",
+    "avaliacao_formativa": "formativa",
+    "saida": "saida",
+    "avaliacao de saida": "saida",
+    "avaliacao_de_saida": "saida",
+    "avaliacao_saida": "saida",
+}
+
+KIND_PALAVRAS_CONHECIDAS = "PALAVRAS_CONHECIDAS"
+KIND_POUCO_COMUNS = "POUCO_COMUNS"
 
 ALLOWED_ASSESSMENT_TYPES = frozenset({
     "fluencia",
@@ -89,14 +126,63 @@ def validate_difficulty_level(value: str) -> str:
     return normalized
 
 
+def parse_grade_id_filters(filters: dict) -> List[str]:
+    """Extrai gradeId / gradeIds de query string (um UUID, lista ou CSV)."""
+    collected: List[str] = []
+
+    def _add(value: Any) -> None:
+        if value is None or value == "":
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                _add(item)
+            return
+        for part in str(value).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                collected.append(str(uuid.UUID(part)))
+            except ValueError as exc:
+                raise ValueError(f"gradeId inválido: {part}") from exc
+
+    _add(get_field(filters, "gradeIds", "grade_ids"))
+    _add(get_field(filters, "gradeId", "grade_id"))
+    seen = set()
+    unique: List[str] = []
+    for item in collected:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
+
+
 def validate_word_list_kind(value: str) -> str:
     if not value or not isinstance(value, str):
         raise ValueError("kind é obrigatório.")
-    normalized = value.strip().upper()
+    normalized = value.strip().upper().replace("-", "_").replace(" ", "_")
+    normalized = WORD_LIST_KIND_ALIASES.get(normalized, normalized)
     if normalized not in ALLOWED_WORD_LIST_KINDS:
         allowed = ", ".join(sorted(ALLOWED_WORD_LIST_KINDS))
         raise ValueError(f"kind inválido. Valores permitidos: {allowed}.")
     return normalized
+
+
+def _strip_accents(value: str) -> str:
+    decomposed = unicodedata.normalize("NFD", value)
+    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
+
+
+def validate_evaluation_kind(value: str) -> str:
+    if not value or not isinstance(value, str):
+        raise ValueError("evaluationKind é obrigatório.")
+    normalized = _strip_accents(value.strip().lower())
+    normalized = " ".join(normalized.split())
+    mapped = EVALUATION_KIND_ALIASES.get(normalized, normalized)
+    if mapped not in ALLOWED_EVALUATION_KINDS:
+        allowed = ", ".join(sorted(ALLOWED_EVALUATION_KINDS))
+        raise ValueError(f"evaluationKind inválido. Valores permitidos: {allowed}.")
+    return mapped
 
 
 def validate_assessment_type(value: str) -> str:
@@ -119,19 +205,115 @@ def validate_evaluation_status(value: str) -> str:
     return normalized
 
 
+def _coerce_correct_option(value: Any, options_count: int) -> int:
+    if isinstance(value, bool) or value is None:
+        raise ValueError("correctOption deve ser um número inteiro.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("correctOption deve ser um número inteiro.") from exc
+    if parsed < 0 or parsed >= options_count:
+        raise ValueError("correctOption fora do intervalo das alternativas.")
+    return parsed
+
+
+def _parse_option_entries(options: Any) -> Tuple[List[str], List[Optional[bool]]]:
+    raw = options
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("options deve ser uma lista.") from exc
+    if not isinstance(raw, list):
+        raise ValueError("options deve ser uma lista.")
+
+    texts: List[str] = []
+    flags: List[Optional[bool]] = []
+    for index, item in enumerate(raw):
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                raise ValueError(f"Alternativa no índice {index} não pode ser vazia.")
+            texts.append(text)
+            flags.append(None)
+            continue
+        if isinstance(item, dict):
+            text = get_field(item, "text", "answer")
+            if text is None or not str(text).strip():
+                raise ValueError(f"Alternativa no índice {index} deve ter text.")
+            texts.append(str(text).strip())
+            if "isCorrect" in item or "is_correct" in item:
+                flags.append(bool(get_field(item, "isCorrect", "is_correct")))
+            else:
+                flags.append(None)
+            continue
+        raise ValueError(f"Alternativa no índice {index} inválida.")
+    return texts, flags
+
+
+def options_declare_correct_flags(options: Any) -> bool:
+    try:
+        _, flags = _parse_option_entries(options)
+    except ValueError:
+        return False
+    return any(flag is True for flag in flags)
+
+
 def validate_question_options(
     options: Any,
-    correct_option: Optional[int],
+    correct_option: Optional[int] = None,
+    *,
+    require_correct: bool = True,
 ) -> Tuple[List[str], Optional[int]]:
-    parsed = parse_string_list(options)
-    if len(parsed) < 2:
+    texts, flags = _parse_option_entries(options)
+    if len(texts) < 2:
         raise ValueError("options deve conter pelo menos 2 alternativas.")
-    if correct_option is not None:
-        if not isinstance(correct_option, int):
-            raise ValueError("correctOption deve ser um número inteiro.")
-        if correct_option < 0 or correct_option >= len(parsed):
-            raise ValueError("correctOption fora do intervalo das alternativas.")
-    return parsed, correct_option
+
+    marked = [index for index, flag in enumerate(flags) if flag is True]
+    if len(marked) > 1:
+        raise ValueError("Informe exatamente uma alternativa correta.")
+
+    resolved: Optional[int] = None
+    if len(marked) == 1:
+        resolved = marked[0]
+        if correct_option is not None:
+            explicit = _coerce_correct_option(correct_option, len(texts))
+            if explicit != resolved:
+                raise ValueError(
+                    "correctOption não corresponde à alternativa marcada com isCorrect."
+                )
+    elif correct_option is not None:
+        resolved = _coerce_correct_option(correct_option, len(texts))
+    elif require_correct:
+        raise ValueError(
+            "Informe a alternativa correta (correctOption ou isCorrect em exatamente uma opção)."
+        )
+
+    return texts, resolved
+
+
+def parse_reading_question_payload(data: Any) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("Cada questão deve ser um objeto.")
+
+    statement = get_field(data, "statement", "enunciado")
+    if not statement or not str(statement).strip():
+        raise ValueError("statement é obrigatório.")
+
+    descriptor = get_field(data, "descriptor")
+    if not descriptor or not str(descriptor).strip():
+        raise ValueError("descriptor é obrigatório.")
+
+    options, correct_option = validate_question_options(
+        get_field(data, "options", default=[]),
+        get_field(data, "correctOption", "correct_option"),
+    )
+    return {
+        "statement": str(statement).strip(),
+        "options": options,
+        "correct_option": correct_option,
+        "descriptor": str(descriptor).strip(),
+    }
 
 
 def validate_guided_session_status(value: str) -> str:

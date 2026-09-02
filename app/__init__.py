@@ -312,7 +312,7 @@ def create_app():
         app.logger.warning("Scheduler não pôde ser iniciado: %s", e)
     
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes, ranking_routes, monitoring_routes, saved_ata_routes, folha_rascunho_routes, termo_compromisso_routes, etiquetas_routes, subjective_test_routes
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes, ranking_routes, monitoring_routes, saved_ata_routes, folha_rascunho_routes, termo_compromisso_routes, etiquetas_routes, subjective_test_routes, cover_template_routes
     from app.physical_tests.routes import bp as physical_test_bp
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
     from app.socioeconomic_forms.routes import filter_routes
@@ -327,12 +327,15 @@ def create_app():
     from app.store.routes import bp as store_bp
     from app.afirme_ler.routes import bp as afirme_ler_bp
     from app.participation_report import bp as participation_report_bp
+    from app.mapa_questoes import bp as mapa_questoes_bp
+    from app.boletim_aluno import bp as boletim_aluno_bp
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
     
     app.register_blueprint(school_routes.bp)
     app.register_blueprint(test_routes.bp)
     app.register_blueprint(evaluation_routes.bp)  # Novo blueprint separado para /evaluations/
+    app.register_blueprint(cover_template_routes.bp)
     app.register_blueprint(question_routes.bp)
     app.register_blueprint(login.bp)
     app.register_blueprint(logout.bp)
@@ -390,6 +393,8 @@ def create_app():
     app.register_blueprint(store_bp)
     app.register_blueprint(afirme_ler_bp)
     app.register_blueprint(participation_report_bp)
+    app.register_blueprint(mapa_questoes_bp)
+    app.register_blueprint(boletim_aluno_bp)
 
     from app.routes.mobile import mobile_bp
     app.register_blueprint(mobile_bp)
@@ -499,6 +504,7 @@ def create_app():
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager, MonitoringAction, MonitoringActionHistory
     from app.certification.models import CertificateTemplate, Certificate
+    from app.models.coverTemplate import CoverTemplate  # noqa: F401
 
     # Rota para servir o arquivo swagger.yaml a partir do diretório raiz do projeto
     @app.route('/swagger.yaml')

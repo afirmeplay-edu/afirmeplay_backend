@@ -893,7 +893,7 @@ def _montar_resposta_relatorio_por_turmas(
     niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
     proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
     nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
-    acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
+    acertos_habilidade = _calcular_acertos_habilidade(evaluation_id, class_tests)
     
     series_label = ", ".join(series_ordered) if series_ordered else None
     general_label = f"{series_label} - Geral" if series_label else "Geral"
@@ -1589,7 +1589,7 @@ def test_html_template(evaluation_id: str):
         nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
         
         # 5. Acertos por habilidade
-        acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
+        acertos_habilidade = _calcular_acertos_habilidade(evaluation_id, class_tests)
         
         # Preparar dados para o template
         template_data = _preparar_dados_template(
@@ -5575,24 +5575,28 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
 
 def _calcular_acertos_habilidade_por_escopo(evaluation_id: str, class_tests: List[ClassTest], scope_type: str) -> Dict[str, Any]:
     """
-    Calcula acertos por habilidade por escopo (turma, escola ou município)
-    
-    Args:
-        evaluation_id: ID da avaliação
-        class_tests: Lista de turmas onde a avaliação foi aplicada
-        scope_type: Tipo de escopo ('school', 'city', 'all')
-    
-    Returns:
-        Dict com acertos por habilidade agrupados conforme o escopo
+    Calcula acertos por habilidade por escopo (turma, escola ou município).
+
+    Sempre filtra pelas turmas já resolvidas em `class_tests` — o recorte
+    (escola vs município) é definido por `_buscar_turmas_por_escopo`.
     """
-    if scope_type == 'city' or scope_type == 'all':
-        return _calcular_acertos_habilidade_por_municipio(evaluation_id, class_tests)
-    else:
-        return _calcular_acertos_habilidade(evaluation_id)
+    return _calcular_acertos_habilidade(evaluation_id, class_tests)
 
 
 def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: List[ClassTest]) -> Dict[str, Any]:
-    """Calcula acertos por habilidade para relatório municipal (filtrado por turmas do município)"""
+    """Acertos por habilidade filtrados pelas turmas do escopo (município, escola ou conjunto explícito)."""
+    return _calcular_acertos_habilidade(evaluation_id, class_tests)
+
+
+def _calcular_acertos_habilidade(
+    evaluation_id: str, class_tests: Optional[List[ClassTest]] = None
+) -> Dict[str, Any]:
+    """Calcula acertos por habilidade e ranking organizados por disciplina.
+
+    Se `class_tests` for informado, conta apenas respostas de alunos cuja turma
+    atual está nesse conjunto. Sem filtro, usa todas as respostas da prova
+    (compatibilidade com chamadas antigas).
+    """
     from app.models.skill import Skill
     
     # Buscar questões da avaliação
@@ -5600,160 +5604,13 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
     if not test or not test.questions:
         return {}
     
-    # Filtrar respostas apenas das turmas do município
-    class_ids = [ct.class_id for ct in class_tests]
-    student_answers = StudentAnswer.query.filter_by(test_id=evaluation_id).join(Student).filter(Student.class_id.in_(class_ids)).all()
-    
-    # Agrupar respostas por questão
-    answers_by_question = defaultdict(list)
-    for answer in student_answers:
-        answers_by_question[answer.question_id].append(answer)
-    
-    # Buscar todas as habilidades para mapear ID -> código
-    skills_dict = {}
-    skill_ids = set()
-    for question in test.questions:
-        if question.skill and question.skill.strip() and question.skill != '{}':
-            # Remover chaves {} do UUID se existirem
-            clean_skill_id = question.skill.replace('{', '').replace('}', '')
-            skill_ids.add(clean_skill_id)
-    
-    if skill_ids:
-        skills = Skill.query.filter(Skill.id.in_(skill_ids)).all()
-        skills_dict = {str(skill.id): skill for skill in skills}
-    
-    # Lista para manter a ordem original das questões conforme aparecem na avaliação
-    questoes_ordenadas = []
-    
-    # Processar questões na ordem original (test.questions já está ordenado)
-    for idx, question in enumerate(test.questions, start=1):
-        # Questões com skill: mapear via skill.subject_id
-        if question.skill and question.skill.strip() and question.skill != '{}':
-            # Remover chaves {} do UUID se existirem
-            clean_skill_id = question.skill.replace('{', '').replace('}', '')
-            skill_obj = skills_dict.get(clean_skill_id)
-            
-            # Se não encontrou a habilidade na tabela Skill, usar o ID como código
-            if not skill_obj:
-                skill_code = clean_skill_id
-                skill_description = f"Habilidade {clean_skill_id}"
-                disciplina = "Disciplina Geral"
-            else:
-                skill_code = skill_obj.code
-                skill_description = skill_obj.description if hasattr(skill_obj, 'description') and skill_obj.description else f"Habilidade {skill_code}"
-                # Obter disciplina da habilidade
-                if skill_obj.subject_id:
-                    # Buscar a disciplina pelo subject_id
-                    subject = Subject.query.get(skill_obj.subject_id)
-                    if subject:
-                        disciplina = subject.name
-                    else:
-                        disciplina = "Disciplina Geral"
-                else:
-                    disciplina = "Disciplina Geral"
-        
-        # Questões sem skill: mapear para disciplina principal da avaliação
-        else:
-            if test.subject_rel:
-                disciplina = test.subject_rel.name
-                skill_code = f"Questão {question.number or 'N/A'}"
-                skill_description = f"Questão {question.number or 'N/A'}"
-            else:
-                disciplina = "Disciplina Geral"
-                skill_code = f"Questão {question.number or 'N/A'}"
-                skill_description = f"Questão {question.number or 'N/A'}"
-        
-        answers = answers_by_question.get(question.id, [])
-        
-        total_respostas = len(answers)
-        acertos = 0
-        
-        for answer in answers:
-            # Verificar se a resposta está correta
-            if question.question_type == 'multiple_choice':
-                # Para múltipla escolha, verificar se a resposta está correta
-                if question.correct_answer and str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
-                    acertos += 1
-            else:
-                # Para outros tipos, comparar com correct_answer
-                if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
-                    acertos += 1
-        
-        percentual = (acertos / total_respostas) * 100 if total_respostas > 0 else 0
-        
-        # Armazenar questão na ordem original
-        questoes_ordenadas.append({
-            "ordem_original": idx,  # Posição na avaliação (1, 2, 3, ...)
-            "disciplina": disciplina,
-            "codigo": skill_code,
-            "descricao": skill_description,
-            "acertos": acertos,
-            "total": total_respostas,
-            "percentual": round(percentual, 1)
-        })
-    
-    # Agrupar por disciplina mantendo a ordem original das questões
-    resultado_por_disciplina = {}
-    disciplinas_ordem = []  # Lista para manter ordem de aparição das disciplinas
-    
-    for questao in questoes_ordenadas:
-        disciplina = questao["disciplina"]
-        
-        # Se é a primeira vez que vemos esta disciplina, adicionar à lista de ordem
-        if disciplina not in disciplinas_ordem:
-            disciplinas_ordem.append(disciplina)
-            resultado_por_disciplina[disciplina] = {
-                "questoes": []
-            }
-        
-        # Adicionar questão à disciplina (mantendo ordem original)
-        resultado_por_disciplina[disciplina]["questoes"].append({
-            "numero_questao": questao["ordem_original"],
-            "codigo": questao["codigo"],
-            "descricao": questao["descricao"],
-            "acertos": questao["acertos"],
-            "total": questao["total"],
-            "percentual": questao["percentual"]
-        })
-    
-    # Adicionar dados gerais que englobam todas as disciplinas (na ordem original)
-    questoes_gerais = []
-    for questao in questoes_ordenadas:
-        questoes_gerais.append({
-            "numero_questao": questao["ordem_original"],
-            "codigo": questao["codigo"],
-            "descricao": questao["descricao"],
-            "acertos": questao["acertos"],
-            "total": questao["total"],
-            "percentual": questao["percentual"]
-        })
-    
-    # Construir resultado final ordenado usando a ordem de aparição das disciplinas
-    resultado_ordenado = OrderedDict()
-    
-    # Adicionar disciplinas na ordem de aparição
-    for disciplina in disciplinas_ordem:
-        resultado_ordenado[disciplina] = resultado_por_disciplina[disciplina]
-    
-    # Adicionar "GERAL" sempre por último
-    resultado_ordenado["GERAL"] = {
-        "questoes": questoes_gerais
-    }
-    
-    return resultado_ordenado
-
-
-def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
-    """Calcula acertos por habilidade e ranking organizados por disciplina"""
-    from app.models.skill import Skill
-    
-    # Buscar questões da avaliação
-    test = Test.query.get(evaluation_id)
-    if not test or not test.questions:
-        return {}
-    
-    # Buscar respostas dos alunos
-    student_answers = StudentAnswer.query.filter_by(test_id=evaluation_id).all()
+    answers_query = StudentAnswer.query.filter_by(test_id=evaluation_id)
+    if class_tests is not None:
+        class_ids = [ct.class_id for ct in class_tests if getattr(ct, "class_id", None)]
+        if not class_ids:
+            return {}
+        answers_query = answers_query.join(Student).filter(Student.class_id.in_(class_ids))
+    student_answers = answers_query.all()
     
     # Agrupar respostas por questão
     answers_by_question = defaultdict(list)

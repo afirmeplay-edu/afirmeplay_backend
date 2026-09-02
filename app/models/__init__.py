@@ -30,6 +30,7 @@ from .evaluationResult import EvaluationResult
 from .manager import Manager
 from .physicalTestAnswer import PhysicalTestAnswer
 from .physicalTestForm import PhysicalTestForm
+from .coverTemplate import CoverTemplate
 from .physicalTestZip import PhysicalTestZip
 from .formCoordinates import FormCoordinates
 from .studentPasswordLog import StudentPasswordLog

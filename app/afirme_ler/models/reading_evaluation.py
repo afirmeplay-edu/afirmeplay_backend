@@ -15,8 +15,11 @@ class ReadingEvaluation(db.Model):
     words_word_list_id = db.Column(db.String, nullable=True)
     uncommon_word_list_id = db.Column(db.String, nullable=True)
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("public.grade.id"), nullable=True)
+    grade_ids = db.Column(JSON, nullable=False, default=list)
     class_ids = db.Column(JSON, nullable=False, default=list)
     school_ids = db.Column(JSON, nullable=True)
+    student_ids = db.Column(JSON, nullable=False, default=list)
+    evaluation_kind = db.Column(db.String(20), nullable=False, default="formativa")
     assessment_type = db.Column(db.String(20), nullable=False, default="completa")
     status = db.Column(db.String(20), nullable=False, default="rascunho")
     application_start = db.Column(db.TIMESTAMP, nullable=True)
@@ -38,24 +41,51 @@ class ReadingEvaluation(db.Model):
         cascade="all, delete-orphan",
     )
 
+    def grade_id_list(self):
+        ids = self.grade_ids if isinstance(self.grade_ids, list) else []
+        out = [str(item) for item in ids if item]
+        if not out and self.grade_id:
+            out = [str(self.grade_id)]
+        return out
+
     def to_dict(self, include_sessions=False):
+        from app.afirme_ler.services.parsing import EVALUATION_KIND_LABELS
+        from app.models.grades import Grade
+
+        grade_ids = self.grade_id_list()
+        grades = []
+        if grade_ids:
+            rows = Grade.query.filter(Grade.id.in_(grade_ids)).all()
+            by_id = {str(row.id): row for row in rows}
+            grades = [
+                {"id": gid, "name": by_id[gid].name if gid in by_id else None}
+                for gid in grade_ids
+            ]
+        first_grade = grades[0] if grades else None
+
         data = {
             "id": self.id,
             "title": self.title,
             "description": self.description,
+            "evaluationKind": self.evaluation_kind,
+            "evaluationKindLabel": EVALUATION_KIND_LABELS.get(self.evaluation_kind),
             "readingTextId": self.reading_text_id,
+            "knownWordListId": self.words_word_list_id,
             "wordsWordListId": self.words_word_list_id,
             "uncommonWordListId": self.uncommon_word_list_id,
-            "gradeId": str(self.grade_id) if self.grade_id else None,
-            "grade": (
-                {"id": str(self.grade.id), "name": self.grade.name}
-                if self.grade
-                else None
-            ),
+            "gradeIds": grade_ids,
+            "grades": grades,
+            "gradeId": grade_ids[0] if grade_ids else None,
+            "grade": first_grade,
             "classIds": self.class_ids if isinstance(self.class_ids, list) else [],
             "schoolIds": self.school_ids if isinstance(self.school_ids, list) else [],
-            "assessmentType": self.assessment_type,
+            "studentIds": self.student_ids if isinstance(self.student_ids, list) else [],
             "status": self.status,
+            "createdBy": (
+                {"id": self.created_by, "name": self.creator.name}
+                if self.creator
+                else {"id": self.created_by, "name": None}
+            ),
             "applicationStart": (
                 self.application_start.isoformat() if self.application_start else None
             ),

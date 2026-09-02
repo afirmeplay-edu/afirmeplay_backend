@@ -45,6 +45,15 @@ from app.models.city import City
 from app.models.test import Test
 from app.models.skill import Skill
 from app.utils.decimal_helpers import round_to_two_decimals
+from app.utils.municipality_availability import (
+    apply_availability_fields,
+    apply_municipality_availability_filter,
+    municipality_availability_payload,
+    resolve_availability_for_create,
+    unavailable_to_municipality_response,
+    user_bypasses_municipality_availability,
+    user_can_access_municipality_content,
+)
 from typing import Dict, Optional, List, Any, Tuple, Set
 from collections import defaultdict
 from sqlalchemy import cast, String, desc, func, or_, and_
@@ -89,7 +98,11 @@ def _user_sees_all_city_gabaritos(user: dict) -> bool:
 
 
 def _user_can_read_gabarito(user: dict, gabarito: AnswerSheetGabarito) -> bool:
-    """Leitura de gabarito: admin/aplicador/tecadm = qualquer; demais = criador."""
+    """Leitura de gabarito: admin/aplicador/tecadm = qualquer; demais = criador.
+    Papéis municipais (inclui aplicador) só leem se estiver liberado para o município.
+    """
+    if not user_can_access_municipality_content(user, gabarito):
+        return False
     if _user_sees_all_city_gabaritos(user):
         return True
     if not gabarito.created_by:
@@ -125,6 +138,9 @@ def _user_can_edit_gabarito(user: dict, gabarito: AnswerSheetGabarito) -> bool:
         # Gabarito está no schema do tenant (city_xxx), se conseguiu buscar, está no contexto correto
         # O middleware de tenant já garantiu que estamos no schema certo via X-City-Context
         return True
+
+    if not user_can_access_municipality_content(user, gabarito):
+        return False
     
     # Outros roles: apenas gabaritos que criaram
     if not gabarito.created_by:
@@ -769,6 +785,12 @@ def create_gabarito_only():
             get_gabarito_grades,
         )
 
+        available_to_municipality, available_from, availability_err = resolve_availability_for_create(
+            data, user
+        )
+        if availability_err:
+            return jsonify({"error": availability_err}), 400
+
         gabarito = AnswerSheetGabarito(
             test_id=str(data.get('test_id')) if data.get('test_id') else None,
             class_id=None,
@@ -786,7 +808,9 @@ def create_gabarito_only():
             state=None,
             grade_name=None,
             grades=None,
-            institution=test_data.get('institution', '') or ''
+            institution=test_data.get('institution', '') or '',
+            available_to_municipality=available_to_municipality,
+            available_from=available_from,
         )
         grades_payload = merge_grade_sources(
             payload_grade_ids=data.get("grade_ids") or data.get("grade_id"),
@@ -819,6 +843,7 @@ def create_gabarito_only():
             'grades': get_gabarito_grades(gabarito),
             'grade_id': str(gabarito.grade_id) if gabarito.grade_id else None,
             'grade_name': gabarito.grade_name,
+            **municipality_availability_payload(gabarito),
         }), 201
 
     except Exception as e:
@@ -912,6 +937,8 @@ def generate_answer_sheets():
             gabarito = AnswerSheetGabarito.query.get(existing_gabarito_id)
             if not gabarito:
                 return jsonify({"error": "Gabarito não encontrado"}), 404
+            if not user_can_access_municipality_content(user, gabarito):
+                return unavailable_to_municipality_response()
             if not _user_can_read_gabarito(user, gabarito):
                 return jsonify({"error": "Você não tem permissão para usar este gabarito"}), 403
 
@@ -1251,6 +1278,12 @@ def generate_answer_sheets():
             classes=classes_to_generate,
         )
 
+        available_to_municipality, available_from, availability_err = resolve_availability_for_create(
+            data, user
+        )
+        if availability_err:
+            return jsonify({"error": availability_err}), 400
+
         gabarito = AnswerSheetGabarito(
             test_id=str(data.get('test_id')) if data.get('test_id') else None,
             class_id=str(classes_to_generate[0].id) if scope_type == 'class' and len(classes_to_generate) == 1 else None,
@@ -1268,7 +1301,9 @@ def generate_answer_sheets():
             state=state_for_gabarito,
             grade_name=None,
             grades=None,
-            institution=test_data.get('institution', '')
+            institution=test_data.get('institution', ''),
+            available_to_municipality=available_to_municipality,
+            available_from=available_from,
         )
         if grades_for_gabarito:
             apply_grades_to_gabarito(gabarito, grades_for_gabarito)
@@ -1540,6 +1575,10 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None, t
                             "correct": result.get("correct_answers"),
                             "total": result.get("total_questions"),
                             "percentage": result.get("score"),
+                            "aluno_ausente": bool(result.get("aluno_ausente")),
+                            "motivo_ausencia": result.get("motivo_ausencia"),
+                            "saved": bool(result.get("saved")),
+                            "status": result.get("status", "corrigido"),
                         }
                         update_item_done(job_id, i, adapted)
                         logging.info(f"✅ Job {job_id}: Cartão resposta {i+1} processado com sucesso")
@@ -1728,6 +1767,7 @@ def list_gabaritos():
         query = AnswerSheetGabarito.query
         if not _user_sees_all_city_gabaritos(user):
             query = query.filter(AnswerSheetGabarito.created_by == str(user['id']))
+        query = apply_municipality_availability_filter(query, AnswerSheetGabarito, user)
         
         # Aplicar filtros adicionais
         if class_id:
@@ -1949,6 +1989,7 @@ def list_gabaritos():
                 "created_by": str(gabarito.created_by) if gabarito.created_by else None,
                 "creator_name": creator_name,
             }
+            item.update(municipality_availability_payload(gabarito))
             if gabarito.scope_type == "city":
                 item["schools_summary"] = schools_summary
             gens = generations_by_gabarito.get(str(gabarito.id), [])
@@ -2302,6 +2343,7 @@ def get_gabarito(gabarito_id):
             "question_skills": question_skills_map,
             "questions_options": questions_options_map,
             "skill_codes": skill_codes_map,
+            **municipality_availability_payload(gabarito),
         }), 200
         
     except Exception as e:
@@ -2365,6 +2407,26 @@ def patch_gabarito_structure(gabarito_id: str):
         data = request.get_json() or {}
         if not data:
             return jsonify({"error": "Nenhum dado fornecido para edição"}), 400
+
+        availability_keys = ("available_to_municipality", "available_from")
+        availability_payload = {k: data[k] for k in availability_keys if k in data}
+        if availability_payload:
+            if not user_bypasses_municipality_availability(user) and set(data.keys()) <= set(availability_keys):
+                return jsonify({
+                    "error": "Apenas admin e tecadm podem alterar a disponibilidade para o município"
+                }), 403
+            _, availability_err = apply_availability_fields(gabarito, availability_payload, user)
+            if availability_err:
+                return jsonify({"error": availability_err}), 400
+            for k in availability_payload:
+                data.pop(k, None)
+            if not data:
+                db.session.commit()
+                return jsonify({
+                    "message": "Disponibilidade atualizada",
+                    "gabarito_id": str(gabarito.id),
+                    **municipality_availability_payload(gabarito),
+                }), 200
 
         new_title = None
         if "title" in data:
@@ -3020,15 +3082,27 @@ def correct_answer_sheet_new_pipeline():
                 f"✅ NOVO PIPELINE: Correção processada com sucesso - "
                 f"{result['correct_answers']}/{result['total_questions']} corretas "
                 f"({result['score']:.1f}%)"
+                f"{' [ALUNO AUSENTE — não salvo]' if result.get('aluno_ausente') else ''}"
+            )
+
+            message = (
+                "Aluno marcado como ausente. O cartão não gerou nota."
+                if result.get("aluno_ausente")
+                else "Correção processada com sucesso (NOVO PIPELINE)"
             )
             
             return jsonify({
-                "message": "Correção processada com sucesso (NOVO PIPELINE)",
+                "message": message,
                 "system": "new_grid_pipeline",
                 "student_id": result.get('student_id'),
                 "student_name": student_name,
                 "gabarito_id": result.get('gabarito_id'),
                 "test_id": result.get('test_id'),
+                "aluno_ausente": bool(result.get("aluno_ausente")),
+                "aluno_ausente_fill_ratio": result.get("aluno_ausente_fill_ratio"),
+                "motivo_ausencia": result.get("motivo_ausencia"),
+                "saved": bool(result.get("saved")),
+                "status": result.get("status", "corrigido"),
                 "correct": result['correct_answers'],
                 "wrong": result['wrong_answers'],
                 "blank": result['blank_answers'],

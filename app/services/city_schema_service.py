@@ -181,6 +181,24 @@ COMMENT ON TABLE "{schema}".monitoring_action_history IS 'Histórico de alteraç
 """
 
 
+def get_municipality_availability_column_migrations_ddl(schema: str) -> str:
+    """ALTER idempotente: disponibilidade municipal em test e answer_sheet_gabaritos."""
+    return f"""
+ALTER TABLE "{schema}".test
+    ADD COLUMN IF NOT EXISTS available_to_municipality BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE "{schema}".test
+    ADD COLUMN IF NOT EXISTS available_from TIMESTAMPTZ;
+ALTER TABLE "{schema}".answer_sheet_gabaritos
+    ADD COLUMN IF NOT EXISTS available_to_municipality BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE "{schema}".answer_sheet_gabaritos
+    ADD COLUMN IF NOT EXISTS available_from TIMESTAMPTZ;
+COMMENT ON COLUMN "{schema}".test.available_to_municipality IS 'Se false, a avaliação não aparece nem pode ser aplicada pelo município (exceto admin/tecadm)';
+COMMENT ON COLUMN "{schema}".test.available_from IS 'Se preenchido, o município só vê/aplica a partir desta data/hora';
+COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.available_to_municipality IS 'Se false, o cartão não aparece nem pode ser gerado/baixado pelo município (exceto admin/tecadm)';
+COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.available_from IS 'Se preenchido, o município só vê/gera a partir desta data/hora';
+"""
+
+
 def get_monitoring_action_column_migrations_ddl(schema: str) -> str:
     """ALTER idempotente para colunas adicionadas após a criação inicial."""
     return f"""
@@ -510,6 +528,42 @@ def migrate_plantao_online_from_public_to_city_schema(schema_name: str) -> dict:
         raise
     finally:
         raw_conn.close()
+
+
+def get_cover_templates_table_ddl(schema: str) -> str:
+    """
+    DDL idempotente da tabela cover_templates (capa de prova física por avaliação).
+    Associada a "{schema}".test; isolamento via schema tenant (sem city_id).
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".cover_templates (
+    id VARCHAR PRIMARY KEY,
+    test_id VARCHAR NOT NULL REFERENCES "{schema}".test(id) ON DELETE CASCADE,
+    name VARCHAR(200) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'draft',
+    original_filename VARCHAR(255),
+    mime_type VARCHAR(100) NOT NULL,
+    source_kind VARCHAR(20) NOT NULL,
+    minio_bucket VARCHAR(100) NOT NULL,
+    minio_object_name VARCHAR(500) NOT NULL,
+    normalized_object_name VARCHAR(500),
+    page_count INTEGER NOT NULL DEFAULT 1,
+    page_width_pt FLOAT NOT NULL,
+    page_height_pt FLOAT NOT NULL,
+    rotation INTEGER NOT NULL DEFAULT 0,
+    fields JSON NOT NULL DEFAULT '{{"fields": []}}'::json,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by VARCHAR REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ck_cover_templates_status CHECK (status IN ('draft', 'active', 'inactive')),
+    CONSTRAINT ck_cover_templates_source_kind CHECK (source_kind IN ('pdf', 'jpeg', 'png'))
+);
+COMMENT ON TABLE "{schema}".cover_templates IS 'Templates de capa de prova física por avaliação (tenant.test)';
+CREATE INDEX IF NOT EXISTS ix_cover_templates_test_id ON "{schema}".cover_templates(test_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cover_templates_one_active_per_test
+    ON "{schema}".cover_templates(test_id) WHERE status = 'active';
+"""
 
 
 def get_subjective_evaluation_tables_ddl(schema: str) -> str:
@@ -939,6 +993,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
         cursor.execute(ddl)
         cursor.execute(get_class_shift_column_migrations_ddl(schema_name))
         cursor.execute(get_answer_sheet_result_snapshot_columns_ddl(schema_name))
+        cursor.execute(get_municipality_availability_column_migrations_ddl(schema_name))
 
         mobile_ddl = get_mobile_tables_ddl(schema_name)
         cursor.execute(mobile_ddl)
@@ -961,6 +1016,7 @@ def _get_city_tables_ddl(schema: str) -> str:
     saved_ata_block = get_saved_ata_sala_tables_ddl(schema)
     afirme_ler_block = get_afirme_ler_evaluation_tables_ddl(schema)
     subjective_evaluation_block = get_subjective_evaluation_tables_ddl(schema)
+    cover_templates_block = get_cover_templates_table_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
 CREATE TABLE IF NOT EXISTS "{schema}".school (
@@ -1111,9 +1167,13 @@ CREATE TABLE IF NOT EXISTS "{schema}".test (
     model VARCHAR(50),
     subjects_info JSON,
     status VARCHAR(20) DEFAULT 'pendente',
-    grade_calculation_type VARCHAR(20) DEFAULT 'complex'
+    grade_calculation_type VARCHAR(20) DEFAULT 'complex',
+    available_to_municipality BOOLEAN NOT NULL DEFAULT true,
+    available_from TIMESTAMPTZ
 );
 COMMENT ON TABLE "{schema}".test IS 'Avaliações criadas no município';
+COMMENT ON COLUMN "{schema}".test.available_to_municipality IS 'Se false, a avaliação não aparece nem pode ser aplicada pelo município (exceto admin/tecadm)';
+COMMENT ON COLUMN "{schema}".test.available_from IS 'Se preenchido, o município só vê/aplica a partir desta data/hora';
 
 CREATE TABLE IF NOT EXISTS "{schema}".test_questions (
     id VARCHAR PRIMARY KEY,
@@ -1307,10 +1367,14 @@ CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_gabaritos (
     last_generation_classes_count INTEGER,
     last_generation_students_count INTEGER,
     batch_id VARCHAR(36),
-    last_generation_job_id VARCHAR(36)
+    last_generation_job_id VARCHAR(36),
+    available_to_municipality BOOLEAN NOT NULL DEFAULT true,
+    available_from TIMESTAMPTZ
 );
 COMMENT ON TABLE "{schema}".answer_sheet_gabaritos IS 'Gabaritos de cartões resposta';
 COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.grades IS 'Séries aplicáveis ao gabarito: [{{id, name}}, ...]';
+COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.available_to_municipality IS 'Se false, o cartão não aparece nem pode ser gerado/baixado pelo município (exceto admin/tecadm)';
+COMMENT ON COLUMN "{schema}".answer_sheet_gabaritos.available_from IS 'Se preenchido, o município só vê/gera a partir desta data/hora';
 
 CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_generations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -1679,7 +1743,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".form_result_cache (
 COMMENT ON TABLE "{schema}".form_result_cache IS 'Cache de resultados de formulários';
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_form_type ON "{schema}".form_result_cache(form_id, report_type);
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_dirty ON "{schema}".form_result_cache(is_dirty);
-""" + play_tv_block + plantao_online_block + ideb_meta_block + monitoring_block + saved_ata_block + afirme_ler_block + subjective_evaluation_block + f"""
+""" + play_tv_block + plantao_online_block + ideb_meta_block + monitoring_block + saved_ata_block + afirme_ler_block + subjective_evaluation_block + cover_templates_block + f"""
 CREATE TABLE IF NOT EXISTS "{schema}".certificate_templates (
     id VARCHAR PRIMARY KEY,
     evaluation_id VARCHAR REFERENCES "{schema}".test(id),

@@ -812,9 +812,21 @@ def get_task_status(task_id):
             status_key = 'processing'
             message = 'Gerando formulários PDF (isso pode levar alguns minutos)...'
         elif task.state == 'SUCCESS':
-            status_key = 'completed'
             result_data = task.result
-            message = result_data.get('message', 'Formulários gerados com sucesso') if result_data else 'Formulários gerados com sucesso'
+            if isinstance(result_data, dict) and result_data.get('success') is False:
+                status_key = 'failed'
+                message = (
+                    result_data.get('error')
+                    or result_data.get('message')
+                    or 'Erro ao gerar formulários'
+                )
+            else:
+                status_key = 'completed'
+                message = (
+                    result_data.get('message', 'Formulários gerados com sucesso')
+                    if isinstance(result_data, dict)
+                    else 'Formulários gerados com sucesso'
+                )
         elif task.state == 'FAILURE':
             status_key = 'failed'
             message = 'Erro ao gerar formulários'
@@ -832,9 +844,25 @@ def get_task_status(task_id):
         }
 
         if task.state == 'FAILURE':
-            response['error'] = str(task.info) if task.info else 'Erro desconhecido'
-        if task.state == 'RETRY' and hasattr(task, 'info') and task.info:
-            response['retries'] = task.info.get('retries', 0)
+            info = task.info
+            if isinstance(info, dict):
+                response['error'] = str(info.get('error') or info.get('message') or info)
+            else:
+                response['error'] = str(info) if info else 'Erro desconhecido'
+        elif status_key == 'failed' and isinstance(task.result, dict) and task.result.get('error'):
+            response['error'] = str(task.result.get('error'))
+        if task.state == 'RETRY' and task.info is not None:
+            info = task.info
+            if isinstance(info, dict):
+                response['retries'] = info.get('retries', 0)
+                if info.get('error'):
+                    response['error'] = str(info.get('error'))
+            else:
+                # Celery coloca a exceção em task.info no RETRY (não um dict)
+                response['error'] = str(info)
+                retries = getattr(task, 'retries', None)
+                if retries is not None:
+                    response['retries'] = retries
 
         # Progresso detalhado (job de progresso)
         if job:
@@ -935,7 +963,7 @@ def get_task_status(task_id):
                 if isinstance(res, dict):
                     response['summary']['zip_minio_url'] = res.get('minio_url')
                     response['summary']['can_download'] = bool(res.get('minio_url'))
-            if status_key == 'completed' and task.result and isinstance(task.result, dict):
+            if status_key in ('completed', 'failed') and task.result and isinstance(task.result, dict):
                 response['result'] = task.result
         else:
             response['progress'] = {

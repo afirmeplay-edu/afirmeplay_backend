@@ -43,6 +43,7 @@ class MinIOService:
         'SCHOOL_LOGOS': 'school-logos',
         'QUESTION_IMAGES': 'question-images',
         'CERTIFICATE_TEMPLATES': 'certificate-templates',
+        'COVER_TEMPLATES': 'cover-templates',
         'USER_UPLOADS': 'user-uploads',
         'PLAY_TV_RESOURCES': 'play-tv-resources',
         'AFIRME_READING_AUDIO': 'afirme-reading-audio',

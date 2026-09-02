@@ -284,6 +284,7 @@ class InstitutionalTestWeasyPrintGenerator:
         default_logo_base64 = self._load_default_logo()
         afirme_cover_base64, afirme_cover_mime = self._load_afirme_cover_asset()
         cover_year = self._cover_year_from_test_data(test_data)
+        custom_cover_template, custom_cover_base = self._load_active_cover_template(test_data)
 
         # ════════════════════════════════════════════════════════════════
         # ETAPA 2: Gerar PDF QUESTÕES (sem capa) - 1× compartilhado
@@ -372,47 +373,52 @@ class InstitutionalTestWeasyPrintGenerator:
         logger.info(f"[ARCH4-A] {num_groups} grupo(s) detectado(s)")
         
         covers_cache = {}
-        
-        for group_idx, (group_key, group_data) in enumerate(groups.items(), 1):
-            school = group_data['school_name']
-            grade = group_data['grade_name']
-            class_n = group_data['class_name']
-            num_students = len(group_data['students'])
-            
-            logger.info(f"[ARCH4-A] Capa {group_idx}/{num_groups} ({num_students} alunos): {school or '?'} | {grade or '?'} | {class_n or '?'}")
-            
-            group_student = {
-                'school_name': school,
-                'class_name': class_n,
-                'name': ''
-            }
-            
-            test_data_group = test_data.copy()
-            test_data_group['grade_name'] = grade
-            
-            cover_template_data = {
-                'test_data': test_data_group,
-                'student': group_student,
-                'questions_by_subject': questions_by_subject,
-                'questions_by_block': questions_by_block,
-                'blocks_config': blocks_config,
-                'questions_map': questions_map,
-                'answer_sheet_image': '',
-                'total_questions': total_questions,
-                'datetime': datetime,
-                'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
-                'default_logo': default_logo_base64,
-                'afirme_cover_base64': afirme_cover_base64,
-                'afirme_cover_mime': afirme_cover_mime,
-                'cover_year': cover_year,
-                'include_cover': True,
-                'include_questions': False,
-                'include_answer_sheet': False,
-            }
-            cover_html = self._render_template('institutional_test_hybrid.html', cover_template_data)
-            cover_pdf_bytes = self._html_to_pdf_bytes(cover_html)
-            covers_cache[group_key] = cover_pdf_bytes
-            logger.info(f"[ARCH4-A] Capa {group_idx}: {len(cover_pdf_bytes) // 1024} kB")
+        if custom_cover_base:
+            logger.info(
+                "[ARCH4-A] Capa personalizada ativa (%s) — WeasyPrint da capa não será usado",
+                getattr(custom_cover_template, "id", "?"),
+            )
+        else:
+            for group_idx, (group_key, group_data) in enumerate(groups.items(), 1):
+                school = group_data['school_name']
+                grade = group_data['grade_name']
+                class_n = group_data['class_name']
+                num_students = len(group_data['students'])
+
+                logger.info(f"[ARCH4-A] Capa {group_idx}/{num_groups} ({num_students} alunos): {school or '?'} | {grade or '?'} | {class_n or '?'}")
+
+                group_student = {
+                    'school_name': school,
+                    'class_name': class_n,
+                    'name': ''
+                }
+
+                test_data_group = test_data.copy()
+                test_data_group['grade_name'] = grade
+
+                cover_template_data = {
+                    'test_data': test_data_group,
+                    'student': group_student,
+                    'questions_by_subject': questions_by_subject,
+                    'questions_by_block': questions_by_block,
+                    'blocks_config': blocks_config,
+                    'questions_map': questions_map,
+                    'answer_sheet_image': '',
+                    'total_questions': total_questions,
+                    'datetime': datetime,
+                    'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
+                    'default_logo': default_logo_base64,
+                    'afirme_cover_base64': afirme_cover_base64,
+                    'afirme_cover_mime': afirme_cover_mime,
+                    'cover_year': cover_year,
+                    'include_cover': True,
+                    'include_questions': False,
+                    'include_answer_sheet': False,
+                }
+                cover_html = self._render_template('institutional_test_hybrid.html', cover_template_data)
+                cover_pdf_bytes = self._html_to_pdf_bytes(cover_html)
+                covers_cache[group_key] = cover_pdf_bytes
+                logger.info(f"[ARCH4-A] Capa {group_idx}: {len(cover_pdf_bytes) // 1024} kB")
 
         # ════════════════════════════════════════════════════════════════
         # ETAPA 5: Gerar PDFs por aluno (merge)
@@ -456,24 +462,46 @@ class InstitutionalTestWeasyPrintGenerator:
                     (student.get('class_name') or '').strip()
                 )
                 
-                cover_pdf_bytes = covers_cache.get(group_key)
-                if not cover_pdf_bytes:
-                    logger.warning(f"Capa não encontrada para {group_key}, usando primeira")
-                    cover_pdf_bytes = list(covers_cache.values())[0] if covers_cache else None
-                
-                if not cover_pdf_bytes:
-                    raise RuntimeError("Nenhuma capa disponível")
-                
-                cover_reader = PdfReader(io.BytesIO(cover_pdf_bytes))
+                cover_reader = None
+                cover_page = None
+                if custom_cover_base:
+                    from app.services.cover_templates.cover_composer import CoverComposer
+                    try:
+                        cover_pdf_bytes = CoverComposer.compose(
+                            custom_cover_base,
+                            custom_cover_template,
+                            student=student,
+                            test_data=test_data,
+                        )
+                    except Exception as cover_exc:
+                        logger.error(
+                            "Falha ao compor capa personalizada do aluno %s: %s",
+                            student.get("id"),
+                            cover_exc,
+                            exc_info=True,
+                        )
+                        cover_pdf_bytes = custom_cover_base
+                    cover_reader = PdfReader(io.BytesIO(cover_pdf_bytes))
+                    cover_page = cover_reader.pages[0]
+                else:
+                    cover_pdf_bytes = covers_cache.get(group_key)
+                    if not cover_pdf_bytes:
+                        logger.warning(f"Capa não encontrada para {group_key}, usando primeira")
+                        cover_pdf_bytes = list(covers_cache.values())[0] if covers_cache else None
 
-                cover_page = cover_reader.pages[0]
-                if afirme_cover_base64:
-                    cover_student_overlay = self._generate_afirme_cover_student_overlay_pdf(
-                        student, test_data
-                    )
-                    if cover_student_overlay:
-                        cover_overlay_reader = PdfReader(io.BytesIO(cover_student_overlay))
-                        cover_page.merge_page(cover_overlay_reader.pages[0])
+                    if not cover_pdf_bytes:
+                        raise RuntimeError("Nenhuma capa disponível")
+
+                    cover_reader = PdfReader(io.BytesIO(cover_pdf_bytes))
+
+                    cover_page = cover_reader.pages[0]
+                    if afirme_cover_base64:
+                        cover_student_overlay = self._generate_afirme_cover_student_overlay_pdf(
+                            student, test_data
+                        )
+                        if cover_student_overlay:
+                            cover_overlay_reader = PdfReader(io.BytesIO(cover_student_overlay))
+                            cover_page.merge_page(cover_overlay_reader.pages[0])
 
                 omr_overlay_bytes = self._generate_student_overlay_pdf(student, test_data)
                 if not omr_overlay_bytes:
@@ -1441,6 +1469,26 @@ class InstitutionalTestWeasyPrintGenerator:
         except Exception as e:
             logging.error(f"Erro ao carregar logo padrão: {str(e)}")
             return None
+
+    def _load_active_cover_template(self, test_data: Optional[Dict]) -> Tuple[Optional[Any], Optional[bytes]]:
+        """Carrega CoverTemplate active da avaliação, se existir. Falha → fallback Afirme."""
+        try:
+            from app.services.cover_templates.cover_template_service import CoverTemplateService
+
+            test_id = (test_data or {}).get("id")
+            template = CoverTemplateService.get_active_for_test(test_id)
+            if not template:
+                return None, None
+            pdf_bytes = CoverTemplateService().load_normalized_pdf_bytes(template)
+            if not pdf_bytes:
+                return None, None
+            return template, pdf_bytes
+        except Exception as exc:
+            logging.warning(
+                "CoverTemplate indisponível; usando capa Afirme: %s",
+                exc,
+            )
+            return None, None
 
     def _load_afirme_cover_asset(self) -> Tuple[Optional[str], str]:
         """Carrega nova_capa.jpeg (capa Afirme) como base64 + MIME para WeasyPrint."""

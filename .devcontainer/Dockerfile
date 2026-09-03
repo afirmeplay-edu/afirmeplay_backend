@@ -7,7 +7,15 @@ ENV TZ=UTC \
 
 USER root
 
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# A imagem da Microsoft traz o repo do Yarn com chave GPG quebrada; apt-get update falha sem isso.
+RUN rm -f /etc/apt/sources.list.d/yarn.list \
+          /etc/apt/sources.list.d/yarn.sources \
+          /etc/apt/keyrings/yarn* \
+          /usr/share/keyrings/yarn*
 
 # WeasyPrint, OpenCV, pyzbar, pdf2image — pip fica no post-create (evita OOM no Docker Desktop)
 RUN apt-get update && apt-get install -y --no-install-recommends \

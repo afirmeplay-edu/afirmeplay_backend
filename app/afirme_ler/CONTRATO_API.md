@@ -679,7 +679,7 @@ Como usar no frontend:
 |------|------|
 | `canStart` | `POST /fluency-sessions` `{ evaluationId, studentId }` |
 | `canContinue` | `GET /fluency-sessions/{sessionId}` e retomar o wizard |
-| `canView` | `GET /fluency-sessions/{sessionId}/report` (ou o GET da sessão) |
+| `canView` | `GET /resultados/estudantes/{studentId}/aplicacao?avaliacaoId={evaluationId}` |
 | `application.status == "ausente"` | `canStart: true` — permite nova sessão |
 
 ### `PATCH /afirme-reading/evaluations/:id` → `200`
@@ -1421,6 +1421,7 @@ DELETE /afirme-reading/guided-sessions/fffbcff5-2d61-411a-8b67-90118cdc4060
 8. Wizard: `PATCH .../fluency` (Q1/Q2/Q3) → `comprehension-answers` → **`POST .../submit`** (save)
 9. Compreensão: índices 0-based alinhados a `options` / `correctOption`
 10. Relatórios: `GET /afirme-reading/resultados/filtros`, `GET /resultados`, `GET /resultados/estudantes/:id` (seção 9)
+10b. Visualização da prova do aluno: `GET /resultados/estudantes/:id/aplicacao?avaliacaoId=` (seção 9)
 11. Leitura guiada (manual/auto) continua à parte e **não** entra no filtro de tipo pedagógico
 
 ---
@@ -1646,6 +1647,8 @@ Enums:
 - `source` (marking): `ia` | `manual` | `timeout`
 
 Se `skipped: true` (ou `notReadReason` ≠ `nao_se_aplica`): aceita markings vazios / zeros.
+
+**Q3 (`texto`):** envie `markings` no mesmo formato das listas (palavra a palavra) e `lastWordPosition` (1-based, última palavra lida). Se `markings` for omitido, o backend persiste o texto/`lines` e deriva `lastWordPosition` (`totalWords - unreadAfterEnd` ou `wordsRead`). A tela de playback usa isso para pintar até onde o aluno leu, devolvendo o texto completo.
 
 O mesmo merge incremental vale para `PATCH /evaluations/:id/sessions/:sid/fluency`.
 
@@ -1878,5 +1881,144 @@ Sem `avaliacaoId` → `400`. Avaliação inexistente / sem permissão → `404`.
 Query: `ano` **ou** `avaliacaoId` (recomendado os dois). `edicao` opcional. Com `avaliacaoId`, a linha do tempo usa o ciclo dessa avaliação.
 
 `linhaDoTempo` sempre 3 itens (`entrada` → `formativa` → `saida`). `exportacao.iflDoNivel` é o peso 0–10 (LI = 6).
+
+### `GET /afirme-reading/resultados/estudantes/:id/aplicacao` → `200`
+
+Visualização da prova aplicada daquele aluno (listas + texto + compreensão). Interface dedicada; **não** substitui o report agregado.
+
+Query **obrigatória:** `avaliacaoId` (alias `evaluationId`).
+
+```http
+GET /afirme-reading/resultados/estudantes/{studentId}/aplicacao?avaliacaoId={evaluationId}
+Authorization: Bearer <jwt>
+```
+
+- Sem `avaliacaoId` → `400`
+- Sem sessão (`em_andamento` ou `finalizada`) → `404` `Aplicação não encontrada para este aluno nesta avaliação.`
+- Aluno ausente não entra.
+
+**Q3 com `markings`:** `texto.hasWordMarkings = true` e `texto.words[]` com `status` por palavra.
+
+**Q3 sem `markings`:** `hasWordMarkings = false`, `markings`/`words` = `null`. `content` e `lines` vêm **completos**. O front pinta até `lastWordPosition` (1-based) / `lastLineIndex`.
+
+`lista1` / `lista2`: palavras da lista canônica cruzadas com `markings`. `status: null` depois do cursor vira `nao_leu`.
+
+**Response (exemplo — texto sem markings):**
+
+```json
+{
+  "studentId": "d0b2cc32-a5c5-4a53-b6de-d27b47a4e9aa",
+  "studentName": "aluno2",
+  "sessionId": "11e037fd-c316-42a0-97f2-b63a3cb60b9f",
+  "evaluationId": "520f11c9-69ee-4f6c-b812-a66db552caad",
+  "evaluationKind": "entrada",
+  "evaluationKindLabel": "Avaliação de Entrada",
+  "status": "finalizada",
+  "caderno": "A",
+  "lista1": {
+    "wordListId": "916df724-1f07-4977-b8db-618ccc7a7272",
+    "kind": "PALAVRAS_CONHECIDAS",
+    "name": "Lista conhecidas",
+    "lastWordPosition": 39,
+    "wordsRead": 39,
+    "errorsCount": 1,
+    "accuracy": 97.44,
+    "plcm": 38.0,
+    "hasAudio": true,
+    "audioUrl": "/afirme-reading/fluency-sessions/.../audio?part=q1",
+    "words": [
+      { "index": 0, "word": "NEVE", "status": "acertou", "source": "manual" },
+      { "index": 24, "word": "COPO", "status": "inventou", "source": "manual" },
+      { "index": 39, "word": "NATUREZA", "status": "nao_leu" }
+    ]
+  },
+  "lista2": {
+    "wordListId": "b6f1c34f-4321-40b9-a245-b81ec643efad",
+    "kind": "POUCO_COMUNS",
+    "lastWordPosition": 40,
+    "words": [
+      { "index": 28, "word": "FILARMONIA", "status": "soletrou", "source": "manual" }
+    ]
+  },
+  "texto": {
+    "readingTextId": "48b99dd1-f932-40e6-8141-5c1aad5e5f00",
+    "title": "O pequenino siri Anastácio",
+    "content": "O PEQUENINO SIRI ANASTÁCIO NASCEU COM MILHÕES DE IRMÃOZINHOS,\nE SUA MAMÃE LEVAVA-OS EM SEU CORPO, BEM GRUDADINHOS.\n...",
+    "lines": [
+      {
+        "lineIndex": 0,
+        "text": "O PEQUENINO SIRI ANASTÁCIO NASCEU COM MILHÕES DE IRMÃOZINHOS,",
+        "wrongWordsCount": 0
+      },
+      {
+        "lineIndex": 6,
+        "text": "PASSOU, O SIRIZINHO ANASTÁCIO FOI PROCURÁ-LA. MAS ELE NÃO",
+        "wrongWordsCount": 1
+      }
+    ],
+    "markings": null,
+    "hasWordMarkings": false,
+    "words": null,
+    "lastWordPosition": 115,
+    "lastLineIndex": 12,
+    "wordsRead": 115,
+    "totalWords": 115,
+    "unreadAfterEnd": 0,
+    "errorsCount": 1,
+    "hasAudio": true,
+    "audioUrl": "/afirme-reading/fluency-sessions/.../audio?part=q3"
+  },
+  "compreensao": {
+    "correctCount": 1,
+    "total": 1,
+    "score": 100.0,
+    "answers": [
+      {
+        "readingTextQuestionId": "755a2cde-9128-46a3-a06e-733f0faa9579",
+        "statement": "Onde o siri nasceu?",
+        "options": ["No mar", "No rio"],
+        "correctOption": 0,
+        "selectedOption": 0,
+        "isCorrect": true
+      }
+    ]
+  },
+  "audioUrls": {
+    "q1": "/afirme-reading/fluency-sessions/.../audio?part=q1",
+    "q2": "/afirme-reading/fluency-sessions/.../audio?part=q2",
+    "q3": "/afirme-reading/fluency-sessions/.../audio?part=q3"
+  },
+  "calculatedPlcm": 131.54,
+  "calculatedAccuracy": 99.13,
+  "precisionLevel": "Independente",
+  "fluencyLevel": "acima",
+  "icaScore": 98.35,
+  "leiturimetroLevel": 6,
+  "startedAt": "2026-08-27T11:35:00.595076",
+  "submittedAt": "2026-08-27T11:44:18.546826"
+}
+```
+
+Quando o front enviar `q3.markings`, `texto` passa a:
+
+```json
+{
+  "hasWordMarkings": true,
+  "lastWordPosition": 115,
+  "markings": [
+    { "index": 0, "word": "O", "status": "acertou", "source": "manual" },
+    { "index": 42, "word": "PROCURÁ-LA", "status": "errou", "source": "manual" }
+  ],
+  "words": [
+    { "index": 0, "word": "O", "status": "acertou", "source": "manual" },
+    { "index": 42, "word": "PROCURÁ-LA", "status": "errou", "source": "manual" },
+    { "index": 114, "word": "FELIZ.", "status": "nao_leu" }
+  ]
+}
+```
+
+`content` continua o texto integral nos dois casos.
+
+Para montar a lista de alunos já aplicados de uma avaliação: `GET /afirme-reading/evaluations/:id/applicants` (`application.status == "finalizada"` ou `canView: true`). Lista das avaliações: `GET /afirme-reading/evaluations`.
 
 

@@ -41,6 +41,12 @@ class Test(db.Model):
     subjects_info = db.Column(JSON)  # Informações sobre as disciplinas e quantidade de questões
     status = db.Column(db.String(20), default='pendente')  # agendada, em_andamento, concluida, cancelada
     grade_calculation_type = db.Column(db.String(20), default='complex')  # complex, simple
+    # Visibilidade para o município (diretor/coordenador/professor/aplicador).
+    # Admin e tecadm sempre veem. Default True = comportamento legado.
+    available_to_municipality = db.Column(
+        db.Boolean, nullable=False, default=True, server_default=db.text('true')
+    )
+    available_from = db.Column(db.TIMESTAMP(timezone=True), nullable=True)
 
     # Relacionamentos
     creator = db.relationship('User', foreign_keys=[created_by])

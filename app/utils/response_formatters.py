@@ -7,6 +7,7 @@ from app.models.subject import Subject
 import uuid
 import logging
 from sqlalchemy.exc import SQLAlchemyError
+from app.utils.municipality_availability import municipality_availability_payload
 
 
 def _is_valid_uuid(uuid_string):
@@ -594,6 +595,7 @@ def format_test_response(test, questions=None):
         'model': test.model,
         'subjects_info': test.subjects_info,
         'status': test.status,
+        **municipality_availability_payload(test),
         'is_applied': is_applied,
         'applied_classes': applied_classes_info,
         'applied_classes_count': len(applied_classes_info),

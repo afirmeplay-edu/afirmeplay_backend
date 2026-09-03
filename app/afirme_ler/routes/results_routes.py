@@ -11,6 +11,7 @@ from app.decorators.tenant_required import requires_city_context
 from app.entitlements import require_feature
 from app.permissions import get_current_user_from_token, role_required
 from app.afirme_ler.routes import AFIRME_LER_ROLES, bp
+from app.afirme_ler.services.fluency_aplicacao_service import FluencyAplicacaoService
 from app.afirme_ler.services.fluency_results_service import FluencyResultsService
 
 _ROLES = AFIRME_LER_ROLES
@@ -57,6 +58,24 @@ def get_resultado_estudante(student_id):
         return _error_response("Usuário não encontrado.", 401)
     try:
         payload = FluencyResultsService.student_profile(
+            user, student_id, request.args.to_dict()
+        )
+        return jsonify(payload), 200
+    except Exception as error:
+        return _handle_service_error(error)
+
+
+@bp.route("/resultados/estudantes/<student_id>/aplicacao", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*_ROLES)
+@requires_city_context
+def get_resultado_estudante_aplicacao(student_id):
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        payload = FluencyAplicacaoService.student_aplicacao(
             user, student_id, request.args.to_dict()
         )
         return jsonify(payload), 200

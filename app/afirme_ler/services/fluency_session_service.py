@@ -121,10 +121,87 @@ class FluencySessionService:
         raise PermissionError("Você não tem permissão para acessar esta sessão.")
 
     @staticmethod
+    def _resolve_class_and_school(data: dict, student: Student):
+        class_id_raw = get_field(data, "classId", "class_id")
+        class_id = FluencySessionService._parse_uuid(class_id_raw, "classId")
+        if class_id is None and student.class_id:
+            class_id = student.class_id
+
+        school_id = get_field(data, "schoolId", "school_id")
+        if school_id is not None:
+            school_id = str(school_id)
+        elif class_id:
+            klass = Class.query.get(class_id)
+            if klass:
+                school_id = klass.school_id
+        if school_id is None and student.school_id:
+            school_id = str(student.school_id)
+        return class_id, school_id
+
+    @staticmethod
+    def _new_session_payload(caderno: str) -> dict:
+        return {
+            "kind": "FLUENCY",
+            "caderno": caderno,
+            "q1": None,
+            "q2": None,
+            "q3": None,
+            "extras": {},
+        }
+
+    @staticmethod
+    def _create_practice(user: Dict[str, Any], data: dict) -> ReadingFluencySession:
+        """Sessão livre de prática (sem avaliação oficial)."""
+        from app.afirme_ler.models import ReadingText
+
+        student_id = get_field(data, "studentId", "student_id")
+        if not student_id:
+            raise ValueError("studentId é obrigatório.")
+        reading_text_id = get_field(data, "readingTextId", "reading_text_id")
+        if not reading_text_id:
+            raise ValueError("readingTextId é obrigatório para prática sem evaluationId.")
+
+        student = Student.query.get(str(student_id))
+        if not student:
+            raise LookupError("Aluno não encontrado.")
+
+        text = ReadingText.query.get(str(reading_text_id))
+        if not text:
+            raise LookupError("Texto não encontrado.")
+
+        class_id, school_id = FluencySessionService._resolve_class_and_school(data, student)
+        caderno = str(get_field(data, "caderno", default="A") or "A").strip().upper() or "A"
+        words_id = get_field(
+            data, "wordsWordListId", "words_word_list_id", "knownWordListId"
+        )
+        uncommon_id = get_field(data, "uncommonWordListId", "uncommon_word_list_id")
+        user_id = user.get("id") or user.get("user_id")
+        now = datetime.utcnow()
+
+        session = ReadingFluencySession(
+            reading_evaluation_id=None,
+            student_id=str(student_id),
+            class_id=class_id,
+            school_id=school_id,
+            reading_text_id=str(reading_text_id),
+            words_word_list_id=str(words_id) if words_id else None,
+            uncommon_word_list_id=str(uncommon_id) if uncommon_id else None,
+            caderno=caderno,
+            status="em_andamento",
+            fluency_data=FluencySessionService._new_session_payload(caderno),
+            part_audios={},
+            started_at=now,
+            applied_by=user_id,
+        )
+        db.session.add(session)
+        db.session.commit()
+        return FluencySessionService.get_session(session.id, include_answers=True)
+
+    @staticmethod
     def create(user: Dict[str, Any], data: dict) -> ReadingFluencySession:
         evaluation_id = get_field(data, "evaluationId", "evaluation_id")
         if not evaluation_id:
-            raise ValueError("evaluationId é obrigatório.")
+            return FluencySessionService._create_practice(user, data)
 
         evaluation = ReadingEvaluationService.get_evaluation(str(evaluation_id))
         ReadingEvaluationService.assert_can_apply(user, evaluation)
@@ -177,20 +254,7 @@ class FluencySessionService:
                 status=latest.status,
             )
 
-        class_id_raw = get_field(data, "classId", "class_id")
-        class_id = FluencySessionService._parse_uuid(class_id_raw, "classId")
-        if class_id is None and student.class_id:
-            class_id = student.class_id
-
-        school_id = get_field(data, "schoolId", "school_id")
-        if school_id is not None:
-            school_id = str(school_id)
-        elif class_id:
-            klass = Class.query.get(class_id)
-            if klass:
-                school_id = klass.school_id
-        if school_id is None and student.school_id:
-            school_id = str(student.school_id)
+        class_id, school_id = FluencySessionService._resolve_class_and_school(data, student)
 
         caderno = get_field(data, "caderno", default="A") or "A"
         caderno = str(caderno).strip().upper() or "A"
@@ -207,14 +271,7 @@ class FluencySessionService:
             uncommon_word_list_id=evaluation.uncommon_word_list_id,
             caderno=caderno,
             status="em_andamento",
-            fluency_data={
-                "kind": "FLUENCY",
-                "caderno": caderno,
-                "q1": None,
-                "q2": None,
-                "q3": None,
-                "extras": {},
-            },
+            fluency_data=FluencySessionService._new_session_payload(caderno),
             part_audios={},
             started_at=now,
             applied_by=user_id,

@@ -98,6 +98,13 @@ class AnswerSheetGabarito(db.Model):
     # Último job de geração (preenchido apenas quando a rota generate é chamada; null em create-gabaritos)
     last_generation_job_id = db.Column(db.String(36), nullable=True)
 
+    # Visibilidade para o município (diretor/coordenador/professor/aplicador).
+    # Admin e tecadm sempre veem. Default True = comportamento legado.
+    available_to_municipality = db.Column(
+        db.Boolean, nullable=False, default=True, server_default=db.text('true')
+    )
+    available_from = db.Column(db.TIMESTAMP(timezone=True), nullable=True)
+
     # Relacionamentos
     test = db.relationship('Test', foreign_keys=[test_id])
     class_ = db.relationship('Class', foreign_keys=[class_id])

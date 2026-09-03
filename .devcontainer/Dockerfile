@@ -9,7 +9,7 @@ USER root
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# Libs nativas que no Windows costumam falhar: WeasyPrint, OpenCV, pyzbar, pdf2image
+# WeasyPrint, OpenCV, pyzbar, pdf2image — pip fica no post-create (evita OOM no Docker Desktop)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
@@ -48,10 +48,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspaces/afirmeplay_backend
-
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r /tmp/requirements.txt \
-    && rm /tmp/requirements.txt
 
 USER vscode

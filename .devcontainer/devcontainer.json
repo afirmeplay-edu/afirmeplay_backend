@@ -1,11 +1,9 @@
 {
   "name": "AfirmePlay Backend",
   "build": {
-    "context": "..",
     "dockerfile": "Dockerfile"
   },
   "workspaceFolder": "/workspaces/afirmeplay_backend",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/afirmeplay_backend,type=bind,consistency=cached",
   "remoteUser": "vscode",
   "forwardPorts": [5000],
   "portsAttributes": {
@@ -14,7 +12,7 @@
       "onAutoForward": "notify"
     }
   },
-  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postCreateCommand": "sed -i 's/\\r$//' .devcontainer/post-create.sh && bash .devcontainer/post-create.sh",
   "containerEnv": {
     "APP_ENV": "development",
     "PYTHONUNBUFFERED": "1",
@@ -26,9 +24,6 @@
   "mounts": [
     "source=afirmeplay-pip-cache,target=/home/vscode/.cache/pip,type=volume"
   ],
-  "hostRequirements": {
-    "memory": "8gb"
-  },
   "customizations": {
     "vscode": {
       "extensions": [

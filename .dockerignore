@@ -21,7 +21,5 @@ backup*
 .cursor
 .vscode
 docs
-QUESTÃO SUBJETIVA
-AVALIAÇÃO SUBJETIVA
 *.md
 !requirements.txt

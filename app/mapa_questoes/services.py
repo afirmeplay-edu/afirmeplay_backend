@@ -255,6 +255,7 @@ def build_mapa_questoes_digital(
                 mark_counts=mark_counts,
                 acertaram=acertaram,
                 n_alunos=n_alunos,
+                question_id=str(q.id) if getattr(q, "id", None) else None,
             )
         )
 

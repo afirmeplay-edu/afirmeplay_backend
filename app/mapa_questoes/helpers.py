@@ -220,8 +220,9 @@ def build_question_row(
     mark_counts: Dict[str, int],
     acertaram: int,
     n_alunos: int,
+    question_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return {
+    row: Dict[str, Any] = {
         "numero": numero,
         "disciplina": disciplina,
         "disciplina_id": disciplina_id,
@@ -234,3 +235,8 @@ def build_question_row(
         },
         "marcacoes": build_marcacoes(mark_counts, letters, n_alunos),
     }
+    # Prova digital: ID para o frontend buscar enunciado/alternativas (GET /questions/batch).
+    # Cartão-resposta não envia este campo (não há enunciado no gabarito).
+    if question_id:
+        row["question_id"] = str(question_id)
+    return row

@@ -7,6 +7,7 @@ from app.mapa_questoes.helpers import (
     gabarito_letter,
     is_discursive_question,
     is_objective_question,
+    join_habilidade_campos,
     letters_for_alternatives,
     letters_for_answer_sheet,
     media_acertos_percentual,
@@ -111,3 +112,34 @@ def test_build_question_row_inclui_question_id_so_quando_informado():
         n_alunos=3,
     )
     assert "question_id" not in cartao
+
+
+def test_join_habilidade_campos_uma_e_varias():
+    assert join_habilidade_campos([]) == ("N/A", "")
+    assert join_habilidade_campos([("EF15_D2", "Ler e interpretar textos.")]) == (
+        "EF15_D2",
+        "Ler e interpretar textos.",
+    )
+    codigo, desc = join_habilidade_campos(
+        [("EF15_D2", "Ler."), ("EF15_D3", "Escrever.")]
+    )
+    assert codigo == "EF15_D2, EF15_D3"
+    assert "EF15_D2 — Ler." in desc
+    assert "EF15_D3 — Escrever." in desc
+
+
+def test_build_question_row_inclui_habilidade_descricao():
+    row = build_question_row(
+        numero=1,
+        disciplina="LP",
+        disciplina_id="lp",
+        habilidade="EF15_D2",
+        habilidade_descricao="Ler e interpretar textos.",
+        gabarito="A",
+        letters=["A", "B", "C", "D"],
+        mark_counts={"A": 1, "B": 0, "C": 0, "D": 0, "sem_resposta": 0},
+        acertaram=1,
+        n_alunos=1,
+    )
+    assert row["habilidade"] == "EF15_D2"
+    assert row["habilidade_descricao"] == "Ler e interpretar textos."

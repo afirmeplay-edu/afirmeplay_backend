@@ -224,7 +224,7 @@ def _build_one_boletim_as(
         por_disciplina_map[disciplina_id]["questoes"].append(
             build_questao_boletim(
                 numero=qn,
-                habilidade=_skill_code_for_question(q_skills.get(qn) or [], skills_db),
+                habilidade=_skill_code_for_question(q_skills.get(qn) or [], skills_db)[0],
                 resposta=marked,
                 gabarito=gabarito,
                 acertou=acertou,

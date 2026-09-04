@@ -4,22 +4,18 @@ Rubrica de correção manual da avaliação subjetiva (ver app.models.subjective
 
 Não existe resposta online do aluno nesse fluxo: o professor aplica a avaliação
 (impressa/presencial) e lança o resultado diretamente aqui, célula por célula
-(aluno x questão), usando a rubrica SIM / PARCIAL / NAO / BRANCO.
+(aluno x questão). O valor guardado é o `code` da marcação configurável
+(ver SubjectiveRubricMark). O template inicial continua SIM/PARCIAL/NAO/BRANCO.
 """
 from app import db
 from datetime import datetime
 import uuid
 
-# SIM: habilidade plenamente demonstrada. PARCIAL: parcialmente demonstrada.
-# NAO: não demonstrada. BRANCO: questão não respondida pelo aluno (presente na prova).
-RUBRIC_VALUES = ('SIM', 'PARCIAL', 'NAO', 'BRANCO')
+from app.models.subjectiveRubricMark import DEFAULT_RUBRIC_MARKS
 
-RUBRIC_WEIGHTS = {
-    'SIM': 1.0,
-    'PARCIAL': 0.5,
-    'NAO': 0.0,
-    'BRANCO': 0.0,
-}
+# Fallback quando a avaliação ainda não tem marcações persistidas (legado).
+RUBRIC_VALUES = tuple(m["code"] for m in DEFAULT_RUBRIC_MARKS)
+RUBRIC_WEIGHTS = {m["code"]: float(m["weight"]) for m in DEFAULT_RUBRIC_MARKS}
 
 
 class SubjectiveResult(db.Model):
@@ -36,7 +32,7 @@ class SubjectiveResult(db.Model):
     subjective_test_id = db.Column(db.String, db.ForeignKey('tenant.subjective_tests.id'), nullable=False)
     subjective_question_id = db.Column(db.String, db.ForeignKey('tenant.subjective_questions.id'), nullable=False)
     student_id = db.Column(db.String, db.ForeignKey('tenant.student.id'), nullable=False)
-    value = db.Column(db.String(10), nullable=False)  # SIM, PARCIAL, NAO, BRANCO
+    value = db.Column(db.String(50), nullable=False)  # code da marcação (ex.: SIM, ou sigla custom)
     corrected_by = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=True)
     corrected_at = db.Column(db.TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
 

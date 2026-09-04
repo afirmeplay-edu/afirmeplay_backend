@@ -17,7 +17,7 @@ import logging
 from celery import Task
 
 from app import db
-from app.report_analysis.celery_app import celery_app
+from app.reports.report_analysis.celery_app import celery_app
 from app.services.competition_ranking_service import CompetitionRankingService
 
 logger = logging.getLogger(__name__)

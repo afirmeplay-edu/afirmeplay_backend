@@ -8,7 +8,7 @@ from datetime import datetime
 from enum import Enum
 
 from app.models.student import Student
-from app.models.test import Test
+from app.exams.models.test import Test
 from app.certification.models.certificate_template import CertificateTemplate
 
 class CertificateStatusEnum(Enum):

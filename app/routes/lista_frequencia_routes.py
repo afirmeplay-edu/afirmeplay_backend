@@ -19,12 +19,12 @@ from app.models.student import Student
 from app.models.grades import Grade
 from app.models.classSubject import ClassSubject
 from app.models.subject import Subject
-from app.models.test import Test
-from app.models.classTest import ClassTest
-from app.models.testSession import TestSession
-from app.models.answerSheetGabarito import AnswerSheetGabarito
-from app.models.answerSheetResult import AnswerSheetResult
-from app.report_analysis.answer_sheet_report_builder import get_answer_sheet_target_classes_for_report
+from app.exams.models.test import Test
+from app.exams.models.classTest import ClassTest
+from app.exams.models.testSession import TestSession
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetResult import AnswerSheetResult
+from app.reports.report_analysis.answer_sheet_report_builder import get_answer_sheet_target_classes_for_report
 from app.utils.uuid_helpers import ensure_uuid
 
 bp = Blueprint("lista_frequencia", __name__, url_prefix="/lista-frequencia")

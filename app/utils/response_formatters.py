@@ -269,7 +269,7 @@ def _count_test_questions_for_test(db, test):
     Retorna 0 em caso de erro. Usado quando relationship/ORM retorna 0 em multi-tenant.
     """
     from sqlalchemy import text
-    from app.models.testQuestion import TestQuestion
+    from app.exams.models.testQuestion import TestQuestion
 
     test_id = str(test.id) if test.id else None
     if not test_id:
@@ -423,7 +423,7 @@ def format_test_response(test, questions=None):
         
         # Primeira prioridade: usar class_tests (quando a avaliação foi aplicada)
         # Carregar class_tests de forma explícita para evitar problemas de transação
-        from app.models.classTest import ClassTest
+        from app.exams.models.classTest import ClassTest
         class_tests_list = ClassTest.query.filter_by(test_id=str(test.id)).all()
         
         if class_tests_list:
@@ -551,7 +551,7 @@ def format_test_response(test, questions=None):
             # Fallback sessão: total_questions da primeira TestSession finalizada
             if total_questions == 0 and test.id:
                 try:
-                    from app.models.testSession import TestSession
+                    from app.exams.models.testSession import TestSession
                     session = TestSession.query.filter_by(test_id=test.id).filter(
                         TestSession.total_questions.isnot(None),
                         TestSession.total_questions > 0

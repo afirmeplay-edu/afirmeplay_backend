@@ -1,6 +1,6 @@
 """Garante faixas contíguas (sem buraco decimal) na classificação GERAL/Matemática."""
 
-from app.services.evaluation_calculator import EvaluationCalculator as EC
+from app.evaluations.services.evaluation_calculator import EvaluationCalculator as EC
 
 
 def test_anos_iniciais_matematica_224_9_is_basico_not_abaixo():

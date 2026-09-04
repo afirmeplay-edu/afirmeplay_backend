@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import desc, func
 
 from app import db
-from app.models.evaluationResult import EvaluationResult
+from app.evaluations.models.evaluationResult import EvaluationResult
 from app.models.school import School
 from app.models.student import Student
 
@@ -107,7 +107,7 @@ class StudentRankingService:
 
         if city_id:
             if evaluation_id:
-                from app.services.evaluation_result_snapshot import municipal_evaluation_results_query
+                from app.evaluations.services.evaluation_result_snapshot import municipal_evaluation_results_query
 
                 muni_rows = municipal_evaluation_results_query(str(city_id), str(evaluation_id)).all()
                 if focal_er and focal_er.grade_id_snapshot is not None:

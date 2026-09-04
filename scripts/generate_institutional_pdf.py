@@ -27,7 +27,7 @@ def main():
     app = create_app()
 
     # Importações internas que precisam do contexto
-    from app.physical_tests.form_service import PhysicalTestFormService
+    from app.physical_tests.services.form_service import PhysicalTestFormService
 
     with app.app_context():
         service = PhysicalTestFormService()

@@ -1,6 +1,6 @@
 """Testes puros do boletim do aluno."""
 
-from app.boletim_aluno.helpers import (
+from app.boletim_aluno.services.helpers import (
     build_cards,
     build_questao_boletim,
     parse_aluno_param,

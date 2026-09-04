@@ -36,7 +36,7 @@ Este documento descreve a otimização implementada para **centralizar os dados 
 ### Arquivos Modificados
 
 - ✅ `app/physical_tests/tasks.py` (linhas 436-483)
-- ✅ `app/services/institutional_test_weasyprint_generator.py` (linhas 559-570, 1091-1096, 1187-1207)
+- ✅ `app/exams/services/institutional_test_weasyprint_generator.py` (linhas 559-570, 1091-1096, 1187-1207)
 - ✅ `app/services/cartao_resposta/correction_new_grid.py` (linhas 1853-1887, 2373-2391)
 
 ### Status Atual

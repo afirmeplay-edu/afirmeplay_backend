@@ -33,7 +33,7 @@ Ou seja: “Item N concluído” é apenas o progress_store marcando o **item N*
 
 Quem chama `update_item_done` para esse fluxo:
 
-- **Arquivo:** `app/services/institutional_test_weasyprint_generator.py`  
+- **Arquivo:** `app/exams/services/institutional_test_weasyprint_generator.py`  
 - **Função:** `generate_institutional_test_pdf_arch4()`  
 - **Trecho:** dentro do `for idx, student in enumerate(students_data, 1):`, após gerar o PDF do aluno, merge e gravar em disco (linhas 334–342):
 

@@ -19,9 +19,9 @@ from app.competitions.schema_resolution import get_competition_target_schema, ge
 from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
 from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
 from sqlalchemy import text
-from app.models.test import Test
-from app.models.testQuestion import TestQuestion
-from app.models.question import Question
+from app.exams.models.test import Test
+from app.exams.models.testQuestion import TestQuestion
+from app.exams.models.question import Question
 from app.models.student import Student
 from app.models.subject import Subject
 from app.models.studentTestOlimpics import StudentTestOlimpics

@@ -13,19 +13,19 @@ from uuid import UUID
 
 from sqlalchemy.orm import joinedload
 
-from app.models.answerSheetGabarito import AnswerSheetGabarito
-from app.models.answerSheetResult import AnswerSheetResult
-from app.models.evaluationResult import EvaluationResult
-from app.models.question import Question
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetResult import AnswerSheetResult
+from app.evaluations.models.evaluationResult import EvaluationResult
+from app.exams.models.question import Question
 from app.models.skill import Skill
 from app.models.subject import Subject
 from app.models.student import Student
-from app.models.studentAnswer import StudentAnswer
+from app.exams.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
-from app.models.testQuestion import TestQuestion
-from app.report_analysis.answer_sheet_report_builder import question_skills_map_for_answer_sheet
-from app.services.cartao_resposta.proficiency_by_subject import _extract_blocks_with_questions
-from app.services.evaluation_result_service import EvaluationResultService
+from app.exams.models.testQuestion import TestQuestion
+from app.reports.report_analysis.answer_sheet_report_builder import question_skills_map_for_answer_sheet
+from app.answer_sheets.services.cartao_resposta.proficiency_by_subject import _extract_blocks_with_questions
+from app.evaluations.services.evaluation_result_service import EvaluationResultService
 from app.utils.decimal_helpers import round_to_two_decimals
 
 FAIXA_ABAIXO = "abaixo_do_basico"
@@ -571,7 +571,7 @@ def resolve_participating_students_answer_sheet(
     """
     if not class_ids:
         return [], {}, 0
-    from app.services.answer_sheet_result_snapshot import (
+    from app.answer_sheets.services.answer_sheet_result_snapshot import (
         query_answer_sheet_results_for_class_group,
         student_ids_for_answer_sheet_class_group,
     )
@@ -1112,7 +1112,7 @@ def get_instrument_skill_detail(
     Detalhe de uma habilidade no instrumento (avaliação ou gabarito):
     cadastro (nome/descrição) e questões em que a habilidade aparece.
     """
-    from app.models.testQuestion import TestQuestion
+    from app.exams.models.testQuestion import TestQuestion
 
     codigo_input = (codigo or "").strip()
     target_code = normalize_skill_code(codigo_input)

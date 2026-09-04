@@ -6,7 +6,7 @@ from app import db
 import uuid
 
 from app.models.student import Student
-from app.models.testSession import TestSession
+from app.exams.models.testSession import TestSession
 
 
 class CoinTransaction(db.Model):

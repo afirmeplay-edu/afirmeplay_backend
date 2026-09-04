@@ -11,7 +11,7 @@ from app.socioeconomic_forms.services.results_tasks import generate_indices_repo
 from app.socioeconomic_forms.services.results_migration_tasks import populate_initial_cache_for_form, populate_all_forms_cache
 from app.socioeconomic_forms.services.inse_saeb_service import InseAvaliacaoService
 from celery.result import AsyncResult
-from app.report_analysis.celery_app import celery_app
+from app.reports.report_analysis.celery_app import celery_app
 import logging
 
 

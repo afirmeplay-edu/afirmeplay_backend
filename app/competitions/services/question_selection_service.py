@@ -17,7 +17,7 @@ from sqlalchemy.orm import Query
 from app import db
 from app.competitions.constants import STAGE_NAMES_BY_LEVEL
 from app.models.educationStage import EducationStage
-from app.models.question import Question
+from app.exams.models.question import Question
 
 from app.competitions.exceptions import ValidationError
 from .question_rules_validator import validate_question_rules

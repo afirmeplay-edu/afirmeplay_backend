@@ -31,7 +31,7 @@ script_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(script_dir))
 
 from app import create_app
-from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
 from app import db
 
 # ============================================================================

@@ -1,9 +1,9 @@
 from flask import Blueprint, jsonify, request
 from app.models.skill import Skill
 from app.models.grades import Grade
-from app.models.question import Question
-from app.models.test import Test
-from app.models.classTest import ClassTest
+from app.exams.models.question import Question
+from app.exams.models.test import Test
+from app.exams.models.classTest import ClassTest
 from app import db
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
@@ -11,7 +11,7 @@ from app.permissions.utils import get_teacher_classes
 from app.utils.question_helpers import get_questions_from_test
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.tenant_middleware import set_search_path, city_id_to_schema_name
-from app.routes.answer_sheet_evaluation_listing import (
+from app.answer_sheets.routes.answer_sheet_evaluation_listing import (
     collect_skill_ids_for_answer_sheet_gabarito,
     fetch_answer_sheet_gabarito_for_detail,
     is_answer_sheet_report_entity,

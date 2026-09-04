@@ -14,15 +14,15 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import joinedload
 
 from app import db
-from app.models.evaluationResult import EvaluationResult
+from app.evaluations.models.evaluationResult import EvaluationResult
 from app.models.school import School
 from app.models.student import Student
 from app.models.studentClass import Class
-from app.models.test import Test
+from app.exams.models.test import Test
 from app.permissions.utils import get_teacher_classes
 from app.services.dashboard_service import DashboardService
-from app.services.evaluation_calculator import EvaluationCalculator
-from app.services.evaluation_result_snapshot import (
+from app.evaluations.services.evaluation_calculator import EvaluationCalculator
+from app.evaluations.services.evaluation_result_snapshot import (
     municipal_evaluation_results_query,
     prefetch_placement_from_results,
     resolve_participant_display_context,

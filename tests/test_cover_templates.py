@@ -29,7 +29,7 @@ from app.services.cover_templates.file_normalizer import (
     normalize_upload,
 )
 from app.services.cover_templates.cover_template_service import CoverTemplateService
-from app.services.institutional_test_weasyprint_generator import (
+from app.exams.services.institutional_test_weasyprint_generator import (
     InstitutionalTestWeasyPrintGenerator,
 )
 

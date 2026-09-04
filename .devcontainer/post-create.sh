@@ -24,4 +24,4 @@ echo ">>> Pronto. Suba a API com:"
 echo "    python run.py"
 echo
 echo "    Celery (opcional):"
-echo "    celery -A app.report_analysis.celery_app worker --loglevel=info --concurrency=4 --prefetch-multiplier=1"
+echo "    celery -A app.reports.report_analysis.celery_app worker --loglevel=info --concurrency=4 --prefetch-multiplier=1"

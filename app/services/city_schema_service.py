@@ -2,14 +2,14 @@
 Provisiona o schema PostgreSQL city_<id> e as tabelas operacionais ao criar um novo município.
 Reutiliza a mesma estrutura da migração 0001_init_city_schemas.
 
-Tabelas mobile (sync + offline pack) vêm de app.services.mobile.ddl.get_mobile_tables_ddl,
+Tabelas mobile (sync + offline pack) vêm de app.mobile.services.ddl.get_mobile_tables_ddl,
 para que cada cidade nova já tenha o mesmo conjunto que scripts/create_mobile_tables.py
 aplica nas city_* existentes.
 """
 import logging
 from app import db
 from app.utils.tenant_middleware import city_id_to_schema_name
-from app.services.mobile.ddl import get_mobile_tables_ddl
+from app.mobile.services.ddl import get_mobile_tables_ddl
 from app.afirme_ler.ddl import get_afirme_ler_evaluation_tables_ddl
 
 logger = logging.getLogger(__name__)

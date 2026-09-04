@@ -4,10 +4,10 @@ import json
 import base64
 from datetime import datetime, timedelta
 from app import db
-from app.models.batchCorrectionJob import BatchCorrectionJob
-from app.models.test import Test
+from app.answer_sheets.models.batchCorrectionJob import BatchCorrectionJob
+from app.exams.models.test import Test
 from app.models.student import Student
-from app.physical_tests.pdf_generator import PhysicalTestPDFGenerator
+from app.physical_tests.services.pdf_generator import PhysicalTestPDFGenerator
 import logging
 
 class BatchCorrectionService:

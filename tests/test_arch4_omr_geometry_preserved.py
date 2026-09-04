@@ -17,8 +17,8 @@ import numpy as np
 from PIL import Image
 from pypdf import PdfReader
 
-from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
-from app.services.institutional_test_weasyprint_generator import (
+from app.answer_sheets.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
+from app.exams.services.institutional_test_weasyprint_generator import (
     InstitutionalTestWeasyPrintGenerator,
 )
 from app.utils.pdf_question_image_optimizer import optimize_html_data_uris
@@ -29,9 +29,9 @@ A4_HEIGHT_PT = 841.89
 A4_TOLERANCE_PT = 1.0
 
 _REPO = os.path.dirname(os.path.dirname(__file__))
-GENERATOR_PATH = os.path.join(_REPO, "app", "services", "institutional_test_weasyprint_generator.py")
-TEMPLATE_PATH = os.path.join(_REPO, "app", "templates", "institutional_test_hybrid.html")
-CORRECTOR_PATH = os.path.join(_REPO, "app", "services", "cartao_resposta", "correction_new_grid.py")
+GENERATOR_PATH = os.path.join(_REPO, "app", "exams", "services", "institutional_test_weasyprint_generator.py")
+TEMPLATE_PATH = os.path.join(_REPO, "app", "exams", "templates", "institutional_test_hybrid.html")
+CORRECTOR_PATH = os.path.join(_REPO, "app", "answer_sheets", "services", "cartao_resposta", "correction_new_grid.py")
 
 
 def _huge_question_content() -> str:

@@ -53,7 +53,7 @@ Nenhum outro ponto no código analisado chama `.delay()` ou `.apply_async` para 
      - `institutional_generator.generate_institutional_test_pdf_arch4(test_data, students_data, questions_data, class_test_id, output_dir=...)`.
    - Depois persiste resultados com `_save_physical_forms_to_db(...)`.
 
-3. **Gerador** `InstitutionalTestWeasyPrintGenerator.generate_institutional_test_pdf_arch4()` (`app/services/institutional_test_weasyprint_generator.py`):
+3. **Gerador** `InstitutionalTestWeasyPrintGenerator.generate_institutional_test_pdf_arch4()` (`app/exams/services/institutional_test_weasyprint_generator.py`):
    - Implementa a “Architecture 4” (ver seção 4).
    - **Não** cria novas tasks; faz um **loop sequencial** sobre `students_data` dentro da mesma execução.
 
@@ -65,7 +65,7 @@ Conclusão: **não há “task por aluno”**. Uma única task Celery chama o fo
 
 O loop de alunos está **apenas** em:
 
-- **Arquivo:** `app/services/institutional_test_weasyprint_generator.py`  
+- **Arquivo:** `app/exams/services/institutional_test_weasyprint_generator.py`  
 - **Função:** `generate_institutional_test_pdf_arch4()`  
 - **Trecho:** `for idx, student in enumerate(students_data, 1):` (por volta da linha 246).
 
@@ -114,7 +114,7 @@ Não há chamada ao gerador por aluno (nem por task separada nem por outro servi
 ### 5.1 Onde ocorre download do MinIO
 
 - **Serviço de armazenamento:** `app/services/storage/minio_service.py`, método `download_file()`, que emite o log `"Arquivo baixado do MinIO: {bucket_name}/{object_name}"`.
-- **Uso no gerador:** apenas no método `_inline_question_images_html()` (`app/services/institutional_test_weasyprint_generator.py`), que:
+- **Uso no gerador:** apenas no método `_inline_question_images_html()` (`app/exams/services/institutional_test_weasyprint_generator.py`), que:
   - É chamado em `_process_question_for_template()` (ao processar cada questão para o template).
   - É chamado no bloco de “inline base64 nas questões (uma vez)” (linhas 191–215) em `generate_institutional_test_pdf_arch4()`.
 
@@ -161,8 +161,8 @@ Ou seja: **não** é “uma task por aluno que gera o PDF completo da prova”. 
 | Task Celery única | `app/physical_tests/tasks.py`: `generate_physical_forms_async` |
 | Loop de alunos e preparação de dados | `app/physical_tests/tasks.py`: mesmo corpo da task (alunos, questões, `test_data`) |
 | Orquestração e chamada ao gerador | `app/physical_tests/form_service.py`: `PhysicalTestFormService.generate_physical_forms()` |
-| Geração do PDF base + loop por aluno (OMR + merge) | `app/services/institutional_test_weasyprint_generator.py`: `generate_institutional_test_pdf_arch4()` |
-| Inline de imagens (e downloads MinIO) | `app/services/institutional_test_weasyprint_generator.py`: `_inline_question_images_html()`, usado em `_process_question_for_template()` e no bloco de “inline base64” em `generate_institutional_test_pdf_arch4()` |
+| Geração do PDF base + loop por aluno (OMR + merge) | `app/exams/services/institutional_test_weasyprint_generator.py`: `generate_institutional_test_pdf_arch4()` |
+| Inline de imagens (e downloads MinIO) | `app/exams/services/institutional_test_weasyprint_generator.py`: `_inline_question_images_html()`, usado em `_process_question_for_template()` e no bloco de “inline base64” em `generate_institutional_test_pdf_arch4()` |
 | Log “Arquivo baixado do MinIO” | `app/services/storage/minio_service.py`: `download_file()` |
 
 ---

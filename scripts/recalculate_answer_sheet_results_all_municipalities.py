@@ -48,10 +48,10 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from app import create_app, db
-from app.models.answerSheetGabarito import AnswerSheetGabarito
-from app.models.answerSheetResult import AnswerSheetResult
-from app.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService
-from app.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetResult import AnswerSheetResult
+from app.reports.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService
+from app.answer_sheets.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
 from app.utils.decimal_helpers import round_to_two_decimals
 
 logging.basicConfig(

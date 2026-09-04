@@ -9,7 +9,7 @@ import logging
 from typing import Dict, Any, Optional
 from celery import Task
 
-from app.report_analysis.celery_app import celery_app
+from app.reports.report_analysis.celery_app import celery_app
 from app.socioeconomic_forms.services.results_service import ResultsService
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
 from app.socioeconomic_forms.services.pneerq_service import PneerqService

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def _get_flask_app():
     """Obtém a app Flask (usada pelos hooks fora do contexto da task)."""
-    from app.report_analysis.celery_app import _get_flask_app as _get
+    from app.reports.report_analysis.celery_app import _get_flask_app as _get
     return _get()
 
 

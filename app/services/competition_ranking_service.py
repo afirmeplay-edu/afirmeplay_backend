@@ -11,10 +11,10 @@ from app import db
 from app.competitions.models import Competition, CompetitionResult, CompetitionRankingPayout
 from app.competitions.schema_resolution import get_competition_schema
 from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
-from app.models.testSession import TestSession
-from app.models.evaluationResult import EvaluationResult
+from app.exams.models.testSession import TestSession
+from app.evaluations.models.evaluationResult import EvaluationResult
 from app.models.student import Student
-from app.models.studentAnswer import StudentAnswer
+from app.exams.models.studentAnswer import StudentAnswer
 from app.models.school import School
 from app.models.city import City
 import logging
@@ -139,9 +139,9 @@ class CompetitionRankingService:
             return (0, 0, None)
         set_search_path(schema)
         try:
-            from app.models.testQuestion import TestQuestion
-            from app.models.question import Question
-            from app.services.evaluation_result_service import EvaluationResultService
+            from app.exams.models.testQuestion import TestQuestion
+            from app.exams.models.question import Question
+            from app.evaluations.services.evaluation_result_service import EvaluationResultService
             test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
             questions = list(Question.query.filter(Question.id.in_(test_question_ids)).all()) if test_question_ids else []
             total = len(questions)

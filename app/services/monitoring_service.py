@@ -12,27 +12,27 @@ from sqlalchemy import String, and_, cast, func, not_, or_
 from sqlalchemy.orm import joinedload
 
 from app import db
-from app.models.answerSheetGabarito import AnswerSheetGabarito
-from app.models.answerSheetResult import AnswerSheetResult
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetResult import AnswerSheetResult
 from app.models.city import City
-from app.models.classTest import ClassTest
-from app.models.evaluationResult import EvaluationResult
+from app.exams.models.classTest import ClassTest
+from app.evaluations.models.evaluationResult import EvaluationResult
 from app.models.grades import Grade
 from app.models.manager import Manager
 from app.models.monitoring_action import MonitoringAction
 from app.models.monitoring_action_history import MonitoringActionHistory
-from app.models.question import Question
+from app.exams.models.question import Question
 from app.models.skill import Skill
 from app.models.school import School
 from app.models.student import Student
-from app.models.studentAnswer import StudentAnswer
+from app.exams.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
 from app.models.subject import Subject
-from app.models.test import Test
+from app.exams.models.test import Test
 from app.models.user import RoleEnum, User
 from app.permissions.utils import get_user_scope
 from app.services.city_schema_service import ensure_monitoring_action_columns
-from app.services.evaluation_result_snapshot import municipal_evaluation_results_query
+from app.evaluations.services.evaluation_result_snapshot import municipal_evaluation_results_query
 from app.services.skills_map_service import (
     _extract_skill_ids_from_question_field,
     _fetch_skills_batch,
@@ -515,7 +515,7 @@ class MonitoringService:
         if not municipio:
             return []
         if source_type == "cartao_resposta":
-            from app.routes.answer_sheet_evaluation_listing import obter_series_com_gabaritos_municipio
+            from app.answer_sheets.routes.answer_sheet_evaluation_listing import obter_series_com_gabaritos_municipio
             from app.permissions import get_user_permission_scope
 
             permissao = get_user_permission_scope(user)
@@ -635,7 +635,7 @@ class MonitoringService:
         rows = q.order_by(AnswerSheetGabarito.created_at.desc()).limit(120).all()
         serie_param = MonitoringService._norm_modal_filtro(filters.get("serie_filtro"))
         if serie_param:
-            from app.routes.answer_sheet_evaluation_listing import _gabarito_aplica_serie
+            from app.answer_sheets.routes.answer_sheet_evaluation_listing import _gabarito_aplica_serie
 
             rows = [g for g in rows if _gabarito_aplica_serie(g, serie_param, municipio)]
         return [
@@ -788,7 +788,7 @@ class MonitoringService:
                 result_query = result_query.filter(School.id.in_(list(scope_school_ids)))
             ids.update(str(row[0]) for row in result_query.distinct().all() if row[0])
         else:
-            from app.report_analysis.answer_sheet_report_builder import (
+            from app.reports.report_analysis.answer_sheet_report_builder import (
                 get_answer_sheet_target_classes_for_report,
             )
 
@@ -941,7 +941,7 @@ class MonitoringService:
                 if class_row and class_row.grade_id:
                     return _grade_option(Grade.query.get(class_row.grade_id))
 
-            from app.report_analysis.answer_sheet_report_builder import (
+            from app.reports.report_analysis.answer_sheet_report_builder import (
                 get_answer_sheet_target_classes_for_report,
             )
 

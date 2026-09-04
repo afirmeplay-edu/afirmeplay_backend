@@ -1361,7 +1361,7 @@ def bulk_upload_students():
         
         # Conjunto de emails já atribuídos neste batch (para evitar duplicatas)
         emails_usados_no_batch = set()
-        from app.services.mobile.student_registration_pin import (
+        from app.mobile.services.student_registration_pin import (
             assign_registration_pin,
             collect_used_student_registrations,
         )

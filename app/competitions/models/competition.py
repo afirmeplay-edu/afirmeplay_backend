@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from app.utils.timezone_utils import get_local_time
 from app.models.subject import Subject
-from app.models.test import Test
+from app.exams.models.test import Test
 
 
 def _normalize_datetime_for_comparison(dt, competition_timezone=None):

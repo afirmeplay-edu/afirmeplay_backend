@@ -698,7 +698,7 @@ def delete_class(class_id):
         )
 
         # 2. Excluir registros em ClassTest
-        from app.models.classTest import ClassTest
+        from app.exams.models.classTest import ClassTest
         class_tests = ClassTest.query.filter_by(class_id=class_id_uuid).all()
         test_ids = [ct.test_id for ct in class_tests]
         logging.info(
@@ -743,7 +743,7 @@ def delete_class(class_id):
             f"📺 Excluindo {play_tv_deleted} vínculos play_tv_video_classes para turma {class_id}"
         )
 
-        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
         gabaritos_deleted = AnswerSheetGabarito.query.filter_by(class_id=class_id_uuid).delete(
             synchronize_session=False
         )
@@ -751,7 +751,7 @@ def delete_class(class_id):
             f"📄 Excluindo {gabaritos_deleted} gabaritos (answer_sheet_gabaritos) para turma {class_id}"
         )
 
-        from app.models.calendar_event_user import CalendarEventUser
+        from app.calendar.models.calendar_event_user import CalendarEventUser
         calendar_users_updated = (
             db.session.query(CalendarEventUser)
             .filter(CalendarEventUser.class_id == class_id_uuid)

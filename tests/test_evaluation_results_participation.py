@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from app.routes.evaluation_results_routes import (
+from app.evaluations.routes.evaluation_results_routes import (
     _calcular_dados_gerais_alunos,
     _collect_participating_student_ids,
 )
@@ -24,7 +24,7 @@ class TestEvaluationResultsParticipation(unittest.TestCase):
         mock_filter = MagicMock(return_value=MagicMock(distinct=mock_distinct))
         mock_query = MagicMock(return_value=MagicMock(filter=mock_filter))
 
-        with patch("app.routes.evaluation_results_routes.db.session.query", mock_query):
+        with patch("app.evaluations.routes.evaluation_results_routes.db.session.query", mock_query):
             participants = _collect_participating_student_ids(
                 test_id="test-2",
                 student_ids=["s9", "s10", "s11"],

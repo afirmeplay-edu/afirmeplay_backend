@@ -136,7 +136,7 @@ celery_app = Celery(
     broker=CELERY_BROKER_URL,
     backend=CELERY_RESULT_BACKEND,
     include=[
-        'app.report_analysis.tasks',
+        'app.reports.report_analysis.tasks',
         'app.services.celery_tasks.physical_test_tasks',
         'app.services.celery_tasks.answer_sheet_tasks',
         'app.services.celery_tasks.evaluation_recalculation_tasks'  # ✅ NOVA TASK
@@ -280,7 +280,7 @@ if (result.gabarito_changed) {
 **Se quiser monitorar o progresso da task:**
 
 ```python
-from app.report_analysis.celery_app import celery_app
+from app.reports.report_analysis.celery_app import celery_app
 
 # Obter resultado da task
 task_id = "celery-task-uuid"
@@ -479,7 +479,7 @@ Question
 1. Celery worker está rodando?
 
     ```bash
-    celery -A app.report_analysis.celery_app worker --loglevel=info
+    celery -A app.reports.report_analysis.celery_app worker --loglevel=info
     ```
 
 2. Redis está acessível?

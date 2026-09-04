@@ -27,7 +27,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from app import create_app, db
-from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.utils.tenant_middleware import city_id_to_schema_name

@@ -204,7 +204,7 @@ def update_questions(
     Atualiza question.skill de todas as questões, substituindo old_id por new_id.
     Tenta encontrar por código primeiro, depois por similaridade de descrição.
     """
-    from app.models.question import Question
+    from app.exams.models.question import Question
     
     logger.info("\n" + "=" * 70)
     logger.info("ATUALIZAR question.skill")

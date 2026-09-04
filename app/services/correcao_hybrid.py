@@ -12,9 +12,9 @@ import json
 import logging
 from typing import Dict, List, Optional, Tuple, Any
 from app import db
-from app.models.testQuestion import TestQuestion
-from app.models.question import Question
-from app.models.studentAnswer import StudentAnswer
+from app.exams.models.testQuestion import TestQuestion
+from app.exams.models.question import Question
+from app.exams.models.studentAnswer import StudentAnswer
 from app.models.student import Student
 from datetime import datetime
 
@@ -137,7 +137,7 @@ class CorrecaoHybrid:
                 evaluation_result = None
             else:
                 # 11. Calcular nota, proficiência e classificação
-                from app.services.evaluation_result_service import EvaluationResultService
+                from app.evaluations.services.evaluation_result_service import EvaluationResultService
                 
                 evaluation_result = EvaluationResultService.calculate_and_save_result(
                     test_id=test_id,
@@ -639,7 +639,7 @@ class CorrecaoHybrid:
                 ).first()
                 return student.id if student else None
             elif table_name == 'test':
-                from app.models.test import Test
+                from app.exams.models.test import Test
                 # Buscar usando LIKE '%suffix' (últimos caracteres sem hífens)
                 test = Test.query.filter(
                     func.replace(Test.id, '-', '').like(f'%{suffix}')
@@ -2087,7 +2087,7 @@ class CorrecaoHybrid:
             session_id: ID da sessão criada ou None se erro
         """
         try:
-            from app.models.testSession import TestSession
+            from app.exams.models.testSession import TestSession
             import uuid
 
             # Verificar se já existe uma sessão para esta correção física
@@ -2136,7 +2136,7 @@ class CorrecaoHybrid:
             bool: True se marcado com sucesso, False caso contrário
         """
         try:
-            from app.models.physicalTestForm import PhysicalTestForm
+            from app.physical_tests.models.physicalTestForm import PhysicalTestForm
 
             # Buscar formulário físico do aluno para esta prova
             form = PhysicalTestForm.query.filter_by(

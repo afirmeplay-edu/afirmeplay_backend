@@ -2,10 +2,10 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
 from app.models.subject import Subject
-from app.models.test import Test
-from app.models.classTest import ClassTest
+from app.exams.models.test import Test
+from app.exams.models.classTest import ClassTest
 from app.models.studentClass import Class
-from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
 from app import db
 from sqlalchemy import func
 import logging

@@ -8,47 +8,56 @@ from .studentSchoolEnrollment import StudentSchoolEnrollment
 from .subject import Subject
 from .studentClass import Class
 from .classSubject import ClassSubject
-from .classTest import ClassTest
 from .studentTestOlimpics import StudentTestOlimpics
-from .test import Test
-from .testQuestion import TestQuestion
+from app.exams.models import (
+    Test,
+    TestQuestion,
+    Question,
+    StudentAnswer,
+    TestSession,
+    ClassTest,
+    SubjectiveTest,
+    SubjectiveQuestion,
+    SubjectiveResult,
+    SubjectivePresence,
+)
 from .educationStage import EducationStage
 from .grades import Grade
 from .skill import Skill
-from .question import Question
-from .studentAnswer import StudentAnswer
-from .testSession import TestSession
-from .subjectiveTest import SubjectiveTest
-from .subjectiveQuestion import SubjectiveQuestion
-from .subjectiveResult import SubjectiveResult
-from .subjectivePresence import SubjectivePresence
 from .userQuickLinks import UserQuickLinks
 from .teacherClass import TeacherClass
 from .user import User
 from .game import Game
-from .evaluationResult import EvaluationResult
+from app.evaluations.models import EvaluationResult
 from .manager import Manager
-from .physicalTestAnswer import PhysicalTestAnswer
-from .physicalTestForm import PhysicalTestForm
+from app.physical_tests.models import PhysicalTestAnswer, PhysicalTestForm, PhysicalTestZip
 from .coverTemplate import CoverTemplate
-from .physicalTestZip import PhysicalTestZip
-from .formCoordinates import FormCoordinates
 from .studentPasswordLog import StudentPasswordLog
 from .user_settings import UserSettings
-from .reportAggregate import ReportAggregate
-from .answerSheetGabarito import AnswerSheetGabarito
-from app.services.cartao_resposta.answer_sheet_gabarito_generation import AnswerSheetGabaritoGeneration
-from .answerSheetGenerationJob import AnswerSheetGenerationJob
-from .answerSheetResult import AnswerSheetResult
-from .answerSheetReportAggregate import AnswerSheetReportAggregate
+from app.reports.models import ReportAggregate
+from app.answer_sheets.models import (
+    AnswerSheetGabarito,
+    AnswerSheetResult,
+    AnswerSheetGenerationJob,
+    AnswerSheetReportAggregate,
+    FormCoordinates,
+    BatchCorrectionJob,
+)
+from app.answer_sheets.services.cartao_resposta.answer_sheet_gabarito_generation import (
+    AnswerSheetGabaritoGeneration,
+)
 from .monitoring_action import MonitoringAction
 from .monitoring_action_history import MonitoringActionHistory
 from .saved_ata_sala import SavedAtaSala
 
-from .calendar_event import CalendarEvent, CalendarVisibilityScope
-from .calendar_event_target import CalendarEventTarget, CalendarTargetType
-from .calendar_event_user import CalendarEventUser
-from .calendar_event_resource import CalendarEventResource
+from app.calendar.models import (
+    CalendarEvent,
+    CalendarVisibilityScope,
+    CalendarEventTarget,
+    CalendarTargetType,
+    CalendarEventUser,
+    CalendarEventResource,
+)
 
 # Formulários Socioeconômicos, Play TV e Plantão Online
 from app.socioeconomic_forms.models import Form, FormQuestion, FormRecipient, FormResponse
@@ -71,12 +80,12 @@ from app.ideb_meta.models import IdebMetaSave
 from app.store.models import StoreItem, StudentPurchase
 
 # Mobile offline-first (tabelas por schema city_*)
-from .mobile_models import (
+from app.mobile.models import (
     MobileDevice,
     MobileOfflinePackCode,
     MobileOfflinePackRedeemDevice,
     MobileSyncBundleGeneration,
     MobileSyncSubmission,
+    MobileOfflinePackRegistry,
+    MobileCityDirectory,
 )
-from .mobile_offline_pack_registry import MobileOfflinePackRegistry
-from .mobile_city_directory import MobileCityDirectory

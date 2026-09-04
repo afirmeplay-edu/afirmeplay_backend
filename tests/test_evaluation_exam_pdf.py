@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 from pypdf import PdfReader
 
-from app.services.evaluation_exam_pdf_service import exam_pdf_filename
-from app.services.institutional_test_weasyprint_generator import (
+from app.evaluations.services.evaluation_exam_pdf_service import exam_pdf_filename
+from app.exams.services.institutional_test_weasyprint_generator import (
     InstitutionalTestWeasyPrintGenerator,
 )
 

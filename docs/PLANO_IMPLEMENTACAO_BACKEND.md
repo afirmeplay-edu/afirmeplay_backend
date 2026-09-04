@@ -497,9 +497,9 @@ class Competition(db.Model):
 ```python
 from app import db
 from app.models.competition import Competition
-from app.models.test import Test
-from app.models.testQuestion import TestQuestion
-from app.models.question import Question
+from app.exams.models.test import Test
+from app.exams.models.testQuestion import TestQuestion
+from app.exams.models.question import Question
 from app.models.studentTestOlimpics import StudentTestOlimpics
 from datetime import datetime
 import random

@@ -312,7 +312,7 @@ def aggregated_grade_from_proficiency(
     has_matematica: Optional[bool] = None,
 ) -> float:
     """Nota agregada canônica a partir da média de proficiência (não média das notas)."""
-    from app.services.evaluation_calculator import EvaluationCalculator
+    from app.evaluations.services.evaluation_calculator import EvaluationCalculator
 
     return float(
         EvaluationCalculator.calculate_grade(

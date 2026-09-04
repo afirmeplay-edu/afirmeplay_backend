@@ -33,8 +33,8 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from app import create_app, db
-from app.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService
-from app.services.report_aggregate_service import ReportAggregateService
+from app.reports.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService
+from app.reports.services.report_aggregate_service import ReportAggregateService
 
 logging.basicConfig(
     level=logging.INFO,

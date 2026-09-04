@@ -108,8 +108,8 @@ class UserDeletionService(BaseDeletionService):
 
         self.log("step 4 deleting student and tenant dependencies")
 
-        from app.models.physicalTestForm import PhysicalTestForm
-        from app.models.physicalTestAnswer import PhysicalTestAnswer
+        from app.physical_tests.models.physicalTestForm import PhysicalTestForm
+        from app.physical_tests.models.physicalTestAnswer import PhysicalTestAnswer
 
         student_ids_to_delete = [
             row[0] for row in self.session.query(Student.id).filter(Student.user_id == user_id).all()
@@ -130,12 +130,12 @@ class UserDeletionService(BaseDeletionService):
                 PhysicalTestForm.student_id.in_(student_ids_to_delete)
             ).delete(synchronize_session=False)
 
-            from app.models.studentAnswer import StudentAnswer
-            from app.models.testSession import TestSession
-            from app.models.evaluationResult import EvaluationResult
-            from app.models.answerSheetResult import AnswerSheetResult
+            from app.exams.models.studentAnswer import StudentAnswer
+            from app.exams.models.testSession import TestSession
+            from app.evaluations.models.evaluationResult import EvaluationResult
+            from app.answer_sheets.models.answerSheetResult import AnswerSheetResult
             from app.models.studentTestOlimpics import StudentTestOlimpics
-            from app.models.formCoordinates import FormCoordinates
+            from app.answer_sheets.models.formCoordinates import FormCoordinates
             from app.models.studentPasswordLog import StudentPasswordLog
 
             StudentAnswer.query.filter(StudentAnswer.student_id.in_(student_ids_to_delete)).delete(
@@ -211,13 +211,13 @@ class UserDeletionService(BaseDeletionService):
             self.log("step 5 deleting tenant rows referencing public.users", user_id=user_id)
             _set_search_path_for_user()
             from app.models.game import Game, GameClass
-            from app.models.calendar_event_user import CalendarEventUser
-            from app.models.mobile_models import (
+            from app.calendar.models.calendar_event_user import CalendarEventUser
+            from app.mobile.models.mobile_models import (
                 MobileDevice,
                 MobileOfflinePackCode,
                 MobileSyncSubmission,
             )
-            from app.services.mobile.offline_pack_service import delete_offline_pack
+            from app.mobile.services.offline_pack_service import delete_offline_pack
 
             offline_packs = MobileOfflinePackCode.query.filter_by(
                 created_by_user_id=user_id

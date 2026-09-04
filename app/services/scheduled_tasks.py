@@ -8,9 +8,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from app import db
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
-from app.models.test import Test
-from app.models.classTest import ClassTest
-from app.models.testSession import TestSession
+from app.exams.models.test import Test
+from app.exams.models.classTest import ClassTest
+from app.exams.models.testSession import TestSession
 from datetime import datetime
 import dateutil.parser
 import pytz

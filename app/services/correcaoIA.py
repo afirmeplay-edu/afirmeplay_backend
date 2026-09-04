@@ -20,9 +20,9 @@ from app.openai_config.openai_config import (
 )
 import requests
 from app import db
-from app.models.testQuestion import TestQuestion
-from app.models.question import Question
-from app.models.studentAnswer import StudentAnswer
+from app.exams.models.testQuestion import TestQuestion
+from app.exams.models.question import Question
+from app.exams.models.studentAnswer import StudentAnswer
 from app.models.student import Student
 from datetime import datetime
 
@@ -142,7 +142,7 @@ class CorrecaoIA:
                 evaluation_result = None
             else:
                 # 12. Calcular nota, proficiência e classificação usando EvaluationResultService
-                from app.services.evaluation_result_service import EvaluationResultService
+                from app.evaluations.services.evaluation_result_service import EvaluationResultService
                 
                 evaluation_result = EvaluationResultService.calculate_and_save_result(
                     test_id=test_id,
@@ -634,7 +634,7 @@ class CorrecaoIA:
                 ).first()
                 return student.id if student else None
             elif table_name == 'test':
-                from app.models.test import Test
+                from app.exams.models.test import Test
                 test = Test.query.filter(
                     func.replace(Test.id, '-', '').like(f'%{suffix}')
                 ).first()
@@ -1131,7 +1131,7 @@ IMPORTANTE:
             session_id: ID da sessão criada ou None se erro
         """
         try:
-            from app.models.testSession import TestSession
+            from app.exams.models.testSession import TestSession
             from datetime import datetime
             import uuid
             
@@ -1181,7 +1181,7 @@ IMPORTANTE:
             bool: True se marcado com sucesso, False caso contrário
         """
         try:
-            from app.models.physicalTestForm import PhysicalTestForm
+            from app.physical_tests.models.physicalTestForm import PhysicalTestForm
             from datetime import datetime
             
             # Buscar formulário físico do aluno para esta prova

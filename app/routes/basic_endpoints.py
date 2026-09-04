@@ -11,17 +11,17 @@ from app.models.subject import Subject
 from app.models.studentClass import Class
 from app.models.school import School
 from app.models.grades import Grade
-from app.models.test import Test
+from app.exams.models.test import Test
 from app.models.student import Student
-from app.models.studentAnswer import StudentAnswer
-from app.models.testSession import TestSession
+from app.exams.models.studentAnswer import StudentAnswer
+from app.exams.models.testSession import TestSession
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
 from sqlalchemy import func, cast, String, text
 from datetime import datetime, timedelta
 import logging
-from app.models.question import Question
-from app.models.classTest import ClassTest
+from app.exams.models.question import Question
+from app.exams.models.classTest import ClassTest
 from app.models.schoolTeacher import SchoolTeacher
 from app.decorators.role_required import get_current_tenant_id
 from app.decorators.role_required import get_current_user_from_token
@@ -293,7 +293,7 @@ def comprehensive_dashboard_stats():
     try:
         from app.models.user import User
         from app.models.game import Game
-        from app.models.question import Question
+        from app.exams.models.question import Question
         from app.models.studentClass import Class
         from app.models.teacher import Teacher
         
@@ -817,13 +817,13 @@ def get_submitted_evaluations():
     """
     try:
         print("Iniciando busca de avaliações enviadas...")
-        from app.models.testSession import TestSession
+        from app.exams.models.testSession import TestSession
         from app.models.student import Student
-        from app.models.test import Test
+        from app.exams.models.test import Test
         from app.models.subject import Subject
         from app.models.grades import Grade
         from app.models.user import User
-        from app.models.studentAnswer import StudentAnswer
+        from app.exams.models.studentAnswer import StudentAnswer
         from sqlalchemy.orm import joinedload
         print("Modelos importados com sucesso")
         
@@ -1040,8 +1040,8 @@ def correct_evaluation(session_id):
         }
     """
     try:
-        from app.models.testSession import TestSession
-        from app.models.studentAnswer import StudentAnswer
+        from app.exams.models.testSession import TestSession
+        from app.exams.models.studentAnswer import StudentAnswer
         from app.decorators.role_required import get_current_user_from_token
         
         data = request.get_json()
@@ -1123,8 +1123,8 @@ def finalize_evaluation(session_id):
     Body: Mesmo formato do endpoint /correct
     """
     try:
-        from app.models.testSession import TestSession
-        from app.models.studentAnswer import StudentAnswer
+        from app.exams.models.testSession import TestSession
+        from app.exams.models.studentAnswer import StudentAnswer
         from app.decorators.role_required import get_current_user_from_token
         
         data = request.get_json()
@@ -2073,8 +2073,8 @@ def get_evaluation_results_stats():
         }
     """
     try:
-        from app.models.testSession import TestSession
-        from app.models.test import Test
+        from app.exams.models.testSession import TestSession
+        from app.exams.models.test import Test
         from app.models.student import Student
         from app.models.subject import Subject
         from sqlalchemy import func
@@ -2323,8 +2323,8 @@ def get_evaluation_results_list():
         Lista de avaliações com estatísticas de desempenho
     """
     try:
-        from app.models.test import Test
-        from app.models.testSession import TestSession
+        from app.exams.models.test import Test
+        from app.exams.models.testSession import TestSession
         from app.models.subject import Subject
         from app.models.grades import Grade
         from sqlalchemy import func
@@ -2415,8 +2415,8 @@ def export_evaluation_results(evaluation_id):
     try:
         # Por enquanto retorna um JSON com os dados
         # Futuramente pode ser implementado para gerar Excel/PDF
-        from app.models.test import Test
-        from app.models.testSession import TestSession
+        from app.exams.models.test import Test
+        from app.exams.models.testSession import TestSession
         
         evaluation = Test.query.get(evaluation_id)
         if not evaluation:
@@ -2464,7 +2464,7 @@ def export_all_results():
     try:
         # Por enquanto retorna um JSON com todos os dados
         # Futuramente pode ser implementado para gerar Excel/PDF
-        from app.models.testSession import TestSession
+        from app.exams.models.testSession import TestSession
         
         sessions = TestSession.query.filter(
             TestSession.submitted_at.isnot(None)

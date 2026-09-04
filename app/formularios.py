@@ -127,10 +127,10 @@ def get_arial_bold_font(size):
 
 # Imports do nosso sistema
 from app import create_app
-from app.models.test import Test
+from app.exams.models.test import Test
 from app.models.student import Student
-from app.models.testSession import TestSession
-from app.models.formCoordinates import FormCoordinates
+from app.exams.models.testSession import TestSession
+from app.answer_sheets.models.formCoordinates import FormCoordinates
 from app import db
 
 # Imports para PDF

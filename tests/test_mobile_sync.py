@@ -7,14 +7,14 @@ import os
 import unittest
 import uuid
 
-from app.services.mobile.ddl import get_mobile_tables_ddl
-from app.services.mobile.device_service import is_valid_uuid_v4
-from app.services.mobile.content_hash import compute_test_content_version
-from app.services.mobile.student_registration_pin_core import (
+from app.mobile.services.ddl import get_mobile_tables_ddl
+from app.mobile.services.device_service import is_valid_uuid_v4
+from app.mobile.services.content_hash import compute_test_content_version
+from app.mobile.services.student_registration_pin_core import (
     allocate_unique_pin,
     is_valid_pin_format,
 )
-from app.services.mobile.student_registration_pin import (
+from app.mobile.services.student_registration_pin import (
     assign_registration_pin,
     collect_used_student_registrations,
 )

@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """Testes do resolver de série e payload multi-série do gabarito."""
 
-from app.services.cartao_resposta.course_name_resolver import (
+from app.answer_sheets.services.cartao_resposta.course_name_resolver import (
     infer_course_name_from_grade,
     looks_like_grade_label,
     resolve_grade_name_for_proficiency,
 )
-from app.services.cartao_resposta.gabarito_grades import (
+from app.answer_sheets.services.cartao_resposta.gabarito_grades import (
     normalize_grades_list,
     pick_grade_for_scope,
 )

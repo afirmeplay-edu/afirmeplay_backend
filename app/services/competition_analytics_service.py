@@ -11,7 +11,7 @@ from app import db
 from app.competitions.models import Competition, CompetitionEnrollment, CompetitionResult
 from app.competitions.schema_resolution import get_competition_schema
 from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
-from app.models.testSession import TestSession
+from app.exams.models.testSession import TestSession
 from app.models.student import Student
 from app.services.competition_ranking_service import CompetitionRankingService
 import logging

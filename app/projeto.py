@@ -12,10 +12,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Imports do nosso sistema
 from app import create_app
-from app.models.question import Question
-from app.models.testQuestion import TestQuestion
-from app.models.testSession import TestSession
-from app.models.formCoordinates import FormCoordinates
+from app.exams.models.question import Question
+from app.exams.models.testQuestion import TestQuestion
+from app.exams.models.testSession import TestSession
+from app.answer_sheets.models.formCoordinates import FormCoordinates
 
 def atualizar_nota(id_aluno, nota):
     with open('alunos.txt', 'r', encoding='utf-8') as f:

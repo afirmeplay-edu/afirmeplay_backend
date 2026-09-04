@@ -17,7 +17,7 @@ except ImportError:
 from app.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from app.models.question import Question
+from app.exams.models.question import Question
 from app.models.skill import Skill
 
 # IDs fornecidos pelo usuário

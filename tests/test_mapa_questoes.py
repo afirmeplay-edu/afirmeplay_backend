@@ -1,6 +1,6 @@
 """Testes puros do mapa de questões (sem banco)."""
 
-from app.mapa_questoes.helpers import (
+from app.mapa_questoes.services.helpers import (
     answer_to_letter,
     build_marcacoes,
     gabarito_letter,

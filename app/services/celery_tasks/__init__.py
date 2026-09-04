@@ -7,7 +7,7 @@ Todas as tasks demoradas devem ser criadas aqui
 from app.physical_tests.tasks import (
     generate_physical_forms_async
 )
-from app.services.celery_tasks.answer_sheet_tasks import (
+from app.answer_sheets.tasks import (
     generate_answer_sheets_batch_async,
     upload_answer_sheets_zip_async
 )

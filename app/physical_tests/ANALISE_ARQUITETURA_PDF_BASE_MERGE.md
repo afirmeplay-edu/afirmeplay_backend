@@ -14,7 +14,7 @@
 |-------|------------|---------|------------------|
 | 1 | Task Celery | `app/physical_tests/tasks.py` | `generate_physical_forms_async` — configura schema (multitenant), valida prova/turmas, monta `test_data` com `correction_data` e `blocks_config`, chama o serviço. |
 | 2 | Serviço | `app/physical_tests/form_service.py` | `PhysicalTestFormService.generate_physical_forms()` — carrega prova, questões, alunos, extrai `correction_data` do `test_data`, monta `test_data` final, chama o gerador WeasyPrint e depois `_save_physical_forms_to_db`. |
-| 3 | Gerador | `app/services/institutional_test_weasyprint_generator.py` | `InstitutionalTestWeasyPrintGenerator.generate_institutional_test_pdf_arch4()` — implementa a “Architecture 4”: gera 1 PDF de questões, 1 PDF por aluno (capa + OMR), mescla com pypdf e persiste em disco. |
+| 3 | Gerador | `app/exams/services/institutional_test_weasyprint_generator.py` | `InstitutionalTestWeasyPrintGenerator.generate_institutional_test_pdf_arch4()` — implementa a “Architecture 4”: gera 1 PDF de questões, 1 PDF por aluno (capa + OMR), mescla com pypdf e persiste em disco. |
 
 A geração em produção é acionada pela task Celery; o serviço não recebe `output_dir` na chamada atual, então o gerador usa o diretório padrão `/tmp/celery_pdfs/physical_tests`.
 

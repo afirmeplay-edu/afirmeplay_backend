@@ -13,12 +13,12 @@ import os
 import json
 from typing import Dict, List, Optional, Tuple, Any
 from app import db
-from app.models.testQuestion import TestQuestion
-from app.models.question import Question
-from app.models.studentAnswer import StudentAnswer
+from app.exams.models.testQuestion import TestQuestion
+from app.exams.models.question import Question
+from app.exams.models.studentAnswer import StudentAnswer
 from app.models.student import Student
-from app.models.testSession import TestSession
-from app.models.physicalTestForm import PhysicalTestForm
+from app.exams.models.testSession import TestSession
+from app.physical_tests.models.physicalTestForm import PhysicalTestForm
 from datetime import datetime
 
 # Importar funções do sistema antigo (sem modificar)
@@ -195,7 +195,7 @@ class CorrecaoNova:
                 return {"success": False, "error": "Erro ao criar sessão temporária"}
             
             # 13. Calcular nota, proficiência e classificação usando EvaluationResultService
-            from app.services.evaluation_result_service import EvaluationResultService
+            from app.evaluations.services.evaluation_result_service import EvaluationResultService
             
             evaluation_result = EvaluationResultService.calculate_and_save_result(
                 test_id=test_id,

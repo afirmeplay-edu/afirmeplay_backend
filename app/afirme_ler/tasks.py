@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from celery import Task
 
-from app.report_analysis.celery_app import celery_app
+from app.reports.report_analysis.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 

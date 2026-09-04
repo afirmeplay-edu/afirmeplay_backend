@@ -39,9 +39,9 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from app import create_app, db
-from app.models.answerSheetGabarito import AnswerSheetGabarito
-from app.models.answerSheetResult import AnswerSheetResult
-from app.report_analysis.answer_sheet_aggregate_service import (
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetResult import AnswerSheetResult
+from app.reports.report_analysis.answer_sheet_aggregate_service import (
     AnswerSheetReportAggregateService,
 )
 from app.utils.tenant_middleware import city_id_to_schema_name

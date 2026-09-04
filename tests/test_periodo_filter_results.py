@@ -4,12 +4,12 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from app.routes.answer_sheet_routes import (
+from app.answer_sheets.routes.answer_sheet_routes import (
     _apply_answer_sheet_result_period_filter,
     _parse_cartao_periodo_bounds,
     _periodo_bounds_dados_cartao,
 )
-from app.routes.evaluation_results_routes import (
+from app.evaluations.routes.evaluation_results_routes import (
     _apply_class_test_application_period,
     _filtrar_alunos_mapa_digital_por_periodo_aplicacao,
     _parse_periodo_bounds,

@@ -27,14 +27,14 @@ def delete_student_tenant_dependencies(student_ids: Union[str, Iterable[str]]) -
     if not ids:
         return
 
-    from app.models.physicalTestForm import PhysicalTestForm
-    from app.models.physicalTestAnswer import PhysicalTestAnswer
-    from app.models.studentAnswer import StudentAnswer
-    from app.models.testSession import TestSession
-    from app.models.evaluationResult import EvaluationResult
-    from app.models.answerSheetResult import AnswerSheetResult
+    from app.physical_tests.models.physicalTestForm import PhysicalTestForm
+    from app.physical_tests.models.physicalTestAnswer import PhysicalTestAnswer
+    from app.exams.models.studentAnswer import StudentAnswer
+    from app.exams.models.testSession import TestSession
+    from app.evaluations.models.evaluationResult import EvaluationResult
+    from app.answer_sheets.models.answerSheetResult import AnswerSheetResult
     from app.models.studentTestOlimpics import StudentTestOlimpics
-    from app.models.formCoordinates import FormCoordinates
+    from app.answer_sheets.models.formCoordinates import FormCoordinates
     from app.models.studentPasswordLog import StudentPasswordLog
 
     physical_forms_subq = (

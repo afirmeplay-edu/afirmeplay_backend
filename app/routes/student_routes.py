@@ -14,10 +14,10 @@ from app.multitenant.flask_g import get_orm_session
 from flask_jwt_extended import jwt_required
 from app.utils.auth import hash_password
 from marshmallow import ValidationError
-from app.models.studentAnswer import StudentAnswer
+from app.exams.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
 from app.models.grades import Grade
-from app.models.classTest import ClassTest
+from app.exams.models.classTest import ClassTest
 from app.models.city import City
 from app.models.manager import Manager
 from app.models.teacher import Teacher
@@ -135,7 +135,7 @@ def criar_usuario_e_aluno():
         # Determinar grade_id (série) com fallback da turma
         grade_id = data.get("grade_id") or class_obj.grade_id
 
-        from app.services.mobile.student_registration_pin import assign_registration_pin
+        from app.mobile.services.student_registration_pin import assign_registration_pin
 
         # Criar aluno (PIN de 4 dígitos em student.registration)
         novo_aluno = Student(

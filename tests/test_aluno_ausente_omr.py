@@ -5,7 +5,7 @@ import unittest
 import cv2
 import numpy as np
 
-from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
+from app.answer_sheets.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
 
 
 class TestAlunoAusenteOmr(unittest.TestCase):

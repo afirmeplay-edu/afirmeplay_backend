@@ -51,7 +51,7 @@ _load_env()
 
 from app import create_app  # noqa: E402
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path  # noqa: E402
-from app.routes.answer_sheet_routes import (  # noqa: E402
+from app.answer_sheets.routes.answer_sheet_routes import (  # noqa: E402
     _apply_answer_sheet_result_period_filter,
     _class_ids_alunos_previstos_cartao,
     _dedupe_answer_sheet_results_latest_per_student,
@@ -59,7 +59,7 @@ from app.routes.answer_sheet_routes import (  # noqa: E402
     _determinar_nivel_granularidade_cartao,
     _parse_cartao_periodo_bounds,
 )
-from app.models.answerSheetResult import AnswerSheetResult  # noqa: E402
+from app.answer_sheets.models.answerSheetResult import AnswerSheetResult  # noqa: E402
 from app.models.grades import Grade  # noqa: E402
 from app.models.school import School  # noqa: E402
 from app.models.student import Student  # noqa: E402

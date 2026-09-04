@@ -56,7 +56,7 @@ def main():
 
     session = get_db_session()
     from app.models.skill import Skill
-    from app.models.question import Question
+    from app.exams.models.question import Question
 
     duplicates = find_duplicates(session)
     if not duplicates:

@@ -5,7 +5,7 @@ Execução: python -m unittest tests.test_bundle_shared_questions
 import unittest
 from unittest.mock import MagicMock, patch
 
-from app.services.mobile import bundle_service as svc
+from app.mobile.services import bundle_service as svc
 
 
 class TestBundleSharedQuestions(unittest.TestCase):

@@ -9,7 +9,7 @@ import logging
 import os
 from typing import Any, Dict
 
-from app.report_analysis.celery_app import celery_app
+from app.reports.report_analysis.celery_app import celery_app
 from app.services.ai_analysis_service import AIAnalysisService
 from app.services.ai_redis_cache import set_ready, set_error
 

@@ -43,13 +43,13 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from app import create_app, db  # noqa: E402
-from app.models.answerSheetGabarito import AnswerSheetGabarito  # noqa: E402
-from app.models.answerSheetResult import AnswerSheetResult  # noqa: E402
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito  # noqa: E402
+from app.answer_sheets.models.answerSheetResult import AnswerSheetResult  # noqa: E402
 from app.models.city import City  # noqa: E402
 from app.models.school import School  # noqa: E402
 from app.models.student import Student  # noqa: E402
 from app.models.studentClass import Class  # noqa: E402
-from app.report_analysis.answer_sheet_report_builder import (  # noqa: E402
+from app.reports.report_analysis.answer_sheet_report_builder import (  # noqa: E402
     _resolve_target_class_ids,
     union_target_class_ids_for_gabarito,
 )

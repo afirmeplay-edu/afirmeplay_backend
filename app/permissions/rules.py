@@ -17,11 +17,11 @@ Descrição:
 """
 
 from typing import Dict, Any, Optional
-from app.models.test import Test
+from app.exams.models.test import Test
 from app.models.school import School
 from app.models.studentClass import Class
 from app.models.teacherClass import TeacherClass
-from app.models.classTest import ClassTest
+from app.exams.models.classTest import ClassTest
 from app.models.teacher import Teacher
 from .roles import Roles
 from .utils import (

@@ -421,7 +421,7 @@ class SistemaORM:
                 ).first()
                 return student.id if student else None
             elif table_name == 'test':
-                from app.models.test import Test
+                from app.exams.models.test import Test
                 test = Test.query.filter(
                     func.replace(Test.id, '-', '').like(f'%{suffix}')
                 ).first()
@@ -790,8 +790,8 @@ class SistemaORM:
         """
         try:
             from app import db
-            from app.models.studentAnswer import StudentAnswer
-            from app.models.testQuestion import TestQuestion
+            from app.exams.models.studentAnswer import StudentAnswer
+            from app.exams.models.testQuestion import TestQuestion
             from datetime import datetime
             
             # Buscar questões da prova ordenadas
@@ -871,7 +871,7 @@ class SistemaORM:
         Calcula resultado da avaliação usando EvaluationResultService
         """
         try:
-            from app.services.evaluation_result_service import EvaluationResultService
+            from app.evaluations.services.evaluation_result_service import EvaluationResultService
             import uuid
             
             # Gerar session_id temporário para correções físicas
@@ -900,7 +900,7 @@ class SistemaORM:
         Busca número de questões do banco de dados
         """
         try:
-            from app.models.testQuestion import TestQuestion
+            from app.exams.models.testQuestion import TestQuestion
             num = TestQuestion.query.filter_by(test_id=test_id).count()
             return num if num > 0 else None
         except Exception as e:
@@ -912,8 +912,8 @@ class SistemaORM:
         Busca gabarito do banco de dados
         """
         try:
-            from app.models.testQuestion import TestQuestion
-            from app.models.question import Question
+            from app.exams.models.testQuestion import TestQuestion
+            from app.exams.models.question import Question
             
             test_questions = TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()
             

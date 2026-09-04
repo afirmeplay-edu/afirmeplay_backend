@@ -151,10 +151,10 @@ def filter_tests_by_user(query: Query, user: dict, escola_id: str = None, requir
     Returns:
         Query: Query filtrada de acordo com permissões do usuário
     """
-    from app.models.test import Test
+    from app.exams.models.test import Test
     from app.models.teacher import Teacher
     from app.models.teacherClass import TeacherClass
-    from app.models.classTest import ClassTest
+    from app.exams.models.classTest import ClassTest
     from app.models.studentClass import Class as ClassModel
     from sqlalchemy import or_
     

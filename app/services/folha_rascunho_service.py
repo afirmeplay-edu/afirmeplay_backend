@@ -5,15 +5,15 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.city import City
 from app.models.school import School
 from app.models.student import Student
 from app.models.studentClass import Class
-from app.models.test import Test
-from app.models.classTest import ClassTest
+from app.exams.models.test import Test
+from app.exams.models.classTest import ClassTest
 from app.permissions.utils import get_manager_school, get_teacher_schools
-from app.report_analysis.answer_sheet_report_builder import get_answer_sheet_target_classes_for_report
+from app.reports.report_analysis.answer_sheet_report_builder import get_answer_sheet_target_classes_for_report
 from app.utils.uuid_helpers import ensure_uuid
 
 

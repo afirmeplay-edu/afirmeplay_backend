@@ -22,7 +22,7 @@ from app.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
-from app.models.question import Question
+from app.exams.models.question import Question
 
 # Mapeamento: texto corrompido -> texto correto (ordem: mais específico primeiro)
 # Padrões com ?? onde era um caractere acentuado (UTF-8 lido errado)

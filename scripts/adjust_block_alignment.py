@@ -19,7 +19,7 @@ sys.path.insert(0, str(script_dir))
 # Importar apenas quando necessário (para evitar erros se não houver banco configurado)
 try:
     from app import create_app
-    from app.models.answerSheetGabarito import AnswerSheetGabarito
+    from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
     from app import db
     FLASK_AVAILABLE = True
 except ImportError:
@@ -212,7 +212,7 @@ class AlignmentAdjuster:
                     return False
                 
                 # Importar a função de criação de imagem de referência
-                from app.services.cartao_resposta.correction_n import AnswerSheetCorrectionN
+                from app.answer_sheets.services.cartao_resposta.correction_n import AnswerSheetCorrectionN
                 
                 # Criar instância do serviço de correção
                 correction_service = AnswerSheetCorrectionN(debug=False)

@@ -51,7 +51,7 @@ def mime_to_ext(mime):
 
 def run():
     from app import create_app
-    from app.models.question import Question
+    from app.exams.models.question import Question
     from app import db
     from app.services.storage.minio_service import MinIOService
 

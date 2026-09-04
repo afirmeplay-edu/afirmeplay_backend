@@ -2,9 +2,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from app import create_app
 from app.models import CalendarTargetType
-from app.services.calendar_event_service import CalendarEventService
-import app.services.calendar_event_service as ces
+from app.calendar.services.calendar_event_service import CalendarEventService
+import app.calendar.services.calendar_event_service as ces
 
 
 class FakeQuery:
@@ -33,6 +34,14 @@ class FakeQuery:
 
 
 class TestCalendarEventTecadmRecipients(unittest.TestCase):
+    def setUp(self):
+        self.app = create_app()
+        self.ctx = self.app.app_context()
+        self.ctx.push()
+
+    def tearDown(self):
+        self.ctx.pop()
+
     def test_matches_tecadm_school_filter_without_manager(self):
         tecadm_user = SimpleNamespace(id="u-tec", role="tecadm", city_id="city-1")
         school = SimpleNamespace(id="school-1", city_id="city-1")

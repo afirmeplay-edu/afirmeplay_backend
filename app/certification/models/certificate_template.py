@@ -4,7 +4,7 @@ Modelo para templates de certificados
 """
 from app import db
 from app.services.storage.minio_service import MinIOService
-from app.models.test import Test
+from app.exams.models.test import Test
 import uuid
 from datetime import datetime
 from typing import Optional

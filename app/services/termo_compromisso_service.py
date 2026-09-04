@@ -8,13 +8,13 @@ from typing import Any, Dict, Optional, Set, Tuple
 from sqlalchemy import func
 
 from app import db
-from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.city import City
-from app.models.classTest import ClassTest
+from app.exams.models.classTest import ClassTest
 from app.models.grades import Grade
 from app.models.school import School
 from app.models.studentClass import Class
-from app.models.test import Test
+from app.exams.models.test import Test
 from app.permissions.utils import get_manager_school, get_teacher_schools
 from app.utils.uuid_helpers import ensure_uuid
 

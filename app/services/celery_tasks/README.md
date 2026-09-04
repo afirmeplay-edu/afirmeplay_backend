@@ -134,7 +134,7 @@ result = trigger_recalculation_sync(
 ```python
 # app/services/celery_tasks/my_new_task.py
 
-from app.report_analysis.celery_app import celery_app
+from app.reports.report_analysis.celery_app import celery_app
 from celery import Task
 
 @celery_app.task(
@@ -199,7 +199,7 @@ celery_app = Celery(
     broker=CELERY_BROKER_URL,
     backend=CELERY_RESULT_BACKEND,
     include=[
-        'app.report_analysis.tasks',
+        'app.reports.report_analysis.tasks',
         'app.services.celery_tasks.physical_test_tasks',
         'app.services.celery_tasks.my_new_task'  # Adicionar aqui
     ]
@@ -281,12 +281,12 @@ docker logs celery_worker_production -f
 
 ```bash
 # No container do worker
-celery -A app.report_analysis.celery_app inspect active
+celery -A app.reports.report_analysis.celery_app inspect active
 ```
 
 ### **Monitorar com Flower (opcional):**
 
 ```bash
-celery -A app.report_analysis.celery_app flower
+celery -A app.reports.report_analysis.celery_app flower
 # Acesse: http://localhost:5555
 ```

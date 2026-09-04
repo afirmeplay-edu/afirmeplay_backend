@@ -143,7 +143,7 @@ def all_portuguese_habilidades():
 def run():
     from sqlalchemy.orm import sessionmaker
     from app.models.skill import Skill
-    from app.models.question import Question
+    from app.exams.models.question import Question
 
     engine = get_engine_utf8()
     Session = sessionmaker(bind=engine)

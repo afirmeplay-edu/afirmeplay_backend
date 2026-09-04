@@ -4,9 +4,9 @@ Serviço de gerenciamento de certificados
 """
 from app import db
 from app.certification.models import CertificateTemplate, Certificate
-from app.models.evaluationResult import EvaluationResult
+from app.evaluations.models.evaluationResult import EvaluationResult
 from app.models.student import Student
-from app.models.test import Test
+from app.exams.models.test import Test
 from app.models.studentClass import Class
 from app.models.school import School
 from sqlalchemy import func, cast
@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from app.services.storage.minio_service import MinIOService
-from app.services.evaluation_result_snapshot import prefetch_placement_from_results
+from app.evaluations.services.evaluation_result_snapshot import prefetch_placement_from_results
 from app.utils.response_formatters import _get_all_subjects_from_test
 
 logger = logging.getLogger(__name__)

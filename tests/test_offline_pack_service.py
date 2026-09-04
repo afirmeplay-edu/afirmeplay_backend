@@ -7,8 +7,8 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-from app.services.mobile import offline_pack_service as svc
-from app.services.mobile.ddl import get_mobile_tables_ddl
+from app.mobile.services import offline_pack_service as svc
+from app.mobile.services.ddl import get_mobile_tables_ddl
 
 
 class TestOfflinePackDDL(unittest.TestCase):

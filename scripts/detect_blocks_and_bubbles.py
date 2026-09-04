@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 script_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(script_dir))
 
-from app.services.cartao_resposta.correction_n import AnswerSheetCorrectionN
+from app.answer_sheets.services.cartao_resposta.correction_n import AnswerSheetCorrectionN
 
 
 class BlocksAndBubblesDetector:

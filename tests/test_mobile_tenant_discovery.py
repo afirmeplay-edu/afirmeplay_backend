@@ -5,7 +5,7 @@ Execução: python -m unittest tests.test_mobile_tenant_discovery
 import os
 import unittest
 
-from app.services.mobile.tenant_discovery_service import (
+from app.mobile.services.tenant_discovery_service import (
     API_CONTRACT_VERSION,
     build_available_cities_response,
     serialize_city_entry,

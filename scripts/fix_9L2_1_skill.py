@@ -18,7 +18,7 @@ except ImportError:
 from app.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, noload
-from app.models.question import Question
+from app.exams.models.question import Question
 from app.models.skill import Skill
 
 OLD_DESCRIPTION_9L2_1 = "Analisar elementos constitutivos de textos pertencentes ao domínio literário."

@@ -15,9 +15,9 @@ from app.services.competition_student_ranking_service import (
 from app.services.competition_ranking_service import CompetitionRankingService
 from app.models.student import Student
 from app.models.studentTestOlimpics import StudentTestOlimpics
-from app.models.test import Test
-from app.models.testQuestion import TestQuestion
-from app.models.testSession import TestSession
+from app.exams.models.test import Test
+from app.exams.models.testQuestion import TestQuestion
+from app.exams.models.testSession import TestSession
 from app.competitions.constants import is_valid_level, LEVEL_OPTIONS, validate_scope_and_filter, get_competition_status_display
 from app.competitions.scope_permissions import (
     get_allowed_competition_scopes,

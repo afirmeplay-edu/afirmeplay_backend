@@ -3,7 +3,7 @@ Cria tabelas mobile em todos os schemas city_* existentes no PostgreSQL.
 
 Inclui: mobile_device, mobile_sync_submission, mobile_sync_bundle_generation,
 mobile_offline_pack_code, mobile_offline_pack_redeem_device (mesmo DDL de
-app.services.mobile.ddl.get_mobile_tables_ddl, também aplicado em novos
+app.mobile.services.ddl.get_mobile_tables_ddl, também aplicado em novos
 municípios via app.services.city_schema_service.provision_city_schema).
 
 Idempotente: CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS.
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import text  # noqa: E402
 
 from app import create_app, db  # noqa: E402
-from app.services.mobile.ddl import get_mobile_tables_ddl  # noqa: E402
+from app.mobile.services.ddl import get_mobile_tables_ddl  # noqa: E402
 
 
 def list_city_schemas():

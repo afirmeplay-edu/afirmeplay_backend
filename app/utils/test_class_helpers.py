@@ -6,12 +6,12 @@ import logging
 from typing import Any, Dict, List, Optional, Set
 
 from app import db
-from app.models.classTest import ClassTest
-from app.models.evaluationResult import EvaluationResult
+from app.exams.models.classTest import ClassTest
+from app.evaluations.models.evaluationResult import EvaluationResult
 from app.models.grades import Grade
 from app.models.school import School
 from app.models.student import Student
-from app.models.studentAnswer import StudentAnswer
+from app.exams.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 

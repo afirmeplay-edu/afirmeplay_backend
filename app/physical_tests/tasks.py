@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 from celery import Task
 
-from app.report_analysis.celery_app import celery_app
+from app.reports.report_analysis.celery_app import celery_app
 from app import db
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ _NON_RETRYABLE_MARKERS = (
 def _ensure_flask_app_context():
     """Garante app context: FlaskTask pode não envolver o run() em alguns workers."""
     from flask import has_app_context
-    from app.report_analysis.celery_app import _get_flask_app
+    from app.reports.report_analysis.celery_app import _get_flask_app
 
     if has_app_context():
         return None
@@ -109,7 +109,7 @@ def upload_physical_test_zip_async(
     """
     try:
         from app.services.storage.minio_service import MinIOService
-        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
         
         if not os.path.exists(zip_path):
             logger.error(f"[CELERY-UPLOAD] ZIP não encontrado: {zip_path}")
@@ -241,15 +241,15 @@ def generate_physical_forms_async(
         pushed_ctx = _ensure_flask_app_context()
 
         # Imports locais para evitar problemas de circular import
-        from app.models.test import Test
+        from app.exams.models.test import Test
         from app.models.student import Student
-        from app.models.classTest import ClassTest
-        from app.models.question import Question
-        from app.models.testQuestion import TestQuestion
-        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.exams.models.classTest import ClassTest
+        from app.exams.models.question import Question
+        from app.exams.models.testQuestion import TestQuestion
+        from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
         from app.models.studentClass import Class
         from app.models.school import School
-        from app.physical_tests.form_service import PhysicalTestFormService
+        from app.physical_tests.services.form_service import PhysicalTestFormService
         from app.models.city import City
         from app.utils.tenant_middleware import set_search_path
 
@@ -695,7 +695,7 @@ def generate_physical_forms_async(
             if generated_files:
                 try:
                     # Estrutura de pastas no ZIP = mesma do cartão-resposta: municipio_/escola_/serie_/turma_/arquivo.pdf
-                    from app.services.cartao_resposta.answer_sheet_generator import sanitize_filename
+                    from app.answer_sheets.services.cartao_resposta.answer_sheet_generator import sanitize_filename
                     from app.models.grades import Grade
 
                     student_id_to_class_id = {str(s.id): s.class_id for s in students}

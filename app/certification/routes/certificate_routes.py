@@ -12,7 +12,7 @@ from app.decorators import requires_city_context
 from app.certification.models import CertificateTemplate, Certificate
 from app.certification.services.certificate_service import CertificateService
 from app.models.student import Student
-from app.models.test import Test
+from app.exams.models.test import Test
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 

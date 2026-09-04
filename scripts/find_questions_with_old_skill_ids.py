@@ -17,7 +17,7 @@ except ImportError:
 from app.config import Config
 from sqlalchemy import create_engine, or_
 from sqlalchemy.orm import sessionmaker
-from app.models.question import Question
+from app.exams.models.question import Question
 from app.models.skill import Skill
 
 # Mapeamento dos IDs antigos para os códigos (do skills.sql)

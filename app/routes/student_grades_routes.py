@@ -4,11 +4,11 @@ from app.models.user import User, RoleEnum
 from app.models.school import School
 from app.models.studentClass import Class
 from app.models.grades import Grade
-from app.models.evaluationResult import EvaluationResult
-from app.models.test import Test
-from app.models.question import Question
-from app.models.studentAnswer import StudentAnswer
-from app.models.testQuestion import TestQuestion
+from app.evaluations.models.evaluationResult import EvaluationResult
+from app.exams.models.test import Test
+from app.exams.models.question import Question
+from app.exams.models.studentAnswer import StudentAnswer
+from app.exams.models.testQuestion import TestQuestion
 from app.models.educationStage import EducationStage
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import func, case
@@ -18,7 +18,7 @@ from app.decorators.role_required import role_required, get_current_user_from_to
 from flask_jwt_extended import jwt_required
 from app import db
 from typing import Dict, List, Optional, Any
-from app.services.evaluation_result_service import EvaluationResultService
+from app.evaluations.services.evaluation_result_service import EvaluationResultService
 from app.services.student_ranking_service import StudentRankingService
 from app.services.achievement_service import (
     get_conquistas,

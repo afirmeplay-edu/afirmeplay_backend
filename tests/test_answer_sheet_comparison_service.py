@@ -1,9 +1,9 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from app.routes.answer_sheet_routes import _parse_gabarito_ids_from_body
-from app.services.answer_sheet_comparison_service import AnswerSheetComparisonService
-from app.services.evaluation_comparison_service import EvaluationComparisonService
+from app.answer_sheets.routes.answer_sheet_routes import _parse_gabarito_ids_from_body
+from app.answer_sheets.services.answer_sheet_comparison_service import AnswerSheetComparisonService
+from app.evaluations.services.evaluation_comparison_service import EvaluationComparisonService
 
 
 class TestParseGabaritoIds(unittest.TestCase):
@@ -32,7 +32,7 @@ class TestAnswerSheetGeneralComparison(unittest.TestCase):
         gab_2 = MagicMock(id="g2")
 
         with patch(
-            "app.services.answer_sheet_comparison_service.AnswerSheetComparisonService._course_meta_for_gabarito",
+            "app.answer_sheets.services.answer_sheet_comparison_service.AnswerSheetComparisonService._course_meta_for_gabarito",
             side_effect=[("Anos Iniciais", True), ("Anos Iniciais", True)],
         ), patch(
             "app.utils.school_equal_weight_means.hierarchical_mean_grade_and_proficiency",
@@ -118,7 +118,7 @@ class TestAnswerSheetSubjectComparison(unittest.TestCase):
             "_extract_subjects_from_gabarito",
             side_effect=[{"mat": "Matemática"}, {"mat": "Matemática"}],
         ), patch(
-            "app.services.answer_sheet_comparison_service.AnswerSheetComparisonService._course_meta_for_gabarito",
+            "app.answer_sheets.services.answer_sheet_comparison_service.AnswerSheetComparisonService._course_meta_for_gabarito",
             side_effect=[("Anos Iniciais", True), ("Anos Iniciais", True)],
         ), patch(
             "app.utils.school_equal_weight_means.hierarchical_mean_from_subject_rows",
@@ -168,7 +168,7 @@ class TestGradeInfoResolution(unittest.TestCase):
         class_obj = MagicMock(grade_id="grade-uuid-1", id="class-uuid-1", name="Turma A")
         grade_obj = MagicMock(name="5º Ano")
 
-        with patch("app.models.classTest.ClassTest") as mock_ct, patch(
+        with patch("app.exams.models.classTest.ClassTest") as mock_ct, patch(
             "app.models.studentClass.Class"
         ) as mock_class, patch("app.models.grades.Grade") as mock_grade:
             mock_ct.query.filter_by.return_value.all.return_value = [

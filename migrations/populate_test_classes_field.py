@@ -11,8 +11,8 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import create_app, db
-from app.models.test import Test
-from app.models.classTest import ClassTest
+from app.exams.models.test import Test
+from app.exams.models.classTest import ClassTest
 import logging
 
 logging.basicConfig(level=logging.INFO)

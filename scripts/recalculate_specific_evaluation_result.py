@@ -17,8 +17,8 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import create_app, db
-from app.models.evaluationResult import EvaluationResult
-from app.services.evaluation_result_service import EvaluationResultService
+from app.evaluations.models.evaluationResult import EvaluationResult
+from app.evaluations.services.evaluation_result_service import EvaluationResultService
 from app.utils.tenant_middleware import set_search_path
 import logging
 

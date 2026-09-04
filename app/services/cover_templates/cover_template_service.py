@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app import db
 from app.models.coverTemplate import CoverTemplate
-from app.models.test import Test
+from app.exams.models.test import Test
 from app.services.cover_templates.constants import (
     ALLOWED_ALIGN,
     ALLOWED_FONTS,

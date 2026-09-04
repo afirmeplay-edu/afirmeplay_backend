@@ -43,8 +43,8 @@ def _obter_series_com_aplicacoes_municipio_inse_saeb(
 ) -> List[Dict[str, Any]]:
     """Séries do município com avaliações aplicadas (modal INSE/Avaliação e PNEERQ)."""
     try:
-        from app.models.test import Test
-        from app.models.classTest import ClassTest
+        from app.exams.models.test import Test
+        from app.exams.models.classTest import ClassTest
         from app.models.grades import Grade
 
         city = City.query.get(municipio_id)
@@ -89,8 +89,8 @@ def _obter_avaliacoes_por_municipio_inse_saeb(
 ) -> List[Dict[str, Any]]:
     """Retorna avaliações aplicadas no município (para filtro INSE x Avaliação)."""
     try:
-        from app.models.test import Test
-        from app.models.classTest import ClassTest
+        from app.exams.models.test import Test
+        from app.exams.models.classTest import ClassTest
         from app.models.grades import Grade
 
         city = City.query.get(municipio_id)
@@ -141,8 +141,8 @@ def _obter_escolas_por_avaliacao_inse_saeb(
 ) -> List[Dict[str, Any]]:
     """Retorna escolas onde a avaliação foi aplicada no município."""
     try:
-        from app.models.test import Test
-        from app.models.classTest import ClassTest
+        from app.exams.models.test import Test
+        from app.exams.models.classTest import ClassTest
 
         city = City.query.get(municipio_id)
         if not city:
@@ -188,8 +188,8 @@ def _obter_series_por_escola_avaliacao_inse_saeb(
 ) -> List[Dict[str, Any]]:
     """Retorna séries onde a avaliação foi aplicada na escola."""
     try:
-        from app.models.test import Test
-        from app.models.classTest import ClassTest
+        from app.exams.models.test import Test
+        from app.exams.models.classTest import ClassTest
 
         city = City.query.get(municipio_id)
         if not city:
@@ -215,8 +215,8 @@ def _obter_turmas_por_serie_avaliacao_inse_saeb(
 ) -> List[Dict[str, Any]]:
     """Retorna turmas onde a avaliação foi aplicada na escola/série."""
     try:
-        from app.models.test import Test
-        from app.models.classTest import ClassTest
+        from app.exams.models.test import Test
+        from app.exams.models.classTest import ClassTest
 
         city = City.query.get(municipio_id)
         if not city:

@@ -32,9 +32,9 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from app import create_app, db
-from app.models.evaluationResult import EvaluationResult
-from app.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService  # noqa: F401
-from app.services.evaluation_result_service import EvaluationResultService
+from app.evaluations.models.evaluationResult import EvaluationResult
+from app.reports.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService  # noqa: F401
+from app.evaluations.services.evaluation_result_service import EvaluationResultService
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 
 logging.basicConfig(

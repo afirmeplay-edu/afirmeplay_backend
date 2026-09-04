@@ -6,7 +6,7 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from app.services.institutional_test_weasyprint_generator import (
+from app.exams.services.institutional_test_weasyprint_generator import (
     InstitutionalTestWeasyPrintGenerator,
 )
 from app.utils.pdf_question_image_optimizer import (

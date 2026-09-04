@@ -12,9 +12,9 @@ from sqlalchemy import func, cast, distinct
 from sqlalchemy.types import Date
 
 from app import db
-from app.models.evaluationResult import EvaluationResult
+from app.evaluations.models.evaluationResult import EvaluationResult
 from app.models.student import Student
-from app.models.testSession import TestSession
+from app.exams.models.testSession import TestSession
 
 # Competitions: importação condicional para não quebrar se schema multitenant não estiver ativo
 try:

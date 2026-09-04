@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Script para preparar contexto Flask para o Celery Worker
-O worker deve ser iniciado via CLI: celery -A app.report_analysis.celery_app worker --loglevel=info
+O worker deve ser iniciado via CLI: celery -A app.reports.report_analysis.celery_app worker --loglevel=info
 """
 
 import os
@@ -16,7 +16,7 @@ load_dotenv("app/.env")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app import create_app
-from app.report_analysis.celery_app import init_celery
+from app.reports.report_analysis.celery_app import init_celery
 
 def main():
     """
@@ -33,9 +33,9 @@ def main():
     print("Para iniciar o worker, execute:")
     print()
     if sys.platform == 'win32':
-        print("  celery -A app.report_analysis.celery_app worker --loglevel=info --pool=solo")
+        print("  celery -A app.reports.report_analysis.celery_app worker --loglevel=info --pool=solo")
     else:
-        print("  celery -A app.report_analysis.celery_app worker --loglevel=info")
+        print("  celery -A app.reports.report_analysis.celery_app worker --loglevel=info")
     print()
     print("=" * 60)
 

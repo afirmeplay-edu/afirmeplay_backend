@@ -17,8 +17,8 @@ def get_questions_from_test(test_id, order_by_test_question=True):
     Returns:
         list: Lista de objetos Question ordenados
     """
-    from app.models.question import Question
-    from app.models.testQuestion import TestQuestion
+    from app.exams.models.question import Question
+    from app.exams.models.testQuestion import TestQuestion
     
     # Buscar IDs das questões da avaliação
     query = TestQuestion.query.filter_by(test_id=test_id)
@@ -58,7 +58,7 @@ def get_question_ids_from_test(test_id, order_by=True):
     Returns:
         list: Lista de IDs (strings) das questões
     """
-    from app.models.testQuestion import TestQuestion
+    from app.exams.models.testQuestion import TestQuestion
     
     query = TestQuestion.query.filter_by(test_id=test_id)
     if order_by:

@@ -9,7 +9,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from celery import Task
 
-from app.report_analysis.celery_app import celery_app
+from app.reports.report_analysis.celery_app import celery_app
 from app.socioeconomic_forms.models import Form, FormResponse, FormResultCache
 from app.socioeconomic_forms.services.results_service import ResultsService
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService

@@ -294,7 +294,7 @@ def create_app():
     
     # Inicializar Celery (para processamento assíncrono de relatórios)
     try:
-        from app.report_analysis.celery_app import init_celery
+        from app.reports.report_analysis.celery_app import init_celery
         init_celery(app)
         app.logger.info("Celery inicializado com sucesso")
     except Exception as e:
@@ -312,7 +312,13 @@ def create_app():
         app.logger.warning("Scheduler não pôde ser iniciado: %s", e)
     
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes, ranking_routes, monitoring_routes, saved_ata_routes, folha_rascunho_routes, termo_compromisso_routes, etiquetas_routes, subjective_test_routes, cover_template_routes, evaluation_exam_pdf_routes
+    from .routes import school_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, userQuickLinks_routes, basic_endpoints, game_routes, manager_routes, student_grades_routes, dashboard_routes, subdomain_routes, lista_frequencia_routes, ranking_routes, monitoring_routes, saved_ata_routes, folha_rascunho_routes, termo_compromisso_routes, etiquetas_routes, cover_template_routes
+    from app.exams.routes import test_bp, question_bp, student_answer_bp, subjective_test_bp
+    from app.calendar.routes import bp as calendar_bp
+    from app.answer_sheets.routes import bp as answer_sheet_bp
+    from app.evaluations.routes import evaluation_bp, evaluation_results_bp, evaluation_exam_pdf_bp
+    from app.reports.routes import bp as report_bp
+    from app.reports.report_analysis import routes as report_analysis_routes
     from app.physical_tests.routes import bp as physical_test_bp
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
     from app.socioeconomic_forms.routes import filter_routes
@@ -329,15 +335,13 @@ def create_app():
     from app.participation_report import bp as participation_report_bp
     from app.mapa_questoes import bp as mapa_questoes_bp
     from app.boletim_aluno import bp as boletim_aluno_bp
-    # Importar rotas de report_analysis (processamento assíncrono)
-    from app.report_analysis import routes as report_analysis_routes
-    
+
     app.register_blueprint(school_routes.bp)
-    app.register_blueprint(test_routes.bp)
-    app.register_blueprint(evaluation_routes.bp)  # Novo blueprint separado para /evaluations/
+    app.register_blueprint(test_bp)
+    app.register_blueprint(evaluation_bp)  # Novo blueprint separado para /evaluations/
     app.register_blueprint(cover_template_routes.bp)
-    app.register_blueprint(evaluation_exam_pdf_routes.bp)
-    app.register_blueprint(question_routes.bp)
+    app.register_blueprint(evaluation_exam_pdf_bp)
+    app.register_blueprint(question_bp)
     app.register_blueprint(login.bp)
     app.register_blueprint(logout.bp)
     app.register_blueprint(admin_route.bp)
@@ -354,15 +358,14 @@ def create_app():
     app.register_blueprint(professor_route.bp)
     app.register_blueprint(subject_routes.bp)
     app.register_blueprint(skill_routes.skill_bp)
-    app.register_blueprint(student_answer_routes.bp)
+    app.register_blueprint(student_answer_bp)
     app.register_blueprint(userQuickLinks_routes.bp)
-    app.register_blueprint(evaluation_results_routes.bp)
-    app.register_blueprint(subjective_test_routes.bp)
+    app.register_blueprint(evaluation_results_bp)
+    app.register_blueprint(subjective_test_bp)
     # Registrar blueprint de report_analysis ANTES (para sobrescrever rotas antigas)
-    from app.report_analysis import routes as report_analysis_routes
     app.register_blueprint(report_analysis_routes.bp)
     # Depois registrar report_routes (rotas antigas ficam como fallback para outras rotas)
-    app.register_blueprint(report_routes.bp)
+    app.register_blueprint(report_bp)
     app.register_blueprint(basic_endpoints.bp)
     app.register_blueprint(subdomain_routes.bp)
     # Mesmas rotas sob /api/* (proxies e frontends costumam usar esse prefixo).
@@ -371,10 +374,10 @@ def create_app():
     app.register_blueprint(manager_routes.bp)
     app.register_blueprint(physical_test_bp)
     app.register_blueprint(student_grades_routes.bp)
-    app.register_blueprint(calendar_routes.bp)
+    app.register_blueprint(calendar_bp)
     app.register_blueprint(dashboard_routes.bp)
     app.register_blueprint(ranking_routes.bp)
-    app.register_blueprint(answer_sheet_routes.bp)
+    app.register_blueprint(answer_sheet_bp)
     app.register_blueprint(monitoring_routes.bp)
     app.register_blueprint(saved_ata_routes.bp)
     app.register_blueprint(folha_rascunho_routes.bp)
@@ -397,7 +400,7 @@ def create_app():
     app.register_blueprint(mapa_questoes_bp)
     app.register_blueprint(boletim_aluno_bp)
 
-    from app.routes.mobile import mobile_bp
+    from app.mobile.routes import mobile_bp
     app.register_blueprint(mobile_bp)
 
     # ========================================================================

@@ -195,7 +195,7 @@ services:
       backend-prod:
         condition: service_started
     restart: unless-stopped
-    command: celery -A app.report_analysis.celery_app worker --loglevel=info --concurrency=4 --prefetch-multiplier=1
+    command: celery -A app.reports.report_analysis.celery_app worker --loglevel=info --concurrency=4 --prefetch-multiplier=1
 
 networks:
   afirmeplay_network_prod :

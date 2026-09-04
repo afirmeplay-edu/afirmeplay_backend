@@ -11,7 +11,7 @@ from app import db
 from app.decorators import requires_city_context
 from app.decorators.role_required import get_current_user_from_token, role_required
 from app.services.class_peer_ranking_service import ClassPeerRankingService
-from app.services.ranking_report_service import RankingReportService
+from app.reports.services.ranking_report_service import RankingReportService
 
 bp = Blueprint("ranking_routes", __name__, url_prefix="/ranking")
 

@@ -18,7 +18,7 @@ except ImportError:
 from app.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from app.models.question import Question
+from app.exams.models.question import Question
 
 
 def get_db_session():

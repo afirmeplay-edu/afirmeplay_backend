@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from app.services.ranking_report_service import RankingReportService
+from app.reports.services.ranking_report_service import RankingReportService
 from app.routes.ranking_routes import parse_ranking_request_args, validate_ranking_filters
 
 
@@ -82,9 +82,9 @@ class TestRankingReportService(unittest.TestCase):
                     }
                 ],
             ):
-                with patch("app.services.ranking_report_service.DashboardService.get_school_ranking_card") as school_card_mock:
-                    with patch("app.services.ranking_report_service.DashboardService.get_class_ranking_card") as class_mock:
-                        with patch("app.services.ranking_report_service.DashboardService.get_ranking_alunos") as ranking_mock:
+                with patch("app.reports.services.ranking_report_service.DashboardService.get_school_ranking_card") as school_card_mock:
+                    with patch("app.reports.services.ranking_report_service.DashboardService.get_class_ranking_card") as class_mock:
+                        with patch("app.reports.services.ranking_report_service.DashboardService.get_ranking_alunos") as ranking_mock:
                             school_card_mock.return_value = {"ranking": [], "total": 0}
                             class_mock.return_value = {"ranking": [], "total": 0}
                             ranking_mock.return_value = {"ranking": [], "total": 123}
@@ -137,10 +137,10 @@ class TestRankingReportService(unittest.TestCase):
         }
         with patch.object(RankingReportService, "_resolve_scope", return_value={"scope": "escola", "school_ids": ["school-1"]}):
             with patch.object(RankingReportService, "_build_school_general_rows", return_value=[school_row]):
-                with patch("app.services.ranking_report_service.DashboardService.get_school_ranking_card") as school_card_mock:
+                with patch("app.reports.services.ranking_report_service.DashboardService.get_school_ranking_card") as school_card_mock:
                     with patch.object(RankingReportService, "_build_evaluation_class_rows", return_value=[]):
-                        with patch("app.services.ranking_report_service.DashboardService.get_ranking_alunos") as ranking_mock:
-                            with patch("app.services.ranking_report_service.db.session.query") as grade_query_mock:
+                        with patch("app.reports.services.ranking_report_service.DashboardService.get_ranking_alunos") as ranking_mock:
+                            with patch("app.reports.services.ranking_report_service.db.session.query") as grade_query_mock:
                                 school_card_mock.return_value = {"ranking": [], "total": 0}
                                 ranking_mock.return_value = {"ranking": [], "total": 0}
                                 grade_query_mock.return_value.filter.return_value.first.return_value = type(

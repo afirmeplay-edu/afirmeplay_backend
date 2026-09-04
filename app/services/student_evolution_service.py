@@ -13,14 +13,14 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import dateutil.parser
 
-from app.models.answerSheetGabarito import AnswerSheetGabarito
-from app.models.answerSheetResult import AnswerSheetResult
-from app.models.classTest import ClassTest
-from app.models.evaluationResult import EvaluationResult
+from app.answer_sheets.models.answerSheetGabarito import AnswerSheetGabarito
+from app.answer_sheets.models.answerSheetResult import AnswerSheetResult
+from app.exams.models.classTest import ClassTest
+from app.evaluations.models.evaluationResult import EvaluationResult
 from app.models.student import Student
-from app.models.test import Test
-from app.services.answer_sheet_comparison_service import AnswerSheetComparisonService
-from app.services.evaluation_comparison_service import EvaluationComparisonService
+from app.exams.models.test import Test
+from app.answer_sheets.services.answer_sheet_comparison_service import AnswerSheetComparisonService
+from app.evaluations.services.evaluation_comparison_service import EvaluationComparisonService
 from app.services.skills_map_service import _participating_answer_sheet_result
 
 logger = logging.getLogger(__name__)

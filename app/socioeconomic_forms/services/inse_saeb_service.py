@@ -14,13 +14,13 @@ from app.socioeconomic_forms.constants.inse_scoring import (
     NIVEIS_INSE_DESCRICOES,
     NIVEIS_INSE_LABELS,
 )
-from app.models.test import Test
-from app.models.testQuestion import TestQuestion
-from app.models.question import Question
+from app.exams.models.test import Test
+from app.exams.models.testQuestion import TestQuestion
+from app.exams.models.question import Question
 from app.models.subject import Subject
-from app.models.studentAnswer import StudentAnswer
-from app.services.evaluation_calculator import EvaluationCalculator
-from app.services.evaluation_result_service import EvaluationResultService
+from app.exams.models.studentAnswer import StudentAnswer
+from app.evaluations.services.evaluation_calculator import EvaluationCalculator
+from app.evaluations.services.evaluation_result_service import EvaluationResultService
 from collections import defaultdict
 import logging
 from typing import Dict, Any, List, Optional, Tuple

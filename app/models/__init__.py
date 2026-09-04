@@ -21,6 +21,7 @@ from .testSession import TestSession
 from .subjectiveTest import SubjectiveTest
 from .subjectiveQuestion import SubjectiveQuestion
 from .subjectiveResult import SubjectiveResult
+from .subjectiveRubricMark import SubjectiveRubricMark
 from .subjectivePresence import SubjectivePresence
 from .userQuickLinks import UserQuickLinks
 from .teacherClass import TeacherClass

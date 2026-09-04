@@ -614,7 +614,7 @@ def format_test_response(test, questions=None):
         raise
 
 
-def format_subjective_test_response(subjective_test, questions=None):
+def format_subjective_test_response(subjective_test, questions=None, include_progress=False):
     """
     Formata a resposta de uma avaliação subjetiva (SubjectiveTest).
     Se `questions` for passado, usa essa lista em vez de subjective_test.questions (evita N+1).
@@ -673,7 +673,7 @@ def format_subjective_test_response(subjective_test, questions=None):
             questions = subjective_test.questions
         questions_formatted = [q.to_dict() for q in questions]
 
-        return {
+        payload = {
             'id': subjective_test.id,
             'title': subjective_test.title,
             'description': subjective_test.description,
@@ -704,7 +704,24 @@ def format_subjective_test_response(subjective_test, questions=None):
             'updatedAt': subjective_test.updated_at.isoformat() if subjective_test.updated_at else None,
             'total_questions': len(questions_formatted),
             'questions': questions_formatted,
+            'rubric_marks': [],
+            'class_progress': [],
         }
+
+        try:
+            from app.services.subjective_evaluation_service import SubjectiveEvaluationService
+            payload['rubric_marks'] = SubjectiveEvaluationService.get_rubric_marks(subjective_test.id)
+            if include_progress:
+                payload['class_progress'] = SubjectiveEvaluationService.get_class_progress(subjective_test)
+                concluded = sum(1 for p in payload['class_progress'] if p.get('status') == 'concluida')
+                payload['correction_summary'] = {
+                    'total_classes': len(payload['class_progress']),
+                    'concluded_classes': concluded,
+                }
+        except Exception as e:
+            logging.warning(f"Erro ao anexar rubrica/progresso da avaliação subjetiva: {str(e)}")
+
+        return payload
     except SQLAlchemyError as e:
         db.session.rollback()
         logging.error(

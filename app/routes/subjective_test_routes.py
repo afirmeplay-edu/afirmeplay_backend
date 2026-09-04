@@ -22,7 +22,6 @@ from app.models.studentClass import Class
 from app.models.school import School
 from app.permissions.utils import get_teacher_classes
 from app.services.subjective_evaluation_service import SubjectiveEvaluationService
-from app.models.subjectiveResult import RUBRIC_VALUES
 from app.utils.response_formatters import format_subjective_test_response
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list, uuid_list_to_str
 
@@ -115,12 +114,22 @@ def create_subjective_test():
         if questions_error:
             return jsonify({"error": questions_error}), 400
 
+        try:
+            SubjectiveEvaluationService.normalize_rubric_marks_payload(
+                data.get('rubric_marks') or data.get('marks')
+            )
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
         data, err = _validate_scope_fields(data)
         if err:
             return err
 
         subjective_test = SubjectiveEvaluationService.create_subjective_test(data, created_by=user.get('id'))
-        return jsonify(format_subjective_test_response(subjective_test)), 201
+        return jsonify(format_subjective_test_response(subjective_test, include_progress=True)), 201
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         db.session.rollback()
         logging.error("Erro ao criar avaliação subjetiva: %s", str(e), exc_info=True)
@@ -147,7 +156,7 @@ def list_subjective_tests():
 
         pagination = query.paginate(page=page, per_page=per_page, error_out=False)
         return jsonify({
-            "items": [format_subjective_test_response(t) for t in pagination.items],
+            "items": [format_subjective_test_response(t, include_progress=True) for t in pagination.items],
             "total": pagination.total,
             "page": page,
             "per_page": per_page,
@@ -208,7 +217,7 @@ def get_subjective_test(subjective_test_id):
         subjective_test = SubjectiveTest.query.get(subjective_test_id)
         if not subjective_test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
-        return jsonify(format_subjective_test_response(subjective_test)), 200
+        return jsonify(format_subjective_test_response(subjective_test, include_progress=True)), 200
     except Exception as e:
         logging.error(
             "Erro ao buscar avaliação subjetiva %s: %s", subjective_test_id, str(e), exc_info=True
@@ -244,8 +253,12 @@ def update_subjective_test(subjective_test_id):
         if err:
             return err
 
-        subjective_test = SubjectiveEvaluationService.update_subjective_test(subjective_test, data)
-        return jsonify(format_subjective_test_response(subjective_test)), 200
+        try:
+            subjective_test = SubjectiveEvaluationService.update_subjective_test(subjective_test, data)
+        except ValueError as e:
+            db.session.rollback()
+            return jsonify({"error": str(e)}), 400
+        return jsonify(format_subjective_test_response(subjective_test, include_progress=True)), 200
     except Exception as e:
         db.session.rollback()
         logging.error(
@@ -451,10 +464,12 @@ def upsert_correction(subjective_test_id):
         if not subjective_question_id or not student_id:
             return jsonify({"error": "subjective_question_id e student_id são obrigatórios"}), 400
 
-        if value is not None and value not in RUBRIC_VALUES:
-            return jsonify({
-                "error": f"value inválido: {value}. Aceitos: {', '.join(RUBRIC_VALUES)} ou null"
-            }), 400
+        if value is not None:
+            allowed = SubjectiveEvaluationService._allowed_codes(subjective_test_id)
+            if value not in allowed:
+                return jsonify({
+                    "error": f"value inválido: {value}. Aceitos: {', '.join(allowed)} ou null"
+                }), 400
 
         from app.models.student import Student
         student = Student.query.get(student_id)

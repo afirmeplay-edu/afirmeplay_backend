@@ -22,6 +22,7 @@ app.utils.school_equal_weight_means.hierarchical_mean_grade_and_proficiency, já
 pelas rotas de evaluation-results — este serviço só calcula o resultado POR ALUNO.
 """
 import logging
+import re
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -36,6 +37,7 @@ from app.models.school import School
 from app.models.testSession import TestSession
 from app.models.evaluationResult import EvaluationResult
 from app.models.subjectiveResult import SubjectiveResult, RUBRIC_VALUES, RUBRIC_WEIGHTS
+from app.models.subjectiveRubricMark import SubjectiveRubricMark, DEFAULT_RUBRIC_MARKS
 from app.models.subjectivePresence import SubjectivePresence
 from app.services.evaluation_calculator import EvaluationCalculator
 from app.services.evaluation_result_snapshot import build_placement_snapshots_from_student
@@ -44,13 +46,15 @@ from app.utils.decimal_helpers import round_to_two_decimals
 
 # Níveis SAEB simplificados do dashboard da avaliação subjetiva (protótipo AVALIAÇÃO SUBJETIVA).
 # Diferente da classificação TRI do EvaluationCalculator: aqui a faixa é só por % de acerto
-# da rubrica (SIM=1, PARCIAL=0.5, NAO/BRANCO=0).
+# ponderado da rubrica (peso da marcação / peso máximo).
 SAEB_LEVEL_LABELS = {
     'abaixo': 'Abaixo do Básico',
     'basico': 'Básico',
     'adequado': 'Adequado',
     'avancado': 'Avançado',
 }
+
+_HEX_COLOR = re.compile(r'^#?[0-9A-Fa-f]{6}$')
 
 
 def saeb_from_pct(pct: float) -> Dict[str, str]:
@@ -67,6 +71,213 @@ def saeb_from_pct(pct: float) -> Dict[str, str]:
 
 
 class SubjectiveEvaluationService:
+
+    # ------------------------------------------------------------------
+    # Marcações da rubrica
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_hex_color(raw: Any, fallback: str = '#64748b') -> str:
+        text = str(raw or '').strip()
+        if not text:
+            return fallback
+        if not text.startswith('#'):
+            text = f'#{text}'
+        if _HEX_COLOR.match(text):
+            return text.lower()
+        return fallback
+
+    @staticmethod
+    def _slug_code(label: str, used: set) -> str:
+        base = re.sub(r'[^A-Za-z0-9]', '', (label or '').upper())[:12] or 'M'
+        code = base
+        n = 2
+        while code in used:
+            suffix = str(n)
+            code = f'{base[: max(1, 12 - len(suffix))]}{suffix}'
+            n += 1
+        return code[:20]
+
+    @staticmethod
+    def normalize_rubric_marks_payload(raw: Any) -> List[Dict[str, Any]]:
+        """
+        Valida/normaliza a lista de marcações do POST/PUT.
+        Se vazio/ausente, devolve o template padrão.
+        """
+        source = raw if isinstance(raw, list) and len(raw) > 0 else list(DEFAULT_RUBRIC_MARKS)
+        if len(source) < 2:
+            raise ValueError('Informe ao menos duas marcações na rubrica.')
+        if len(source) > 12:
+            raise ValueError('No máximo 12 marcações por avaliação.')
+
+        used_codes = set()
+        normalized = []
+        for index, item in enumerate(source):
+            if not isinstance(item, dict):
+                raise ValueError('Cada marcação deve ser um objeto.')
+            label = str(item.get('label') or item.get('name') or '').strip()
+            if not label:
+                raise ValueError(f'Marcação #{index + 1}: informe o rótulo.')
+            code = str(item.get('code') or item.get('sigla') or '').strip().upper()
+            code = ''.join(ch for ch in code if ch.isalnum() or ch in ('_', '-'))[:20]
+            if not code:
+                code = SubjectiveEvaluationService._slug_code(label, used_codes)
+            if code in used_codes:
+                raise ValueError(f'Sigla duplicada na rubrica: {code}')
+            used_codes.add(code)
+            try:
+                weight = float(item.get('weight') if item.get('weight') is not None else 0)
+            except (TypeError, ValueError):
+                raise ValueError(f'Marcação {label}: peso inválido.')
+            if weight < 0 or weight > 1:
+                raise ValueError(f'Marcação {label}: o peso deve estar entre 0 e 1 (1 = acerto pleno).')
+            color = SubjectiveEvaluationService._normalize_hex_color(item.get('color'))
+            sort_order = item.get('sort_order')
+            try:
+                sort_order = int(sort_order) if sort_order is not None else index
+            except (TypeError, ValueError):
+                sort_order = index
+            normalized.append({
+                'code': code,
+                'label': label[:80],
+                'color': color,
+                'weight': weight,
+                'sort_order': sort_order,
+            })
+        normalized.sort(key=lambda m: m['sort_order'])
+        for i, mark in enumerate(normalized):
+            mark['sort_order'] = i
+        return normalized
+
+    @staticmethod
+    def _replace_rubric_marks(subjective_test_id: str, marks: List[Dict[str, Any]]) -> None:
+        SubjectiveRubricMark.query.filter_by(subjective_test_id=subjective_test_id).delete()
+        for mark in marks:
+            db.session.add(SubjectiveRubricMark(
+                subjective_test_id=subjective_test_id,
+                code=mark['code'],
+                label=mark['label'],
+                color=mark['color'],
+                weight=mark['weight'],
+                sort_order=mark['sort_order'],
+            ))
+
+    @staticmethod
+    def get_rubric_marks(subjective_test_id: str) -> List[Dict[str, Any]]:
+        fallback = [
+            {**dict(m), 'id': None, 'subjective_test_id': subjective_test_id}
+            for m in DEFAULT_RUBRIC_MARKS
+        ]
+        try:
+            rows = (
+                SubjectiveRubricMark.query
+                .filter_by(subjective_test_id=subjective_test_id)
+                .order_by(SubjectiveRubricMark.sort_order, SubjectiveRubricMark.code)
+                .all()
+            )
+        except Exception:
+            db.session.rollback()
+            return fallback
+        if rows:
+            return [r.to_dict() for r in rows]
+        return fallback
+
+    @staticmethod
+    def _weights_for_test(subjective_test_id: str) -> Dict[str, float]:
+        marks = SubjectiveEvaluationService.get_rubric_marks(subjective_test_id)
+        weights = {m['code']: float(m['weight']) for m in marks}
+        return weights or dict(RUBRIC_WEIGHTS)
+
+    @staticmethod
+    def _allowed_codes(subjective_test_id: str) -> List[str]:
+        marks = SubjectiveEvaluationService.get_rubric_marks(subjective_test_id)
+        codes = [m['code'] for m in marks]
+        return codes or list(RUBRIC_VALUES)
+
+    @staticmethod
+    def get_class_progress(subjective_test: SubjectiveTest) -> List[Dict[str, Any]]:
+        """Progresso de correção por turma (pendente / em_correcao / concluida)."""
+        try:
+            return SubjectiveEvaluationService._get_class_progress(subjective_test)
+        except Exception as e:
+            logging.warning("Falha ao calcular progresso de turmas da subjetiva: %s", e)
+            return []
+
+    @staticmethod
+    def _get_class_progress(subjective_test: SubjectiveTest) -> List[Dict[str, Any]]:
+        class_ids = SubjectiveEvaluationService._resolve_target_class_ids(subjective_test)
+        if not class_ids:
+            return []
+
+        questions_n = SubjectiveQuestion.query.filter_by(subjective_test_id=subjective_test.id).count()
+        classes = Class.query.filter(Class.id.in_(class_ids)).order_by(Class.name).all()
+        students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        students_by_class: Dict[Any, List] = {}
+        student_ids = []
+        for student in students:
+            students_by_class.setdefault(student.class_id, []).append(student)
+            student_ids.append(student.id)
+
+        filled_by_student: Dict[str, int] = {}
+        if student_ids:
+            for row in SubjectiveResult.query.filter(
+                SubjectiveResult.subjective_test_id == subjective_test.id,
+                SubjectiveResult.student_id.in_(student_ids),
+            ).all():
+                sid = str(row.student_id)
+                filled_by_student[sid] = filled_by_student.get(sid, 0) + 1
+
+        finalized_students = set()
+        if subjective_test.shadow_test_id and student_ids:
+            for er in EvaluationResult.query.filter(
+                EvaluationResult.test_id == subjective_test.shadow_test_id,
+                EvaluationResult.student_id.in_(student_ids),
+            ).all():
+                finalized_students.add(str(er.student_id))
+
+        progress = []
+        for cls in classes:
+            class_students = students_by_class.get(cls.id, [])
+            n_students = len(class_students)
+            expected = n_students * questions_n
+            filled = sum(filled_by_student.get(str(s.id), 0) for s in class_students)
+            n_finalized = sum(1 for s in class_students if str(s.id) in finalized_students)
+            if n_finalized > 0:
+                status = 'concluida'
+            elif filled > 0:
+                status = 'em_correcao'
+            else:
+                status = 'pendente'
+            school_obj = School.query.get(str(cls.school_id)) if getattr(cls, 'school_id', None) else None
+            progress.append({
+                'id': cls.id,
+                'name': cls.name,
+                'school': {'id': school_obj.id, 'name': school_obj.name} if school_obj else None,
+                'students_count': n_students,
+                'filled_cells': filled,
+                'expected_cells': expected,
+                'pct': round((filled / expected) * 100) if expected else 0,
+                'finalized_students': n_finalized,
+                'status': status,
+            })
+        return progress
+
+    @staticmethod
+    def recompute_status(subjective_test: SubjectiveTest, commit: bool = False) -> str:
+        progress = SubjectiveEvaluationService.get_class_progress(subjective_test)
+        if not progress:
+            new_status = 'pendente'
+        elif all(p['status'] == 'concluida' for p in progress):
+            new_status = 'concluida'
+        elif any(p['status'] != 'pendente' for p in progress):
+            new_status = 'em_correcao'
+        else:
+            new_status = 'pendente'
+        if subjective_test.status != new_status:
+            subjective_test.status = new_status
+            if commit:
+                db.session.commit()
+        return new_status
 
     # ------------------------------------------------------------------
     # CRUD da avaliação subjetiva
@@ -213,6 +424,11 @@ class SubjectiveEvaluationService:
         subjective_test.shadow_test_id = shadow_test.id
         SubjectiveEvaluationService._sync_shadow_class_tests(subjective_test)
 
+        marks = SubjectiveEvaluationService.normalize_rubric_marks_payload(
+            data.get('rubric_marks') or data.get('marks')
+        )
+        SubjectiveEvaluationService._replace_rubric_marks(subjective_test.id, marks)
+
         db.session.commit()
         return subjective_test
 
@@ -246,6 +462,22 @@ class SubjectiveEvaluationService:
                     code=q.get('code'),
                     skill_description=q.get('skill_description') or q.get('skillDescription') or '',
                 ))
+
+        if 'rubric_marks' in data or 'marks' in data:
+            marks = SubjectiveEvaluationService.normalize_rubric_marks_payload(
+                data.get('rubric_marks') if 'rubric_marks' in data else data.get('marks')
+            )
+            allowed_codes = {m['code'] for m in marks}
+            used_codes = {
+                r.value for r in SubjectiveResult.query.filter_by(subjective_test_id=subjective_test.id).all()
+            }
+            missing = used_codes - allowed_codes
+            if missing:
+                raise ValueError(
+                    'Não é possível remover marcações já lançadas na correção: '
+                    + ', '.join(sorted(missing))
+                )
+            SubjectiveEvaluationService._replace_rubric_marks(subjective_test.id, marks)
 
         # Mantém o Test espelho e as ClassTest sincronizados nos campos usados por relatórios/escopo.
         if subjective_test.shadow_test:
@@ -342,6 +574,7 @@ class SubjectiveEvaluationService:
                 "title": subjective_test.title,
                 "test_type": subjective_test.test_type,
             },
+            "rubric_marks": SubjectiveEvaluationService.get_rubric_marks(subjective_test_id),
             "classification_legend": SubjectiveEvaluationService.get_classification_legend_for_test(
                 subjective_test
             ),
@@ -372,8 +605,9 @@ class SubjectiveEvaluationService:
         value=None ou repetir o mesmo valor já lançado remove o lançamento
         (mesma UX de "clicar de novo para desmarcar" do protótipo).
         """
-        if value is not None and value not in RUBRIC_VALUES:
-            raise ValueError(f"Valor de rubrica inválido: {value}. Aceitos: {', '.join(RUBRIC_VALUES)}")
+        allowed = SubjectiveEvaluationService._allowed_codes(subjective_test_id)
+        if value is not None and value not in allowed:
+            raise ValueError(f"Valor de rubrica inválido: {value}. Aceitos: {', '.join(allowed)}")
 
         existing = SubjectiveResult.query.filter_by(
             subjective_test_id=subjective_test_id,
@@ -400,6 +634,10 @@ class SubjectiveEvaluationService:
                 corrected_by=corrected_by,
             )
             db.session.add(existing)
+
+        subjective_test = SubjectiveTest.query.get(subjective_test_id)
+        if subjective_test and subjective_test.status == 'pendente':
+            subjective_test.status = 'em_correcao'
 
         db.session.commit()
         return {"removed": False, "result": existing.to_dict()}
@@ -498,12 +736,18 @@ class SubjectiveEvaluationService:
         ).all()
         value_by_question = {str(r.subjective_question_id): r.value for r in results}
 
+        weights = SubjectiveEvaluationService._weights_for_test(subjective_test.id)
+        max_weight = max(weights.values()) if weights else 1.0
+        if max_weight <= 0:
+            max_weight = 1.0
+
         weighted_sum = 0.0
         correct_equivalent_count = 0
         for qid in question_ids:
             v = value_by_question.get(str(qid))
-            weighted_sum += RUBRIC_WEIGHTS.get(v, 0.0)
-            if v == 'SIM':
+            w = float(weights.get(v, 0.0)) if v else 0.0
+            weighted_sum += w
+            if v and w >= max_weight:
                 correct_equivalent_count += 1
 
         course_name, subject_name = SubjectiveEvaluationService._resolve_course_and_subject_names(subjective_test)
@@ -581,9 +825,9 @@ class SubjectiveEvaluationService:
         Calcula nota/proficiência/classificação de um aluno a partir da rubrica lançada
         e grava em EvaluationResult (via Test espelho + TestSession sintética).
 
-        Pontuação do aluno = média aritmética dos itens (SIM=1, PARCIAL=0.5, NAO=0,
-        BRANCO=0) sobre o TOTAL de questões da avaliação — itens ainda não lançados
-        contam como BRANCO=0 (mesmo critério usado na tela de correção). Este cálculo
+        Pontuação do aluno = média aritmética dos itens (peso da marcação, 0–1)
+        sobre o TOTAL de questões da avaliação — itens ainda não lançados
+        contam como peso 0 (mesmo critério usado na tela de correção). Este cálculo
         é por aluno; agregações acima da turma usam a média hierárquica com peso igual
         entre unidades (ver docs/FONTE_DA_VERDADE_CALCULOS_RESULTADOS.md §7).
 
@@ -749,9 +993,8 @@ class SubjectiveEvaluationService:
                 processed.append(outcome)
 
         subjective_test = SubjectiveTest.query.get(subjective_test_id)
-        if subjective_test and subjective_test.status != 'concluida':
-            subjective_test.status = 'concluida'
-            db.session.commit()
+        if subjective_test:
+            SubjectiveEvaluationService.recompute_status(subjective_test, commit=True)
 
         return {
             "processed_count": len(processed),
@@ -838,13 +1081,19 @@ class SubjectiveEvaluationService:
             if student_ids else []
         )
 
-        totals = {v: 0 for v in RUBRIC_VALUES}
+        marks = SubjectiveEvaluationService.get_rubric_marks(subjective_test_id)
+        mark_codes = [m['code'] for m in marks] or list(RUBRIC_VALUES)
+        weights = {m['code']: float(m['weight']) for m in marks} or dict(RUBRIC_WEIGHTS)
+        mark_meta = {m['code']: m for m in marks}
+
+        totals = {code: 0 for code in mark_codes}
         results_by_question: Dict[str, List[SubjectiveResult]] = {}
         results_by_student: Dict[str, Dict[str, str]] = {}
         respondent_ids = set()
         for r in results:
-            if r.value in totals:
-                totals[r.value] += 1
+            if r.value not in totals:
+                totals[r.value] = 0
+            totals[r.value] += 1
             results_by_question.setdefault(str(r.subjective_question_id), []).append(r)
             results_by_student.setdefault(str(r.student_id), {})[str(r.subjective_question_id)] = r.value
             respondent_ids.add(str(r.student_id))
@@ -855,47 +1104,58 @@ class SubjectiveEvaluationService:
         marked_absent = sum(1 for p in presences if not p.present)
         absent = max(marked_absent, max(0, total_students - respondents))
 
-        weighted_sum = totals['SIM'] + totals['PARCIAL'] * 0.5
+        weighted_sum = sum(totals.get(code, 0) * weights.get(code, 0.0) for code in totals)
         hit_rate_pct = round((weighted_sum / total_responses) * 100) if total_responses > 0 else 0
         saeb_global = saeb_from_pct(hit_rate_pct)
         participation_pct = round((respondents / total_students) * 100) if total_students > 0 else 0
 
         distribution = []
-        for name in RUBRIC_VALUES:
-            value = totals[name]
+        for code in mark_codes:
+            value = totals.get(code, 0)
             pct = round((value / total_responses) * 100) if total_responses > 0 else 0
-            distribution.append({"name": name, "value": value, "pct": pct})
+            meta = mark_meta.get(code) or {}
+            distribution.append({
+                "code": code,
+                "name": meta.get("label") or code,
+                "label": meta.get("label") or code,
+                "color": meta.get("color") or "#94a3b8",
+                "weight": meta.get("weight", weights.get(code, 0)),
+                "value": value,
+                "pct": pct,
+            })
 
         # Contagem de QUESTÕES por faixa (mantida para compatibilidade / habilidades).
         saeb_levels = {'abaixo': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
         per_question = []
         for q in questions:
             rows = results_by_question.get(str(q.id), [])
-            counts = {v: 0 for v in RUBRIC_VALUES}
+            counts = {code: 0 for code in mark_codes}
             for r in rows:
-                if r.value in counts:
-                    counts[r.value] += 1
+                if r.value not in counts:
+                    counts[r.value] = 0
+                counts[r.value] += 1
             q_total = len(rows)
-            q_weighted = counts['SIM'] + counts['PARCIAL'] * 0.5
+            q_weighted = sum(counts.get(code, 0) * weights.get(code, 0.0) for code in counts)
             q_hit = round((q_weighted / q_total) * 100) if q_total > 0 else 0
             q_saeb = saeb_from_pct(q_hit) if q_total > 0 else {'level': None, 'label': None}
             if q_total > 0 and q_saeb['level']:
                 saeb_levels[q_saeb['level']] += 1
 
-            per_question.append({
+            item = {
                 "id": q.id,
                 "number": q.number,
                 "code": q.code,
                 "skill_description": q.skill_description,
-                "SIM": counts['SIM'],
-                "PARCIAL": counts['PARCIAL'],
-                "NAO": counts['NAO'],
-                "BRANCO": counts['BRANCO'],
+                "counts": counts,
                 "total": q_total,
                 "hit_rate_pct": q_hit,
                 "saeb_level": q_saeb['level'],
                 "saeb_label": q_saeb['label'],
-            })
+            }
+            # Compatibilidade com o dashboard anterior (chaves SIM/PARCIAL/...).
+            for legacy in RUBRIC_VALUES:
+                item[legacy] = counts.get(legacy, 0)
+            per_question.append(item)
 
         # Alunos por nível SAEB simplificado (mesma fórmula do % individual da rubrica).
         # Usado no hover/seleção do gráfico e na tabelinha do relatório.
@@ -918,7 +1178,7 @@ class SubjectiveEvaluationService:
             if is_present and has_results and n_questions > 0:
                 weighted_student = 0.0
                 for q in questions:
-                    weighted_student += RUBRIC_WEIGHTS.get(value_by_q.get(str(q.id)), 0.0)
+                    weighted_student += weights.get(value_by_q.get(str(q.id)), 0.0)
                 score_pct = round((weighted_student / n_questions) * 100)
                 saeb_info = saeb_from_pct(score_pct)
                 entry = {
@@ -949,6 +1209,7 @@ class SubjectiveEvaluationService:
                 "title": subjective_test.title,
                 "test_type": subjective_test.test_type,
             },
+            "rubric_marks": marks,
             "filters": {
                 "class_id": str(class_id) if class_id is not None else None,
                 "classes": classes_payload,

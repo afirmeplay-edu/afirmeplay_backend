@@ -8,6 +8,15 @@ from weasyprint import HTML, CSS
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 from app.utils.render_math import render_math_in_html, render_math_in_text
+from app.utils.pdf_question_image_optimizer import (
+    ImageOptimizationStats,
+    log_cover_optimization_summary,
+    log_optimization_summary,
+    optimize_base64_asset,
+    optimize_html_data_uris,
+    optimize_letterhead_image,
+    optimize_logo_image,
+)
 from app.utils.afirme_cover_layout import (
     load_afirme_cover_layout,
     student_max_chars,
@@ -88,6 +97,9 @@ class InstitutionalTestWeasyPrintGenerator:
         Substitui <img src="/questions/<question_id>/images/<image_id>"> por data:...;base64,...
         Usa question.images (minio_bucket/minio_object_name) quando existir; senão fallback
         via MinIO com bucket question-images e object_name {question_id}/{image_id}.png
+
+        Não otimiza rasters. A compressão/resize ocorre apenas em
+        _optimize_question_images_for_questions_pdf(), no render das questões.
         """
         if not html or not isinstance(html, str):
             return html or ""
@@ -187,6 +199,228 @@ class InstitutionalTestWeasyPrintGenerator:
 
         return img_tag_pattern.sub(_replace, html)
 
+    def _optimize_question_images_for_questions_pdf(
+        self,
+        questions_by_subject: Dict,
+        questions_by_block: Optional[List],
+    ) -> ImageOptimizationStats:
+        """
+        Otimiza data URIs já inlined no conteúdo das questões.
+
+        Isolado do OMR: só reescreve content/prompt/alternatives. Não altera
+        questions_map, CSS, overlay, nem o HTML do cartão-resposta.
+        """
+        stats = ImageOptimizationStats()
+        cache: Dict[str, str] = {}
+
+        def _optimize_field(value: Any) -> Any:
+            if not value:
+                return value
+            html = str(value)
+            if "data:image/" not in html:
+                return value
+            return Markup(optimize_html_data_uris(html, cache=cache, stats=stats))
+
+        questions_iter: List[Dict] = []
+        if questions_by_block:
+            for block in questions_by_block:
+                for q in (block.get("questions") or []):
+                    if isinstance(q, dict):
+                        questions_iter.append(q)
+        else:
+            for subject_questions in (questions_by_subject or {}).values():
+                for q in subject_questions or []:
+                    if isinstance(q, dict):
+                        questions_iter.append(q)
+
+        for q in questions_iter:
+            q["content"] = _optimize_field(q.get("content"))
+            if q.get("prompt"):
+                q["prompt"] = _optimize_field(q.get("prompt"))
+            if q.get("solution"):
+                q["solution"] = _optimize_field(q.get("solution"))
+            for alt in q.get("alternatives") or []:
+                if isinstance(alt, dict) and alt.get("content"):
+                    alt["content"] = _optimize_field(alt["content"])
+
+        return stats
+
+    def _optimize_print_branding_copy(
+        self,
+        test_data: Optional[Dict],
+        stats: ImageOptimizationStats,
+        include_logo: bool = True,
+    ) -> Dict:
+        """
+        Cópia de test_data com timbrado/logo otimizados.
+
+        Nunca altera o dict original (OMR continua com os bytes originais
+        no CSS compartilhado). Template do timbrado é data:image/png — PNG only.
+        """
+        copied = dict(test_data) if test_data else {}
+        letterhead = copied.get("letterhead_image_base64")
+        if letterhead:
+            copied["letterhead_image_base64"], _ = optimize_base64_asset(
+                letterhead, "image/png", optimize_letterhead_image, stats=stats
+            )
+        if include_logo and copied.get("municipality_logo"):
+            copied["municipality_logo"], _ = optimize_base64_asset(
+                copied["municipality_logo"], "image/png", optimize_logo_image, stats=stats
+            )
+        return copied
+
+    FICHA_COVER_FIELD_KEYS = frozenset({
+        "avaliacao.titulo",
+        "disciplinas.nomes",
+        "serie.nome",
+    })
+
+    def generate_generic_evaluation_pdf(
+        self,
+        test_data: Dict,
+        questions_data: List[Dict],
+        include_gabarito: bool = False,
+    ) -> bytes:
+        """
+        Um PDF da ficha: capa (1 pág) + questões. Sem OMR, sem aluno, sem Celery.
+        """
+        questions_by_subject = self._organize_questions_by_subject(questions_data, test_data)
+        question_number = 1
+        for subject_questions in questions_by_subject.values():
+            for question in subject_questions:
+                question["question_number"] = question_number
+                question_number += 1
+                self._apply_exam_sheet_question_extras(question, include_gabarito)
+
+        image_stats = self._optimize_question_images_for_questions_pdf(
+            questions_by_subject, None
+        )
+        questions_html = self._render_template(
+            "evaluation_exam_sheet.html",
+            {
+                "test_data": test_data,
+                "questions_by_subject": questions_by_subject,
+                "include_gabarito": include_gabarito,
+                "generated_date": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "datetime": datetime,
+            },
+        )
+        questions_pdf_bytes = self._html_to_pdf_bytes(questions_html)
+        log_optimization_summary(image_stats, questions_pdf_bytes)
+
+        cover_pdf_bytes = self._generate_ficha_cover_pdf(test_data, questions_by_subject)
+
+        writer = PdfWriter()
+        cover_reader = PdfReader(io.BytesIO(cover_pdf_bytes))
+        if not cover_reader.pages:
+            raise RuntimeError("Capa da ficha sem páginas")
+        writer.add_page(cover_reader.pages[0])
+        questions_reader = PdfReader(io.BytesIO(questions_pdf_bytes))
+        for page in questions_reader.pages:
+            writer.add_page(page)
+        out = io.BytesIO()
+        writer.write(out)
+        pdf_bytes = out.getvalue()
+        logger.info(
+            "[FICHA] PDF: %.2f MB, %s pág (capa + %s questões)",
+            len(pdf_bytes) / (1024 * 1024),
+            1 + len(questions_reader.pages),
+            question_number - 1,
+        )
+        return pdf_bytes
+
+    def _apply_exam_sheet_question_extras(self, question: Dict, include_gabarito: bool) -> None:
+        qtype = str(question.get("question_type") or "").replace("_", "").replace("-", "").lower()
+        has_alts = bool(question.get("alternatives"))
+        question["is_essay"] = qtype in ("essay", "open", "discursive", "dissertative") or not has_alts
+
+        if include_gabarito:
+            correct = question.get("correct_answer")
+            for alt in question.get("alternatives") or []:
+                if isinstance(alt, dict):
+                    alt["is_correct"] = self._alternative_matches_correct(alt, correct)
+            solution = question.get("formatted_solution") or ""
+            if solution:
+                images_meta = question.get("images") or []
+                inlined = self._inline_question_images_html(str(solution), images_meta)
+                question["solution"] = self._process_html_content(render_math_in_html(inlined))
+            else:
+                question["solution"] = None
+        else:
+            question["solution"] = None
+            for alt in question.get("alternatives") or []:
+                if isinstance(alt, dict):
+                    alt["is_correct"] = False
+            question.pop("correct_answer", None)
+            question.pop("formatted_solution", None)
+
+    @staticmethod
+    def _alternative_matches_correct(alt: Dict, correct: Any) -> bool:
+        if correct is None or correct == "":
+            return bool(alt.get("isCorrect") or alt.get("is_correct") or alt.get("correct"))
+        correct_s = str(correct).strip()
+        letter = str(alt.get("letter") or "").strip()
+        alt_id = str(alt.get("id") or "").strip()
+        return correct_s.upper() == letter.upper() or correct_s == alt_id
+
+    def _ficha_cover_fields_override(self, template: Any) -> Dict[str, Any]:
+        raw = []
+        fields = getattr(template, "fields", None) or {}
+        if isinstance(fields, dict):
+            raw = fields.get("fields") or []
+        elif isinstance(fields, list):
+            raw = fields
+        filtered = [
+            item for item in raw
+            if isinstance(item, dict) and (item.get("key") or "") in self.FICHA_COVER_FIELD_KEYS
+        ]
+        return {"fields": filtered}
+
+    def _generate_ficha_cover_pdf(
+        self,
+        test_data: Dict,
+        questions_by_subject: Dict,
+    ) -> bytes:
+        template, cover_base = self._load_active_cover_template(test_data)
+        if template and cover_base:
+            from app.services.cover_templates.cover_composer import CoverComposer
+            return CoverComposer.compose(
+                cover_base,
+                template,
+                student={},
+                test_data=test_data,
+                sample=False,
+                fields_override=self._ficha_cover_fields_override(template),
+            )
+
+        # Capa Afirme sem otimizador de questões (arte de marca em resolução nativa).
+        test_print = dict(test_data) if test_data else {}
+        afirme_b64, afirme_mime = self._load_afirme_cover_asset()
+        default_logo = self._load_default_logo()
+        cover_html = self._render_template(
+            "institutional_test_hybrid.html",
+            {
+                "test_data": test_print,
+                "student": {"name": "", "school_name": "", "class_name": ""},
+                "questions_by_subject": questions_by_subject,
+                "questions_by_block": None,
+                "blocks_config": {},
+                "questions_map": {},
+                "answer_sheet_image": "",
+                "total_questions": 0,
+                "datetime": datetime,
+                "generated_date": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "default_logo": default_logo,
+                "afirme_cover_base64": afirme_b64,
+                "afirme_cover_mime": afirme_mime,
+                "cover_year": self._cover_year_from_test_data(test_data),
+                "include_cover": True,
+                "include_questions": False,
+                "include_answer_sheet": False,
+            },
+        )
+        return self._html_to_pdf_bytes(cover_html)
+
     def generate_institutional_test_pdf_arch4(
         self,
         test_data: Dict,
@@ -281,10 +515,25 @@ class InstitutionalTestWeasyPrintGenerator:
                             if isinstance(alt, dict) and alt.get('content'):
                                 alt['content'] = Markup(self._inline_question_images_html(str(alt['content']), q.get('images') or []))
 
+        # Rasters das questões: otimizar SOMENTE o conteúdo usado no PDF de questões.
+        # O OMR não renderiza question.content / prompt / alternativas.
+        image_opt_stats = self._optimize_question_images_for_questions_pdf(
+            questions_by_subject, questions_by_block
+        )
+
         default_logo_base64 = self._load_default_logo()
         afirme_cover_base64, afirme_cover_mime = self._load_afirme_cover_asset()
         cover_year = self._cover_year_from_test_data(test_data)
         custom_cover_template, custom_cover_base = self._load_active_cover_template(test_data)
+
+        # Timbrado das questões @ 300 DPI. Capa Afirme/logo: bytes nativos (sem JPEG q80).
+        # OMR recebe test_data original.
+        cover_opt_stats = ImageOptimizationStats()
+        test_data_for_print = self._optimize_print_branding_copy(
+            test_data, cover_opt_stats, include_logo=False
+        )
+        afirme_cover_print, afirme_cover_print_mime = afirme_cover_base64, afirme_cover_mime
+        default_logo_print = default_logo_base64
 
         # ════════════════════════════════════════════════════════════════
         # ETAPA 2: Gerar PDF QUESTÕES (sem capa) - 1× compartilhado
@@ -292,7 +541,7 @@ class InstitutionalTestWeasyPrintGenerator:
         logger.info(f"[ARCH4-A] Gerando PDF questões (sem capa) - 1× para todos")
         
         questions_template_data = {
-            'test_data': test_data,
+            'test_data': test_data_for_print,
             'student': {'school_name': '', 'class_name': '', 'name': ''},
             'questions_by_subject': questions_by_subject,
             'questions_by_block': questions_by_block,
@@ -311,6 +560,8 @@ class InstitutionalTestWeasyPrintGenerator:
         questions_pdf_bytes = self._html_to_pdf_bytes(questions_html)
         questions_reader = PdfReader(io.BytesIO(questions_pdf_bytes))
         logger.info(f"[ARCH4-A] Questões: {len(questions_pdf_bytes) // 1024} kB, {len(questions_reader.pages)} pág")
+        log_optimization_summary(image_opt_stats, questions_pdf_bytes)
+        log_cover_optimization_summary(cover_opt_stats)
 
         # ════════════════════════════════════════════════════════════════
         # ETAPA 3: Gerar Template OMR - 1× compartilhado
@@ -393,7 +644,7 @@ class InstitutionalTestWeasyPrintGenerator:
                     'name': ''
                 }
 
-                test_data_group = test_data.copy()
+                test_data_group = test_data_for_print.copy()
                 test_data_group['grade_name'] = grade
 
                 cover_template_data = {
@@ -407,9 +658,9 @@ class InstitutionalTestWeasyPrintGenerator:
                     'total_questions': total_questions,
                     'datetime': datetime,
                     'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
-                    'default_logo': default_logo_base64,
-                    'afirme_cover_base64': afirme_cover_base64,
-                    'afirme_cover_mime': afirme_cover_mime,
+                    'default_logo': default_logo_print,
+                    'afirme_cover_base64': afirme_cover_print,
+                    'afirme_cover_mime': afirme_cover_print_mime,
                     'cover_year': cover_year,
                     'include_cover': True,
                     'include_questions': False,
@@ -1479,7 +1730,7 @@ class InstitutionalTestWeasyPrintGenerator:
             template = CoverTemplateService.get_active_for_test(test_id)
             if not template:
                 return None, None
-            pdf_bytes = CoverTemplateService().load_normalized_pdf_bytes(template)
+            pdf_bytes = CoverTemplateService().load_print_pdf_bytes(template)
             if not pdf_bytes:
                 return None, None
             return template, pdf_bytes

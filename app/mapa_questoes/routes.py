@@ -80,6 +80,7 @@ def resumo_mapa_questoes():
     Obrigatórios: estado, municipio, avaliacao (exatamente uma).
     Opcionais: escola/escolas, serie/series, turma/turmas (vazio = todas).
     Cartão-resposta: ?report_entity_type=answer_sheet
+    Prova digital: cada questão do resumo inclui ``question_id`` (enunciado via GET /questions/batch).
     """
     try:
         user = get_current_user_from_token()

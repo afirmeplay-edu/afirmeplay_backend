@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<!--
+  Ficha genérica da avaliação (capa é outro PDF).
+  Sem OMR, QR, aluno, bloco físico ou timbrado full-page.
+-->
+<html lang="pt-BR">
+	<head>
+		<meta charset="UTF-8" />
+		<title>{{ test_data.title or "Avaliação" }}</title>
+		<style>
+			@page {
+				size: A4 portrait;
+				margin: 1.5cm 2cm 2cm 2cm;
+				@bottom-left {
+					content: "AfirmePlay Sistema de Ensino e Avaliação";
+					font-family: "Helvetica", Arial, sans-serif;
+					font-size: 7pt;
+					color: #999;
+				}
+				@bottom-center {
+					content: "Página " counter(page);
+					font-family: "Helvetica", Arial, sans-serif;
+					font-size: 7pt;
+					color: #999;
+				}
+				@bottom-right {
+					content: "Gerado em {{ generated_date }}";
+					font-family: "Helvetica", Arial, sans-serif;
+					font-size: 7pt;
+					color: #999;
+				}
+			}
+
+			body {
+				font-family: "Helvetica", Arial, sans-serif;
+				font-size: 10.5pt;
+				color: #000;
+				margin: 0;
+			}
+
+			.subject-header {
+				font-size: 13pt;
+				font-weight: bold;
+				color: #111;
+				border-bottom: 1.5px solid #111;
+				padding-bottom: 4px;
+				margin: 0 0 14px 0;
+				page-break-after: avoid;
+			}
+
+			.subject-block + .subject-block {
+				margin-top: 22px;
+			}
+
+			.question {
+				margin-bottom: 16px;
+				page-break-inside: avoid;
+			}
+
+			.question-header {
+				font-size: 10.5pt;
+				font-weight: bold;
+				margin-bottom: 6px;
+			}
+
+			.skill-code {
+				font-weight: normal;
+				color: #444;
+				margin-left: 6px;
+			}
+
+			.question-content,
+			.question-prompt,
+			.alternative-content,
+			.question-instruction-text,
+			.solution-content {
+				overflow-wrap: break-word;
+				word-break: break-word;
+				max-width: 100%;
+				line-height: 1.45;
+			}
+
+			.question-content img,
+			.question-prompt img,
+			.alternative-content img,
+			.solution-content img {
+				max-width: 100% !important;
+				width: auto !important;
+				height: auto !important;
+				display: block;
+				margin: 8px auto;
+			}
+
+			img.math-inline-img {
+				display: inline !important;
+				width: auto !important;
+				max-width: none !important;
+				height: 2.4em !important;
+				margin: 0 2px 0 0 !important;
+				vertical-align: middle !important;
+			}
+
+			.alternatives {
+				margin-top: 8px;
+			}
+
+			.alternative {
+				display: flex;
+				align-items: flex-start;
+				margin-bottom: 5px;
+			}
+
+			.alternative-letter {
+				font-weight: bold;
+				min-width: 22px;
+				margin-right: 6px;
+			}
+
+			.alternative.is-correct .alternative-letter {
+				color: #0b6b2b;
+			}
+
+			.correct-mark {
+				font-size: 8.5pt;
+				font-weight: bold;
+				color: #0b6b2b;
+				margin-left: 6px;
+			}
+
+			.essay-box {
+				border: 1px solid #bbb;
+				min-height: 4.2cm;
+				margin-top: 8px;
+				background: repeating-linear-gradient(
+					to bottom,
+					transparent,
+					transparent 21px,
+					#ddd 21px,
+					#ddd 22px
+				);
+			}
+
+			.solution-block {
+				margin-top: 8px;
+				padding: 8px 10px;
+				border-left: 3px solid #0b6b2b;
+				background: #f4faf6;
+				page-break-inside: avoid;
+			}
+
+			.solution-title {
+				font-size: 9pt;
+				font-weight: bold;
+				margin-bottom: 4px;
+				color: #0b6b2b;
+			}
+		</style>
+	</head>
+	<body>
+		{% for subject_name, subject_questions in questions_by_subject.items() %}
+		<div class="subject-block">
+			<div class="subject-header">{{ subject_name }}</div>
+			{% for question in subject_questions %}
+			<div class="question">
+				<div class="question-header">
+					Questão {{ question.question_number }}
+					{% if question.skill_code %}
+					<span class="skill-code">({{ question.skill_code }})</span>
+					{% endif %}
+				</div>
+				{% if question.instruction %}
+				<div class="question-instruction-text">{{ question.instruction }}</div>
+				{% endif %}
+				{% if question.title %}
+				<div class="question-title">{{ question.title }}</div>
+				{% endif %}
+				<div class="question-content">{{ question.content|safe }}</div>
+				{% if question.prompt %}
+				<div class="question-prompt">{{ question.prompt|safe }}</div>
+				{% endif %}
+				{% if question.alternatives %}
+				<div class="alternatives">
+					{% for alt in question.alternatives %}
+					<div class="alternative{% if include_gabarito and alt.is_correct %} is-correct{% endif %}">
+						<span class="alternative-letter">({{ alt.letter }})</span>
+						<div class="alternative-content">
+							{{ alt.content|safe }}
+							{% if include_gabarito and alt.is_correct %}
+							<span class="correct-mark">← correta</span>
+							{% endif %}
+						</div>
+					</div>
+					{% endfor %}
+				</div>
+				{% elif question.is_essay %}
+				<div class="essay-box"></div>
+				{% endif %}
+				{% if include_gabarito and question.solution %}
+				<div class="solution-block">
+					<div class="solution-title">Resolução</div>
+					<div class="solution-content">{{ question.solution|safe }}</div>
+				</div>
+				{% endif %}
+			</div>
+			{% endfor %}
+		</div>
+		{% endfor %}
+	</body>
+</html>

@@ -1,0 +1,43 @@
+{
+  "name": "AfirmePlay Backend",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "workspaceFolder": "/workspaces/afirmeplay_backend",
+  "remoteUser": "vscode",
+  "forwardPorts": [5000],
+  "portsAttributes": {
+    "5000": {
+      "label": "Flask API",
+      "onAutoForward": "notify"
+    }
+  },
+  "postCreateCommand": "sed -i 's/\\r$//' .devcontainer/post-create.sh && bash .devcontainer/post-create.sh",
+  "containerEnv": {
+    "APP_ENV": "development",
+    "PYTHONUNBUFFERED": "1",
+    "TZ": "UTC"
+  },
+  "remoteEnv": {
+    "POPPLER_PATH": ""
+  },
+  "mounts": [
+    "source=afirmeplay-pip-cache,target=/home/vscode/.cache/pip,type=volume"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.terminal.activateEnvironment": false,
+        "files.eol": "\n",
+        "editor.insertSpaces": true,
+        "editor.tabSize": 4
+      }
+    }
+  }
+}

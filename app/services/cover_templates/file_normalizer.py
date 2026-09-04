@@ -16,6 +16,10 @@ from app.services.cover_templates.constants import (
     A4_WIDTH_PT,
     MAX_COVER_FILE_BYTES,
 )
+
+# Capa institucional: nunca passar pelo otimizador de questões.
+# Uma página A4 em PNG lossless (JPEG q75 do Pillow gerava ringing em texto/logo).
+COVER_EMBED_JPEG_QUALITY = 92
 from app.services.cover_templates.coordinates import pt_to_mm
 from app.services.cover_templates.exceptions import CoverTemplateValidationError
 
@@ -134,10 +138,25 @@ def _assert_a4_aspect(width: float, height: float, source_label: str) -> None:
     )
 
 
+def encode_cover_raster(image: Image.Image, source_kind: str) -> Tuple[bytes, str]:
+    """
+    Raster da capa no PDF normalizado, na resolução nativa (sem downscale).
+
+    Sempre PNG: uma página, sem ringing em texto/logo/ondas. source_kind
+    permanece o formato do arquivo enviado (jpeg/png).
+    """
+    has_alpha = "A" in image.getbands()
+    if image.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+        image = image.convert("RGBA" if has_alpha else "RGB")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue(), "PNG"
+
+
 def inspect_and_normalize_image(data: bytes, source_kind: str) -> Tuple[Dict[str, Any], bytes]:
     """
     Preserva o original (quem chama armazena `data`).
-    Gera um PDF A4 com a imagem em contain (sem distorcer).
+    Gera um PDF A4 com a imagem em contain (sem distorcer, sem reduzir pixels).
     A proporção precisa ser A4 retrato; DPI do arquivo não é confiável.
     """
     try:
@@ -167,17 +186,14 @@ def inspect_and_normalize_image(data: bytes, source_kind: str) -> Tuple[Dict[str
     x = (page_w - draw_w) / 2.0
     y = (page_h - draw_h) / 2.0
 
+    raster_bytes, raster_format = encode_cover_raster(image, source_kind)
+    img_buffer = io.BytesIO(raster_bytes)
+
     buffer = io.BytesIO()
     canvas = Canvas(buffer, pagesize=(page_w, page_h))
     canvas.setPageSize((page_w, page_h))
     canvas.setFillColorRGB(1, 1, 1)
     canvas.rect(0, 0, page_w, page_h, stroke=0, fill=1)
-    img_buffer = io.BytesIO()
-    save_format = "PNG" if source_kind == "png" or "A" in image.getbands() else "JPEG"
-    if save_format == "JPEG" and image.mode != "RGB":
-        image = image.convert("RGB")
-    image.save(img_buffer, format=save_format)
-    img_buffer.seek(0)
     canvas.drawImage(
         ImageReader(img_buffer),
         x,
@@ -185,7 +201,7 @@ def inspect_and_normalize_image(data: bytes, source_kind: str) -> Tuple[Dict[str
         width=draw_w,
         height=draw_h,
         preserveAspectRatio=True,
-        mask="auto",
+        mask="auto" if raster_format == "PNG" else None,
         anchor="sw",
     )
     canvas.save()
@@ -193,6 +209,9 @@ def inspect_and_normalize_image(data: bytes, source_kind: str) -> Tuple[Dict[str
 
     meta = inspect_pdf(normalized_pdf)
     meta["source_kind"] = source_kind
+    meta["embed_format"] = raster_format
+    meta["source_width_px"] = image.width
+    meta["source_height_px"] = image.height
     return meta, normalized_pdf
 
 

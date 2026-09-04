@@ -79,6 +79,38 @@ class CoverTemplateService:
         object_name = template.normalized_object_name or template.minio_object_name
         return self.minio.download_file(template.minio_bucket, object_name)
 
+    def load_print_pdf_bytes(self, template: CoverTemplate) -> bytes:
+        """
+        PDF da capa para impressão.
+
+        PDF enviado: bytes originais (vetor). Imagem: re-normaliza do original
+        com PNG ou JPEG ≥90 na resolução nativa — corrige capas já gravadas
+        com JPEG qualidade 75 do Pillow.
+        """
+        source_kind = (getattr(template, "source_kind", None) or "").lower()
+        filename = getattr(template, "original_filename", None) or f"capa.{source_kind or 'bin'}"
+
+        if source_kind == "pdf":
+            try:
+                original, _ = self.load_original_bytes(template)
+                if original and original.startswith(b"%PDF"):
+                    return original
+            except Exception as exc:
+                logger.warning("Original PDF da capa indisponível: %s", exc)
+            return self.load_normalized_pdf_bytes(template)
+
+        if source_kind in ("jpeg", "jpg", "png"):
+            try:
+                original, _ = self.load_original_bytes(template)
+                if original:
+                    return normalize_upload(filename, original)["normalized_pdf"]
+            except Exception as exc:
+                logger.warning(
+                    "Re-normalização da capa falhou; usando PDF armazenado: %s",
+                    exc,
+                )
+        return self.load_normalized_pdf_bytes(template)
+
     def create_from_upload(
         self,
         test_id: str,
@@ -314,7 +346,7 @@ class CoverTemplateService:
         if "fields" in payload:
             fields_override = self._canonicalize_fields(template, payload["fields"])
 
-        cover_base = self.load_normalized_pdf_bytes(template)
+        cover_base = self.load_print_pdf_bytes(template)
         student = payload.get("student") if isinstance(payload.get("student"), dict) else {}
         test_data = payload.get("test_data") if isinstance(payload.get("test_data"), dict) else {}
         if not test_data:

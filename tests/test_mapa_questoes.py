@@ -3,6 +3,7 @@
 from app.mapa_questoes.helpers import (
     answer_to_letter,
     build_marcacoes,
+    build_question_row,
     gabarito_letter,
     is_discursive_question,
     is_objective_question,
@@ -81,3 +82,32 @@ def test_marcacoes_incluem_sem_resposta_e_somam_cem():
 def test_percentual_zero_quando_sem_alunos():
     assert percentual(5, 0) == 0.0
     assert percentual(10, 20) == 50.0
+
+
+def test_build_question_row_inclui_question_id_so_quando_informado():
+    row = build_question_row(
+        numero=1,
+        disciplina="Matemática",
+        disciplina_id="mat",
+        habilidade="EF05MA01",
+        gabarito="A",
+        letters=["A", "B", "C", "D"],
+        mark_counts={"A": 2, "B": 1, "C": 0, "D": 0, "sem_resposta": 0},
+        acertaram=2,
+        n_alunos=3,
+        question_id="q-uuid-1",
+    )
+    assert row["question_id"] == "q-uuid-1"
+
+    cartao = build_question_row(
+        numero=1,
+        disciplina="Matemática",
+        disciplina_id="mat",
+        habilidade="EF05MA01",
+        gabarito="A",
+        letters=["A", "B", "C", "D"],
+        mark_counts={"A": 2, "B": 1, "C": 0, "D": 0, "sem_resposta": 0},
+        acertaram=2,
+        n_alunos=3,
+    )
+    assert "question_id" not in cartao

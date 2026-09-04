@@ -22,7 +22,12 @@ from app.services.cover_templates.exceptions import (
     CoverTemplateValidationError,
 )
 from app.services.cover_templates.field_catalog import FIELD_KEYS, resolve_field_value
-from app.services.cover_templates.file_normalizer import inspect_pdf, normalize_upload
+from app.services.cover_templates.file_normalizer import (
+    COVER_EMBED_JPEG_QUALITY,
+    encode_cover_raster,
+    inspect_pdf,
+    normalize_upload,
+)
 from app.services.cover_templates.cover_template_service import CoverTemplateService
 from app.services.institutional_test_weasyprint_generator import (
     InstitutionalTestWeasyPrintGenerator,
@@ -51,6 +56,20 @@ def _square_jpeg_bytes() -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, format="JPEG")
     return buffer.getvalue()
+
+
+def _pdf_image_filters(pdf_bytes: bytes) -> list:
+    page = PdfReader(io.BytesIO(pdf_bytes)).pages[0]
+    resources = (page.get("/Resources") or {}).get_object()
+    xobjects = (resources.get("/XObject") or {})
+    if hasattr(xobjects, "get_object"):
+        xobjects = xobjects.get_object()
+    filters = []
+    for name in xobjects:
+        obj = xobjects[name].get_object()
+        if obj.get("/Subtype") == "/Image":
+            filters.append(str(obj.get("/Filter")))
+    return filters
 
 
 class _FakeTemplate:
@@ -114,6 +133,59 @@ class TestCoverTemplates(unittest.TestCase):
         box = reader.pages[0].mediabox
         self.assertLess(abs(float(box.width) - A4_WIDTH_PT), 1)
         self.assertLess(abs(float(box.height) - A4_HEIGHT_PT), 1)
+
+    def test_graphic_jpeg_cover_embeds_as_png(self):
+        original = _a4_jpeg_bytes()
+        result = normalize_upload("capa.jpg", original)
+        self.assertEqual(result.get("embed_format"), "PNG")
+        self.assertEqual(result.get("source_width_px"), 827)
+        self.assertEqual(result.get("source_height_px"), 1169)
+        filters = _pdf_image_filters(result["normalized_pdf"])
+        self.assertTrue(filters)
+        self.assertTrue(all("DCTDecode" not in item for item in filters))
+
+    def test_photo_cover_is_embedded_as_lossless_png(self):
+        import numpy as np
+
+        rng = np.random.default_rng(7)
+        arr = rng.integers(0, 256, size=(1169, 827, 3), dtype="uint8")
+        image = Image.fromarray(arr, "RGB")
+        high, fmt = encode_cover_raster(image, "jpeg")
+        self.assertEqual(fmt, "PNG")
+        self.assertGreaterEqual(COVER_EMBED_JPEG_QUALITY, 90)
+        out = Image.open(io.BytesIO(high))
+        self.assertEqual(out.size, image.size)
+        self.assertEqual(list(out.getdata())[0], list(image.getdata())[0])
+
+    def test_load_print_pdf_uses_original_for_pdf_source(self):
+        original = _a4_pdf_bytes("CAPA VETOR")
+        svc = CoverTemplateService(minio=MagicMock())
+        template = SimpleNamespace(
+            source_kind="pdf",
+            original_filename="capa.pdf",
+            minio_bucket="covers",
+            minio_object_name="orig.pdf",
+            normalized_object_name="norm.pdf",
+        )
+        svc.load_original_bytes = lambda _t: (original, "application/pdf")
+        self.assertEqual(svc.load_print_pdf_bytes(template), original)
+
+    def test_load_print_pdf_renormalizes_jpeg_original(self):
+        original = _a4_jpeg_bytes()
+        svc = CoverTemplateService(minio=MagicMock())
+        template = SimpleNamespace(
+            source_kind="jpeg",
+            original_filename="capa.jpg",
+            minio_bucket="covers",
+            minio_object_name="orig.jpg",
+            normalized_object_name="norm.pdf",
+        )
+        svc.load_original_bytes = lambda _t: (original, "image/jpeg")
+        pdf = svc.load_print_pdf_bytes(template)
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        meta = inspect_pdf(pdf)
+        self.assertEqual(meta["page_count"], 1)
+        self.assertTrue(all("DCTDecode" not in item for item in _pdf_image_filters(pdf)))
 
     def test_image_wrong_aspect_rejected(self):
         with self.assertRaises(CoverTemplateValidationError) as ctx:

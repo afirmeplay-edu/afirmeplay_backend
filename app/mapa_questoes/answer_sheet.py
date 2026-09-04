@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 from app.mapa_questoes.helpers import (
     build_question_row,
     empty_payload,
+    join_habilidade_campos,
     letters_for_answer_sheet,
     media_acertos_percentual,
 )
@@ -38,16 +39,12 @@ def _ensure_tenant_schema(municipio_id: str) -> None:
     set_search_path(city_id_to_schema_name(str(municipio_id).strip()))
 
 
-def _skill_code_for_question(skill_ids: Sequence[str], skills_db: Dict[str, Any]) -> str:
-    codes: List[str] = []
-    seen: Set[str] = set()
-    for sid in skill_ids:
-        obj = skills_db.get(str(sid))
-        codigo, _ = _habilidade_codigo_e_descricao(str(sid), obj)
-        if codigo and codigo not in seen:
-            codes.append(codigo)
-            seen.add(codigo)
-    return ", ".join(codes) if codes else "N/A"
+def _skill_code_for_question(skill_ids: Sequence[str], skills_db: Dict[str, Any]) -> tuple[str, str]:
+    pairs = [
+        _habilidade_codigo_e_descricao(str(sid), skills_db.get(str(sid)))
+        for sid in skill_ids
+    ]
+    return join_habilidade_campos(pairs)
 
 
 def _resolve_subject_name(subject_id: str, fallback: str) -> str:
@@ -206,12 +203,14 @@ def build_mapa_questoes_answer_sheet(
                 "questoes": [],
             }
 
+        codigo, descricao = _skill_code_for_question(q_skills.get(qn) or [], skills_db)
         por_disciplina_map[disciplina_id]["questoes"].append(
             build_question_row(
                 numero=qn,
                 disciplina=disciplina_nome,
                 disciplina_id=disciplina_id,
-                habilidade=_skill_code_for_question(q_skills.get(qn) or [], skills_db),
+                habilidade=codigo,
+                habilidade_descricao=descricao,
                 gabarito=gabarito,
                 letters=letters,
                 mark_counts=mark_counts,

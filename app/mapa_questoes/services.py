@@ -17,6 +17,7 @@ from app.mapa_questoes.helpers import (
     empty_payload,
     gabarito_letter,
     is_objective_question,
+    join_habilidade_campos,
     letters_for_alternatives,
     media_acertos_percentual,
 )
@@ -46,24 +47,25 @@ def _ensure_tenant_schema(municipio_id: str) -> None:
     set_search_path(city_id_to_schema_name(str(municipio_id).strip()))
 
 
-def _skill_codes_for_question(question: Question, skills_db: Dict[str, Any]) -> str:
+def _skill_codes_for_question(question: Question, skills_db: Dict[str, Any]) -> tuple[str, str]:
     raw_ids = _extract_skill_ids_from_question_field(getattr(question, "skill", None))
-    codes: List[str] = []
-    seen: Set[str] = set()
+    pairs: List[tuple[str, str]] = []
     for sid in raw_ids:
         obj = skills_db.get(_norm_skill_key(sid)) or skills_db.get(str(sid))
         if obj:
-            codigo, _ = _habilidade_codigo_e_descricao(str(sid), obj)
-        else:
-            try:
-                UUID(str(sid).strip())
-                codigo = "N/A"
-            except ValueError:
-                codigo = str(sid).strip() or "N/A"
-        if codigo and codigo not in seen:
-            codes.append(codigo)
-            seen.add(codigo)
-    return ", ".join(codes) if codes else "N/A"
+            pairs.append(_habilidade_codigo_e_descricao(str(sid), obj))
+            continue
+        try:
+            UUID(str(sid).strip())
+            pairs.append(
+                (
+                    "N/A",
+                    "Esta habilidade não foi encontrada na base de habilidades.",
+                )
+            )
+        except ValueError:
+            pairs.append((str(sid).strip() or "N/A", ""))
+    return join_habilidade_campos(pairs)
 
 
 def _disciplinas_header(test: Test, objective_questions: List[Question]) -> List[Dict[str, str]]:
@@ -244,12 +246,14 @@ def build_mapa_questoes_digital(
                 "questoes": [],
             }
 
+        codigo, descricao = _skill_codes_for_question(q, skills_db)
         por_disciplina_map[disciplina_id]["questoes"].append(
             build_question_row(
                 numero=item["numero"],
                 disciplina=disciplina_nome,
                 disciplina_id=disciplina_id,
-                habilidade=_skill_codes_for_question(q, skills_db),
+                habilidade=codigo,
+                habilidade_descricao=descricao,
                 gabarito=gabarito,
                 letters=letters,
                 mark_counts=mark_counts,

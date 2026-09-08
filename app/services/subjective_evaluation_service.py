@@ -573,6 +573,7 @@ class SubjectiveEvaluationService:
                 "id": subjective_test.id,
                 "title": subjective_test.title,
                 "test_type": subjective_test.test_type,
+                "subject": SubjectiveEvaluationService._subject_ref(subjective_test),
             },
             "rubric_marks": SubjectiveEvaluationService.get_rubric_marks(subjective_test_id),
             "classification_legend": SubjectiveEvaluationService.get_classification_legend_for_test(
@@ -683,6 +684,20 @@ class SubjectiveEvaluationService:
         if subjective_test.subject_rel:
             subject_name = subjective_test.subject_rel.name
         return course_name, subject_name
+
+    @staticmethod
+    def _subject_ref(subjective_test: SubjectiveTest) -> Optional[Dict[str, Any]]:
+        """id + nome da disciplina, no mesmo formato de format_subjective_test_response."""
+        rel = getattr(subjective_test, 'subject_rel', None)
+        if rel:
+            return {'id': rel.id, 'name': rel.name}
+        if not subjective_test.subject_id:
+            return None
+        from app.models.subject import Subject
+        obj = Subject.query.get(subjective_test.subject_id)
+        if not obj:
+            return {'id': subjective_test.subject_id, 'name': None}
+        return {'id': obj.id, 'name': obj.name}
 
     @staticmethod
     def get_classification_legend_for_test(subjective_test: SubjectiveTest) -> Dict[str, Any]:
@@ -1208,6 +1223,7 @@ class SubjectiveEvaluationService:
                 "id": subjective_test.id,
                 "title": subjective_test.title,
                 "test_type": subjective_test.test_type,
+                "subject": SubjectiveEvaluationService._subject_ref(subjective_test),
             },
             "rubric_marks": marks,
             "filters": {
@@ -1483,15 +1499,30 @@ class SubjectiveEvaluationService:
             filtered_contexts = narrowed
 
         # Avaliações (já corrigidas e no recorte)
+        from app.models.subject import Subject
+        subject_ids = {ctx["test"].subject_id for ctx in filtered_contexts if ctx["test"].subject_id}
+        subjects_by_id = {}
+        if subject_ids:
+            for subj in Subject.query.filter(Subject.id.in_(list(subject_ids))).all():
+                subjects_by_id[subj.id] = subj.name
+
         avaliacoes = []
         for ctx in filtered_contexts:
             test = ctx["test"]
+            subject_name = subjects_by_id.get(test.subject_id)
+            subject_payload = (
+                {"id": test.subject_id, "name": subject_name}
+                if test.subject_id
+                else None
+            )
             avaliacoes.append({
                 "id": test.id,
                 "titulo": test.title,
                 "test_type": test.test_type,
                 "grade_id": str(test.grade_id) if test.grade_id else None,
                 "subject_id": test.subject_id,
+                "subject": subject_payload,
+                "disciplina": subject_name,
             })
         # Dedup + sort
         seen = set()

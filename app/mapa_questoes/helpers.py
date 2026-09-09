@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.utils.decimal_helpers import round_to_two_decimals
 
@@ -178,6 +178,31 @@ def build_marcacoes(
     return rows
 
 
+def join_habilidade_campos(items: Sequence[Tuple[str, str]]) -> Tuple[str, str]:
+    """Junta códigos e descrições de habilidade, sem repetir código."""
+    unique: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for codigo, descricao in items:
+        code = (codigo or "").strip() or "N/A"
+        if code in seen:
+            continue
+        seen.add(code)
+        unique.append((code, (descricao or "").strip()))
+    if not unique:
+        return "N/A", ""
+    code_str = ", ".join(code for code, _ in unique)
+    if len(unique) == 1:
+        _code, desc = unique[0]
+        return code_str, "" if desc in ("", "—") else desc
+    lines: List[str] = []
+    for code, desc in unique:
+        if desc and desc != "—":
+            lines.append(f"{code} — {desc}")
+        else:
+            lines.append(code)
+    return code_str, "\n\n".join(lines)
+
+
 def empty_payload(
     estado: str,
     municipio_id: str,
@@ -221,12 +246,14 @@ def build_question_row(
     acertaram: int,
     n_alunos: int,
     question_id: Optional[str] = None,
+    habilidade_descricao: str = "",
 ) -> Dict[str, Any]:
     row: Dict[str, Any] = {
         "numero": numero,
         "disciplina": disciplina,
         "disciplina_id": disciplina_id,
         "habilidade": habilidade or "N/A",
+        "habilidade_descricao": habilidade_descricao or "",
         "gabarito": gabarito or "",
         "taxa_acertos": {
             "acertaram": acertaram,

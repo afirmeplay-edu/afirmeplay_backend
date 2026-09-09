@@ -614,20 +614,33 @@ CREATE TABLE IF NOT EXISTS "{schema}".subjective_questions (
 CREATE INDEX IF NOT EXISTS idx_subjective_questions_test_id ON "{schema}".subjective_questions(subjective_test_id);
 COMMENT ON TABLE "{schema}".subjective_questions IS 'Estrutura da questão da avaliação subjetiva: número, código e habilidade digitada livremente';
 
+CREATE TABLE IF NOT EXISTS "{schema}".subjective_rubric_marks (
+    id VARCHAR PRIMARY KEY,
+    subjective_test_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_tests(id) ON DELETE CASCADE,
+    code VARCHAR(20) NOT NULL,
+    label VARCHAR(80) NOT NULL,
+    color VARCHAR(20) NOT NULL DEFAULT '#64748b',
+    weight FLOAT NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_subjective_rubric_mark_test_code UNIQUE(subjective_test_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_subjective_rubric_marks_test_id ON "{schema}".subjective_rubric_marks(subjective_test_id);
+COMMENT ON TABLE "{schema}".subjective_rubric_marks IS 'Marcações configuráveis da rubrica (rótulo, sigla, cor, peso) por avaliação subjetiva';
+
 CREATE TABLE IF NOT EXISTS "{schema}".subjective_results (
     id VARCHAR PRIMARY KEY,
     subjective_test_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_tests(id) ON DELETE CASCADE,
     subjective_question_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_questions(id) ON DELETE CASCADE,
     student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
-    value VARCHAR(10) NOT NULL,
+    value VARCHAR(50) NOT NULL,
     corrected_by VARCHAR REFERENCES public.users(id),
     corrected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_subjective_result_test_question_student UNIQUE(subjective_test_id, subjective_question_id, student_id),
-    CONSTRAINT ck_subjective_result_value CHECK (value IN ('SIM', 'PARCIAL', 'NAO', 'BRANCO'))
+    CONSTRAINT uq_subjective_result_test_question_student UNIQUE(subjective_test_id, subjective_question_id, student_id)
 );
 CREATE INDEX IF NOT EXISTS idx_subjective_results_test_id ON "{schema}".subjective_results(subjective_test_id);
 CREATE INDEX IF NOT EXISTS idx_subjective_results_student_id ON "{schema}".subjective_results(student_id);
-COMMENT ON TABLE "{schema}".subjective_results IS 'Rubrica de correção manual (SIM/PARCIAL/NAO/BRANCO) da avaliação subjetiva';
+COMMENT ON TABLE "{schema}".subjective_results IS 'Lançamento da marcação (code da rubrica) por aluno e questão';
 
 CREATE TABLE IF NOT EXISTS "{schema}".subjective_presences (
     id VARCHAR PRIMARY KEY,
@@ -640,6 +653,30 @@ CREATE TABLE IF NOT EXISTS "{schema}".subjective_presences (
 );
 CREATE INDEX IF NOT EXISTS idx_subjective_presences_test_id ON "{schema}".subjective_presences(subjective_test_id);
 COMMENT ON TABLE "{schema}".subjective_presences IS 'Presença do aluno na aplicação da avaliação subjetiva';
+"""
+
+
+def get_subjective_rubric_marks_upgrade_ddl(schema: str) -> str:
+    """
+    Upgrade idempotente para schemas city_* já provisionados:
+    cria subjective_rubric_marks, alarga value e remove o CHECK do enum fixo.
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".subjective_rubric_marks (
+    id VARCHAR PRIMARY KEY,
+    subjective_test_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_tests(id) ON DELETE CASCADE,
+    code VARCHAR(20) NOT NULL,
+    label VARCHAR(80) NOT NULL,
+    color VARCHAR(20) NOT NULL DEFAULT '#64748b',
+    weight FLOAT NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_subjective_rubric_mark_test_code UNIQUE(subjective_test_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_subjective_rubric_marks_test_id ON "{schema}".subjective_rubric_marks(subjective_test_id);
+COMMENT ON TABLE "{schema}".subjective_rubric_marks IS 'Marcações configuráveis da rubrica (rótulo, sigla, cor, peso) por avaliação subjetiva';
+ALTER TABLE "{schema}".subjective_results DROP CONSTRAINT IF EXISTS ck_subjective_result_value;
+ALTER TABLE "{schema}".subjective_results ALTER COLUMN value TYPE VARCHAR(50);
 """
 
 

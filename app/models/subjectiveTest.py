@@ -6,7 +6,8 @@ Diferente da avaliação online, aqui a prova em si é física/impressa e fica f
 sistema — só a ESTRUTURA é cadastrada (quantidade de questões e, para cada uma, uma
 habilidade digitada livremente). Não há enunciado, alternativas nem gabarito
 estruturado (ver SubjectiveQuestion). A correção é sempre manual, célula a célula
-(aluno x questão), usando a rubrica SIM/PARCIAL/NAO/BRANCO (ver SubjectiveResult).
+(aluno x questão), usando as marcações configuráveis da avaliação
+(ver SubjectiveRubricMark / SubjectiveResult).
 
 `shadow_test_id` aponta para um registro "espelho" em tenant.test (evaluation_mode
 'subjective', sem questões reais nele), criado internamente só para reaproveitar o

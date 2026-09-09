@@ -124,7 +124,7 @@
 		.afirme-cover-logo-company {
 			position: absolute;
 			top: {{ afirme_cover_layout.company_logo.top_cm | default(9.0) }}cm;
-			left: {{ afirme_cover_layout.company_logo.left_cm | default(0.75) }}cm;
+			left: {{ afirme_cover_layout.company_logo.left_cm | default(2.14) }}cm;
 			width: {{ afirme_cover_layout.company_logo.width_cm | default(10.77) }}cm;
 			height: {{ afirme_cover_layout.company_logo.height_cm | default(7.7) }}cm;
 			border-radius: 50%;
@@ -513,7 +513,7 @@
 			.skill-code {
 				font-size: 10pt;
 				color: #fff;
-				font-weight: bold;
+				font-weight: normal;
 				margin-left: 8px;
 				display: inline;
 			}
@@ -1289,7 +1289,8 @@
 		<!-- Capa Institucional -->
 		{% if include_cover %}
 		{% if afirme_cover_base64 %}
-		{% set cover_logo = test_data.municipality_logo or default_logo %}
+		{% set municipality_cover_logo = test_data.municipality_logo or default_logo %}
+		{% set system_cover_logo = default_logo %}
 		{% set grade_name = test_data.grade_name or '' %}
 		{% set grade_parts = grade_name.split() %}
 		{% set subject_names = questions_by_subject.keys() | list %}
@@ -1299,12 +1300,14 @@
 				src="data:{{ afirme_cover_mime | default('image/jpeg') }};base64,{{ afirme_cover_base64 }}"
 				alt="" />
 			<div class="afirme-cover-overlay">
-				{% if cover_logo %}
+				{% if municipality_cover_logo %}
 				<div class="afirme-cover-logo-municipality">
-					<img src="data:image/png;base64,{{ cover_logo }}" alt="" />
+					<img src="data:image/png;base64,{{ municipality_cover_logo }}" alt="" />
 				</div>
+				{% endif %}
+				{% if system_cover_logo %}
 				<div class="afirme-cover-logo-company">
-					<img src="data:image/png;base64,{{ cover_logo }}" alt="" />
+					<img src="data:image/png;base64,{{ system_cover_logo }}" alt="" />
 				</div>
 				{% endif %}
 				<div class="afirme-cover-title">

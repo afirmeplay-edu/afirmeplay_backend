@@ -58,15 +58,24 @@
 			}
 
 			.question-header {
+				margin-bottom: 12px;
+				background: #7030A0;
+				padding: 8px 12px;
+			}
+
+			.question-number {
 				font-size: 10.5pt;
 				font-weight: bold;
-				margin-bottom: 6px;
+				color: #fff;
+				display: inline;
 			}
 
 			.skill-code {
+				font-size: 10.5pt;
 				font-weight: normal;
-				color: #444;
-				margin-left: 6px;
+				color: #fff;
+				margin-left: 8px;
+				display: inline;
 			}
 
 			.question-content,
@@ -163,7 +172,9 @@
 			{% for question in subject_questions %}
 			<div class="question">
 				<div class="question-header">
-					Questão {{ question.question_number }}
+					<span class="question-number"
+						>Questão {{ question.question_number }}</span
+					>
 					{% if question.skill_code %}
 					<span class="skill-code">({{ question.skill_code }})</span>
 					{% endif %}

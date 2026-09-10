@@ -26,6 +26,7 @@ ESCOLARIDADE_PAI_KEYS = ["q10", "q9"]
 # - Formulário atual (aluno_jovem/velho): bens em q13; q12 é infra na rua (Sim/Não) —
 #   esses são ignorados e usa-se q13.
 # - Formulário legado (formsData): bens em q12, serviços em q13 — q12 vence.
+# - SAEB 2025 (aluno-jovem): q13h ar-condicionado, q13i instrumento musical.
 BENS_MAP = {
     "geladeira": ["q12a", "q13a"],
     "computador": ["q12b", "q13b"],
@@ -34,10 +35,13 @@ BENS_MAP = {
     "banheiro": ["q12e", "q13e"],
     "carro": ["q12f", "q13f"],
     "celular": ["q12g", "q13g"],
+    "ar_condicionado": ["q13h"],
+    "instrumento_musical": ["q13i"],
 }
 
-# Serviços (sim/não): conceito -> lista de chaves possíveis [q14a ou q13a, ...]
-SERVICOS_MAP = {
+# Serviços (sim/não) — layout legado (SAEB 2023):
+# q14c = quarto só seu … q14i = garagem
+SERVICOS_MAP_LEGACY = {
     "tv_internet": ["q14a", "q13a"],
     "wifi": ["q14b", "q13b"],
     "quarto_so_seu": ["q14c", "q13c"],
@@ -49,6 +53,31 @@ SERVICOS_MAP = {
     "garagem": ["q14i", "q13i"],
 }
 
+# Serviços SAEB 2025 (aluno-jovem): removeu "quarto só seu"; letras c+ deslocadas;
+# novos itens i/j/k (estante, PC escolar, lugar estudar).
+SERVICOS_MAP_SAEB_2025 = {
+    "tv_internet": ["q14a"],
+    "wifi": ["q14b"],
+    "quarto_so_seu": [],  # removido no SAEB 2025
+    "mesa_estudar": ["q14c"],
+    "microondas": ["q14d"],
+    "aspirador": ["q14e"],
+    "maquina_lavar": ["q14f"],
+    "freezer": ["q14g"],
+    "garagem": ["q14h"],
+    "estante_livros": ["q14i"],
+    "computador_escolar": ["q14j"],
+    "lugar_estudar": ["q14k"],
+}
+
+# Compat: consumidores que iteram SERVICOS_MAP (união das chaves).
+SERVICOS_MAP = {**SERVICOS_MAP_LEGACY, "estante_livros": ["q14i"], "computador_escolar": ["q14j"], "lugar_estudar": ["q14k"]}
+
+
+def _is_saeb_2025_servicos_layout(responses: Dict[str, Any]) -> bool:
+    """Detecta layout SAEB 2025 de serviços (q14j/q14k exclusivos desse template)."""
+    return "q14j" in responses or "q14k" in responses
+
 # ---------------------------------------------------------------------------
 # Aliases semânticos: texto da opção -> conceito estável
 # ---------------------------------------------------------------------------
@@ -59,10 +88,12 @@ ESCOLARIDADE_ALIAS = {
         "Não completou o 5º ano",
         "Não completou a 4ª série",
         "Não completou a 4ª série ou o 5º ano do Ensino Fundamental",
+        "Não completou o 5º ano (4ª série) do Ensino Fundamental",
     ],
     "fundamental_ate_4": [
         "Ensino Fundamental, até a 4ª série ou o 5º ano",
         "Ensino Fundamental até o 5º ano",
+        "Ensino Fundamental, até o 5º ano",
     ],
     "fundamental_completo": [
         "Ensino Fundamental completo",
@@ -72,10 +103,14 @@ ESCOLARIDADE_ALIAS = {
     ],
     "superior_completo": [
         "Ensino Superior completo (faculdade ou graduação)",
+        "Ensino Superior completo (faculdade, graduação)",
         "Ensino Superior completo",
+        "Pós-graduação (especialização, mestrado, doutorado)",
     ],
     "nao_sei": [
         "Não sei",
+        "Não se aplica (não tenho mãe/madrasta)",
+        "Não se aplica (não tenho pai/padrasto)",
     ],
 }
 
@@ -225,8 +260,16 @@ def normalizar_respostas(responses: Dict[str, Any]) -> Dict[str, Any]:
         raw = _first_bem_quantidade_bruta(responses, keys)
         bens[item] = normalizar_quantidade_bens(raw)
 
-    servicos = {}
-    for item, keys in SERVICOS_MAP.items():
+    servicos_map = (
+        SERVICOS_MAP_SAEB_2025
+        if _is_saeb_2025_servicos_layout(responses)
+        else SERVICOS_MAP_LEGACY
+    )
+    servicos = {k: False for k in SERVICOS_MAP}
+    for item, keys in servicos_map.items():
+        if not keys:
+            servicos[item] = False
+            continue
         raw = _first_value(responses, keys)
         val = normalizar_sim_nao(raw)
         servicos[item] = val if val is not None else False

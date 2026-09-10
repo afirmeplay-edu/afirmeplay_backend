@@ -90,18 +90,18 @@ Este guia descreve como consumir, no frontend, os indicadores PNEERQ calculados 
 
 ### Eixo 2 — Diagnóstico e Monitoramento
 - **`age_grade_distortion`**: % em distorção idade-série conforme a tabela do template (base: série/curso + idade).
-- **`dropout_history`**: % `q21 != "Nunca"`
+- **`dropout_history`**: % abandono != `"Nunca"` (SAEB 2025: `q19`; legado: `q21`)
 
 ### Eixo 3/4 — Formação e Currículo
-- **`curricular_silencing_index`**: % `q23d` em `["Poucos deles", "Nenhum deles"]`
+- **`curricular_silencing_index`**: baixa abordagem de diferenças étnico-raciais (SAEB 2025: `q22a` em `Nunca`/`Poucas vezes`; legado: `q23d` em `Poucos deles`/`Nenhum deles`)
 
 ### Eixo 5 — Clima/Segurança
-- **`violence_bullying_low_approach`**: % `q23f` em `["Poucos deles", "Nenhum deles"]`
-- **`safety_perception_low`**: % `q24d` em `["Discordo", "Discordo totalmente"]`
+- **`violence_bullying_low_approach`**: baixa abordagem de bullying (SAEB 2025: `q22d`; legado: `q23f`)
+- **`safety_perception_low`**: percepção de segurança baixa (SAEB 2025: `q23d` em `Discordo em parte`/`Discordo totalmente`; legado: `q24d`)
 
 ### Eixo 6 — Afirmação de trajetórias
-- **`teacher_expectation_low_capable`**: % `q24h` em `["Discordo", "Discordo totalmente"]`
-- **`teacher_expectation_low_motivation`**: % `q24i` em `["Discordo", "Discordo totalmente"]`
+- **`teacher_expectation_low_capable`**: expectativa docente baixa (SAEB 2025: `q23h`; legado: `q24h`)
+- **`teacher_expectation_low_motivation`**: motivação docente baixa (SAEB 2025: `q23i`; legado: `q24i`)
 
 ### Eixo 7 — Difusão de saberes
 - **`home_language_non_portuguese`**: % `q4 != "Português"`

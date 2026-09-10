@@ -54,6 +54,7 @@ def _parse_age(value: Optional[str]) -> Optional[int]:
     - "Menos de 3 anos" => 2
     - "13 anos ou menos" => 13
     - "13 anos ou mais" => 13
+    - "14 anos ou mais" => 14
     - "18 anos ou mais" => 18
     """
     s = (_normalize_str(value) or "").lower()
@@ -69,6 +70,36 @@ def _parse_age(value: Optional[str]) -> Optional[int]:
         return None
     return int(m.group(1))
 
+
+_DROPOUT_OPTIONS = {"Nunca", "Sim, uma vez", "Sim, duas vezes ou mais"}
+_FREQ_THEME_OPTIONS = {"Nunca", "Poucas vezes", "Algumas vezes", "Sempre"}
+_PROPORTION_OPTIONS = {"Todos eles", "A maior parte deles", "Poucos deles", "Nenhum deles"}
+_AGREE_OPTIONS_LEGACY = {"Concordo totalmente", "Concordo", "Discordo", "Discordo totalmente"}
+_AGREE_OPTIONS_2025 = {
+    "Concordo totalmente",
+    "Concordo em parte",
+    "Discordo em parte",
+    "Discordo totalmente",
+}
+
+
+def _first_matching_response(
+    responses: Dict[str, Any],
+    keys: List[str],
+    allowed: Optional[set] = None,
+) -> Optional[str]:
+    for key in keys:
+        value = _normalize_str(responses.get(key))
+        if not value:
+            continue
+        if allowed is None or value in allowed:
+            return value
+    return None
+
+
+def _is_saeb_2025_layout(responses: Dict[str, Any]) -> bool:
+    """Layout SAEB 2025 (aluno-jovem/velho): q25 clima escolar e/ou q14j/q14k."""
+    return any(k in responses for k in ("q25a", "q14j", "q14k"))
 
 def _parse_grade_from_text(value: Optional[str]) -> Optional[int]:
     """
@@ -214,16 +245,37 @@ class PneerqService:
             municipio_id = getattr(city, "id", None)
             return (str(school_id) if school_id else None, str(municipio_id) if municipio_id else None)
 
-        # Regras de respostas
-        curricular_silencing_bad = {"Poucos deles", "Nenhum deles"}
-        bullying_low_bad = {"Poucos deles", "Nenhum deles"}
-        agree_disagree_negative = {"Discordo", "Discordo totalmente"}
+        # Regras de respostas (legado SAEB 2023 + SAEB 2025)
+        curricular_silencing_bad = {"Poucos deles", "Nenhum deles", "Nunca", "Poucas vezes"}
+        bullying_low_bad = {"Poucos deles", "Nenhum deles", "Nunca", "Poucas vezes"}
+        agree_disagree_negative = {
+            "Discordo",
+            "Discordo totalmente",
+            "Discordo em parte",
+        }
 
-        curricular_labels = ["Todos eles", "A maior parte deles", "Poucos deles", "Nenhum deles"]
-        expectativa_labels = ["Concordo totalmente", "Concordo", "Discordo", "Discordo totalmente"]
+        curricular_labels = [
+            "Todos eles",
+            "A maior parte deles",
+            "Poucos deles",
+            "Nenhum deles",
+            "Nunca",
+            "Poucas vezes",
+            "Algumas vezes",
+            "Sempre",
+        ]
+        expectativa_labels = [
+            "Concordo totalmente",
+            "Concordo",
+            "Concordo em parte",
+            "Discordo",
+            "Discordo em parte",
+            "Discordo totalmente",
+        ]
 
         for response, _user, _student, school, grade, _class, city in results:
             responses_data = response.responses or {}
+            saeb_2025 = _is_saeb_2025_layout(responses_data)
 
             race_raw = _normalize_str(responses_data.get("q5"))
             race_key = _race_group(race_raw)
@@ -238,36 +290,60 @@ class PneerqService:
                 if threshold is not None and age >= threshold:
                     _inc(num_age_distortion_by_race, race_key)
 
-            # === Eixo 2: abandono (q21) ===
-            q21 = _normalize_str(responses_data.get("q21"))
-            if q21 and q21 != "Nunca":
+            # === Eixo 2: abandono (SAEB 2025 q19; legado q21) ===
+            q_dropout = _first_matching_response(
+                responses_data,
+                ["q19", "q21"] if saeb_2025 else ["q21", "q19"],
+                _DROPOUT_OPTIONS,
+            )
+            if q_dropout and q_dropout != "Nunca":
                 _inc(num_dropout_by_race, race_key)
 
-            # === Eixo 3/4: silenciamento curricular (q23d) ===
-            q23d = _normalize_str(responses_data.get("q23d"))
-            if q23d:
-                curricular_distribution[q23d] = curricular_distribution.get(q23d, 0) + 1
-            if q23d in curricular_silencing_bad:
+            # === Eixo 3/4: silenciamento curricular (SAEB 2025 q22a; legado q23d) ===
+            q_racial = _first_matching_response(
+                responses_data,
+                ["q22a", "q23d"] if saeb_2025 else ["q23d", "q22a"],
+                _FREQ_THEME_OPTIONS | _PROPORTION_OPTIONS,
+            )
+            if q_racial:
+                curricular_distribution[q_racial] = curricular_distribution.get(q_racial, 0) + 1
+            if q_racial in curricular_silencing_bad:
                 _inc(num_curricular_silencing_by_race, race_key)
 
-            # === Eixo 5: bullying/violência (q23f) ===
-            q23f = _normalize_str(responses_data.get("q23f"))
-            if q23f in bullying_low_bad:
+            # === Eixo 5: bullying/violência (SAEB 2025 q22d; legado q23f) ===
+            q_bullying = _first_matching_response(
+                responses_data,
+                ["q22d", "q23f"] if saeb_2025 else ["q23f", "q22d"],
+                _FREQ_THEME_OPTIONS | _PROPORTION_OPTIONS,
+            )
+            if q_bullying in bullying_low_bad:
                 _inc(num_bullying_low_by_race, race_key)
 
-            # === Eixo 5: percepção de segurança (q24d) ===
-            q24d = _normalize_str(responses_data.get("q24d"))
-            if q24d in agree_disagree_negative:
+            # === Eixo 5: percepção de segurança (SAEB 2025 q23d; legado q24d) ===
+            q_safety = _first_matching_response(
+                responses_data,
+                ["q23d", "q24d"] if saeb_2025 else ["q24d", "q23d"],
+                _AGREE_OPTIONS_LEGACY | _AGREE_OPTIONS_2025,
+            )
+            if q_safety in agree_disagree_negative:
                 _inc(num_safety_low_by_race, race_key)
 
-            # === Eixo 6: expectativa docente (q24h/q24i) ===
-            q24h = _normalize_str(responses_data.get("q24h"))
-            if q24h:
-                expectativa_distribution[q24h] = expectativa_distribution.get(q24h, 0) + 1
-            if q24h in agree_disagree_negative:
+            # === Eixo 6: expectativa docente (SAEB 2025 q23h/q23i; legado q24h/q24i) ===
+            q_expect_h = _first_matching_response(
+                responses_data,
+                ["q23h", "q24h"] if saeb_2025 else ["q24h", "q23h"],
+                _AGREE_OPTIONS_LEGACY | _AGREE_OPTIONS_2025,
+            )
+            if q_expect_h:
+                expectativa_distribution[q_expect_h] = expectativa_distribution.get(q_expect_h, 0) + 1
+            if q_expect_h in agree_disagree_negative:
                 _inc(num_expectation_low_h_by_race, race_key)
-            q24i = _normalize_str(responses_data.get("q24i"))
-            if q24i in agree_disagree_negative:
+            q_expect_i = _first_matching_response(
+                responses_data,
+                ["q23i", "q24i"] if saeb_2025 else ["q24i", "q23i"],
+                _AGREE_OPTIONS_LEGACY | _AGREE_OPTIONS_2025,
+            )
+            if q_expect_i in agree_disagree_negative:
                 _inc(num_expectation_low_i_by_race, race_key)
 
             # === Eixo 7: diversidade linguística (q4) ===
@@ -346,9 +422,13 @@ class PneerqService:
         preta_parda_neg = metric_for(num_expectation_low_i_by_race, "PretaParda").value
         gap_motivacao_pp = round(preta_parda_neg - branca_neg, 2)
 
-        silenciamento_num = curricular_distribution.get("Poucos deles", 0) + curricular_distribution.get("Nenhum deles", 0)
-        silenciamento_pct = pct(silenciamento_num, total_respostas)
-        preta_parda_share = pct(denom_by_race.get("PretaParda", 0), total_students)
+        silenciamento_num = (
+            curricular_distribution.get("Poucos deles", 0)
+            + curricular_distribution.get("Nenhum deles", 0)
+            + curricular_distribution.get("Nunca", 0)
+            + curricular_distribution.get("Poucas vezes", 0)
+        )
+        silenciamento_pct = pct(silenciamento_num, total_respostas)        preta_parda_share = pct(denom_by_race.get("PretaParda", 0), total_students)
 
         risk_components = [
             metric_total(num_curricular_silencing_by_race).value,

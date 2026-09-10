@@ -23,13 +23,27 @@ class SubjectiveQuestion(db.Model):
     number = db.Column(db.Integer, nullable=False)  # posição da questão (Q1, Q2, ...)
     code = db.Column(db.String(50))  # ex.: "Q01" ou código de habilidade "EF06MA01"
     skill_description = db.Column(db.String(500), nullable=False)  # habilidade digitada manualmente
+    rubric_group_id = db.Column(
+        db.String,
+        db.ForeignKey('tenant.subjective_rubric_groups.id', ondelete='SET NULL'),
+        nullable=True,
+    )
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
 
-    def __init__(self, subjective_test_id, number, skill_description, code=None, **kwargs):
+    def __init__(
+        self,
+        subjective_test_id,
+        number,
+        skill_description,
+        code=None,
+        rubric_group_id=None,
+        **kwargs,
+    ):
         self.subjective_test_id = subjective_test_id
         self.number = number
         self.skill_description = skill_description
         self.code = code
+        self.rubric_group_id = rubric_group_id
         for key, val in kwargs.items():
             if hasattr(self, key):
                 setattr(self, key, val)
@@ -41,6 +55,7 @@ class SubjectiveQuestion(db.Model):
             'number': self.number,
             'code': self.code,
             'skill_description': self.skill_description,
+            'rubric_group_id': self.rubric_group_id,
         }
 
     def __repr__(self):

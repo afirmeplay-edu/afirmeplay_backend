@@ -18,6 +18,7 @@ from app import db
 from app.decorators import requires_city_context
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.models.subjectiveTest import SubjectiveTest
+from app.models.subjectiveQuestion import SubjectiveQuestion
 from app.models.studentClass import Class
 from app.models.school import School
 from app.permissions.utils import get_teacher_classes
@@ -115,8 +116,9 @@ def create_subjective_test():
             return jsonify({"error": questions_error}), 400
 
         try:
-            SubjectiveEvaluationService.normalize_rubric_marks_payload(
-                data.get('rubric_marks') or data.get('marks')
+            SubjectiveEvaluationService.normalize_rubric_groups_payload(
+                data.get('rubric_groups'),
+                fallback_marks=data.get('rubric_marks') or data.get('marks'),
             )
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
@@ -248,6 +250,17 @@ def update_subjective_test(subjective_test_id):
         questions_error = _validate_questions(data.get('questions'))
         if questions_error:
             return jsonify({"error": questions_error}), 400
+
+        if 'rubric_groups' in data or 'rubric_marks' in data or 'marks' in data:
+            try:
+                SubjectiveEvaluationService.normalize_rubric_groups_payload(
+                    data.get('rubric_groups'),
+                    fallback_marks=(
+                        data.get('rubric_marks') if 'rubric_marks' in data else data.get('marks')
+                    ),
+                )
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
 
         data, err = _validate_scope_fields(data)
         if err:
@@ -465,7 +478,13 @@ def upsert_correction(subjective_test_id):
             return jsonify({"error": "subjective_question_id e student_id são obrigatórios"}), 400
 
         if value is not None:
-            allowed = SubjectiveEvaluationService._allowed_codes(subjective_test_id)
+            question = SubjectiveQuestion.query.get(subjective_question_id)
+            if question and str(question.subjective_test_id) == str(subjective_test_id):
+                allowed = SubjectiveEvaluationService._allowed_codes_for_question(
+                    question, subjective_test_id
+                )
+            else:
+                allowed = SubjectiveEvaluationService._allowed_codes(subjective_test_id)
             if value not in allowed:
                 return jsonify({
                     "error": f"value inválido: {value}. Aceitos: {', '.join(allowed)} ou null"

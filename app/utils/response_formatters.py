@@ -705,12 +705,14 @@ def format_subjective_test_response(subjective_test, questions=None, include_pro
             'total_questions': len(questions_formatted),
             'questions': questions_formatted,
             'rubric_marks': [],
+            'rubric_groups': [],
             'class_progress': [],
         }
 
         try:
             from app.services.subjective_evaluation_service import SubjectiveEvaluationService
             payload['rubric_marks'] = SubjectiveEvaluationService.get_rubric_marks(subjective_test.id)
+            payload['rubric_groups'] = SubjectiveEvaluationService.get_rubric_groups(subjective_test.id)
             if include_progress:
                 payload['class_progress'] = SubjectiveEvaluationService.get_class_progress(subjective_test)
                 concluded = sum(1 for p in payload['class_progress'] if p.get('status') == 'concluida')

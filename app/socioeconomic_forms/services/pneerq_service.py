@@ -428,7 +428,8 @@ class PneerqService:
             + curricular_distribution.get("Nunca", 0)
             + curricular_distribution.get("Poucas vezes", 0)
         )
-        silenciamento_pct = pct(silenciamento_num, total_respostas)        preta_parda_share = pct(denom_by_race.get("PretaParda", 0), total_students)
+        silenciamento_pct = pct(silenciamento_num, total_respostas)
+        preta_parda_share = pct(denom_by_race.get("PretaParda", 0), total_students)
 
         risk_components = [
             metric_total(num_curricular_silencing_by_race).value,

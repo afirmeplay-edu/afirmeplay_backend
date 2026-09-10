@@ -1,10 +1,19 @@
 from app import db
 from app.models import (
-    City, School, SchoolTeacher, Teacher, Student, Subject, 
-    Class, ClassSubject, ClassTest, Test, EducationStage, 
-    Grade, Skill, Question, StudentAnswer, UserQuickLinks, 
+    City, School, SchoolTeacher, Teacher, Student, Subject,
+    Class, ClassSubject, ClassTest, Test, EducationStage,
+    Grade, Skill, Question, StudentAnswer, UserQuickLinks,
     TeacherClass, User, TestSession, Game
 )
+
+
+def _safe_print(msg: str) -> None:
+    """Evita UnicodeEncodeError no console Windows (cp1252)."""
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        print(msg.encode("ascii", "replace").decode("ascii"))
+
 
 def check_and_init_database():
     """
@@ -12,53 +21,51 @@ def check_and_init_database():
     Esta função é chamada antes de iniciar o servidor.
     """
     try:
-        print("🔍 Verificando estado do banco de dados...")
-        # Verificar se já existe alguma tabela
+        _safe_print("Verificando estado do banco de dados...")
         inspector = db.inspect(db.engine)
         existing_tables = inspector.get_table_names()
-        
+
         if not existing_tables:
-            print("📊 Banco vazio detectado, criando tabelas...")
+            _safe_print("Banco vazio detectado, criando tabelas...")
             db.create_all()
-            print("✅ Tabelas criadas com sucesso!")
+            _safe_print("Tabelas criadas com sucesso!")
         else:
-            print(f"📊 Banco já possui {len(existing_tables)} tabelas:")
+            _safe_print(f"Banco ja possui {len(existing_tables)} tabelas:")
             for table in existing_tables:
-                print(f"   - {table}")
-            print("✅ Banco de dados está pronto!")
-            
+                _safe_print(f"   - {table}")
+            _safe_print("Banco de dados esta pronto!")
+
     except Exception as e:
-        print(f"❌ Erro ao verificar/inicializar banco de dados: {str(e)}")
-        print("💡 Verifique se:")
-        print("   - O banco de dados está acessível")
-        print("   - As credenciais estão corretas")
-        print("   - O banco existe")
+        _safe_print(f"Erro ao verificar/inicializar banco de dados: {str(e)}")
+        _safe_print("Verifique se:")
+        _safe_print("   - O banco de dados esta acessivel")
+        _safe_print("   - As credenciais estao corretas")
+        _safe_print("   - O banco existe")
         raise e
+
 
 def reset_database():
     """
     Função para resetar completamente o banco (CUIDADO: apaga todos os dados!)
     """
     try:
-        print("⚠️  ATENÇÃO: Resetando banco de dados...")
-        print("   Todos os dados serão perdidos!")
-        
-        # Drop todas as tabelas
+        _safe_print("ATENCAO: Resetando banco de dados...")
+        _safe_print("   Todos os dados serao perdidos!")
+
         db.drop_all()
-        print("🗑️  Tabelas removidas")
-        
-        # Recriar tabelas
+        _safe_print("Tabelas removidas")
+
         db.create_all()
-        print("✅ Tabelas recriadas com sucesso!")
-        
+        _safe_print("Tabelas recriadas com sucesso!")
+
     except Exception as e:
-        print(f"❌ Erro ao resetar banco: {str(e)}")
+        _safe_print(f"Erro ao resetar banco: {str(e)}")
         raise e
 
+
 if __name__ == "__main__":
-    # Se executar diretamente, importar app
     from app import create_app
-    
+
     app = create_app()
     with app.app_context():
         check_and_init_database()

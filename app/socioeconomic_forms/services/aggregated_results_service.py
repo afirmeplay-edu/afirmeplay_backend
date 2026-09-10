@@ -439,9 +439,9 @@ class AggregatedResultsService:
         # Estrutura para consolidação
         consolidated = {
             'perfilDemografico': {'nome': 'Perfil Demográfico do Estudante', 'questoes': ['q1', 'q2', 'q3', 'q4', 'q5'], 'dados': {}},
-            'contextoFamiliar': {'nome': 'Contexto Familiar e Socioeconômico', 'questoes': ['q6', 'q7', 'q8', 'q9', 'q10', 'q11', 'q12', 'q13'], 'dados': {}},
-            'trajetoriaEscolar': {'nome': 'Trajetória e Contexto Escolar', 'questoes': ['q14', 'q15', 'q16', 'q17', 'q18', 'q19', 'q20', 'q21'], 'dados': {}},
-            'ambienteEscolar': {'nome': 'Percepções sobre o Ambiente Escolar', 'questoes': ['q22', 'q23', 'q24'], 'dados': {}}
+            'contextoFamiliar': {'nome': 'Contexto Familiar e Socioeconômico', 'questoes': ['q6', 'q7', 'q8', 'q9', 'q10', 'q11', 'q12', 'q13', 'q14'], 'dados': {}},
+            'trajetoriaEscolar': {'nome': 'Trajetória e Contexto Escolar', 'questoes': ['q15', 'q16', 'q17', 'q18', 'q19', 'q20', 'q26'], 'dados': {}},
+            'ambienteEscolar': {'nome': 'Percepções sobre o Ambiente Escolar', 'questoes': ['q21', 'q22', 'q23', 'q24', 'q25'], 'dados': {}}
         }
         
         # Agregar dados de cada formulário

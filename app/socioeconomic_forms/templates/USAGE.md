@@ -337,11 +337,11 @@ print(resultado)  # "distorcao"
 
 **Objetivo:** Identificar a idade do aluno (faixa etária de Anos Finais e EJA) para análise de distorção idade-série.
 
-### Pergunta q25: Planos Futuros (NOVA - exclusiva do aluno-velho)
+### Pergunta q26: Planos Futuros (própria - exclusiva do aluno-velho)
 
 ```json
 {
-	"id": "q25",
+	"id": "q26",
 	"text": "Quando terminar o Ensino Fundamental, você pretende:",
 	"type": "selecao_unica",
 	"options": [
@@ -351,7 +351,7 @@ print(resultado)  # "distorcao"
 		"Ainda não sei"
 	],
 	"required": true,
-	"order": 25
+	"order": 26
 }
 ```
 
@@ -413,15 +413,15 @@ As rotas de templates requerem autenticação JWT e as seguintes roles:
 ### aluno-jovem:
 
 - ⚠️ **EJA NÃO está incluído**: Apenas para Educação Infantil e Anos Iniciais
-- ✅ Total de 24 perguntas obrigatórias
-- ✅ Perguntas baseadas no questionário SAEB 2023 do 5º ano
-- ✅ Faixa etária: Menos de 3 anos até 13 anos ou mais
+- ✅ Total de 25 perguntas obrigatórias
+- ✅ Perguntas baseadas no questionário SAEB 2025 do 5º ano
+- ✅ Faixa etária: Menos de 3 anos até 14 anos ou mais
 
 ### aluno-velho:
 
 - ✅ **EJA ESTÁ incluído**: Para Anos Finais (4º ao 9º ano) e EJA (1º ao 9º Período)
-- ✅ Total de 25 perguntas obrigatórias (inclui q25 sobre planos futuros)
-- ✅ Perguntas baseadas no questionário SAEB 2023 do 9º ano
+- ✅ Total de 26 perguntas obrigatórias (inclui q26 sobre planos futuros)
+- ✅ Perguntas baseadas no questionário SAEB 2025 do 9º ano
 - ✅ Faixa etária: 13 anos ou menos até 18 anos ou mais
 - ✅ q1 com 15 opções (6 anos do ensino regular + 9 períodos EJA)
 - ✅ EJA tem regra especial: idade mínima de 15 anos

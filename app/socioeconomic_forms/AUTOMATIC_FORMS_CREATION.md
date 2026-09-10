@@ -45,8 +45,8 @@ O sistema conta automaticamente quantas vezes cada tipo de formulário foi aplic
 
 Se perguntas não forem fornecidas, o sistema carrega automaticamente do template correspondente:
 
-- `aluno-jovem` → 24 perguntas
-- `aluno-velho` → 25 perguntas
+- `aluno-jovem` → 25 perguntas
+- `aluno-velho` → 26 perguntas
 
 ### 5. **Validação de Séries**
 
@@ -209,7 +209,7 @@ São coisas **diferentes** e **independentes**:
 
 - ✅ EJA agora está **incluído** no `aluno-velho`
 - ❌ EJA foi **removido** do `aluno-jovem`
-- ✅ Formulário `aluno-velho` tem 25 perguntas (inclui q25 sobre planos futuros)
+- ✅ Formulário `aluno-velho` tem 26 perguntas (inclui q26 sobre planos futuros)
 
 ### Contagem Compartilhada
 
@@ -314,5 +314,5 @@ const payload = {
 
 - `templates/README.md` - Documentação dos templates de perguntas
 - `templates/USAGE.md` - Guia de uso dos templates
-- `templates/aluno_jovem_questions.json` - Template aluno-jovem (24 perguntas)
-- `templates/aluno_velho_questions.json` - Template aluno-velho (25 perguntas)
+- `templates/aluno_jovem_questions.json` - Template aluno-jovem (25 perguntas)
+- `templates/aluno_velho_questions.json` - Template aluno-velho (26 perguntas)

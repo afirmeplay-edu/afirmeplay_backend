@@ -1,7 +1,7 @@
 {
   "formType": "aluno-velho",
   "title": "Questionário Socioeconômico - Aluno Velho",
-  "description": "Questionário para alunos dos Anos Finais (4º ao 9º ano) e EJA (1º ao 9º Período)",
+  "description": "Questionário para alunos dos Anos Finais e EJA (base SAEB 2025 - 9º ano)",
   "questions": [
     {
       "id": "q1",
@@ -44,11 +44,12 @@
     },
     {
       "id": "q3",
-      "text": "Qual é o seu sexo?",
+      "text": "Qual é o seu gênero?",
       "type": "selecao_unica",
       "options": [
-        "Masculino",
         "Feminino",
+        "Masculino",
+        "Outro",
         "Não quero declarar"
       ],
       "required": true,
@@ -56,12 +57,13 @@
     },
     {
       "id": "q4",
-      "text": "Qual a língua que seus pais falam com mais frequência em casa?",
+      "text": "Qual língua seus pais ou responsáveis falam com mais frequência em casa?",
       "type": "selecao_unica",
       "options": [
         "Português",
         "Espanhol",
-        "Língua de Sinais (Libras, Língua de Sinais Argentina, Língua de Sinais Boliviana etc.)",
+        "Língua de povos originários (tikuna, guarani-kaiowá, kaingang etc)",
+        "Língua de sinais (Libras, língua de sinais argentina, língua de sinais boliviana etc)",
         "Outra língua"
       ],
       "required": true,
@@ -84,25 +86,50 @@
     },
     {
       "id": "q6",
-      "text": "Você possui deficiência, transtorno do espectro autista ou superdotação?",
+      "text": "Informe se você tem alguma(s) das características a seguir.",
       "type": "matriz_selecao",
       "subQuestions": [
         {
           "id": "q6a",
-          "text": "Deficiência"
+          "text": "Baixa visão"
         },
         {
           "id": "q6b",
-          "text": "Transtorno do espectro autista"
+          "text": "Cegueira"
         },
         {
           "id": "q6c",
-          "text": "Altas habilidades ou superdotação"
+          "text": "Deficiência auditiva"
+        },
+        {
+          "id": "q6d",
+          "text": "Deficiência física"
+        },
+        {
+          "id": "q6e",
+          "text": "Deficiência intelectual"
+        },
+        {
+          "id": "q6f",
+          "text": "Surdez"
+        },
+        {
+          "id": "q6g",
+          "text": "Surdocegueira"
+        },
+        {
+          "id": "q6h",
+          "text": "Transtorno do espectro autista (TEA)"
+        },
+        {
+          "id": "q6i",
+          "text": "Altas habilidades ou superdotação (pessoas com desempenho excepcional, em algumas áreas, identificado por profissional)"
         }
       ],
       "options": [
         "Não",
-        "Sim"
+        "Sim",
+        "Não sei"
       ],
       "required": true,
       "order": 6
@@ -128,11 +155,11 @@
       "subQuestions": [
         {
           "id": "q8a",
-          "text": "Mãe(s) ou madrasta(s)"
+          "text": "Mãe(s) ou madrasta"
         },
         {
           "id": "q8b",
-          "text": "Pai(s) ou padrasto(s)"
+          "text": "Pai(s) ou padrasto"
         },
         {
           "id": "q8c",
@@ -144,7 +171,11 @@
         },
         {
           "id": "q8e",
-          "text": "Outros familiares – irmãos(ãs), tios(as), primos(as) etc."
+          "text": "Irmãos(ãs)"
+        },
+        {
+          "id": "q8f",
+          "text": "Outros familiares, como tios(as), primos(as) etc"
         }
       ],
       "options": [
@@ -156,14 +187,16 @@
     },
     {
       "id": "q9",
-      "text": "Qual é a maior escolaridade da sua mãe (ou madrasta ou mulher responsável por você)?",
+      "text": "Qual é a maior escolaridade da sua mãe, madrasta ou responsável 1?",
       "type": "selecao_unica",
       "options": [
-        "Não completou a 4ª série ou o 5º ano do Ensino Fundamental",
-        "Ensino Fundamental, até a 4ª série ou o 5º ano",
+        "Não se aplica (não tenho mãe/madrasta)",
+        "Não completou o 5º ano (4ª série) do Ensino Fundamental",
+        "Ensino Fundamental, até o 5º ano",
         "Ensino Fundamental completo",
         "Ensino Médio completo",
-        "Ensino Superior completo (faculdade ou graduação)",
+        "Ensino Superior completo (faculdade, graduação)",
+        "Pós-graduação (especialização, mestrado, doutorado)",
         "Não sei"
       ],
       "required": true,
@@ -171,14 +204,16 @@
     },
     {
       "id": "q10",
-      "text": "Qual é a maior escolaridade de seu pai (ou padrasto ou homem responsável por você)?",
+      "text": "Qual é a maior escolaridade do seu pai, padrasto ou responsável 2?",
       "type": "selecao_unica",
       "options": [
-        "Não completou a 4ª série ou o 5º ano do Ensino Fundamental",
-        "Ensino Fundamental, até a 4ª série ou o 5º ano",
+        "Não se aplica (não tenho pai/padrasto)",
+        "Não completou o 5º ano (4ª série) do Ensino Fundamental",
+        "Ensino Fundamental, até o 5º ano",
         "Ensino Fundamental completo",
         "Ensino Médio completo",
-        "Ensino Superior completo (faculdade ou graduação)",
+        "Ensino Superior completo (faculdade, graduação)",
+        "Pós-graduação (especialização, mestrado, doutorado)",
         "Não sei"
       ],
       "required": true,
@@ -186,58 +221,75 @@
     },
     {
       "id": "q11",
-      "text": "Com que frequência seus pais ou responsáveis costumam:",
+      "text": "Indique com que frequência seus pais ou responsáveis costumam:",
       "type": "matriz_selecao",
       "subQuestions": [
         {
           "id": "q11a",
-          "text": "Ler em casa"
+          "text": "Ler livros, jornais e revistas (de papel ou em meio digital) em casa?"
         },
         {
           "id": "q11b",
-          "text": "Conversar com você sobre o que acontece na escola"
+          "text": "Conversar com você sobre o que acontece na escola?"
         },
         {
           "id": "q11c",
-          "text": "Incentivar você a estudar"
+          "text": "Incentivar você a estudar?"
         },
         {
           "id": "q11d",
-          "text": "Incentivar você a fazer a tarefa de casa"
+          "text": "Incentivar você a fazer a tarefa de casa?"
         },
         {
           "id": "q11e",
-          "text": "Incentivar você a comparecer às aulas"
+          "text": "Incentivar você a comparecer às aulas?"
         },
         {
           "id": "q11f",
-          "text": "Ir às reuniões de pais na escola"
+          "text": "Ir às reuniões de pais ou responsáveis na escola?"
+        },
+        {
+          "id": "q11g",
+          "text": "Acompanhar seu desempenho escolar?"
+        },
+        {
+          "id": "q11h",
+          "text": "Apoiar seus planos para o futuro?"
+        },
+        {
+          "id": "q11i",
+          "text": "Elogiar sua dedicação aos estudos?"
         }
       ],
       "options": [
-        "Nunca ou quase nunca",
-        "De vez em quando",
-        "Sempre ou quase sempre"
+        "Nunca",
+        "Poucas vezes",
+        "Algumas vezes",
+        "Sempre"
       ],
       "required": true,
       "order": 11
     },
     {
       "id": "q12",
-      "text": "Na rua em que você mora, tem:",
+      "text": "Na rua onde você mora tem:",
       "type": "matriz_selecao",
       "subQuestions": [
         {
           "id": "q12a",
-          "text": "Asfalto ou calçamento"
+          "text": "Asfalto/calçamento ou pavimento?"
         },
         {
           "id": "q12b",
-          "text": "Água tratada"
+          "text": "Água tratada?"
         },
         {
           "id": "q12c",
-          "text": "Iluminação"
+          "text": "Iluminação?"
+        },
+        {
+          "id": "q12d",
+          "text": "Coleta de lixo?"
         }
       ],
       "options": [
@@ -279,6 +331,14 @@
         {
           "id": "q13g",
           "text": "Celular com internet (smartphone)"
+        },
+        {
+          "id": "q13h",
+          "text": "Ar-condicionado"
+        },
+        {
+          "id": "q13i",
+          "text": "Instrumento musical"
         }
       ],
       "options": [
@@ -292,44 +352,52 @@
     },
     {
       "id": "q14",
-      "text": "Na sua casa tem:",
+      "text": "Indique se na sua casa tem:",
       "type": "matriz_selecao",
       "subQuestions": [
         {
           "id": "q14a",
-          "text": "TV por internet (Netflix, GloboPlay etc.)"
+          "text": "TV por internet (Netflix, GloboPlay etc)"
         },
         {
           "id": "q14b",
-          "text": "Rede wi-fi"
+          "text": "Rede Wi-Fi"
         },
         {
           "id": "q14c",
-          "text": "Um quarto só seu"
-        },
-        {
-          "id": "q14d",
           "text": "Mesa para estudar"
         },
         {
-          "id": "q14e",
-          "text": "Forno de micro-ondas"
+          "id": "q14d",
+          "text": "Micro-ondas"
         },
         {
-          "id": "q14f",
+          "id": "q14e",
           "text": "Aspirador de pó"
         },
         {
-          "id": "q14g",
+          "id": "q14f",
           "text": "Máquina de lavar roupa"
         },
         {
-          "id": "q14h",
+          "id": "q14g",
           "text": "Freezer (independente ou segunda porta da geladeira)"
         },
         {
-          "id": "q14i",
+          "id": "q14h",
           "text": "Garagem"
+        },
+        {
+          "id": "q14i",
+          "text": "Estante com livros"
+        },
+        {
+          "id": "q14j",
+          "text": "Computador (ou notebook) que você utiliza para os trabalhos escolares"
+        },
+        {
+          "id": "q14k",
+          "text": "Um lugar reservado para estudar"
         }
       ],
       "options": [
@@ -344,67 +412,29 @@
       "text": "Quanto tempo você demora para chegar à sua escola?",
       "type": "selecao_unica",
       "options": [
-        "Menos de 30 minutos",
-        "Entre 30 minutos e uma hora",
-        "Mais de uma hora"
+        "Menos de trinta minutos",
+        "Entre trinta minutos e uma hora",
+        "Entre uma e duas horas",
+        "Mais de duas horas"
       ],
       "required": true,
       "order": 15
     },
     {
       "id": "q16",
-      "text": "Você utiliza para ir à escola:",
-      "type": "matriz_selecao",
-      "subQuestions": [
-        {
-          "id": "q16a",
-          "text": "Transporte gratuito escolar"
-        },
-        {
-          "id": "q16b",
-          "text": "Passe escolar"
-        }
-      ],
+      "text": "Com que idade você entrou na escola?",
+      "type": "selecao_unica",
       "options": [
-        "Não",
-        "Sim"
+        "3 anos ou menos",
+        "4 a 5 anos",
+        "6 a 7 anos",
+        "8 anos ou mais"
       ],
       "required": true,
       "order": 16
     },
     {
       "id": "q17",
-      "text": "Considerando a maior distância percorrida, normalmente, de que forma você chega à sua escola?",
-      "type": "selecao_unica",
-      "options": [
-        "A pé",
-        "De bicicleta",
-        "De van (ou Kombi)",
-        "De ônibus",
-        "De metrô (ou trem urbano)",
-        "De carro",
-        "De barco",
-        "De motocicleta",
-        "Outro meio de transporte"
-      ],
-      "required": true,
-      "order": 17
-    },
-    {
-      "id": "q18",
-      "text": "Com que idade você entrou na escola?",
-      "type": "selecao_unica",
-      "options": [
-        "3 anos ou menos",
-        "4 ou 5 anos",
-        "6 ou 7 anos",
-        "8 anos ou mais"
-      ],
-      "required": true,
-      "order": 18
-    },
-    {
-      "id": "q19",
       "text": "A partir do primeiro ano do Ensino Fundamental, em que tipo de escola você estudou?",
       "type": "selecao_unica",
       "options": [
@@ -413,10 +443,10 @@
         "Em escola pública e em escola particular"
       ],
       "required": true,
-      "order": 19
+      "order": 17
     },
     {
-      "id": "q20",
+      "id": "q18",
       "text": "Você já foi reprovado?",
       "type": "selecao_unica",
       "options": [
@@ -425,10 +455,10 @@
         "Sim, duas vezes ou mais"
       ],
       "required": true,
-      "order": 20
+      "order": 18
     },
     {
-      "id": "q21",
+      "id": "q19",
       "text": "Alguma vez você abandonou a escola deixando de frequentá-la até o final do ano escolar?",
       "type": "selecao_unica",
       "options": [
@@ -437,32 +467,36 @@
         "Sim, duas vezes ou mais"
       ],
       "required": true,
-      "order": 21
+      "order": 19
     },
     {
-      "id": "q22",
+      "id": "q20",
       "text": "Fora da escola e em dias de aula, quanto tempo você usa para:",
       "type": "matriz_selecao",
       "subQuestions": [
         {
-          "id": "q22a",
-          "text": "Estudar (lição de casa, trabalhos escolares etc.)"
+          "id": "q20a",
+          "text": "Estudar (lição de casa, trabalhos escolares etc.)?"
         },
         {
-          "id": "q22b",
-          "text": "Fazer cursos ou atividades extracurriculares (idioma, artes, informática etc.)"
+          "id": "q20b",
+          "text": "Fazer cursos ou atividades extracurriculares (idioma, artes, esportes, informática etc.)?"
         },
         {
-          "id": "q22c",
-          "text": "Trabalhar em casa (lavar louça, limpar quintal, cuidar dos irmãos etc.)"
+          "id": "q20c",
+          "text": "Trabalhar em casa (lavar louça, limpar quintal, cuidar de irmãos etc.)?"
         },
         {
-          "id": "q22d",
-          "text": "Trabalhar fora de casa (recebendo ou não um salário)"
+          "id": "q20d",
+          "text": "Trabalhar fora de casa (recebendo ou não salário)?"
         },
         {
-          "id": "q22e",
-          "text": "Lazer (TV, brincar, internet, música etc.)"
+          "id": "q20e",
+          "text": "Lazer (brincar, passear, ouvir música etc.)?"
+        },
+        {
+          "id": "q20f",
+          "text": "Navegar/interagir na internet (vídeos, jogos, redes sociais etc.)?"
         }
       ],
       "options": [
@@ -472,101 +506,171 @@
         "Mais de 2 horas"
       ],
       "required": true,
+      "order": 20
+    },
+    {
+      "id": "q21",
+      "text": "Para os próximos itens, indique com que frequência os professores realizam as seguintes ações na sala de aula:",
+      "type": "matriz_selecao",
+      "subQuestions": [
+        {
+          "id": "q21a",
+          "text": "No início do ano, informaram sobre o que seria ensinado e aprendido"
+        },
+        {
+          "id": "q21b",
+          "text": "Antes de iniciar um novo conteúdo, perguntam o que vocês sabem sobre ele"
+        },
+        {
+          "id": "q21c",
+          "text": "Trazem temas do cotidiano (política, violência, meio ambiente etc.) para serem debatidos em sala de aula"
+        },
+        {
+          "id": "q21d",
+          "text": "Abordam temas sobre a cultura da sua região"
+        },
+        {
+          "id": "q21e",
+          "text": "Desenvolvem trabalhos em grupos que promovem a troca de ideias e a cooperação"
+        },
+        {
+          "id": "q21f",
+          "text": "Utilizam a internet (aulas, jogos, leituras etc.) para trabalhar os conteúdos"
+        }
+      ],
+      "options": [
+        "Nunca",
+        "Poucas vezes",
+        "Algumas vezes",
+        "Sempre"
+      ],
+      "required": true,
+      "order": 21
+    },
+    {
+      "id": "q22",
+      "text": "Para os próximos itens, indique com que frequência os professores abordam os seguintes temas na sala de aula:",
+      "type": "matriz_selecao",
+      "subQuestions": [
+        {
+          "id": "q22a",
+          "text": "Desigualdade étnico-racial (pessoas com diferentes origens, histórias, idiomas e culturas)"
+        },
+        {
+          "id": "q22b",
+          "text": "Desigualdade de gênero (identidades de gênero, diferentes sexualidades etc)"
+        },
+        {
+          "id": "q22c",
+          "text": "Diferenças religiosas"
+        },
+        {
+          "id": "q22d",
+          "text": "Bullying (intimidação ou agressões repetidas entre colegas) e outras formas de violência"
+        }
+      ],
+      "options": [
+        "Nunca",
+        "Poucas vezes",
+        "Algumas vezes",
+        "Sempre"
+      ],
+      "required": true,
       "order": 22
     },
     {
       "id": "q23",
-      "text": "Para os próximos itens, indique qual é a proporção de professores(as) da sua turma que abordam os seguintes temas em sala de aula:",
+      "text": "Indique o quanto você concorda ou discorda a respeito das afirmações a seguir:",
       "type": "matriz_selecao",
       "subQuestions": [
         {
           "id": "q23a",
-          "text": "No início do ano, eles(as) informaram sobre o que seria ensinado e aprendido?"
+          "text": "Eu me interesso pelo que foi ensinado na escola neste ano"
         },
         {
           "id": "q23b",
-          "text": "Antes de iniciar um novo conteúdo, eles(as) perguntam o que vocês sabem sobre o conteúdo?"
+          "text": "No meu dia a dia, vejo sentido naquilo que aprendo na escola"
         },
         {
           "id": "q23c",
-          "text": "Eles(as) trazem temas do cotidiano para serem debatidos em sala de aula?"
+          "text": "Há espaço para diferentes opiniões na minha sala de aula"
         },
         {
           "id": "q23d",
-          "text": "Eles(as) abordam temas sobre desigualdade racial?"
+          "text": "Eu me sinto seguro(a) quando estou na escola"
         },
         {
           "id": "q23e",
-          "text": "Eles(as) abordam temas sobre desigualdade de gênero?"
+          "text": "Eu me sinto à vontade para discordar dos professores"
         },
         {
           "id": "q23f",
-          "text": "Eles(as) abordam temas como bullying e outras formas de violência?"
+          "text": "Eu consigo explicar os conteúdos de matérias difíceis para meus colegas"
         },
         {
           "id": "q23g",
-          "text": "Eles(as) desenvolvem trabalhos em grupos?"
+          "text": "Os professores corrigem minhas lições de casa"
         },
         {
           "id": "q23h",
-          "text": "Eles(as) abordam questões relacionadas ao futuro profissional dos(as) estudantes?"
+          "text": "Os professores acreditam que eu sou capaz de aprender"
+        },
+        {
+          "id": "q23i",
+          "text": "Os professores me motivam a continuar meus estudos"
+        },
+        {
+          "id": "q23j",
+          "text": "Os resultados das avaliações representam o quanto eu aprendi"
+        },
+        {
+          "id": "q23k",
+          "text": "Os estudantes têm suas opiniões consideradas nas decisões da direção escolar"
         }
       ],
       "options": [
-        "Todos eles",
-        "A maior parte deles",
-        "Poucos deles",
-        "Nenhum deles"
+        "Concordo totalmente",
+        "Concordo em parte",
+        "Discordo em parte",
+        "Discordo totalmente"
       ],
       "required": true,
       "order": 23
     },
     {
       "id": "q24",
-      "text": "Sobre sua escola, indique o quanto você concorda ou discorda das afirmações abaixo:",
+      "text": "Gostaríamos de conhecer mais a sua escola. Continue indicando o quanto você concorda ou discorda sobre as afirmações a seguir:",
       "type": "matriz_selecao",
       "subQuestions": [
         {
           "id": "q24a",
-          "text": "Eu me interesso sobre o que foi ensinado na escola neste ano"
+          "text": "A alimentação escolar oferecida é de boa qualidade"
         },
         {
           "id": "q24b",
-          "text": "Eu me sinto motivado(a), no dia a dia, a usar o que foi ensinado"
+          "text": "Os banheiros que os estudantes usam estão em bom estado e têm itens de higiene (papel higiênico e sabonete)"
         },
         {
           "id": "q24c",
-          "text": "Há espaço para diferentes opiniões na minha sala de aula"
+          "text": "Os espaços na escola permitem a circulação e o acesso dos estudantes com deficiências"
         },
         {
           "id": "q24d",
-          "text": "Eu me sinto seguro(a) quando estou na escola"
+          "text": "O espaço da sala é suficiente para o número de estudantes da turma"
         },
         {
           "id": "q24e",
-          "text": "Eu me sinto à vontade para discordar dos(as) meus(minhas) professores(as)"
+          "text": "A sala de aula tem cadeiras, mesas e carteiras em bom estado"
         },
         {
           "id": "q24f",
-          "text": "Eu consigo argumentar sobre conteúdos difíceis"
-        },
-        {
-          "id": "q24g",
-          "text": "Os resultados das avaliações representam o quanto eu aprendi"
-        },
-        {
-          "id": "q24h",
-          "text": "Meus (Minhas) professores(as) acreditam que eu sou capaz de aprender"
-        },
-        {
-          "id": "q24i",
-          "text": "Meus (Minhas) professores(as) me motivam a continuar meus estudos"
+          "text": "A sala de aula tem boas condições de temperatura e ventilação"
         }
       ],
       "options": [
         "Concordo totalmente",
-        "Concordo",
-        "Discordo",
+        "Concordo em parte",
+        "Discordo em parte",
         "Discordo totalmente"
       ],
       "required": true,
@@ -574,6 +678,45 @@
     },
     {
       "id": "q25",
+      "text": "Indique a frequência em que ocorreram as seguintes situações em sua escola, no último ano:",
+      "type": "matriz_selecao",
+      "subQuestions": [
+        {
+          "id": "q25a",
+          "text": "Tenho amigos(as) na minha sala ou na escola"
+        },
+        {
+          "id": "q25b",
+          "text": "Converso e brinco com outros(as) alunos(as) durante o intervalo"
+        },
+        {
+          "id": "q25c",
+          "text": "Eu agredi e xinguei um(a) ou mais alunos(as) da escola"
+        },
+        {
+          "id": "q25d",
+          "text": "Me senti ameaçado(a) por outros(as) alunos(as), na escola ou nas redes sociais"
+        },
+        {
+          "id": "q25e",
+          "text": "Eu fui agredido(a) e xingado(a) por um(a) ou mais alunos(as) da escola"
+        },
+        {
+          "id": "q25f",
+          "text": "Quando preciso, posso procurar um(a) professor(a) ou outro(a) funcionário(a) da escola para conversar sobre os meus problemas"
+        }
+      ],
+      "options": [
+        "Nunca",
+        "Poucas vezes",
+        "Algumas vezes",
+        "Sempre"
+      ],
+      "required": true,
+      "order": 25
+    },
+    {
+      "id": "q26",
       "text": "Quando terminar o Ensino Fundamental, você pretende:",
       "type": "selecao_unica",
       "options": [
@@ -583,7 +726,7 @@
         "Ainda não sei"
       ],
       "required": true,
-      "order": 25
+      "order": 26
     }
   ]
 }

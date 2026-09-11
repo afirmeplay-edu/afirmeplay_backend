@@ -93,6 +93,43 @@ def build_cards(
     }
 
 
+def build_disciplina_cards_parcial(acertou: int, total: int) -> Dict[str, Any]:
+    """Card por disciplina sem nota/proficiência/nível pré-calculados."""
+    return {
+        "acertos_totais": {
+            "acertou": int(acertou),
+            "total": int(total),
+            "percentual": percentual(int(acertou), int(total)),
+        },
+        "nota": None,
+        "proficiencia": None,
+        "nivel": None,
+    }
+
+
+def attach_disciplina_cards(
+    bloco: Dict[str, Any],
+    subject_data: Optional[Dict[str, Any]],
+) -> None:
+    """
+    Preenche bloco['cards'] a partir do JSON por disciplina (subject_results /
+    proficiency_by_subject) ou com fallback parcial pelos acertos das questões.
+    """
+    questoes = bloco.get("questoes") or []
+    acertou_local = sum(1 for q in questoes if q.get("acertou"))
+    total_local = len(questoes)
+    if subject_data:
+        bloco["cards"] = build_cards(
+            subject_data["correct_answers"],
+            subject_data["total_questions"],
+            subject_data["grade"],
+            subject_data["proficiency"],
+            subject_data["classification"],
+        )
+    else:
+        bloco["cards"] = build_disciplina_cards_parcial(acertou_local, total_local)
+
+
 def empty_boletim_payload(
     estado: str,
     municipio_id: str,

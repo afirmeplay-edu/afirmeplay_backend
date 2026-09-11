@@ -1,7 +1,9 @@
 """Testes puros do boletim do aluno."""
 
 from app.boletim_aluno.helpers import (
+    attach_disciplina_cards,
     build_cards,
+    build_disciplina_cards_parcial,
     build_questao_boletim,
     parse_aluno_param,
     parse_pagination,
@@ -64,3 +66,40 @@ def test_questao_e_cards():
     assert cards["acertos_totais"]["percentual"] == 54.55
     assert cards["nota"] == 6.4
     assert cards["nivel"] == "Básico"
+
+
+def test_disciplina_cards_from_subject_data_and_parcial():
+    parcial = build_disciplina_cards_parcial(8, 10)
+    assert parcial["acertos_totais"] == {"acertou": 8, "total": 10, "percentual": 80.0}
+    assert parcial["nota"] is None
+    assert parcial["proficiencia"] is None
+    assert parcial["nivel"] is None
+
+    bloco = {
+        "questoes": [
+            {"acertou": True},
+            {"acertou": False},
+        ]
+    }
+    attach_disciplina_cards(
+        bloco,
+        {
+            "correct_answers": 8,
+            "total_questions": 10,
+            "grade": 7.5,
+            "proficiency": 320.0,
+            "classification": "Adequado",
+        },
+    )
+    assert bloco["cards"]["acertos_totais"]["acertou"] == 8
+    assert bloco["cards"]["nota"] == 7.5
+    assert bloco["cards"]["proficiencia"] == 320.0
+    assert bloco["cards"]["nivel"] == "Adequado"
+
+    bloco_fallback = {"questoes": [{"acertou": True}, {"acertou": True}, {"acertou": False}]}
+    attach_disciplina_cards(bloco_fallback, None)
+    assert "cards" in bloco_fallback
+    assert bloco_fallback["cards"]["acertos_totais"]["acertou"] == 2
+    assert bloco_fallback["cards"]["acertos_totais"]["total"] == 3
+    assert bloco_fallback["cards"]["nota"] is None
+    assert bloco_fallback["cards"]["nivel"] is None

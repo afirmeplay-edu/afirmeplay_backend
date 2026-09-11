@@ -9,6 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 
 from app.boletim_aluno.helpers import (
+    attach_disciplina_cards,
     build_cards,
     build_questao_boletim,
     empty_boletim_payload,
@@ -201,6 +202,11 @@ def _build_one_boletim_as(
     disciplina_ordem: List[str] = []
     acertou_total = 0
     question_numbers = sorted(gab_map.keys())
+    proficiency_by_subject = (
+        result.proficiency_by_subject
+        if result and isinstance(getattr(result, "proficiency_by_subject", None), dict)
+        else {}
+    ) or {}
 
     for qn in question_numbers:
         gabarito = (gab_map.get(qn) or "").strip().upper() or None
@@ -232,9 +238,15 @@ def _build_one_boletim_as(
             )
         )
 
+    por_disciplina: List[Dict[str, Any]] = []
+    for disciplina_id in disciplina_ordem:
+        bloco = por_disciplina_map[disciplina_id]
+        attach_disciplina_cards(bloco, proficiency_by_subject.get(str(disciplina_id)))
+        por_disciplina.append(bloco)
+
     return {
         "aluno": _aluno_publico(student, result, school_names, grade_names),
-        "por_disciplina": [por_disciplina_map[k] for k in disciplina_ordem],
+        "por_disciplina": por_disciplina,
         "cards": build_cards(
             acertou_total,
             len(question_numbers),

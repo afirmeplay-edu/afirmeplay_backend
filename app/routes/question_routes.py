@@ -753,6 +753,115 @@ def get_questions_batch():
         return jsonify({"error": "Erro ao buscar questões em lote", "details": str(e)}), 500
 
 
+@bp.route('/import/template', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def download_questions_import_template():
+    """
+    Baixa o template DOCX pré-preenchido com disciplina e série.
+    Só para questões de múltipla escolha; dificuldade é preenchida por questão no arquivo.
+
+    Query params obrigatórios:
+      - subjectId
+      - grade (UUID da série)
+    """
+    try:
+        from app.services.question_import import build_questions_import_template
+        from app.services.question_import.importer import validate_import_defaults
+
+        defaults = {
+            "subjectId": (request.args.get("subjectId") or "").strip(),
+            "grade": (request.args.get("grade") or request.args.get("gradeId") or "").strip(),
+        }
+        context = validate_import_defaults(defaults)
+        buffer = build_questions_import_template(context)
+
+        safe_subject = "".join(c if c.isalnum() or c in "-_" else "_" for c in (context["subjectName"] or "disciplina"))[:40]
+        safe_grade = "".join(c if c.isalnum() or c in "-_" else "_" for c in (context["gradeName"] or "serie"))[:40]
+        download_name = f"template_questoes_{safe_subject}_{safe_grade}.docx"
+
+        return send_file(
+            buffer,
+            as_attachment=True,
+            download_name=download_name,
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error generating questions import template: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao gerar template", "details": str(e)}), 500
+
+
+@bp.route('/import/docx', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def import_questions_docx():
+    """
+    Importa questões de múltipla escolha a partir de um DOCX.
+
+    multipart/form-data:
+      - file (obrigatório): .docx
+      - subjectId (obrigatório): UUID da disciplina
+      - grade (obrigatório): UUID da série
+      - commit (opcional): "true" | "false" (default false = preview)
+      - indexes (opcional no commit): "1,3,5" ou indexes[] — só cria esses índices
+
+    Dificuldade vem por questão no arquivo (Abaixo do Básico | Básico | Adequado | Avançado).
+    """
+    try:
+        from app.services.question_import import import_questions_from_docx
+        from app.services.question_import.importer import parse_indexes_from_request
+
+        if "file" not in request.files:
+            return jsonify({"error": "Nenhum arquivo enviado. Use o campo 'file'."}), 400
+
+        file = request.files["file"]
+        if not file or not file.filename:
+            return jsonify({"error": "Nenhum arquivo selecionado"}), 400
+
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "User not authenticated"}), 401
+
+        commit_raw = (
+            request.form.get("commit")
+            or request.args.get("commit")
+            or "false"
+        )
+        commit = str(commit_raw).strip().lower() in ("1", "true", "yes", "sim")
+
+        defaults = {}
+        for key in ("subjectId", "grade", "gradeId"):
+            value = request.form.get(key)
+            if value not in (None, ""):
+                defaults[key] = value.strip()
+
+        indexes = parse_indexes_from_request(request.form, request.args)
+        if indexes is not None and not commit:
+            indexes = None
+
+        result = import_questions_from_docx(
+            file,
+            current_user=current_user,
+            commit=commit,
+            defaults=defaults,
+            indexes=indexes,
+        )
+
+        status = 201 if commit and result.get("summary", {}).get("created", 0) > 0 else 200
+        if commit and result.get("summary", {}).get("created", 0) == 0 and result.get("summary", {}).get("total", 0) > 0:
+            status = 400
+        return jsonify(result), status
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error importing questions from DOCX: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao importar questões", "details": str(e)}), 500
+
+
 @bp.route('/<string:question_id>/images/<string:image_id>', methods=['GET'])
 def get_question_image(question_id, image_id):
     """

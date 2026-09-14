@@ -758,27 +758,41 @@ def get_questions_batch():
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def download_questions_import_template():
     """
-    Baixa o template DOCX pré-preenchido com disciplina e série.
-    Só para questões de múltipla escolha; dificuldade é preenchida por questão no arquivo.
+    Baixa o template DOCX pré-preenchido com série e lista de disciplinas.
 
-    Query params obrigatórios:
-      - subjectId
-      - grade (UUID da série)
+    Query params:
+      - grade (obrigatório): UUID da série
+      - subjectIds (recomendado): id1,id2,... disciplinas do arquivo
+      - subjectId (opcional): atalho para 1 disciplina (também entra na lista)
     """
     try:
         from app.services.question_import import build_questions_import_template
         from app.services.question_import.importer import validate_import_defaults
 
+        subject_ids_raw = request.args.get("subjectIds") or request.args.get("subjects")
+        # também aceita subjectId repetido: ?subjectId=a&subjectId=b
+        listed = request.args.getlist("subjectId") or request.args.getlist("subjectIds")
+        if listed and not subject_ids_raw:
+            subject_ids_raw = ",".join(listed)
+
         defaults = {
-            "subjectId": (request.args.get("subjectId") or "").strip(),
             "grade": (request.args.get("grade") or request.args.get("gradeId") or "").strip(),
+            "subjectId": (request.args.get("subjectId") or "").strip() if len(listed) <= 1 else "",
+            "subjectIds": subject_ids_raw or ",".join(listed),
         }
+        # se veio lista em subjectId repetido, não forçar um único default errado
+        if len(listed) > 1:
+            defaults["subjectId"] = ""
+            defaults["subjectIds"] = ",".join(listed)
+
         context = validate_import_defaults(defaults)
         buffer = build_questions_import_template(context)
 
-        safe_subject = "".join(c if c.isalnum() or c in "-_" else "_" for c in (context["subjectName"] or "disciplina"))[:40]
-        safe_grade = "".join(c if c.isalnum() or c in "-_" else "_" for c in (context["gradeName"] or "serie"))[:40]
-        download_name = f"template_questoes_{safe_subject}_{safe_grade}.docx"
+        safe_grade = "".join(
+            c if c.isalnum() or c in "-_" else "_" for c in (context["gradeName"] or "serie")
+        )[:40]
+        n_subj = len(context.get("subjects") or [])
+        download_name = f"template_questoes_{safe_grade}_{n_subj}disc.docx"
 
         return send_file(
             buffer,
@@ -802,12 +816,13 @@ def import_questions_docx():
 
     multipart/form-data:
       - file (obrigatório): .docx
-      - subjectId (obrigatório): UUID da disciplina
       - grade (obrigatório): UUID da série
-      - commit (opcional): "true" | "false" (default false = preview)
-      - indexes (opcional no commit): "1,3,5" ou indexes[] — só cria esses índices
+      - subjectIds (opcional): lista permitida id1,id2
+      - subjectId (opcional): default se a questão não trouxer SubjectId no DOCX
+      - commit (opcional): "true" | "false"
+      - indexes (opcional no commit): "1,3,5"
 
-    Dificuldade vem por questão no arquivo (Abaixo do Básico | Básico | Adequado | Avançado).
+    Disciplina e dificuldade vêm por questão no arquivo.
     """
     try:
         from app.services.question_import import import_questions_from_docx
@@ -832,10 +847,15 @@ def import_questions_docx():
         commit = str(commit_raw).strip().lower() in ("1", "true", "yes", "sim")
 
         defaults = {}
-        for key in ("subjectId", "grade", "gradeId"):
+        for key in ("subjectId", "grade", "gradeId", "subjectIds"):
             value = request.form.get(key)
             if value not in (None, ""):
                 defaults[key] = value.strip()
+
+        # subjectIds[] repetido
+        listed = request.form.getlist("subjectIds") or request.form.getlist("subjectIds[]")
+        if listed:
+            defaults["subjectIds"] = ",".join(v.strip() for v in listed if v and v.strip())
 
         indexes = parse_indexes_from_request(request.form, request.args)
         if indexes is not None and not commit:

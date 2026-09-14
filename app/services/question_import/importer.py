@@ -198,42 +198,97 @@ def _form_grade_id(defaults: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _parse_subject_ids_list(raw: Any) -> List[str]:
+    """Aceita 'id1,id2', JSON list, ou lista."""
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(x).strip() for x in raw if str(x).strip() and _is_uuid(str(x).strip())]
+    text = str(raw).strip()
+    if text.startswith("["):
+        try:
+            import json
+
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip() and _is_uuid(str(x).strip())]
+        except Exception:
+            pass
+    out = []
+    for part in re.split(r"[,\s;]+", text):
+        part = part.strip()
+        if part and _is_uuid(part):
+            out.append(part)
+    return out
+
+
 def validate_import_defaults(defaults: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Valida subjectId e grade obrigatórios do formulário.
-    Retorna contexto {subjectId, subjectName, gradeId, gradeName}.
-    Dificuldade vem por questão no DOCX (não no formulário).
+    Valida grade obrigatória do formulário.
+    subjectId é opcional (default para questões sem disciplina no DOCX).
+    subjectIds (lista) lista as disciplinas permitidas / do template.
+
+    Retorna:
+      gradeId, gradeName,
+      defaultSubjectId?, defaultSubjectName?,
+      subjects: [{id, name}, ...]
     """
     defaults = defaults or {}
-    subject_id = _form_subject_id(defaults)
     grade_id = _form_grade_id(defaults)
-
-    missing = []
-    if not subject_id:
-        missing.append("subjectId")
     if not grade_id:
-        missing.append("grade")
-    if missing:
         raise ValueError(
-            "Campos obrigatórios do formulário ausentes: "
-            + ", ".join(missing)
-            + ". Selecione disciplina e série antes de baixar/enviar o arquivo."
+            "Campo obrigatório do formulário ausente: grade. "
+            "Selecione a série antes de baixar/enviar o arquivo."
         )
-
-    subject = Subject.query.get(subject_id)
-    if not subject:
-        raise ValueError(f"Disciplina não encontrada para subjectId={subject_id}")
 
     grade = Grade.query.get(grade_id)
     if not grade:
         raise ValueError(f"Série não encontrada para grade={grade_id}")
 
-    return {
-        "subjectId": subject.id,
-        "subjectName": subject.name,
+    subject_ids = _parse_subject_ids_list(
+        defaults.get("subjectIds") or defaults.get("subjects")
+    )
+    single = _form_subject_id(defaults)
+    if single and single not in subject_ids:
+        subject_ids.insert(0, single)
+
+    subjects: List[Dict[str, Any]] = []
+    seen = set()
+    for sid in subject_ids:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        subject = Subject.query.get(sid)
+        if not subject:
+            raise ValueError(f"Disciplina não encontrada para subjectId={sid}")
+        subjects.append({"id": subject.id, "name": subject.name})
+
+    default_subject = subjects[0] if len(subjects) == 1 else None
+    if single and not default_subject:
+        # default explícito mesmo com várias disciplinas na lista
+        match = next((s for s in subjects if s["id"] == single), None)
+        default_subject = match
+
+    ctx: Dict[str, Any] = {
         "gradeId": str(grade.id),
         "gradeName": grade.name,
+        "subjects": subjects,
+        # compat: campos antigos quando há exatamente 1 disciplina
+        "subjectId": default_subject["id"] if default_subject and len(subjects) <= 1 else (
+            single if single else None
+        ),
+        "subjectName": default_subject["name"] if default_subject and len(subjects) <= 1 else (
+            next((s["name"] for s in subjects if s["id"] == single), None) if single else None
+        ),
+        "defaultSubjectId": single or (subjects[0]["id"] if len(subjects) == 1 else None),
+        "defaultSubjectName": (
+            next((s["name"] for s in subjects if s["id"] == single), None)
+            if single
+            else (subjects[0]["name"] if len(subjects) == 1 else None)
+        ),
+        "allowedSubjectIds": [s["id"] for s in subjects] if subjects else None,
     }
+    return ctx
 
 
 def normalize_difficulty(raw: Any) -> Optional[str]:
@@ -278,32 +333,67 @@ def _resolve_question_type(meta: Dict[str, Any]) -> Tuple[str, List[str]]:
 
 
 def _resolve_subject(meta: Dict[str, Any], defaults: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], List[str]]:
-    """Prioriza subjectId do formulário; nome do DOCX só como fallback."""
+    """
+    Disciplina por questão.
+    Prioridade: SubjectId do DOCX → nome Disciplina no DOCX → subjectId default do formulário.
+    Se allowedSubjectIds estiver definido, a disciplina precisa estar na lista.
+    """
     errors: List[str] = []
-    subject_id = _form_subject_id(defaults) or (
-        meta.get("subjectId") if _is_uuid(meta.get("subjectId")) else None
-    )
+    allowed = defaults.get("allowedSubjectIds")
+
+    subject_id = None
+    if _is_uuid(meta.get("subjectId")):
+        subject_id = str(meta.get("subjectId")).strip()
+    elif _is_uuid(meta.get("subject")):
+        subject_id = str(meta.get("subject")).strip()
+
+    subject_name = meta.get("subject") if not _is_uuid(meta.get("subject")) else None
 
     if subject_id:
-        subject = Subject.query.get(str(subject_id).strip())
+        subject = Subject.query.get(subject_id)
         if not subject:
             errors.append(f"Disciplina não encontrada para SubjectId={subject_id}")
             return None, None, errors
+        if allowed and subject.id not in allowed and str(subject.id) not in [str(a) for a in allowed]:
+            errors.append(
+                f"Disciplina '{subject.name}' (SubjectId={subject.id}) não está entre as "
+                "disciplinas permitidas deste arquivo. Use um SubjectId da lista do template."
+            )
+            return None, None, errors
         return subject.id, subject.name, errors
 
-    subject_name = meta.get("subject")
     if subject_name:
         needle = _norm_name(str(subject_name))
-        subjects = Subject.query.all()
-        match = next((s for s in subjects if _norm_name(s.name or "") == needle), None)
+        # restringe busca às permitidas se houver lista
+        if allowed:
+            candidates = [Subject.query.get(sid) for sid in allowed]
+            candidates = [s for s in candidates if s]
+        else:
+            candidates = Subject.query.all()
+        match = next((s for s in candidates if _norm_name(s.name or "") == needle), None)
         if not match:
-            match = next((s for s in subjects if needle in _norm_name(s.name or "")), None)
+            match = next((s for s in candidates if needle in _norm_name(s.name or "")), None)
         if not match:
-            errors.append(f"Disciplina não encontrada: {subject_name}")
+            errors.append(
+                f"Disciplina não encontrada: {subject_name}. "
+                "Copie o SubjectId da lista do template para evitar erro de nome."
+            )
             return None, None, errors
         return match.id, match.name, errors
 
-    errors.append("Disciplina obrigatória (envie subjectId no formulário de upload)")
+    # fallback: default do formulário (1 disciplina ou subjectId explícito)
+    form_sid = _form_subject_id(defaults) or defaults.get("defaultSubjectId")
+    if form_sid and _is_uuid(form_sid):
+        subject = Subject.query.get(str(form_sid).strip())
+        if not subject:
+            errors.append(f"Disciplina padrão do formulário não encontrada: {form_sid}")
+            return None, None, errors
+        return subject.id, subject.name, errors
+
+    errors.append(
+        "Disciplina obrigatória neste bloco. Informe SubjectId (copie da lista do template) "
+        "ou envie subjectId único no formulário como padrão."
+    )
     return None, None, errors
 
 
@@ -589,51 +679,45 @@ def _preview_item(block: Dict[str, Any], payload: Dict[str, Any], resolved: Dict
     }
 
 
-def import_questions_from_docx(
+def _apply_form_context_to_defaults(defaults: Dict[str, Any], form_ctx: Dict[str, Any]) -> Dict[str, Any]:
+    merged = {
+        **defaults,
+        "grade": form_ctx["gradeId"],
+        "gradeId": form_ctx["gradeId"],
+        "defaultSubjectId": form_ctx.get("defaultSubjectId"),
+        "allowedSubjectIds": form_ctx.get("allowedSubjectIds"),
+    }
+    # subjectId do form só como default (não força em todas as questões)
+    if form_ctx.get("defaultSubjectId"):
+        merged["subjectId"] = form_ctx["defaultSubjectId"]
+    elif form_ctx.get("subjectId"):
+        merged["subjectId"] = form_ctx["subjectId"]
+    else:
+        merged.pop("subjectId", None)
+    merged.pop("difficulty", None)
+    merged.pop("type", None)
+    return merged
+
+
+def prepare_docx_questions(
     file_storage,
     *,
     current_user: Dict[str, Any],
-    commit: bool = False,
     defaults: Optional[Dict[str, Any]] = None,
-    indexes: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
-    Parseia o DOCX, valida e opcionalmente cria questões de múltipla escolha.
+    Lê o DOCX, resolve metadados e devolve itens validados sem gravar.
 
-    defaults (obrigatórios do formulário): subjectId, grade (UUID)
-    Dificuldade vem por questão no DOCX.
-
-    indexes (só no commit):
-      - None → cria todas as questões válidas
-      - [1, 3, 5] → cria apenas esses índices (do preview), se válidos
+    Retorno:
+      form, items, prepared_by_index, summary parcial
     """
     defaults = defaults or {}
     created_by = _user_id(current_user)
     if not created_by:
         raise ValueError("Usuário autenticado sem id")
 
-    if indexes is not None:
-        if not isinstance(indexes, list):
-            raise ValueError("indexes deve ser uma lista de inteiros")
-        if len(indexes) == 0:
-            raise ValueError(
-                "indexes está vazio. Envie pelo menos um índice do preview "
-                "(ex.: indexes=1,3) ou omita o campo para importar todas as válidas."
-            )
-        for idx in indexes:
-            if not isinstance(idx, int) or idx < 1:
-                raise ValueError("indexes deve conter apenas inteiros >= 1")
-
-    # Fonte da verdade: selects do formulário (disciplina/série)
     form_ctx = validate_import_defaults(defaults)
-    defaults = {
-        **defaults,
-        "subjectId": form_ctx["subjectId"],
-        "grade": form_ctx["gradeId"],
-        "gradeId": form_ctx["gradeId"],
-    }
-    defaults.pop("difficulty", None)
-    defaults.pop("type", None)
+    defaults = _apply_form_context_to_defaults(defaults, form_ctx)
 
     filename = getattr(file_storage, "filename", "") or ""
     if not filename.lower().endswith(".docx"):
@@ -648,6 +732,78 @@ def import_questions_from_docx(
     from io import BytesIO
 
     blocks = parse_questions_docx(BytesIO(raw))
+    items: List[Dict[str, Any]] = []
+    prepared_by_index: Dict[int, Dict[str, Any]] = {}
+
+    for block in blocks:
+        payload, resolved, errors, warnings = _build_payload(block, defaults, created_by)
+        item = _preview_item(block, payload, resolved, errors, warnings)
+        items.append(item)
+        prepared_by_index[block["index"]] = {
+            "block": block,
+            "payload": payload,
+            "resolved": resolved,
+            "errors": errors,
+            "warnings": warnings,
+            "item": item,
+        }
+
+    valid_count = sum(1 for i in items if i["valid"])
+    return {
+        "form": form_ctx,
+        "items": items,
+        "prepared_by_index": prepared_by_index,
+        "summary": {
+            "total": len(items),
+            "valid": valid_count,
+            "invalid": len(items) - valid_count,
+        },
+        "created_by": created_by,
+    }
+
+
+def import_questions_from_docx(
+    file_storage,
+    *,
+    current_user: Dict[str, Any],
+    commit: bool = False,
+    defaults: Optional[Dict[str, Any]] = None,
+    indexes: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    """
+    Parseia o DOCX, valida e opcionalmente cria questões de múltipla escolha.
+
+    defaults: grade (obrigatório); subjectId (opcional default);
+              subjectIds (opcional, lista permitida).
+    Disciplina e dificuldade vêm por questão no DOCX.
+
+    indexes (só no commit):
+      - None → cria todas as questões válidas
+      - [1, 3, 5] → cria apenas esses índices (do preview), se válidos
+    """
+    if indexes is not None:
+        if not isinstance(indexes, list):
+            raise ValueError("indexes deve ser uma lista de inteiros")
+        if len(indexes) == 0:
+            raise ValueError(
+                "indexes está vazio. Envie pelo menos um índice do preview "
+                "(ex.: indexes=1,3) ou omita o campo para importar todas as válidas."
+            )
+        for idx in indexes:
+            if not isinstance(idx, int) or idx < 1:
+                raise ValueError("indexes deve conter apenas inteiros >= 1")
+
+    prepared_pack = prepare_docx_questions(
+        file_storage,
+        current_user=current_user,
+        defaults=defaults,
+    )
+    form_ctx = prepared_pack["form"]
+    items = prepared_pack["items"]
+    by_index = prepared_pack["prepared_by_index"]
+    valid_count = prepared_pack["summary"]["valid"]
+    invalid_count = prepared_pack["summary"]["invalid"]
+
     empty_summary = {
         "total": 0,
         "valid": 0,
@@ -657,7 +813,7 @@ def import_questions_from_docx(
         "skipped": 0,
         "selectedIndexes": indexes,
     }
-    if not blocks:
+    if not items:
         return {
             "mode": "commit" if commit else "preview",
             "form": form_ctx,
@@ -669,21 +825,9 @@ def import_questions_from_docx(
             "message": "Nenhuma questão encontrada. Use os marcadores === QUESTÃO === e === FIM ===.",
         }
 
-    items: List[Dict[str, Any]] = []
     created: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
-
-    prepared: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], List[str], List[str]]] = []
-    by_index: Dict[int, Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], List[str], List[str]]] = {}
-    for block in blocks:
-        payload, resolved, errors, warnings = _build_payload(block, defaults, created_by)
-        prepared.append((block, payload, resolved, errors, warnings))
-        by_index[block["index"]] = (block, payload, resolved, errors, warnings)
-        items.append(_preview_item(block, payload, resolved, errors, warnings))
-
-    valid_count = sum(1 for i in items if i["valid"])
-    invalid_count = len(items) - valid_count
 
     if not commit:
         return {
@@ -706,7 +850,6 @@ def import_questions_from_docx(
 
     selected_set = set(indexes) if indexes is not None else None
 
-    # índices pedidos que não existem no arquivo
     if selected_set is not None:
         for missing_idx in sorted(selected_set - set(by_index.keys())):
             failed.append(
@@ -718,8 +861,10 @@ def import_questions_from_docx(
             )
 
     try:
-        for block, payload, resolved, errors, warnings in prepared:
-            idx = block["index"]
+        for idx, entry in sorted(by_index.items(), key=lambda x: x[0]):
+            errors = entry["errors"]
+            warnings = entry["warnings"]
+            payload = entry["payload"]
 
             if selected_set is not None and idx not in selected_set:
                 skipped.append(
@@ -748,6 +893,7 @@ def import_questions_from_docx(
                         "index": idx,
                         "id": question.id,
                         "type": question.question_type,
+                        "subjectId": question.subject_id,
                         "warnings": warnings,
                     }
                 )

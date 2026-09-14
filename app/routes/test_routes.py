@@ -382,6 +382,94 @@ def criar_avaliacao():
         logging.error(f"Error creating test: {str(e)}", exc_info=True)
         return jsonify({"error": "Error creating test", "details": str(e)}), 500
 
+
+@bp.route('/import-docx', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def criar_avaliacao_com_docx():
+    """
+    Cria avaliação online (virtual) + questões do DOCX de forma atômica.
+
+    multipart/form-data:
+      - file (obrigatório): .docx
+      - indexes (recomendado): "1,3,5"
+      - grade (obrigatório para as questões)
+      - subjectIds (recomendado no SIMULADO): id1,id2 — disciplinas permitidas
+      - subjectId (opcional): default se a questão não trouxer SubjectId no DOCX
+      - Campos da avaliação: title, type (AVALIACAO|SIMULADO), model, course, created_by, ...
+      - evaluation_mode: apenas virtual
+
+    Disciplina por questão no DOCX (SubjectId). Preview: POST /questions/import/docx.
+    """
+    from app.services.question_import.test_docx_import import (
+        TestDocxImportError,
+        create_test_with_docx,
+        parse_indexes_arg,
+        parse_test_fields_from_form,
+    )
+
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "Nenhum arquivo enviado. Use o campo 'file'."}), 400
+
+        file = request.files["file"]
+        if not file or not file.filename:
+            return jsonify({"error": "Nenhum arquivo selecionado"}), 400
+
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "User not authenticated"}), 401
+
+        test_data = parse_test_fields_from_form(request.form)
+        if not test_data.get("created_by"):
+            test_data["created_by"] = current_user.get("user_id") or current_user.get("id")
+
+        question_defaults = {}
+        for key in ("subjectId", "grade", "gradeId", "subjectIds"):
+            value = request.form.get(key)
+            if value not in (None, ""):
+                question_defaults[key] = value.strip()
+
+        listed = request.form.getlist("subjectIds") or request.form.getlist("subjectIds[]")
+        if listed:
+            question_defaults["subjectIds"] = ",".join(
+                v.strip() for v in listed if v and v.strip()
+            )
+
+        if not question_defaults.get("grade") and not question_defaults.get("gradeId"):
+            g = test_data.get("grade") or test_data.get("grade_id")
+            if g:
+                question_defaults["grade"] = str(g).strip()
+
+        # subjectId único só como default (AVALIACAO 1 disciplina)
+        if not question_defaults.get("subjectId") and test_data.get("subject"):
+            question_defaults["subjectId"] = str(test_data["subject"]).strip()
+
+        indexes = parse_indexes_arg(request.form, request.args)
+
+        result = create_test_with_docx(
+            file,
+            current_user=current_user,
+            test_data=test_data,
+            question_defaults=question_defaults,
+            indexes=indexes,
+        )
+        return jsonify(result), 201
+
+    except TestDocxImportError as e:
+        db.session.rollback()
+        body = {"error": e.message, **(e.payload or {})}
+        return jsonify(body), 400
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error creating test from DOCX: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao criar avaliação com DOCX", "details": str(e)}), 500
+
+
 @bp.route('/', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")

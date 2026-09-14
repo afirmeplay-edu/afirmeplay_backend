@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
@@ -45,25 +45,70 @@ def _add_locked_meta(doc: Document, label: str, value: str) -> None:
 
 
 def _add_user_meta(doc: Document, label: str, value: str) -> None:
-    """Campo que o usuário preenche (ex.: dificuldade por questão)."""
+    """Campo que o usuário preenche/escolhe por questão."""
     p = doc.add_paragraph()
     run = p.add_run(f"{label}: {value}")
     run.font.size = Pt(11)
+
+
+def _add_question_block(
+    doc: Document,
+    *,
+    subject: Dict[str, Any],
+    grade_name: str,
+    grade_id: str,
+    difficulty: str,
+    title: str,
+    enunciado: str,
+    alternativas: List[str],
+    solucao: str,
+    skill: Optional[str] = None,
+) -> None:
+    _add_marker(doc, "=== QUESTÃO ===")
+    _add_locked_meta(doc, "Série", grade_name)
+    if grade_id:
+        _add_locked_meta(doc, "GradeId", str(grade_id))
+    # Disciplina por questão — copiar SubjectId da lista
+    _add_user_meta(doc, "Disciplina", subject.get("name") or "—")
+    if subject.get("id"):
+        _add_user_meta(doc, "SubjectId", str(subject["id"]))
+    _add_user_meta(doc, "Dificuldade", difficulty)
+    if skill:
+        doc.add_paragraph(f"Habilidade: {skill}")
+    doc.add_paragraph(f"Título: {title}")
+    doc.add_paragraph()
+    _add_marker(doc, "Enunciado:")
+    doc.add_paragraph(enunciado)
+    doc.add_paragraph()
+    _add_marker(doc, "Alternativas:")
+    for alt in alternativas:
+        doc.add_paragraph(alt)
+    doc.add_paragraph()
+    _add_marker(doc, "Solução:")
+    doc.add_paragraph(solucao)
+    _add_marker(doc, "=== FIM ===")
 
 
 def build_questions_import_template(context: Optional[Dict[str, Any]] = None) -> BytesIO:
     """
     Monta um .docx só para questões de múltipla escolha.
 
-    context (obrigatório na rota):
-      subjectId, subjectName, gradeId, gradeName
-    Disciplina/série vêm do formulário; dificuldade é por questão no arquivo.
+    context:
+      gradeId, gradeName (obrigatórios)
+      subjects: [{id, name}, ...] — disciplinas permitidas / exemplos
+      defaultSubjectId / defaultSubjectName — opcional (atalho 1 disciplina)
     """
     context = context or {}
-    subject_name = context.get("subjectName") or "—"
-    subject_id = context.get("subjectId") or ""
     grade_name = context.get("gradeName") or "—"
     grade_id = context.get("gradeId") or ""
+    subjects: List[Dict[str, Any]] = list(context.get("subjects") or [])
+    if not subjects and context.get("subjectId"):
+        subjects = [
+            {
+                "id": context.get("subjectId"),
+                "name": context.get("subjectName") or "—",
+            }
+        ]
 
     doc = Document()
 
@@ -71,27 +116,45 @@ def build_questions_import_template(context: Optional[Dict[str, Any]] = None) ->
     _add_muted(
         doc,
         "Este arquivo é só para questões de múltipla escolha. "
-        "Disciplina e série já foram definidas no formulário (campos em verde — não altere). "
+        "A série já foi definida no formulário (campos em verde — não altere). "
+        "A disciplina é por questão: em cada bloco, copie e cole o SubjectId "
+        "da disciplina desejada (lista abaixo). "
         "Não altere os marcadores em amarelo. Você pode colar imagens no enunciado, "
         "nas alternativas ou na solução.",
     )
     doc.add_paragraph()
 
     _add_heading(doc, "Contexto deste arquivo (não editar)", size=13)
-    _add_locked_meta(doc, "Disciplina", subject_name)
-    if subject_id:
-        _add_locked_meta(doc, "SubjectId", str(subject_id))
     _add_locked_meta(doc, "Série", grade_name)
     if grade_id:
         _add_locked_meta(doc, "GradeId", str(grade_id))
     doc.add_paragraph()
 
+    _add_heading(doc, "Disciplinas deste arquivo (copie o SubjectId)", size=13)
+    _add_muted(
+        doc,
+        "Em cada questão, preencha Disciplina (nome) e SubjectId (UUID). "
+        "O mais seguro é copiar o SubjectId da lista. Cada questão pode ter uma disciplina diferente.",
+    )
+    if subjects:
+        for subj in subjects:
+            doc.add_paragraph(
+                f"{subj.get('name') or '—'} → SubjectId: {subj.get('id')}",
+                style="List Bullet",
+            )
+    else:
+        _add_muted(
+            doc,
+            "Nenhuma disciplina foi enviada na geração do template. "
+            "Informe SubjectId manualmente em cada questão (UUID cadastrado no sistema).",
+        )
+
+    doc.add_paragraph()
     _add_heading(doc, "Dificuldade (obrigatória em cada questão)", size=13)
     _add_muted(
         doc,
-        "Copie e cole um dos textos abaixo exatamente no campo Dificuldade de cada questão. "
-        "Assim você evita erro de digitação. Variações leves de acento/maiúscula são aceitas, "
-        "mas o mais seguro é copiar e colar. Cada questão pode ter um nível diferente.",
+        "Copie e cole um dos textos abaixo exatamente no campo Dificuldade. "
+        "Variações leves de acento/maiúscula são aceitas, mas o mais seguro é copiar e colar.",
     )
     for label in ALLOWED_DIFFICULTIES:
         doc.add_paragraph(label, style="List Bullet")
@@ -99,78 +162,74 @@ def build_questions_import_template(context: Optional[Dict[str, Any]] = None) ->
     doc.add_paragraph()
     _add_heading(doc, "O que você preenche em cada questão", size=13)
     for line in [
-        "Dificuldade: obrigatória (copie e cole um dos quatro textos acima)",
+        "SubjectId + Disciplina: obrigatórios por questão (copie da lista acima)",
+        "Dificuldade: obrigatória (copie e cole um dos quatro textos)",
         "Habilidade: código BNCC/código interno (ex.: EF05MA01) — opcional",
         "Título, Comando, Número, Valor — opcionais",
         "Marque a alternativa correta com [CORRETA] no final da linha",
     ]:
         doc.add_paragraph(line, style="List Bullet")
 
+    # Exemplos: uma questão por disciplina (até 2), senão 2 da mesma
+    example_subjects = subjects[:2] if subjects else [
+        {"id": "", "name": "Matemática"},
+        {"id": "", "name": "Língua Portuguesa"},
+    ]
+    if len(example_subjects) == 1:
+        example_subjects = [example_subjects[0], example_subjects[0]]
+
     doc.add_paragraph()
     _add_heading(doc, "Exemplo 1", size=13)
-
-    _add_marker(doc, "=== QUESTÃO ===")
-    _add_locked_meta(doc, "Disciplina", subject_name)
-    if subject_id:
-        _add_locked_meta(doc, "SubjectId", str(subject_id))
-    _add_locked_meta(doc, "Série", grade_name)
-    if grade_id:
-        _add_locked_meta(doc, "GradeId", str(grade_id))
-    _add_user_meta(doc, "Dificuldade", "Adequado")
-    doc.add_paragraph("Habilidade: EF05MA01")
-    doc.add_paragraph("Título: Frações equivalentes")
-    doc.add_paragraph()
-    _add_marker(doc, "Enunciado:")
-    doc.add_paragraph(
-        "Qual das frações abaixo é equivalente a 1/2? "
-        "(Você pode colar uma imagem aqui, se quiser.)"
+    _add_question_block(
+        doc,
+        subject=example_subjects[0],
+        grade_name=grade_name,
+        grade_id=str(grade_id),
+        difficulty="Adequado",
+        title="Frações equivalentes",
+        enunciado=(
+            "Qual das frações abaixo é equivalente a 1/2? "
+            "(Você pode colar uma imagem aqui, se quiser.)"
+        ),
+        alternativas=["A) 2/4 [CORRETA]", "B) 1/3", "C) 3/5", "D) 2/5"],
+        solucao=(
+            "Multiplicando numerador e denominador de 1/2 por 2 obtemos 2/4, "
+            "que é uma fração equivalente."
+        ),
+        skill="EF05MA01",
     )
+
     doc.add_paragraph()
-    _add_marker(doc, "Alternativas:")
-    doc.add_paragraph("A) 2/4 [CORRETA]")
-    doc.add_paragraph("B) 1/3")
-    doc.add_paragraph("C) 3/5")
-    doc.add_paragraph("D) 2/5")
-    doc.add_paragraph()
-    _add_marker(doc, "Solução:")
-    doc.add_paragraph(
-        "Multiplicando numerador e denominador de 1/2 por 2 obtemos 2/4, "
-        "que é uma fração equivalente."
+    _add_heading(doc, "Exemplo 2 (outra disciplina e/ou dificuldade)", size=13)
+    _add_question_block(
+        doc,
+        subject=example_subjects[1],
+        grade_name=grade_name,
+        grade_id=str(grade_id),
+        difficulty="Básico",
+        title="Números pares" if example_subjects[0].get("id") == example_subjects[1].get("id") else "Interpretação de texto",
+        enunciado=(
+            "Qual dos números abaixo é par?"
+            if example_subjects[0].get("id") == example_subjects[1].get("id")
+            else "No texto, a palavra destacada indica qual ideia?"
+        ),
+        alternativas=(
+            ["A) 3", "B) 7", "C) 8 [CORRETA]", "D) 9"]
+            if example_subjects[0].get("id") == example_subjects[1].get("id")
+            else ["A) causa [CORRETA]", "B) tempo", "C) lugar", "D) modo"]
+        ),
+        solucao=(
+            "8 é divisível por 2, portanto é par."
+            if example_subjects[0].get("id") == example_subjects[1].get("id")
+            else "A palavra indica relação de causa."
+        ),
     )
-    _add_marker(doc, "=== FIM ===")
-
-    doc.add_paragraph()
-    _add_heading(doc, "Exemplo 2 (outra dificuldade no mesmo arquivo)", size=13)
-
-    _add_marker(doc, "=== QUESTÃO ===")
-    _add_locked_meta(doc, "Disciplina", subject_name)
-    if subject_id:
-        _add_locked_meta(doc, "SubjectId", str(subject_id))
-    _add_locked_meta(doc, "Série", grade_name)
-    if grade_id:
-        _add_locked_meta(doc, "GradeId", str(grade_id))
-    _add_user_meta(doc, "Dificuldade", "Básico")
-    doc.add_paragraph("Título: Números pares")
-    doc.add_paragraph()
-    _add_marker(doc, "Enunciado:")
-    doc.add_paragraph("Qual dos números abaixo é par?")
-    doc.add_paragraph()
-    _add_marker(doc, "Alternativas:")
-    doc.add_paragraph("A) 3")
-    doc.add_paragraph("B) 7")
-    doc.add_paragraph("C) 8 [CORRETA]")
-    doc.add_paragraph("D) 9")
-    doc.add_paragraph()
-    _add_marker(doc, "Solução:")
-    doc.add_paragraph("8 é divisível por 2, portanto é par.")
-    _add_marker(doc, "=== FIM ===")
 
     doc.add_paragraph()
     _add_muted(
         doc,
-        "Dica: copie o bloco inteiro (da linha === QUESTÃO === até === FIM ===) "
-        "para adicionar mais questões. Mantenha Disciplina/SubjectId/Série/GradeId "
-        "iguais; altere só a Dificuldade (copiar/colar) e o conteúdo da questão.",
+        "Dica: copie o bloco inteiro (=== QUESTÃO === até === FIM ===) para adicionar mais questões. "
+        "Mantenha Série/GradeId; altere SubjectId (disciplina), Dificuldade e o conteúdo.",
     )
 
     buffer = BytesIO()

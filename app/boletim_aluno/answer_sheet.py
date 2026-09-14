@@ -196,6 +196,8 @@ def _build_one_boletim_as(
     skills_db: Dict[str, Any],
     school_names: Dict[str, str],
     grade_names: Dict[str, str],
+    *,
+    course_name: str = "Anos Iniciais",
 ) -> Dict[str, Any]:
     detected = _parse_detected(result.detected_answers if result else None)
     por_disciplina_map: Dict[str, Dict[str, Any]] = {}
@@ -241,7 +243,11 @@ def _build_one_boletim_as(
     por_disciplina: List[Dict[str, Any]] = []
     for disciplina_id in disciplina_ordem:
         bloco = por_disciplina_map[disciplina_id]
-        attach_disciplina_cards(bloco, proficiency_by_subject.get(str(disciplina_id)))
+        attach_disciplina_cards(
+            bloco,
+            proficiency_by_subject.get(str(disciplina_id)),
+            course_name=course_name,
+        )
         por_disciplina.append(bloco)
 
     return {
@@ -339,6 +345,14 @@ def build_boletins_answer_sheet(
     school_names = _school_name_map(school_ids)
     grade_names = _grade_name_map(grade_ids)
 
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        infer_course_name_from_grade,
+        resolve_grade_name_for_proficiency,
+    )
+
+    grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gab)
+    course_name = infer_course_name_from_grade(grade_name) or "Anos Iniciais"
+
     payload["boletins"] = [
         _build_one_boletim_as(
             st,
@@ -350,6 +364,7 @@ def build_boletins_answer_sheet(
             skills_db,
             school_names,
             grade_names,
+            course_name=course_name,
         )
         for st in page_students
     ]

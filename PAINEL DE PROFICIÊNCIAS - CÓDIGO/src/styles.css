@@ -1,0 +1,170 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Afirme Play — design system
+ * Tema institucional roxo profundo, tokens semânticos em oklch.
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-surface: var(--surface);
+  --color-surface-foreground: var(--surface-foreground);
+  --color-abaixo: var(--abaixo);
+  --color-abaixo-soft: var(--abaixo-soft);
+  --color-basico: var(--basico);
+  --color-basico-soft: var(--basico-soft);
+  --color-adequado: var(--adequado);
+  --color-adequado-soft: var(--adequado-soft);
+  --color-avancado: var(--avancado);
+  --color-avancado-soft: var(--avancado-soft);
+  --color-on-level: var(--on-level);
+  --font-sans:
+    "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Sora", "Plus Jakarta Sans", ui-sans-serif, sans-serif;
+  --shadow-panel: 0 24px 60px -30px oklch(0.12 0.09 300 / 0.75);
+  --shadow-lift: 0 10px 24px -14px oklch(0.12 0.09 300 / 0.6);
+}
+
+:root {
+  --radius: 0.9rem;
+  --background: oklch(0.19 0.075 302);
+  --foreground: oklch(0.97 0.01 300);
+  --card: oklch(0.24 0.078 303);
+  --card-foreground: oklch(0.97 0.01 300);
+  --surface: oklch(0.28 0.075 303);
+  --surface-foreground: oklch(0.97 0.01 300);
+  --popover: oklch(0.24 0.078 303);
+  --popover-foreground: oklch(0.97 0.01 300);
+  --primary: oklch(0.62 0.21 300);
+  --primary-foreground: oklch(0.99 0.005 300);
+  --secondary: oklch(0.31 0.08 303);
+  --secondary-foreground: oklch(0.96 0.01 300);
+  --muted: oklch(0.29 0.06 303);
+  --muted-foreground: oklch(0.75 0.045 300);
+  --accent: oklch(0.72 0.16 350);
+  --accent-foreground: oklch(0.18 0.07 302);
+  --destructive: oklch(0.6 0.22 25);
+  --destructive-foreground: oklch(0.99 0.005 300);
+  --border: oklch(0.99 0.01 300 / 0.12);
+  --input: oklch(0.99 0.01 300 / 0.16);
+  --ring: oklch(0.68 0.19 305);
+
+  --on-level: oklch(0.99 0.005 300);
+  --abaixo: oklch(0.58 0.21 25);
+  --abaixo-soft: oklch(0.58 0.21 25 / 0.16);
+  --basico: oklch(0.78 0.16 78);
+  --basico-soft: oklch(0.78 0.16 78 / 0.16);
+  --adequado: oklch(0.68 0.16 150);
+  --adequado-soft: oklch(0.68 0.16 150 / 0.16);
+  --avancado: oklch(0.55 0.14 168);
+  --avancado-soft: oklch(0.55 0.14 168 / 0.18);
+
+  --gradient-brand: linear-gradient(
+    135deg,
+    oklch(0.62 0.21 300),
+    oklch(0.72 0.16 350)
+  );
+  --gradient-panel: linear-gradient(
+    160deg,
+    oklch(0.27 0.085 303),
+    oklch(0.21 0.075 302)
+  );
+  --gradient-scale: linear-gradient(
+    90deg,
+    oklch(0.58 0.21 25),
+    oklch(0.78 0.16 78),
+    oklch(0.75 0.19 135),
+    oklch(0.52 0.14 168)
+  );
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    background-image:
+      radial-gradient(
+        60rem 40rem at 82% -10%,
+        oklch(0.62 0.21 300 / 0.28),
+        transparent 70%
+      ),
+      radial-gradient(
+        50rem 34rem at 0% 100%,
+        oklch(0.72 0.16 350 / 0.18),
+        transparent 70%
+      );
+    background-attachment: fixed;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    letter-spacing: -0.015em;
+  }
+}
+
+@utility panel {
+  background-image: var(--gradient-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-panel);
+}
+
+@utility brand-bar {
+  background-image: var(--gradient-brand);
+}
+
+@utility scale-bar {
+  background-image: var(--gradient-scale);
+}
+
+@media print {
+  body {
+    background: #fff !important;
+    color: #16111f !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-plain {
+    background: #fff !important;
+    color: #16111f !important;
+    box-shadow: none !important;
+    border-color: #d8d3e4 !important;
+    background-image: none !important;
+  }
+}

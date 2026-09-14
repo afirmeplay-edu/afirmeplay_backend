@@ -38,6 +38,7 @@ from app.models.testSession import TestSession
 from app.models.evaluationResult import EvaluationResult
 from app.models.subjectiveResult import SubjectiveResult, RUBRIC_VALUES, RUBRIC_WEIGHTS
 from app.models.subjectiveRubricMark import SubjectiveRubricMark, DEFAULT_RUBRIC_MARKS
+from app.models.subjectiveRubricGroup import SubjectiveRubricGroup
 from app.models.subjectivePresence import SubjectivePresence
 from app.services.evaluation_calculator import EvaluationCalculator
 from app.services.evaluation_result_snapshot import build_placement_snapshots_from_student
@@ -150,24 +151,174 @@ class SubjectiveEvaluationService:
         return normalized
 
     @staticmethod
-    def _replace_rubric_marks(subjective_test_id: str, marks: List[Dict[str, Any]]) -> None:
-        SubjectiveRubricMark.query.filter_by(subjective_test_id=subjective_test_id).delete()
-        for mark in marks:
-            db.session.add(SubjectiveRubricMark(
+    def normalize_rubric_groups_payload(raw: Any, fallback_marks: Any = None) -> List[Dict[str, Any]]:
+        """
+        Normaliza grupos de critérios.
+
+        Aceita:
+        - `rubric_groups`: [{ temp_key|id, name, marks, sort_order }]
+        - legado: só `rubric_marks` → um único grupo padrão
+        """
+        groups_raw = raw if isinstance(raw, list) else None
+        if not groups_raw:
+            marks = SubjectiveEvaluationService.normalize_rubric_marks_payload(fallback_marks)
+            return [{
+                'temp_key': 'default',
+                'name': 'Grupo de critérios',
+                'sort_order': 0,
+                'marks': marks,
+            }]
+
+        if len(groups_raw) < 1:
+            raise ValueError('Informe ao menos um grupo de critérios.')
+        if len(groups_raw) > 20:
+            raise ValueError('No máximo 20 grupos de critérios por avaliação.')
+
+        normalized = []
+        used_keys = set()
+        for index, item in enumerate(groups_raw):
+            if not isinstance(item, dict):
+                raise ValueError(f'Grupo #{index + 1}: formato inválido.')
+            name = str(item.get('name') or item.get('title') or '').strip() or f'Grupo {index + 1}'
+            temp_key = str(
+                item.get('temp_key') or item.get('key') or item.get('id') or f'g{index + 1}'
+            ).strip()
+            if not temp_key:
+                temp_key = f'g{index + 1}'
+            if temp_key in used_keys:
+                temp_key = f'{temp_key}_{index + 1}'
+            used_keys.add(temp_key)
+            marks = SubjectiveEvaluationService.normalize_rubric_marks_payload(
+                item.get('marks') or item.get('rubric_marks')
+            )
+            sort_order = item.get('sort_order')
+            try:
+                sort_order = int(sort_order) if sort_order is not None else index
+            except (TypeError, ValueError):
+                sort_order = index
+            normalized.append({
+                'temp_key': temp_key,
+                'id': item.get('id'),
+                'name': name[:120],
+                'sort_order': sort_order,
+                'marks': marks,
+            })
+        normalized.sort(key=lambda g: g['sort_order'])
+        for i, group in enumerate(normalized):
+            group['sort_order'] = i
+        return normalized
+
+    @staticmethod
+    def _replace_rubric_groups(subjective_test_id: str, groups: List[Dict[str, Any]]) -> Dict[str, str]:
+        """
+        Substitui grupos + marcações da avaliação.
+        Retorna mapa temp_key → group_id (UUID persistido).
+        """
+        SubjectiveRubricMark.query.filter_by(subjective_test_id=subjective_test_id).delete(
+            synchronize_session=False
+        )
+        SubjectiveRubricGroup.query.filter_by(subjective_test_id=subjective_test_id).delete(
+            synchronize_session=False
+        )
+        db.session.flush()
+
+        key_to_id: Dict[str, str] = {}
+        for group in groups:
+            row = SubjectiveRubricGroup(
                 subjective_test_id=subjective_test_id,
-                code=mark['code'],
-                label=mark['label'],
-                color=mark['color'],
-                weight=mark['weight'],
-                sort_order=mark['sort_order'],
-            ))
+                name=group['name'],
+                sort_order=group['sort_order'],
+            )
+            db.session.add(row)
+            db.session.flush()
+            key_to_id[group['temp_key']] = row.id
+            if group.get('id'):
+                key_to_id[str(group['id'])] = row.id
+            for mark in group['marks']:
+                db.session.add(SubjectiveRubricMark(
+                    subjective_test_id=subjective_test_id,
+                    rubric_group_id=row.id,
+                    code=mark['code'],
+                    label=mark['label'],
+                    color=mark['color'],
+                    weight=mark['weight'],
+                    sort_order=mark['sort_order'],
+                ))
+        return key_to_id
+
+    @staticmethod
+    def _replace_rubric_marks(subjective_test_id: str, marks: List[Dict[str, Any]]) -> None:
+        """Compat: um único grupo padrão com as marcações informadas."""
+        SubjectiveEvaluationService._replace_rubric_groups(
+            subjective_test_id,
+            [{
+                'temp_key': 'default',
+                'name': 'Grupo de critérios',
+                'sort_order': 0,
+                'marks': marks,
+            }],
+        )
+
+    @staticmethod
+    def get_rubric_groups(subjective_test_id: str) -> List[Dict[str, Any]]:
+        try:
+            rows = (
+                SubjectiveRubricGroup.query
+                .filter_by(subjective_test_id=subjective_test_id)
+                .order_by(SubjectiveRubricGroup.sort_order, SubjectiveRubricGroup.name)
+                .all()
+            )
+        except Exception:
+            db.session.rollback()
+            rows = []
+        if rows:
+            return [r.to_dict(include_marks=True) for r in rows]
+
+        # Fallback: marcações flat antigas ou template padrão
+        marks = SubjectiveEvaluationService.get_rubric_marks(subjective_test_id)
+        return [{
+            'id': None,
+            'subjective_test_id': subjective_test_id,
+            'name': 'Grupo de critérios',
+            'sort_order': 0,
+            'marks': marks,
+        }]
 
     @staticmethod
     def get_rubric_marks(subjective_test_id: str) -> List[Dict[str, Any]]:
+        """
+        Lista flat de marcações (compatibilidade).
+        Preferência: todas as marcações de todos os grupos, na ordem dos grupos.
+        Se códigos se repetem entre grupos, mantém a primeira ocorrência para meta global.
+        """
         fallback = [
-            {**dict(m), 'id': None, 'subjective_test_id': subjective_test_id}
+            {**dict(m), 'id': None, 'subjective_test_id': subjective_test_id, 'rubric_group_id': None}
             for m in DEFAULT_RUBRIC_MARKS
         ]
+        try:
+            groups = (
+                SubjectiveRubricGroup.query
+                .filter_by(subjective_test_id=subjective_test_id)
+                .order_by(SubjectiveRubricGroup.sort_order)
+                .all()
+            )
+        except Exception:
+            db.session.rollback()
+            groups = []
+
+        if groups:
+            seen = set()
+            flat = []
+            for g in groups:
+                marks = sorted(g.marks or [], key=lambda m: (m.sort_order, m.code or ''))
+                for m in marks:
+                    if m.code in seen:
+                        continue
+                    seen.add(m.code)
+                    flat.append(m.to_dict())
+            if flat:
+                return flat
+
         try:
             rows = (
                 SubjectiveRubricMark.query
@@ -183,16 +334,69 @@ class SubjectiveEvaluationService:
         return fallback
 
     @staticmethod
+    def get_marks_for_group(rubric_group_id: Optional[str], subjective_test_id: str) -> List[Dict[str, Any]]:
+        if rubric_group_id:
+            try:
+                group = SubjectiveRubricGroup.query.get(rubric_group_id)
+            except Exception:
+                db.session.rollback()
+                group = None
+            if group and group.subjective_test_id == subjective_test_id:
+                marks = sorted(group.marks or [], key=lambda m: (m.sort_order, m.code or ''))
+                if marks:
+                    return [m.to_dict() for m in marks]
+        return SubjectiveEvaluationService.get_rubric_marks(subjective_test_id)
+
+    @staticmethod
     def _weights_for_test(subjective_test_id: str) -> Dict[str, float]:
         marks = SubjectiveEvaluationService.get_rubric_marks(subjective_test_id)
         weights = {m['code']: float(m['weight']) for m in marks}
         return weights or dict(RUBRIC_WEIGHTS)
 
     @staticmethod
+    def _weights_for_question(question: SubjectiveQuestion, subjective_test_id: str) -> Dict[str, float]:
+        marks = SubjectiveEvaluationService.get_marks_for_group(
+            getattr(question, 'rubric_group_id', None),
+            subjective_test_id,
+        )
+        weights = {m['code']: float(m['weight']) for m in marks}
+        return weights or SubjectiveEvaluationService._weights_for_test(subjective_test_id)
+
+    @staticmethod
     def _allowed_codes(subjective_test_id: str) -> List[str]:
         marks = SubjectiveEvaluationService.get_rubric_marks(subjective_test_id)
         codes = [m['code'] for m in marks]
         return codes or list(RUBRIC_VALUES)
+
+    @staticmethod
+    def _allowed_codes_for_question(question: SubjectiveQuestion, subjective_test_id: str) -> List[str]:
+        marks = SubjectiveEvaluationService.get_marks_for_group(
+            getattr(question, 'rubric_group_id', None),
+            subjective_test_id,
+        )
+        codes = [m['code'] for m in marks]
+        return codes or SubjectiveEvaluationService._allowed_codes(subjective_test_id)
+
+    @staticmethod
+    def _resolve_question_group_id(
+        q: Dict[str, Any],
+        key_to_id: Dict[str, str],
+        default_group_id: Optional[str],
+    ) -> Optional[str]:
+        raw = (
+            q.get('rubric_group_id')
+            or q.get('rubric_group_key')
+            or q.get('group_key')
+            or q.get('group_id')
+        )
+        if raw is None or raw == '':
+            return default_group_id
+        key = str(raw)
+        if key in key_to_id:
+            return key_to_id[key]
+        if key in key_to_id.values():
+            return key
+        raise ValueError(f'Grupo de critérios inválido na questão {q.get("number")}: {key}')
 
     @staticmethod
     def get_class_progress(subjective_test: SubjectiveTest) -> List[Dict[str, Any]]:
@@ -412,22 +616,28 @@ class SubjectiveEvaluationService:
         db.session.flush()
 
         questions = data.get('questions') or []
+        groups = SubjectiveEvaluationService.normalize_rubric_groups_payload(
+            data.get('rubric_groups'),
+            fallback_marks=data.get('rubric_marks') or data.get('marks'),
+        )
+        key_to_id = SubjectiveEvaluationService._replace_rubric_groups(subjective_test.id, groups)
+        default_group_id = next(iter(key_to_id.values()), None)
+
         for index, q in enumerate(questions):
+            group_id = SubjectiveEvaluationService._resolve_question_group_id(
+                q, key_to_id, default_group_id
+            )
             db.session.add(SubjectiveQuestion(
                 subjective_test_id=subjective_test.id,
                 number=q.get('number') or (index + 1),
                 code=q.get('code'),
                 skill_description=q.get('skill_description') or q.get('skillDescription') or '',
+                rubric_group_id=group_id,
             ))
 
         shadow_test = SubjectiveEvaluationService._create_shadow_test(subjective_test, created_by)
         subjective_test.shadow_test_id = shadow_test.id
         SubjectiveEvaluationService._sync_shadow_class_tests(subjective_test)
-
-        marks = SubjectiveEvaluationService.normalize_rubric_marks_payload(
-            data.get('rubric_marks') or data.get('marks')
-        )
-        SubjectiveEvaluationService._replace_rubric_marks(subjective_test.id, marks)
 
         db.session.commit()
         return subjective_test
@@ -454,30 +664,56 @@ class SubjectiveEvaluationService:
             )
 
         if 'questions' in data and isinstance(data['questions'], list):
+            # Grupos precisam existir antes das questões (FK)
+            key_to_id: Dict[str, str] = {}
+            default_group_id = None
+            if 'rubric_groups' in data or 'rubric_marks' in data or 'marks' in data:
+                groups = SubjectiveEvaluationService.normalize_rubric_groups_payload(
+                    data.get('rubric_groups'),
+                    fallback_marks=(
+                        data.get('rubric_marks') if 'rubric_marks' in data else data.get('marks')
+                    ),
+                )
+                SubjectiveEvaluationService._assert_can_replace_groups(subjective_test.id, groups)
+                key_to_id = SubjectiveEvaluationService._replace_rubric_groups(subjective_test.id, groups)
+                default_group_id = next(iter(key_to_id.values()), None)
+            else:
+                existing_groups = SubjectiveEvaluationService.get_rubric_groups(subjective_test.id)
+                for g in existing_groups:
+                    gid = g.get('id')
+                    if gid:
+                        key_to_id[str(gid)] = str(gid)
+                        if default_group_id is None:
+                            default_group_id = str(gid)
+
             SubjectiveQuestion.query.filter_by(subjective_test_id=subjective_test.id).delete()
             for index, q in enumerate(data['questions']):
+                group_id = SubjectiveEvaluationService._resolve_question_group_id(
+                    q, key_to_id, default_group_id
+                )
                 db.session.add(SubjectiveQuestion(
                     subjective_test_id=subjective_test.id,
                     number=q.get('number') or (index + 1),
                     code=q.get('code'),
                     skill_description=q.get('skill_description') or q.get('skillDescription') or '',
+                    rubric_group_id=group_id,
                 ))
-
-        if 'rubric_marks' in data or 'marks' in data:
-            marks = SubjectiveEvaluationService.normalize_rubric_marks_payload(
-                data.get('rubric_marks') if 'rubric_marks' in data else data.get('marks')
+        elif 'rubric_groups' in data or 'rubric_marks' in data or 'marks' in data:
+            groups = SubjectiveEvaluationService.normalize_rubric_groups_payload(
+                data.get('rubric_groups'),
+                fallback_marks=(
+                    data.get('rubric_marks') if 'rubric_marks' in data else data.get('marks')
+                ),
             )
-            allowed_codes = {m['code'] for m in marks}
-            used_codes = {
-                r.value for r in SubjectiveResult.query.filter_by(subjective_test_id=subjective_test.id).all()
-            }
-            missing = used_codes - allowed_codes
-            if missing:
-                raise ValueError(
-                    'Não é possível remover marcações já lançadas na correção: '
-                    + ', '.join(sorted(missing))
-                )
-            SubjectiveEvaluationService._replace_rubric_marks(subjective_test.id, marks)
+            SubjectiveEvaluationService._assert_can_replace_groups(subjective_test.id, groups)
+            key_to_id = SubjectiveEvaluationService._replace_rubric_groups(subjective_test.id, groups)
+            default_group_id = next(iter(key_to_id.values()), None)
+            # Reatribui questões ao grupo padrão se o grupo antigo sumiu
+            for q in SubjectiveQuestion.query.filter_by(subjective_test_id=subjective_test.id).all():
+                raw_key = q.rubric_group_id
+                if raw_key and str(raw_key) in key_to_id.values():
+                    continue
+                q.rubric_group_id = default_group_id
 
         # Mantém o Test espelho e as ClassTest sincronizados nos campos usados por relatórios/escopo.
         if subjective_test.shadow_test:
@@ -493,6 +729,41 @@ class SubjectiveEvaluationService:
 
         db.session.commit()
         return subjective_test
+
+    @staticmethod
+    def _assert_can_replace_groups(subjective_test_id: str, groups: List[Dict[str, Any]]) -> None:
+        """Impede remover marcações já lançadas na correção (por questão/grupo)."""
+        questions = SubjectiveQuestion.query.filter_by(subjective_test_id=subjective_test_id).all()
+        results = SubjectiveResult.query.filter_by(subjective_test_id=subjective_test_id).all()
+        if not results:
+            return
+
+        # Mapa legado: qualquer code presente em algum grupo novo é aceito globalmente
+        # se a questão ainda não tem grupo (migração parcial).
+        all_new_codes = {m['code'] for g in groups for m in g['marks']}
+        used_codes = {r.value for r in results}
+        # Se só há um grupo, valida como antes (conjunto global)
+        if len(groups) == 1 or not any(getattr(q, 'rubric_group_id', None) for q in questions):
+            missing = used_codes - all_new_codes
+            if missing:
+                raise ValueError(
+                    'Não é possível remover marcações já lançadas na correção: '
+                    + ', '.join(sorted(missing))
+                )
+            return
+
+        # Com múltiplos grupos: valida por questão quando possível
+        q_by_id = {str(q.id): q for q in questions}
+        # Sem remapear temp_keys antigos, exige que cada valor lançado exista em algum grupo
+        missing = used_codes - all_new_codes
+        if missing:
+            # Ainda permite se todos os códigos usados existem em algum grupo (códigos reutilizados)
+            raise ValueError(
+                'Não é possível remover marcações já lançadas na correção: '
+                + ', '.join(sorted(missing))
+            )
+        _ = q_by_id  # reservado para validação mais fina futura
+
 
     @staticmethod
     def delete_subjective_test(subjective_test: SubjectiveTest) -> None:
@@ -575,11 +846,21 @@ class SubjectiveEvaluationService:
                 "test_type": subjective_test.test_type,
                 "subject": SubjectiveEvaluationService._subject_ref(subjective_test),
             },
+            "rubric_groups": SubjectiveEvaluationService.get_rubric_groups(subjective_test_id),
             "rubric_marks": SubjectiveEvaluationService.get_rubric_marks(subjective_test_id),
             "classification_legend": SubjectiveEvaluationService.get_classification_legend_for_test(
                 subjective_test
             ),
-            "questions": [q.to_dict() for q in questions],
+            "questions": [
+                {
+                    **q.to_dict(),
+                    "rubric_marks": SubjectiveEvaluationService.get_marks_for_group(
+                        getattr(q, 'rubric_group_id', None),
+                        subjective_test_id,
+                    ),
+                }
+                for q in questions
+            ],
             "students": [
                 {
                     "id": s.id,
@@ -607,6 +888,11 @@ class SubjectiveEvaluationService:
         (mesma UX de "clicar de novo para desmarcar" do protótipo).
         """
         allowed = SubjectiveEvaluationService._allowed_codes(subjective_test_id)
+        question = SubjectiveQuestion.query.get(subjective_question_id)
+        if question and str(question.subjective_test_id) == str(subjective_test_id):
+            allowed = SubjectiveEvaluationService._allowed_codes_for_question(
+                question, subjective_test_id
+            )
         if value is not None and value not in allowed:
             raise ValueError(f"Valor de rubrica inválido: {value}. Aceitos: {', '.join(allowed)}")
 
@@ -751,15 +1037,14 @@ class SubjectiveEvaluationService:
         ).all()
         value_by_question = {str(r.subjective_question_id): r.value for r in results}
 
-        weights = SubjectiveEvaluationService._weights_for_test(subjective_test.id)
-        max_weight = max(weights.values()) if weights else 1.0
-        if max_weight <= 0:
-            max_weight = 1.0
-
         weighted_sum = 0.0
         correct_equivalent_count = 0
-        for qid in question_ids:
-            v = value_by_question.get(str(qid))
+        for q in questions:
+            v = value_by_question.get(str(q.id))
+            weights = SubjectiveEvaluationService._weights_for_question(q, subjective_test.id)
+            max_weight = max(weights.values()) if weights else 1.0
+            if max_weight <= 0:
+                max_weight = 1.0
             w = float(weights.get(v, 0.0)) if v else 0.0
             weighted_sum += w
             if v and w >= max_weight:
@@ -1100,6 +1385,7 @@ class SubjectiveEvaluationService:
         mark_codes = [m['code'] for m in marks] or list(RUBRIC_VALUES)
         weights = {m['code']: float(m['weight']) for m in marks} or dict(RUBRIC_WEIGHTS)
         mark_meta = {m['code']: m for m in marks}
+        groups = SubjectiveEvaluationService.get_rubric_groups(subjective_test_id)
 
         totals = {code: 0 for code in mark_codes}
         results_by_question: Dict[str, List[SubjectiveResult]] = {}
@@ -1119,7 +1405,12 @@ class SubjectiveEvaluationService:
         marked_absent = sum(1 for p in presences if not p.present)
         absent = max(marked_absent, max(0, total_students - respondents))
 
-        weighted_sum = sum(totals.get(code, 0) * weights.get(code, 0.0) for code in totals)
+        # Hit rate global: soma pesos por questão (grupo da questão), não meta flat única
+        weighted_sum = 0.0
+        for q in questions:
+            q_weights = SubjectiveEvaluationService._weights_for_question(q, subjective_test_id)
+            for r in results_by_question.get(str(q.id), []):
+                weighted_sum += float(q_weights.get(r.value, 0.0))
         hit_rate_pct = round((weighted_sum / total_responses) * 100) if total_responses > 0 else 0
         saeb_global = saeb_from_pct(hit_rate_pct)
         participation_pct = round((respondents / total_students) * 100) if total_students > 0 else 0
@@ -1144,13 +1435,19 @@ class SubjectiveEvaluationService:
         per_question = []
         for q in questions:
             rows = results_by_question.get(str(q.id), [])
-            counts = {code: 0 for code in mark_codes}
+            q_marks = SubjectiveEvaluationService.get_marks_for_group(
+                getattr(q, 'rubric_group_id', None),
+                subjective_test_id,
+            )
+            q_codes = [m['code'] for m in q_marks] or mark_codes
+            q_weights = {m['code']: float(m['weight']) for m in q_marks} or weights
+            counts = {code: 0 for code in q_codes}
             for r in rows:
                 if r.value not in counts:
                     counts[r.value] = 0
                 counts[r.value] += 1
             q_total = len(rows)
-            q_weighted = sum(counts.get(code, 0) * weights.get(code, 0.0) for code in counts)
+            q_weighted = sum(counts.get(code, 0) * q_weights.get(code, 0.0) for code in counts)
             q_hit = round((q_weighted / q_total) * 100) if q_total > 0 else 0
             q_saeb = saeb_from_pct(q_hit) if q_total > 0 else {'level': None, 'label': None}
             if q_total > 0 and q_saeb['level']:
@@ -1161,6 +1458,8 @@ class SubjectiveEvaluationService:
                 "number": q.number,
                 "code": q.code,
                 "skill_description": q.skill_description,
+                "rubric_group_id": getattr(q, 'rubric_group_id', None),
+                "rubric_marks": q_marks,
                 "counts": counts,
                 "total": q_total,
                 "hit_rate_pct": q_hit,
@@ -1193,7 +1492,8 @@ class SubjectiveEvaluationService:
             if is_present and has_results and n_questions > 0:
                 weighted_student = 0.0
                 for q in questions:
-                    weighted_student += weights.get(value_by_q.get(str(q.id)), 0.0)
+                    q_weights = SubjectiveEvaluationService._weights_for_question(q, subjective_test_id)
+                    weighted_student += q_weights.get(value_by_q.get(str(q.id)), 0.0)
                 score_pct = round((weighted_student / n_questions) * 100)
                 saeb_info = saeb_from_pct(score_pct)
                 entry = {
@@ -1225,6 +1525,7 @@ class SubjectiveEvaluationService:
                 "test_type": subjective_test.test_type,
                 "subject": SubjectiveEvaluationService._subject_ref(subjective_test),
             },
+            "rubric_groups": groups,
             "rubric_marks": marks,
             "filters": {
                 "class_id": str(class_id) if class_id is not None else None,

@@ -7800,6 +7800,180 @@ def mapa_habilidades_cartao():
         return jsonify({"error": "Erro ao obter mapa de habilidades", "details": str(e)}), 500
 
 
+@bp.route("/niveis-proficiencia", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def niveis_proficiencia_cartao():
+    """
+    Relatório de Níveis de Proficiência (cartão-resposta).
+
+    Classificação do aluno: AnswerSheetResult.classification / nivel_proficiencia_geral
+    (fonte da verdade via EvaluationCalculator).
+    Habilidades: faixas por % de acertos (mapa de habilidades).
+
+    Query: estado, municipio, gabarito (obrigatórios), escola, serie, turma,
+    periodo (YYYY-MM), turno, nivel, disciplina (opcional p/ habilidades).
+    """
+    try:
+        from app.services.proficiency_levels_report_service import (
+            build_report_payload,
+            resolve_turno_map_from_students,
+        )
+        from app.services.skills_map_service import build_skills_map_answer_sheet
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        gabarito = request.args.get("gabarito")
+        disciplina = request.args.get("disciplina") or "all"
+        turno = request.args.get("turno")
+        nivel = request.args.get("nivel")
+        periodo_raw = request.args.get("periodo")
+        if periodo_raw and str(periodo_raw).strip():
+            try:
+                _parse_cartao_periodo_bounds(str(periodo_raw).strip())
+            except ValueError:
+                return jsonify({"error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04)."}), 400
+        periodo_bounds_dados = _periodo_bounds_dados_cartao()
+
+        if not _is_valid_filter(estado):
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not _is_valid_filter(municipio):
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not _is_valid_filter(gabarito):
+            return jsonify({"error": "Gabarito é obrigatório para o relatório de níveis"}), 400
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        gabarito_id = str(gabarito).strip()
+        if not _gabarito_eh_somente_cartao_resposta(gabarito_id):
+            return jsonify(
+                {
+                    "error": "Gabarito inválido",
+                    "details": "Use apenas gabaritos de cartão-resposta. Avaliações online aparecem na outra aba.",
+                }
+            ), 400
+
+        scope_info = _determinar_escopo_busca_cartao(
+            estado, municipio, escola, serie, turma, gabarito, user, periodo_bounds_dados
+        )
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        nivel_granularidade = _determinar_nivel_granularidade_cartao(
+            estado, municipio, escola, serie, turma, gabarito
+        )
+
+        tabela = _gerar_tabela_detalhada_cartao(
+            scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds_dados
+        )
+        alunos_raw = (((tabela or {}).get("geral") or {}).get("alunos") or [])
+
+        class_ids = _class_ids_alunos_previstos_cartao(
+            gabarito_id, scope_info, nivel_granularidade, user
+        )
+        results, _students = _load_cartao_roster_and_results(
+            gabarito_id, class_ids, periodo_bounds_dados
+        )
+        class_id_by_student = {}
+        for r in results:
+            sid = str(r.student_id)
+            snap = getattr(r, "class_id_snapshot", None)
+            if snap:
+                class_id_by_student[sid] = snap
+        turno_map = resolve_turno_map_from_students(
+            [str(a.get("id")) for a in alunos_raw if a.get("id")],
+            class_id_by_student=class_id_by_student,
+        )
+
+        disc_filt = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+        skills_raw = build_skills_map_answer_sheet(
+            gabarito_id, [str(c) for c in class_ids], disc_filt
+        )
+        habilidades = skills_raw.get("habilidades") or []
+
+        gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
+        city = City.query.get(municipio_str)
+        school_obj = None
+        if escola and _is_valid_filter(escola):
+            school_obj = School.query.get(escola)
+
+        serie_label = None
+        if serie and _is_valid_filter(serie):
+            g = Grade.query.get(serie)
+            serie_label = g.name if g else None
+
+        total_itens = int(getattr(gabarito_obj, "num_questions", 0) or 0) if gabarito_obj else 0
+        data_aplicacao = None
+        if gabarito_obj and getattr(gabarito_obj, "created_at", None):
+            ca = gabarito_obj.created_at
+            data_aplicacao = ca.isoformat() if hasattr(ca, "isoformat") else str(ca)
+
+        periodo_clean = str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None
+        payload = build_report_payload(
+            fonte="cartao",
+            meta={
+                "titulo": (gabarito_obj.title if gabarito_obj else None) or "Cartão-resposta",
+                "avaliacao_id": None,
+                "gabarito_id": gabarito_id,
+                "estado": (city.state if city else estado),
+                "municipio": (city.name if city else None),
+                "municipio_id": municipio_str,
+                "escola": (school_obj.name if school_obj else None),
+                "escola_id": str(escola) if escola and _is_valid_filter(escola) else None,
+                "serie": serie_label,
+                "periodo": periodo_clean,
+                "data_aplicacao": data_aplicacao,
+                "total_itens": total_itens,
+                "rede": (
+                    f"Secretaria Municipal de Educação de {city.name}"
+                    if city and city.name
+                    else None
+                ),
+            },
+            filtros_aplicados={
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "gabarito": gabarito,
+                "periodo": periodo_clean,
+                "turno": (
+                    turno
+                    if turno and str(turno).strip().lower() not in {"", "all", "todos"}
+                    else None
+                ),
+                "nivel": (
+                    nivel
+                    if nivel and str(nivel).strip().lower() not in {"", "all", "todos"}
+                    else None
+                ),
+                "disciplina": disciplina,
+            },
+            alunos_raw=alunos_raw,
+            habilidades_raw=habilidades,
+            turno_por_aluno_id=turno_map,
+            turno_filtro=turno,
+            nivel_filtro=nivel,
+            serie_label=serie_label,
+            nivel_granularidade=nivel_granularidade,
+        )
+        return jsonify(payload), 200
+    except Exception as e:
+        logging.error("Erro relatório níveis de proficiência (cartão): %s", e, exc_info=True)
+        return jsonify(
+            {"error": "Erro ao gerar relatório de níveis de proficiência", "details": str(e)}
+        ), 500
+
+
 @bp.route("/mapa-habilidades/erros", methods=["GET"])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")

@@ -118,6 +118,8 @@ class TestExamSheetTemplate(unittest.TestCase):
         )
         self.assertIn("Questão 1", html)
         self.assertIn("Matemática", html)
+        self.assertIn("#7030A0", html)
+        self.assertIn("question-number", html)
         self.assertNotIn("answer-sheet", html)
         self.assertNotIn("QR Code", html)
         self.assertNotIn("BLOCO", html)

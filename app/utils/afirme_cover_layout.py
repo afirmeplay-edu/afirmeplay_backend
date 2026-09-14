@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 A4_HEIGHT_PT = 841.89
 CM_TO_PT = 72.0 / 2.54
@@ -25,7 +25,7 @@ DEFAULT_LAYOUT: Dict[str, Any] = {
     },
     "company_logo": {
         "top_cm": 9.5,
-        "left_cm": 2.4,
+        "left_cm": 2.14,
         "width_cm": 10.77,
         "height_cm": 7.7,
     },
@@ -45,7 +45,7 @@ DEFAULT_LAYOUT: Dict[str, Any] = {
     },
     "student": {
         "top_cm": 26.8,
-        "left_cm": 4.3,
+        "left_cm": 4.04,
         "width_cm": 15.5,
         "height_cm": 0.9,
         "font_pt": 9,
@@ -103,7 +103,7 @@ def load_afirme_cover_layout(path: Optional[str] = None) -> Dict[str, Any]:
 def student_overlay_coords_pt(layout: Dict[str, Any]) -> Tuple[float, float, int]:
     """Converte posição do aluno (cm do topo) para ReportLab (pt, origem inferior)."""
     student = layout.get("student") or {}
-    left_cm = float(student.get("left_cm", 4.3))
+    left_cm = float(student.get("left_cm", 4.04))
     top_cm = float(student.get("top_cm", 26.8))
     font_pt = int(student.get("font_pt", 9))
     baseline_offset_cm = float(student.get("baseline_offset_cm", 0.3))
@@ -114,3 +114,44 @@ def student_overlay_coords_pt(layout: Dict[str, Any]) -> Tuple[float, float, int
 
 def student_max_chars(layout: Dict[str, Any]) -> int:
     return int((layout.get("student") or {}).get("max_chars", 55))
+
+
+def student_name_overlay_lines(
+    name: str,
+    layout: Dict[str, Any],
+    *,
+    font_name: str = "Helvetica-Bold",
+) -> List[str]:
+    """
+    Quebra o nome do aluno para o campo ESTUDANTE (largura/altura do layout).
+
+    Usa a largura em cm; se ainda assim extrapolar a altura do campo, trunca a
+    última linha visível com reticências.
+    """
+    from reportlab.lib.utils import simpleSplit
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    student = layout.get("student") or {}
+    text = (name or "").strip().upper()
+    if not text:
+        return []
+
+    font_pt = int(student.get("font_pt", 9))
+    width_pt = float(student.get("width_cm", 15.5)) * CM_TO_PT
+    height_pt = float(student.get("height_cm", 0.9)) * CM_TO_PT
+    line_height = font_pt * 1.15
+    max_lines = max(1, int(height_pt // line_height))
+
+    lines = simpleSplit(text, font_name, font_pt, width_pt)
+    if not lines:
+        return []
+    if len(lines) <= max_lines:
+        return lines
+
+    lines = lines[:max_lines]
+    last = lines[-1].rstrip()
+    ellipsis = "…"
+    while last and stringWidth(last + ellipsis, font_name, font_pt) > width_pt:
+        last = last[:-1].rstrip()
+    lines[-1] = (last + ellipsis) if last else ellipsis
+    return lines

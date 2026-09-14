@@ -148,6 +148,103 @@ class AnswerSheetCorrectionNewGrid:
     # =========================================================================
     # DETECÇÃO DE QR CODE
     # =========================================================================
+
+    def _try_decode_qr_raw(self, img: np.ndarray) -> Optional[str]:
+        """
+        Tenta decodificar QR em uma única imagem (pyzbar → OpenCV).
+        Retorna a string bruta do payload ou None.
+        """
+        if img is None or getattr(img, "size", 0) == 0:
+            return None
+
+        # pyzbar
+        try:
+            from pyzbar.pyzbar import decode as zbar_decode
+            codes = zbar_decode(img)
+            if codes:
+                return codes[0].data.decode("utf-8")
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        # OpenCV
+        try:
+            detector = cv2.QRCodeDetector()
+            data, _, _ = detector.detectAndDecode(img)
+            if data:
+                return data
+        except Exception:
+            pass
+
+        return None
+
+    def _detectar_qr_code_via_roi(self, gray: np.ndarray) -> Optional[str]:
+        """
+        Cascata para scans com muita luz / QR pequeno:
+        recorta o canto superior direito (posição fixa do template) e tenta
+        upscale + pré-processamentos locais.
+        """
+        h, w = gray.shape[:2]
+        # Janelas progressivamente mais amplas (QR no canto superior direito)
+        roi_boxes = [
+            (0.00, 0.22, 0.55, 1.00),
+            (0.00, 0.28, 0.50, 1.00),
+            (0.00, 0.32, 0.45, 1.00),
+        ]
+        scales = (2, 3, 4)
+
+        self.logger.info("🔍 Tentando QR via ROI (canto superior direito)...")
+
+        for y1r, y2r, x1r, x2r in roi_boxes:
+            y1, y2 = int(h * y1r), int(h * y2r)
+            x1, x2 = int(w * x1r), int(w * x2r)
+            roi = gray[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+
+            # Pré-processamentos locais (overexposure)
+            blur = cv2.GaussianBlur(roi, (0, 0), 1.0)
+            sharpened = cv2.addWeighted(roi, 1.8, blur, -0.8, 0)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(roi)
+            gamma = np.clip((roi.astype(np.float32) / 255.0) ** 1.6 * 255.0, 0, 255).astype(np.uint8)
+            _, otsu = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            variants = [
+                ("raw", roi),
+                ("sharpen", sharpened),
+                ("clahe", clahe),
+                ("gamma", gamma),
+                ("otsu", otsu),
+            ]
+
+            for prep_name, prep in variants:
+                # 1x no ROI (às vezes já basta)
+                payload = self._try_decode_qr_raw(prep)
+                if payload:
+                    self.logger.info(
+                        f"✅ QR Code detectado via ROI ({prep_name}, "
+                        f"box=y{y1r:.2f}-{y2r:.2f}/x{x1r:.2f}-{x2r:.2f})"
+                    )
+                    return payload
+
+                for scale in scales:
+                    enlarged = cv2.resize(
+                        prep,
+                        None,
+                        fx=scale,
+                        fy=scale,
+                        interpolation=cv2.INTER_CUBIC if prep_name != "otsu" else cv2.INTER_NEAREST,
+                    )
+                    payload = self._try_decode_qr_raw(enlarged)
+                    if payload:
+                        self.logger.info(
+                            f"✅ QR Code detectado via ROI ({prep_name} x{scale}, "
+                            f"box=y{y1r:.2f}-{y2r:.2f}/x{x1r:.2f}-{x2r:.2f})"
+                        )
+                        return payload
+
+        return None
     
     def _detectar_qr_code(self, img: np.ndarray) -> Optional[Dict[str, str]]:
         """
@@ -244,6 +341,16 @@ class AnswerSheetCorrectionNewGrid:
                         
             except Exception as e:
                 self.logger.warning(f"⚠️ Erro ao usar OpenCV QRCodeDetector: {str(e)}")
+
+        # ========================================
+        # ESTRATÉGIA 3: ROI canto superior direito
+        # (scans com muita luz / QR pequeno — casos que falham na folha inteira)
+        # ========================================
+        if not qr_data_str:
+            try:
+                qr_data_str = self._detectar_qr_code_via_roi(gray)
+            except Exception as e:
+                self.logger.warning(f"⚠️ Erro na detecção QR via ROI: {str(e)}")
         
         # ========================================
         # PROCESSAR DADOS DO QR CODE
@@ -438,8 +545,9 @@ class AnswerSheetCorrectionNewGrid:
         - RETR_TREE para hierarquia de contornos
         - Área RELATIVA à imagem (não fixa)
         - Aspect ratio restritivo (0.9-1.1)
-        - Filtro de proximidade à borda
+        - Filtro de proximidade a CANTO real (duas bordas, AND)
         - Garantia de 1 quadrado por canto
+        - Seleção pelo mais próximo do canto (não pela maior área)
         - Extração do vértice correto (não o centro)
         
         Args:
@@ -469,7 +577,7 @@ class AnswerSheetCorrectionNewGrid:
             min_area = img_area * 0.0001   # ~0.01% da imagem
             max_area = img_area * 0.002    # ~0.2% da imagem
             
-            # ✅ CORREÇÃO 3: Margem para filtro de proximidade à borda
+            # ✅ CORREÇÃO 3: Margem para filtro de proximidade a CANTO (duas bordas)
             margin_x = img_width * 0.1   # 10% da largura
             margin_y = img_height * 0.1  # 10% da altura
             
@@ -506,16 +614,21 @@ class AnswerSheetCorrectionNewGrid:
                 cx = int(M["m10"] / M["m00"])
                 cy = int(M["m01"] / M["m00"])
                 
-                # ✅ CORREÇÃO 4: FILTRO DE PROXIMIDADE À BORDA (ESSENCIAL)
-                # Quadrados A4 SEMPRE estão perto dos cantos
-                is_near_edge = (
-                    cx < margin_x or
-                    cx > img_width - margin_x or
-                    cy < margin_y or
-                    cy > img_height - margin_y
+                # ✅ CORREÇÃO 4: FILTRO DE PROXIMIDADE A CANTO REAL (ESSENCIAL)
+                # Exige estar perto de DUAS bordas (AND). Evita finders do QR que
+                # passam só por "perto do topo" ou só por "perto da direita".
+                near_left = cx < margin_x
+                near_right = cx > img_width - margin_x
+                near_top = cy < margin_y
+                near_bottom = cy > img_height - margin_y
+                is_near_corner = (
+                    (near_left and near_top) or
+                    (near_right and near_top) or
+                    (near_right and near_bottom) or
+                    (near_left and near_bottom)
                 )
                 
-                if not is_near_edge:
+                if not is_near_corner:
                     continue
                 
                 squares.append({
@@ -556,14 +669,26 @@ class AnswerSheetCorrectionNewGrid:
                 self.logger.warning(f"❌ Quadrados ausentes nos cantos: {missing_corners}")
                 return None
             
-            # Para cada canto, pegar o maior quadrado (mais confiável) e extrair o vértice correto
+            # Cantos-alvo da imagem (seleção por proximidade, não por área)
+            corner_targets = {
+                "TL": (0, 0),
+                "TR": (img_width - 1, 0),
+                "BR": (img_width - 1, img_height - 1),
+                "BL": (0, img_height - 1),
+            }
+            
+            # Para cada canto, pegar o quadrado MAIS PRÓXIMO do canto e extrair o vértice correto
             ordered_squares = {}
             for corner, items in corners.items():
                 if not items:
                     self.logger.warning(f"❌ Quadrado ausente no canto {corner}")
                     return None
-                # Pegar o maior quadrado do canto
-                best_square = max(items, key=lambda x: x["area"])
+                # Pegar o quadrado mais próximo do canto da folha (rejeita finders do QR)
+                tx, ty = corner_targets[corner]
+                best_square = min(
+                    items,
+                    key=lambda s: (s["center"][0] - tx) ** 2 + (s["center"][1] - ty) ** 2,
+                )
                 
                 # ✅ CORREÇÃO 6: Extrair o vértice correto do quadrado ao invés do centro
                 # O vértice correto é aquele que está mais próximo do canto real do documento

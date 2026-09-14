@@ -14,10 +14,6 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Constantes para education_stage_id
-EDUCATION_STAGE_ANOS_INICIAIS = '614b7d10-b758-42ec-a04e-86f78dc7740a'  # 1º ao 5º ano
-EDUCATION_STAGE_ANOS_FINAIS = 'c78fcd8e-00a1-485d-8c03-70bcf59e3025'  # 6º ao 9º ano
-
 
 class ResultsService:
     """Serviço para cálculo de resultados de formulários socioeconômicos"""
@@ -109,11 +105,11 @@ class ResultsService:
                     'nome': 'Perfil Demográfico do Estudante'
                 },
                 'contextoFamiliar': {
-                    'questoes': ['q6', 'q7', 'q8', 'q9', 'q10', 'q11', 'q12', 'q13'],
+                    'questoes': ['q6', 'q7', 'q8', 'q9', 'q10', 'q11', 'q12', 'q13', 'q14'],
                     'nome': 'Contexto Familiar e Socioeconômico'
                 },
                 'trajetoriaEscolar': {
-                    'questoes': ['q14', 'q15', 'q16', 'q17', 'q18', 'q19', 'q20', 'q21'],
+                    'questoes': ['q15', 'q16', 'q17', 'q18', 'q19', 'q20', 'q26'],
                     'nome': 'Trajetória e Contexto Escolar'
                 },
                 'ambienteEscolar': {
@@ -357,15 +353,22 @@ class ResultsService:
     
     @staticmethod
     def _calculate_distorcao_idade_serie(results, page, limit):
-        """Calcula índice de distorção idade-série (Q20 != 'Nunca')"""
+        """Calcula índice de distorção idade-série a partir de q1 (série) + q2 (idade)."""
+        from app.socioeconomic_forms.services.pneerq_service import (
+            _distorcao_threshold_from_template,
+            _normalize_str,
+            _parse_age,
+        )
+
         alunos_distorcao = []
-        
+
         for response, user, student, school, grade, class_, city in results:
             responses_data = response.responses or {}
-            resposta_q20 = responses_data.get('q20')
-            
-            # Incluir se respondeu algo diferente de "Nunca"
-            if resposta_q20 and resposta_q20 != 'Nunca':
+            age = _parse_age(_normalize_str(responses_data.get('q2')))
+            q1 = _normalize_str(responses_data.get('q1'))
+            threshold = _distorcao_threshold_from_template(q1) if age is not None else None
+
+            if age is not None and threshold is not None and age >= threshold:
                 alunos_distorcao.append({
                     'response': response,
                     'user': user,
@@ -373,17 +376,17 @@ class ResultsService:
                     'school': school,
                     'grade': grade,
                     'class_': class_,
-                    'resposta': resposta_q20
+                    'resposta': responses_data.get('q2')
                 })
-        
+
         total = len(alunos_distorcao)
         porcentagem = (total / len(results) * 100) if len(results) > 0 else 0
-        
+
         # Paginar alunos
         start = (page - 1) * limit
         end = start + limit
         alunos_paginated = alunos_distorcao[start:end]
-        
+
         return {
             'total': total,
             'porcentagem': round(porcentagem, 2),
@@ -605,22 +608,12 @@ class ResultsService:
     
     @staticmethod
     def _determine_ambiente_escolar_questions(education_stages):
-        """Determina questões do perfil Ambiente Escolar baseado nas séries"""
-        if not education_stages:
-            return ['q22', 'q23']
-        
-        # Contar ocorrências
-        stage_counts = defaultdict(int)
-        for stage in education_stages:
-            stage_counts[str(stage)] += 1
-        
-        # Verificar qual predomina
-        if stage_counts.get(EDUCATION_STAGE_ANOS_FINAIS, 0) > stage_counts.get(EDUCATION_STAGE_ANOS_INICIAIS, 0):
-            # Anos Finais predomina - incluir q24
-            return ['q22', 'q23', 'q24']
-        else:
-            # Anos Iniciais predomina ou empate - apenas q22 e q23
-            return ['q22', 'q23']
+        """
+        Questões do perfil Ambiente Escolar.
+        Inclui IDs do SAEB 2025 (q21–q25) e do template legado (q22–q24);
+        IDs ausentes no formulário são ignorados em _calculate_profile.
+        """
+        return ['q21', 'q22', 'q23', 'q24', 'q25']
     
     @staticmethod
     def _format_filters_info(filters, results):

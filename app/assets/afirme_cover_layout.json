@@ -7,7 +7,7 @@
   },
   "company_logo": {
     "top_cm": 9.5,
-    "left_cm": 2.4,
+    "left_cm": 2.14,
     "width_cm": 10.77,
     "height_cm": 7.7
   },
@@ -27,7 +27,7 @@
   },
   "student": {
     "top_cm": 26.8,
-    "left_cm": 4.3,
+    "left_cm": 4.04,
     "width_cm": 15.5,
     "height_cm": 0.9,
     "font_pt": 9,

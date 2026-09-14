@@ -10,6 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 
 from app.boletim_aluno.helpers import (
+    attach_disciplina_cards,
     build_cards,
     build_questao_boletim,
     empty_boletim_payload,
@@ -244,6 +245,22 @@ def list_alunos_digital(
     return {"alunos": alunos, "paginacao": pagination_meta(total, page, per_page)}
 
 
+def _course_name_for_test(test: Test) -> str:
+    course_name = "Anos Iniciais"
+    if not getattr(test, "course", None):
+        return course_name
+    try:
+        from app.models.educationStage import EducationStage
+        import uuid
+
+        course_obj = EducationStage.query.get(uuid.UUID(str(test.course)))
+        if course_obj and course_obj.name:
+            return course_obj.name
+    except (ValueError, TypeError, Exception):
+        pass
+    return course_name
+
+
 def _build_one_boletim(
     student: Student,
     result: Optional[EvaluationResult],
@@ -252,10 +269,18 @@ def _build_one_boletim(
     skills_db: Dict[str, Any],
     school_names: Dict[str, str],
     grade_names: Dict[str, str],
+    *,
+    course_name: str = "Anos Iniciais",
+    use_simple_calculation: bool = False,
 ) -> Dict[str, Any]:
     por_disciplina_map: Dict[str, Dict[str, Any]] = {}
     disciplina_ordem: List[str] = []
     acertou_total = 0
+    subject_results = (
+        result.subject_results
+        if result and isinstance(getattr(result, "subject_results", None), dict)
+        else {}
+    ) or {}
 
     for item in objective_items:
         q: Question = item["question"]
@@ -289,9 +314,20 @@ def _build_one_boletim(
             )
         )
 
+    por_disciplina: List[Dict[str, Any]] = []
+    for disciplina_id in disciplina_ordem:
+        bloco = por_disciplina_map[disciplina_id]
+        attach_disciplina_cards(
+            bloco,
+            subject_results.get(str(disciplina_id)),
+            course_name=course_name,
+            use_simple_calculation=use_simple_calculation,
+        )
+        por_disciplina.append(bloco)
+
     return {
         "aluno": _aluno_publico(student, result, school_names, grade_names),
-        "por_disciplina": [por_disciplina_map[k] for k in disciplina_ordem],
+        "por_disciplina": por_disciplina,
         "cards": build_cards(
             acertou_total,
             len(objective_items),
@@ -379,6 +415,8 @@ def build_boletins_digital(
             school_ids.add(str(st.class_.school_id))
     school_names = _school_name_map(school_ids)
     grade_names = _grade_name_map(grade_ids)
+    course_name = _course_name_for_test(test)
+    use_simple = getattr(test, "grade_calculation_type", None) == "simple"
 
     payload["boletins"] = [
         _build_one_boletim(
@@ -389,6 +427,8 @@ def build_boletins_digital(
             skills_db,
             school_names,
             grade_names,
+            course_name=course_name,
+            use_simple_calculation=use_simple,
         )
         for st in students
     ]

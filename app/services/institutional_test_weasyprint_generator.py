@@ -19,7 +19,7 @@ from app.utils.pdf_question_image_optimizer import (
 )
 from app.utils.afirme_cover_layout import (
     load_afirme_cover_layout,
-    student_max_chars,
+    student_name_overlay_lines,
     student_overlay_coords_pt,
 )
 import os
@@ -1796,20 +1796,21 @@ class InstitutionalTestWeasyPrintGenerator:
 
             layout = self._get_afirme_cover_layout()
             x_pt, y_pt, font_pt = student_overlay_coords_pt(layout)
-            max_chars = student_max_chars(layout)
+            lines = student_name_overlay_lines(student_name, layout)
+            if not lines:
+                return None
 
             FONT_NAME = 'Helvetica-Bold'
             FONT_COLOR = HexColor('#1a1a1a')
-
-            if len(student_name) > max_chars:
-                student_name = student_name[: max_chars - 1] + '…'
+            line_height = font_pt * 1.15
 
             buffer = io.BytesIO()
             c = Canvas(buffer, pagesize=A4)
             c.setPageSize(A4)
             c.setFont(FONT_NAME, font_pt)
             c.setFillColor(FONT_COLOR)
-            c.drawString(x_pt, y_pt, student_name.upper())
+            for i, line in enumerate(lines):
+                c.drawString(x_pt, y_pt - (i * line_height), line)
             c.save()
             buffer.seek(0)
             return buffer.read()

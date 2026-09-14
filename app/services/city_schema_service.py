@@ -602,12 +602,23 @@ CREATE TABLE IF NOT EXISTS "{schema}".subjective_tests (
 CREATE INDEX IF NOT EXISTS idx_subjective_tests_created_by ON "{schema}".subjective_tests(created_by);
 COMMENT ON TABLE "{schema}".subjective_tests IS 'Avaliação subjetiva (cartão-resposta manual): só a estrutura é cadastrada, a prova física fica fora do sistema';
 
+CREATE TABLE IF NOT EXISTS "{schema}".subjective_rubric_groups (
+    id VARCHAR PRIMARY KEY,
+    subjective_test_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_tests(id) ON DELETE CASCADE,
+    name VARCHAR(120) NOT NULL DEFAULT 'Grupo de critérios',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_subjective_rubric_groups_test_id ON "{schema}".subjective_rubric_groups(subjective_test_id);
+COMMENT ON TABLE "{schema}".subjective_rubric_groups IS 'Grupos de critérios (marcações) da avaliação subjetiva; cada questão aponta para um grupo';
+
 CREATE TABLE IF NOT EXISTS "{schema}".subjective_questions (
     id VARCHAR PRIMARY KEY,
     subjective_test_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_tests(id) ON DELETE CASCADE,
     number INTEGER NOT NULL,
     code VARCHAR(50),
     skill_description VARCHAR(500) NOT NULL,
+    rubric_group_id VARCHAR REFERENCES "{schema}".subjective_rubric_groups(id) ON DELETE SET NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_subjective_question_test_number UNIQUE(subjective_test_id, number)
 );
@@ -617,16 +628,18 @@ COMMENT ON TABLE "{schema}".subjective_questions IS 'Estrutura da questão da av
 CREATE TABLE IF NOT EXISTS "{schema}".subjective_rubric_marks (
     id VARCHAR PRIMARY KEY,
     subjective_test_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_tests(id) ON DELETE CASCADE,
+    rubric_group_id VARCHAR REFERENCES "{schema}".subjective_rubric_groups(id) ON DELETE CASCADE,
     code VARCHAR(20) NOT NULL,
     label VARCHAR(80) NOT NULL,
     color VARCHAR(20) NOT NULL DEFAULT '#64748b',
     weight FLOAT NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_subjective_rubric_mark_test_code UNIQUE(subjective_test_id, code)
+    CONSTRAINT uq_subjective_rubric_mark_group_code UNIQUE(rubric_group_id, code)
 );
 CREATE INDEX IF NOT EXISTS idx_subjective_rubric_marks_test_id ON "{schema}".subjective_rubric_marks(subjective_test_id);
-COMMENT ON TABLE "{schema}".subjective_rubric_marks IS 'Marcações configuráveis da rubrica (rótulo, sigla, cor, peso) por avaliação subjetiva';
+CREATE INDEX IF NOT EXISTS idx_subjective_rubric_marks_group_id ON "{schema}".subjective_rubric_marks(rubric_group_id);
+COMMENT ON TABLE "{schema}".subjective_rubric_marks IS 'Marcações configuráveis da rubrica (rótulo, sigla, cor, peso) por grupo de critérios';
 
 CREATE TABLE IF NOT EXISTS "{schema}".subjective_results (
     id VARCHAR PRIMARY KEY,
@@ -677,6 +690,110 @@ CREATE INDEX IF NOT EXISTS idx_subjective_rubric_marks_test_id ON "{schema}".sub
 COMMENT ON TABLE "{schema}".subjective_rubric_marks IS 'Marcações configuráveis da rubrica (rótulo, sigla, cor, peso) por avaliação subjetiva';
 ALTER TABLE "{schema}".subjective_results DROP CONSTRAINT IF EXISTS ck_subjective_result_value;
 ALTER TABLE "{schema}".subjective_results ALTER COLUMN value TYPE VARCHAR(50);
+"""
+
+
+def get_subjective_rubric_groups_upgrade_ddl(schema: str) -> str:
+    """
+    Upgrade idempotente: grupos de critérios + vínculo questão↔grupo.
+    Preserva marcações existentes movendo-as para um grupo padrão por avaliação.
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".subjective_rubric_groups (
+    id VARCHAR PRIMARY KEY,
+    subjective_test_id VARCHAR NOT NULL REFERENCES "{schema}".subjective_tests(id) ON DELETE CASCADE,
+    name VARCHAR(120) NOT NULL DEFAULT 'Grupo de critérios',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_subjective_rubric_groups_test_id ON "{schema}".subjective_rubric_groups(subjective_test_id);
+COMMENT ON TABLE "{schema}".subjective_rubric_groups IS 'Grupos de critérios (marcações) da avaliação subjetiva; cada questão aponta para um grupo';
+
+ALTER TABLE "{schema}".subjective_rubric_marks
+    ADD COLUMN IF NOT EXISTS rubric_group_id VARCHAR;
+
+ALTER TABLE "{schema}".subjective_questions
+    ADD COLUMN IF NOT EXISTS rubric_group_id VARCHAR;
+
+INSERT INTO "{schema}".subjective_rubric_groups (id, subjective_test_id, name, sort_order)
+SELECT md5(t.id || ':default-rubric-group'), t.id, 'Grupo de critérios', 0
+FROM "{schema}".subjective_tests t
+WHERE NOT EXISTS (
+    SELECT 1 FROM "{schema}".subjective_rubric_groups g WHERE g.subjective_test_id = t.id
+);
+
+UPDATE "{schema}".subjective_rubric_marks m
+SET rubric_group_id = g.id
+FROM "{schema}".subjective_rubric_groups g
+WHERE m.subjective_test_id = g.subjective_test_id
+  AND m.rubric_group_id IS NULL
+  AND g.sort_order = 0;
+
+UPDATE "{schema}".subjective_questions q
+SET rubric_group_id = g.id
+FROM "{schema}".subjective_rubric_groups g
+WHERE q.subjective_test_id = g.subjective_test_id
+  AND q.rubric_group_id IS NULL
+  AND g.sort_order = 0;
+
+ALTER TABLE "{schema}".subjective_rubric_marks
+    DROP CONSTRAINT IF EXISTS uq_subjective_rubric_mark_test_code;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        JOIN pg_namespace n ON t.relnamespace = n.oid
+        WHERE c.conname = 'uq_subjective_rubric_mark_group_code'
+          AND n.nspname = '{schema}'
+          AND t.relname = 'subjective_rubric_marks'
+    ) THEN
+        ALTER TABLE "{schema}".subjective_rubric_marks
+            ADD CONSTRAINT uq_subjective_rubric_mark_group_code UNIQUE (rubric_group_id, code);
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        JOIN pg_namespace n ON t.relnamespace = n.oid
+        WHERE c.conname = 'fk_subjective_rubric_marks_group'
+          AND n.nspname = '{schema}'
+          AND t.relname = 'subjective_rubric_marks'
+    ) THEN
+        ALTER TABLE "{schema}".subjective_rubric_marks
+            ADD CONSTRAINT fk_subjective_rubric_marks_group
+            FOREIGN KEY (rubric_group_id)
+            REFERENCES "{schema}".subjective_rubric_groups(id)
+            ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        JOIN pg_namespace n ON t.relnamespace = n.oid
+        WHERE c.conname = 'fk_subjective_questions_rubric_group'
+          AND n.nspname = '{schema}'
+          AND t.relname = 'subjective_questions'
+    ) THEN
+        ALTER TABLE "{schema}".subjective_questions
+            ADD CONSTRAINT fk_subjective_questions_rubric_group
+            FOREIGN KEY (rubric_group_id)
+            REFERENCES "{schema}".subjective_rubric_groups(id)
+            ON DELETE SET NULL;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_subjective_rubric_marks_group_id
+    ON "{schema}".subjective_rubric_marks(rubric_group_id);
+CREATE INDEX IF NOT EXISTS idx_subjective_questions_rubric_group_id
+    ON "{schema}".subjective_questions(rubric_group_id);
 """
 
 

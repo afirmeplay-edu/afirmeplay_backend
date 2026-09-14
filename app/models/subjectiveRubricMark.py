@@ -22,12 +22,17 @@ DEFAULT_RUBRIC_MARKS = (
 class SubjectiveRubricMark(db.Model):
     __tablename__ = 'subjective_rubric_marks'
     __table_args__ = (
-        db.UniqueConstraint('subjective_test_id', 'code', name='uq_subjective_rubric_mark_test_code'),
+        db.UniqueConstraint('rubric_group_id', 'code', name='uq_subjective_rubric_mark_group_code'),
         {"schema": "tenant"},
     )
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     subjective_test_id = db.Column(db.String, db.ForeignKey('tenant.subjective_tests.id'), nullable=False)
+    rubric_group_id = db.Column(
+        db.String,
+        db.ForeignKey('tenant.subjective_rubric_groups.id', ondelete='CASCADE'),
+        nullable=True,
+    )
     code = db.Column(db.String(20), nullable=False)
     label = db.Column(db.String(80), nullable=False)
     color = db.Column(db.String(20), nullable=False, default='#64748b')
@@ -35,8 +40,19 @@ class SubjectiveRubricMark(db.Model):
     sort_order = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
 
-    def __init__(self, subjective_test_id, code, label, color='#64748b', weight=0.0, sort_order=0, **kwargs):
+    def __init__(
+        self,
+        subjective_test_id,
+        code,
+        label,
+        color='#64748b',
+        weight=0.0,
+        sort_order=0,
+        rubric_group_id=None,
+        **kwargs,
+    ):
         self.subjective_test_id = subjective_test_id
+        self.rubric_group_id = rubric_group_id
         self.code = code
         self.label = label
         self.color = color
@@ -50,6 +66,7 @@ class SubjectiveRubricMark(db.Model):
         return {
             'id': self.id,
             'subjective_test_id': self.subjective_test_id,
+            'rubric_group_id': self.rubric_group_id,
             'code': self.code,
             'label': self.label,
             'color': self.color,

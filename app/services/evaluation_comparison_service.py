@@ -11,11 +11,26 @@ from app.models.studentAnswer import StudentAnswer
 from app.models.subject import Subject
 from app.models.skill import Skill
 from app.services.evaluation_calculator import EvaluationCalculator
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from typing import Dict, Any, Optional, List
 import json
 import dateutil.parser
+
+
+def _as_naive_utc(value: Any) -> datetime:
+    """Normaliza datetime para naive UTC, evitando TypeError naive vs aware no sort."""
+    if value is None:
+        return datetime.min
+    if not isinstance(value, datetime):
+        try:
+            value = dateutil.parser.parse(str(value))
+        except Exception:
+            return datetime.min
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
 
 class EvaluationComparisonService:
     
@@ -77,7 +92,7 @@ class EvaluationComparisonService:
                 for ct in class_tests:
                     if ct.application:
                         try:
-                            parsed_date = dateutil.parser.parse(ct.application)
+                            parsed_date = _as_naive_utc(dateutil.parser.parse(ct.application))
                             if application_date is None or parsed_date < application_date:
                                 application_date = parsed_date
                         except Exception as e:
@@ -85,7 +100,7 @@ class EvaluationComparisonService:
                 
                 # Se não encontrar data de aplicação, usar created_at como fallback
                 if application_date is None:
-                    application_date = test.created_at or datetime.min
+                    application_date = _as_naive_utc(test.created_at) if test.created_at else datetime.min
                 
                 tests_with_dates.append({
                     'test': test,
@@ -95,7 +110,7 @@ class EvaluationComparisonService:
             dates_time = time.time() - dates_start
             
             # Ordenar por data de aplicação (primeira aplicada primeiro)
-            tests_with_dates.sort(key=lambda x: x['application_date'])
+            tests_with_dates.sort(key=lambda x: _as_naive_utc(x['application_date']))
             ordered_tests = [item['test'] for item in tests_with_dates]
             
             # Verificar se todas têm resultados (respeitando escopo quando informado)
@@ -1019,15 +1034,15 @@ class EvaluationComparisonService:
                 for ct in class_tests_by_test.get(test.id) or []:
                     if ct.application:
                         try:
-                            parsed_date = dateutil.parser.parse(ct.application)
+                            parsed_date = _as_naive_utc(dateutil.parser.parse(ct.application))
                             if application_date is None or parsed_date < application_date:
                                 application_date = parsed_date
                         except Exception as e:
                             logging.warning(f"Erro ao parsear data de aplicação para teste {test.id}: {e}")
                 if application_date is None:
-                    application_date = test.created_at or datetime.min
+                    application_date = _as_naive_utc(test.created_at) if test.created_at else datetime.min
                 tests_with_dates.append({'test': test, 'application_date': application_date})
-            tests_with_dates.sort(key=lambda x: x['application_date'])
+            tests_with_dates.sort(key=lambda x: _as_naive_utc(x['application_date']))
             ordered_tests = [item['test'] for item in tests_with_dates]
             
             # Buscar todos os resultados do aluno nessas avaliações (uma query)

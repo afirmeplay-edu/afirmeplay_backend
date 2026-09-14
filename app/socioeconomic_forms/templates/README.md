@@ -26,11 +26,11 @@ Questionário para alunos da **Educação Infantil** e **Anos Iniciais** (1º ao
 
 **Perguntas principais:**
 
-- q1: Curso/série atual (NOVA - adicionada para identificar distorção idade-série)
-- q2: Idade (NOVA - com alternativas para análise de distorção)
-- q3-q24: Perguntas baseadas no questionário SAEB 2023 do 5º ano
+- q1: Curso/série atual (própria - distorção idade-série)
+- q2: Idade (própria - distorção idade-série; faixa ampla Creche–5º)
+- q3-q25: Perguntas baseadas no questionário SAEB 2025 do 5º ano
 
-**Total de perguntas:** 24 (com múltiplas subperguntas nas questões de matriz)
+**Total de perguntas:** 25 (com múltiplas subperguntas nas questões de matriz)
 
 ### aluno_velho_questions.json
 
@@ -43,12 +43,12 @@ Questionário para alunos dos **Anos Finais** (4º ao 9º ano) e **EJA** (1º ao
 
 **Perguntas principais:**
 
-- q1: Curso/série/ano atual (NOVA - inclui 15 opções: 4º ao 9º Ano + EJA 1º ao 9º Período)
-- q2: Idade (NOVA - 13 anos ou menos até 18 anos ou mais)
-- q3-q24: Perguntas baseadas no questionário SAEB 2023 do 9º ano
-- q25: Planos futuros após Ensino Fundamental (NOVA - não existe no aluno-jovem)
+- q1: Curso/série/ano atual (própria - inclui EJA; distorção idade-série)
+- q2: Idade (própria - faixa Anos Finais/EJA)
+- q3-q25: Perguntas baseadas no questionário SAEB 2025 do 9º ano
+- q26: Planos futuros após Ensino Fundamental (própria - não existe no SAEB)
 
-**Total de perguntas:** 25 (com múltiplas subperguntas nas questões de matriz)
+**Total de perguntas:** 26 (com múltiplas subperguntas nas questões de matriz)
 
 ## Como Usar
 
@@ -146,15 +146,16 @@ As perguntas q1 (curso/série) e q2 (idade) permitem análise de distorção ida
 ### aluno-jovem:
 
 - ⚠️ **EJA NÃO está incluído**: Destinado apenas para Educação Infantil e Anos Iniciais
-- ✅ Perguntas baseadas no questionário SAEB 2023 do 5º ano
-- ✅ Total: 24 perguntas
+- ✅ Perguntas baseadas no questionário SAEB 2025 do 5º ano
+- ✅ Total: 25 perguntas (q1 série + q2 idade + 23 itens SAEB; transporte escolar removido)
 
 ### aluno-velho:
 
 - ✅ **EJA ESTÁ incluído**: Destinado para Anos Finais (4º ao 9º ano) e EJA (1º ao 9º Período)
-- ✅ Perguntas baseadas no questionário SAEB 2023 do 9º ano
-- ✅ Total: 25 perguntas (inclui q25 sobre planos futuros)
+- ✅ Perguntas baseadas no questionário SAEB 2025 do 9º ano
+- ✅ Total: 26 perguntas (q1 série + q2 idade + 23 itens SAEB + q26 planos futuros)
 - ✅ q1 tem 15 opções (6 anos + 9 períodos EJA)
+- ✅ q6 detalha tipos de deficiência (diferente do aluno-jovem)
 
 ### Geral:
 
@@ -163,17 +164,16 @@ As perguntas q1 (curso/série) e q2 (idade) permitem análise de distorção ida
 
 ## Grupos de Perguntas
 
-### aluno-jovem (24 perguntas):
+### aluno-jovem (25 perguntas):
 
-1. **Perfil Demográfico** (q1-q5): Curso/série, idade, sexo, língua, raça
+1. **Perfil Demográfico** (q1-q5): Curso/série, idade, gênero, língua, raça
 2. **Contexto Familiar e Socioeconômico** (q6-q14): Deficiência, família, escolaridade dos pais, bens domésticos
-3. **Trajetória e Contexto Escolar** (q15-q21): Transporte, trajetória escolar, reprovação
-4. **Percepções sobre o Ambiente Escolar** (q22-q24): Uso do tempo, práticas pedagógicas, percepções sobre a escola
+3. **Trajetória e Contexto Escolar** (q15-q20): Tempo até a escola, trajetória, reprovação, uso do tempo
+4. **Percepções sobre o Ambiente Escolar** (q21-q25): Práticas do professor, temas, clima, infraestrutura
 
-### aluno-velho (25 perguntas):
+### aluno-velho (26 perguntas):
 
-1. **Perfil Demográfico** (q1-q5): Curso/série/ano, idade, sexo, língua, raça
-2. **Contexto Familiar e Socioeconômico** (q6-q14): Deficiência, família, escolaridade dos pais, bens domésticos
-3. **Trajetória e Contexto Escolar** (q15-q21): Transporte, trajetória escolar, reprovação
-4. **Percepções sobre o Ambiente Escolar** (q22-q24): Uso do tempo, práticas pedagógicas, percepções sobre a escola
-5. **Planos Futuros** (q25): Expectativas após conclusão do Ensino Fundamental
+1. **Perfil Demográfico** (q1-q5): Curso/série/ano, idade, gênero, língua, raça
+2. **Contexto Familiar e Socioeconômico** (q6-q14): Deficiência (detalhada), família, escolaridade dos pais, bens domésticos
+3. **Trajetória e Contexto Escolar** (q15-q20, q26): Tempo até a escola, trajetória, reprovação, uso do tempo, planos futuros
+4. **Percepções sobre o Ambiente Escolar** (q21-q25): Práticas dos professores, temas, clima, infraestrutura

@@ -81,7 +81,7 @@ class TestInse(unittest.TestCase):
         self.assertEqual(Q12_QUANTIDADE_SCORE["3+"], 0.5)
 
     def test_template_api_mae_pai_bens(self):
-        # aluno_jovem_questions: q9 mãe, q10 pai, bens q13*, serviços q14*
+        # aluno_jovem_questions legado: q9 mãe, q10 pai, bens q13*, serviços q14*
         r = {
             "q9": "Ensino Superior completo (faculdade ou graduação)",
             "q10": "Ensino Médio completo",
@@ -105,6 +105,32 @@ class TestInse(unittest.TestCase):
         n = normalizar_respostas(r)
         self.assertEqual(n["mae_escolaridade"], "superior_completo")
         self.assertEqual(n["pai_escolaridade"], "medio_completo")
+        self.assertTrue(n["servicos"]["quarto_so_seu"])
+        self.assertTrue(n["servicos"]["mesa_estudar"])
+
+    def test_saeb_2025_servicos_letras_deslocadas(self):
+        # SAEB 2025: q14c = mesa (não quarto); presença de q14j/q14k ativa o layout novo
+        r = {
+            "q9": "Pós-graduação (especialização, mestrado, doutorado)",
+            "q10": "Não se aplica (não tenho pai/padrasto)",
+            "q13a": "1",
+            "q13h": "2",
+            "q14a": "Sim",
+            "q14b": "Sim",
+            "q14c": "Sim",  # mesa
+            "q14d": "Não",  # microondas
+            "q14j": "Sim",
+            "q14k": "Não",
+        }
+        n = normalizar_respostas(r)
+        self.assertEqual(n["mae_escolaridade"], "superior_completo")
+        self.assertEqual(n["pai_escolaridade"], "nao_sei")
+        self.assertFalse(n["servicos"]["quarto_so_seu"])
+        self.assertTrue(n["servicos"]["mesa_estudar"])
+        self.assertFalse(n["servicos"]["microondas"])
+        self.assertTrue(n["servicos"]["computador_escolar"])
+        self.assertFalse(n["servicos"]["lugar_estudar"])
+        self.assertEqual(n["bens"]["ar_condicionado"], "2")
 
     def test_inep_two_questions_only(self):
         r = {

@@ -9,6 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 
 from app.boletim_aluno.helpers import (
+    attach_disciplina_cards,
     build_cards,
     build_questao_boletim,
     empty_boletim_payload,
@@ -195,12 +196,19 @@ def _build_one_boletim_as(
     skills_db: Dict[str, Any],
     school_names: Dict[str, str],
     grade_names: Dict[str, str],
+    *,
+    course_name: str = "Anos Iniciais",
 ) -> Dict[str, Any]:
     detected = _parse_detected(result.detected_answers if result else None)
     por_disciplina_map: Dict[str, Dict[str, Any]] = {}
     disciplina_ordem: List[str] = []
     acertou_total = 0
     question_numbers = sorted(gab_map.keys())
+    proficiency_by_subject = (
+        result.proficiency_by_subject
+        if result and isinstance(getattr(result, "proficiency_by_subject", None), dict)
+        else {}
+    ) or {}
 
     for qn in question_numbers:
         gabarito = (gab_map.get(qn) or "").strip().upper() or None
@@ -232,9 +240,19 @@ def _build_one_boletim_as(
             )
         )
 
+    por_disciplina: List[Dict[str, Any]] = []
+    for disciplina_id in disciplina_ordem:
+        bloco = por_disciplina_map[disciplina_id]
+        attach_disciplina_cards(
+            bloco,
+            proficiency_by_subject.get(str(disciplina_id)),
+            course_name=course_name,
+        )
+        por_disciplina.append(bloco)
+
     return {
         "aluno": _aluno_publico(student, result, school_names, grade_names),
-        "por_disciplina": [por_disciplina_map[k] for k in disciplina_ordem],
+        "por_disciplina": por_disciplina,
         "cards": build_cards(
             acertou_total,
             len(question_numbers),
@@ -327,6 +345,14 @@ def build_boletins_answer_sheet(
     school_names = _school_name_map(school_ids)
     grade_names = _grade_name_map(grade_ids)
 
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        infer_course_name_from_grade,
+        resolve_grade_name_for_proficiency,
+    )
+
+    grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gab)
+    course_name = infer_course_name_from_grade(grade_name) or "Anos Iniciais"
+
     payload["boletins"] = [
         _build_one_boletim_as(
             st,
@@ -338,6 +364,7 @@ def build_boletins_answer_sheet(
             skills_db,
             school_names,
             grade_names,
+            course_name=course_name,
         )
         for st in page_students
     ]

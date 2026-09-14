@@ -382,6 +382,94 @@ def criar_avaliacao():
         logging.error(f"Error creating test: {str(e)}", exc_info=True)
         return jsonify({"error": "Error creating test", "details": str(e)}), 500
 
+
+@bp.route('/import-docx', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def criar_avaliacao_com_docx():
+    """
+    Cria avaliação online (virtual) + questões do DOCX de forma atômica.
+
+    multipart/form-data:
+      - file (obrigatório): .docx
+      - indexes (recomendado): "1,3,5"
+      - grade (obrigatório para as questões)
+      - subjectIds (recomendado no SIMULADO): id1,id2 — disciplinas permitidas
+      - subjectId (opcional): default se a questão não trouxer SubjectId no DOCX
+      - Campos da avaliação: title, type (AVALIACAO|SIMULADO), model, course, created_by, ...
+      - evaluation_mode: apenas virtual
+
+    Disciplina por questão no DOCX (SubjectId). Preview: POST /questions/import/docx.
+    """
+    from app.services.question_import.test_docx_import import (
+        TestDocxImportError,
+        create_test_with_docx,
+        parse_indexes_arg,
+        parse_test_fields_from_form,
+    )
+
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "Nenhum arquivo enviado. Use o campo 'file'."}), 400
+
+        file = request.files["file"]
+        if not file or not file.filename:
+            return jsonify({"error": "Nenhum arquivo selecionado"}), 400
+
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "User not authenticated"}), 401
+
+        test_data = parse_test_fields_from_form(request.form)
+        if not test_data.get("created_by"):
+            test_data["created_by"] = current_user.get("user_id") or current_user.get("id")
+
+        question_defaults = {}
+        for key in ("subjectId", "grade", "gradeId", "subjectIds"):
+            value = request.form.get(key)
+            if value not in (None, ""):
+                question_defaults[key] = value.strip()
+
+        listed = request.form.getlist("subjectIds") or request.form.getlist("subjectIds[]")
+        if listed:
+            question_defaults["subjectIds"] = ",".join(
+                v.strip() for v in listed if v and v.strip()
+            )
+
+        if not question_defaults.get("grade") and not question_defaults.get("gradeId"):
+            g = test_data.get("grade") or test_data.get("grade_id")
+            if g:
+                question_defaults["grade"] = str(g).strip()
+
+        # subjectId único só como default (AVALIACAO 1 disciplina)
+        if not question_defaults.get("subjectId") and test_data.get("subject"):
+            question_defaults["subjectId"] = str(test_data["subject"]).strip()
+
+        indexes = parse_indexes_arg(request.form, request.args)
+
+        result = create_test_with_docx(
+            file,
+            current_user=current_user,
+            test_data=test_data,
+            question_defaults=question_defaults,
+            indexes=indexes,
+        )
+        return jsonify(result), 201
+
+    except TestDocxImportError as e:
+        db.session.rollback()
+        body = {"error": e.message, **(e.payload or {})}
+        return jsonify(body), 400
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error creating test from DOCX: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao criar avaliação com DOCX", "details": str(e)}), 500
+
+
 @bp.route('/', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
@@ -3935,6 +4023,111 @@ def comparar_avaliacoes():
         test_ids_for_log = test_ids if 'test_ids' in locals() else 'N/A'
         logging.error(f"Erro ao comparar avaliações {test_ids_for_log}: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao comparar avaliações", "details": str(e)}), 500
+
+
+@bp.route('/compare-groups', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def comparar_avaliacoes_por_grupos():
+    """
+    Evolução por grupos (turma / série / escola) ao longo das avaliações selecionadas.
+    Body: test_ids (mín. 2), visualizar_por ('turma'|'serie'|'escola'),
+          estado, municipio, escola, serie, turma (filtros de escopo).
+    """
+    try:
+        from app.services.evolution_groups_service import EvolutionGroupsService
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+        if 'test_ids' not in data:
+            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
+
+        test_ids = data['test_ids']
+        if not isinstance(test_ids, list):
+            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
+
+        test_ids = [t.strip() for t in test_ids if t and isinstance(t, str) and t.strip()]
+        if len(test_ids) < 2:
+            return jsonify({"error": "Mínimo de 2 avaliações necessário para comparação"}), 400
+        if len(test_ids) != len(set(test_ids)):
+            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
+
+        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        found = {t.id for t in tests}
+        missing = set(test_ids) - found
+        if missing:
+            return jsonify({"error": f"Avaliações não encontradas: {list(missing)}"}), 404
+
+        from app.models.evaluationResult import EvaluationResult
+        for test_id in test_ids:
+            if not EvaluationResult.query.filter_by(test_id=test_id).first():
+                return jsonify({"error": f"Avaliação {test_id} não possui resultados calculados"}), 400
+
+        from app.models.city import City
+        from app.utils.tenant_middleware import get_current_tenant_context
+
+        def _valid(v):
+            return v and str(v).strip().lower() != "all"
+
+        estado = data.get("estado")
+        municipio = data.get("municipio")
+        escola = data.get("escola")
+        serie = data.get("serie")
+        turma = data.get("turma")
+        view_by = data.get("visualizar_por") or data.get("view_by") or "turma"
+
+        if _valid(municipio):
+            city = City.query.get(str(municipio).strip())
+            if not city:
+                return jsonify({"error": "Município não encontrado"}), 404
+            municipio_id = city.id
+        else:
+            ctx = get_current_tenant_context()
+            municipio_id = (ctx.city_id if ctx and getattr(ctx, "city_id", None) else None) or user.get("city_id")
+            if not municipio_id:
+                return jsonify({"error": "Município é obrigatório (body.municipio ou contexto do tenant)"}), 400
+
+        if _valid(turma):
+            nivel = "turma"
+        elif _valid(serie):
+            nivel = "serie"
+        elif _valid(escola):
+            nivel = "escola"
+        else:
+            nivel = "municipio"
+
+        escopo_calculo = {
+            "tipo": nivel,
+            "municipio_id": municipio_id,
+            "escola_id": str(escola).strip() if _valid(escola) else None,
+            "serie_id": str(serie).strip() if _valid(serie) else None,
+            "turma_id": str(turma).strip() if _valid(turma) else None,
+        }
+        filtros_aplicados = {
+            "estado": str(estado).strip() if _valid(estado) else None,
+            "municipio": str(municipio_id),
+            "escola": escopo_calculo["escola_id"],
+            "serie": escopo_calculo["serie_id"],
+            "turma": escopo_calculo["turma_id"],
+        }
+
+        result = EvolutionGroupsService.compare_by_groups(
+            test_ids,
+            view_by=str(view_by),
+            escopo_calculo=escopo_calculo,
+            filtros_aplicados=filtros_aplicados,
+        )
+        if not result:
+            return jsonify({"error": "Erro ao calcular evolução por grupos"}), 500
+        return jsonify(result), 200
+    except Exception as e:
+        logging.error("Erro em /test/compare-groups: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao comparar por grupos", "details": str(e)}), 500
 
 
 @bp.route('/evolution/export-excel', methods=['POST'])

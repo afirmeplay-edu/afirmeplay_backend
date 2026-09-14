@@ -107,13 +107,47 @@ def build_disciplina_cards_parcial(acertou: int, total: int) -> Dict[str, Any]:
     }
 
 
+def build_disciplina_cards_computed(
+    acertou: int,
+    total: int,
+    *,
+    course_name: str,
+    subject_name: str,
+    use_simple_calculation: bool = False,
+) -> Dict[str, Any]:
+    """
+    Calcula nota/proficiência/nível da disciplina com o mesmo EvaluationCalculator
+    usado na gravação de subject_results / proficiency_by_subject.
+    """
+    from app.services.evaluation_calculator import EvaluationCalculator
+
+    result = EvaluationCalculator.calculate_complete_evaluation(
+        correct_answers=int(acertou),
+        total_questions=int(total),
+        course_name=course_name or "Anos Iniciais",
+        subject_name=subject_name or "Outras",
+        use_simple_calculation=use_simple_calculation,
+    )
+    return build_cards(
+        acertou,
+        total,
+        result["grade"],
+        result["proficiency"],
+        result["classification"],
+    )
+
+
 def attach_disciplina_cards(
     bloco: Dict[str, Any],
     subject_data: Optional[Dict[str, Any]],
+    *,
+    course_name: Optional[str] = None,
+    use_simple_calculation: bool = False,
 ) -> None:
     """
     Preenche bloco['cards'] a partir do JSON por disciplina (subject_results /
-    proficiency_by_subject) ou com fallback parcial pelos acertos das questões.
+    proficiency_by_subject). Se o JSON estiver ausente (resultados antigos /
+    sem subjects_info na gravação), calcula na hora para o frontend não receber null.
     """
     questoes = bloco.get("questoes") or []
     acertou_local = sum(1 for q in questoes if q.get("acertou"))
@@ -125,6 +159,17 @@ def attach_disciplina_cards(
             subject_data["grade"],
             subject_data["proficiency"],
             subject_data["classification"],
+        )
+        return
+
+    subject_name = bloco.get("disciplina") or "Outras"
+    if total_local > 0:
+        bloco["cards"] = build_disciplina_cards_computed(
+            acertou_local,
+            total_local,
+            course_name=course_name or "Anos Iniciais",
+            subject_name=subject_name,
+            use_simple_calculation=use_simple_calculation,
         )
     else:
         bloco["cards"] = build_disciplina_cards_parcial(acertou_local, total_local)

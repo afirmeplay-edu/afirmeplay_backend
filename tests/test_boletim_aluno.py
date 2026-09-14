@@ -76,10 +76,11 @@ def test_disciplina_cards_from_subject_data_and_parcial():
     assert parcial["nivel"] is None
 
     bloco = {
+        "disciplina": "Matemática",
         "questoes": [
             {"acertou": True},
             {"acertou": False},
-        ]
+        ],
     }
     attach_disciplina_cards(
         bloco,
@@ -96,10 +97,18 @@ def test_disciplina_cards_from_subject_data_and_parcial():
     assert bloco["cards"]["proficiencia"] == 320.0
     assert bloco["cards"]["nivel"] == "Adequado"
 
-    bloco_fallback = {"questoes": [{"acertou": True}, {"acertou": True}, {"acertou": False}]}
-    attach_disciplina_cards(bloco_fallback, None)
+    # Sem JSON pré-calculado: calcula nota/proficiência/nível na hora
+    bloco_fallback = {
+        "disciplina": "Português",
+        "questoes": [{"acertou": True}, {"acertou": True}, {"acertou": False}],
+    }
+    attach_disciplina_cards(
+        bloco_fallback, None, course_name="Anos Iniciais"
+    )
     assert "cards" in bloco_fallback
     assert bloco_fallback["cards"]["acertos_totais"]["acertou"] == 2
     assert bloco_fallback["cards"]["acertos_totais"]["total"] == 3
-    assert bloco_fallback["cards"]["nota"] is None
-    assert bloco_fallback["cards"]["nivel"] is None
+    assert bloco_fallback["cards"]["nota"] is not None
+    assert bloco_fallback["cards"]["proficiencia"] is not None
+    assert bloco_fallback["cards"]["nivel"] is not None
+    assert isinstance(bloco_fallback["cards"]["nivel"], str)

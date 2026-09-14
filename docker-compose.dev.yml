@@ -45,7 +45,7 @@ services:
 
   # Script de inicialização do MinIO (cria buckets e configura permissões)
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     container_name: minio-init-dev
     entrypoint: /bin/sh
     command:

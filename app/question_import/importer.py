@@ -14,8 +14,8 @@ from app.models.grades import Grade
 from app.models.question import Question
 from app.models.skill import Skill
 from app.models.subject import Subject
-from app.services.question_import.constants import ALLOWED_DIFFICULTIES
-from app.services.question_import.docx_parser import parse_questions_docx
+from app.question_import.constants import ALLOWED_DIFFICULTIES
+from app.question_import.docx_parser import parse_questions_docx
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +319,7 @@ def _resolve_question_type(meta: Dict[str, Any]) -> Tuple[str, List[str]]:
     if raw in (None, ""):
         return "multipleChoice", errors
 
-    from app.services.question_import.docx_parser import _normalize_type
+    from app.question_import.docx_parser import _normalize_type
 
     mapped = _normalize_type(str(raw))
     if mapped == "multipleChoice":

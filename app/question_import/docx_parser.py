@@ -162,6 +162,95 @@ def _extract_images_from_element(element, document_part) -> List[str]:
     return data_urls
 
 
+def _local_tag(tag: str) -> str:
+    if isinstance(tag, str) and "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag or ""
+
+
+def _omml_children_latex(element) -> str:
+    return "".join(_omml_node_to_latex(child) for child in element.iterchildren())
+
+
+def _omml_first_child(element, *local_names: str):
+    wanted = set(local_names)
+    for child in element.iterchildren():
+        if _local_tag(child.tag) in wanted:
+            return child
+    return None
+
+
+def _omml_child_latex(element, *local_names: str) -> str:
+    child = _omml_first_child(element, *local_names)
+    return _omml_node_to_latex(child) if child is not None else ""
+
+
+def _omml_node_to_latex(node) -> str:
+    """
+    Converte um nó OMML (Office Math) em LaTeX linear compatível com KaTeX ($...$).
+
+    Cobre os casos mais comuns em enunciados escolares. Estruturas desconhecidas
+    caem no texto interno (m:t) para não perder conteúdo.
+    """
+    name = _local_tag(node.tag)
+
+    if name == "t":
+        return node.text or ""
+
+    if name in ("r", "e", "den", "num", "deg", "sub", "sup", "fName"):
+        return _omml_children_latex(node)
+
+    if name == "sSup":
+        return f"{{{_omml_child_latex(node, 'e')}}}^{{{_omml_child_latex(node, 'sup')}}}"
+
+    if name == "sSub":
+        return f"{{{_omml_child_latex(node, 'e')}}}_{{{_omml_child_latex(node, 'sub')}}}"
+
+    if name == "sSubSup":
+        return (
+            f"{{{_omml_child_latex(node, 'e')}}}"
+            f"_{{{_omml_child_latex(node, 'sub')}}}"
+            f"^{{{_omml_child_latex(node, 'sup')}}}"
+        )
+
+    if name == "f":
+        return f"\\frac{{{_omml_child_latex(node, 'num')}}}{{{_omml_child_latex(node, 'den')}}}"
+
+    if name == "rad":
+        base = _omml_child_latex(node, "e")
+        deg = _omml_child_latex(node, "deg").strip()
+        if deg:
+            return f"\\sqrt[{deg}]{{{base}}}"
+        return f"\\sqrt{{{base}}}"
+
+    if name == "d":
+        # delimitadores: ( ... ), | ... |, etc.
+        inner = _omml_child_latex(node, "e") or _omml_children_latex(node)
+        return f"\\left({inner}\\right)"
+
+    if name in ("oMath", "oMathPara"):
+        return _omml_children_latex(node)
+
+    if name in ("ctrlPr", "rPr", "argPr", "fPr", "dPr", "radPr", "sSupPr", "sSubPr", "sSubSupPr"):
+        return ""
+
+    # fallback: desce nos filhos (preserva operadores/texto aninhados)
+    return _omml_children_latex(node)
+
+
+def _omml_element_to_delimited(element) -> str:
+    """Extrai OMML e envolve em $...$ para o frontend (KaTeX)."""
+    latex = _omml_node_to_latex(element).strip()
+    if not latex:
+        return ""
+    # Evita $$...$$ acidental se o Word já trouxe delimitadores no texto
+    if latex.startswith("$$") and latex.endswith("$$"):
+        return latex
+    if latex.startswith("$") and latex.endswith("$") and latex.count("$") == 2:
+        return latex
+    return f"${latex}$"
+
+
 def _process_run_element(run_el, document_part) -> Tuple[str, str, List[str]]:
     """Retorna (html_fragment, plain_text, data_urls)."""
     html_parts: List[str] = []
@@ -185,6 +274,12 @@ def _process_run_element(run_el, document_part) -> Tuple[str, str, List[str]]:
             for data_url in _extract_images_from_element(node, document_part):
                 images.append(data_url)
                 html_parts.append(f'<img src="{data_url}" alt=""/>')
+        elif tag in (qn("m:oMath"), qn("m:oMathPara")):
+            # Equação aninhada em run (raro, mas válido no OOXML)
+            math_text = _omml_element_to_delimited(node)
+            if math_text:
+                html_parts.append(html.escape(math_text))
+                plain_parts.append(math_text)
 
     # fallback: blips nested deeper / not as direct children
     if not images:
@@ -214,6 +309,13 @@ def paragraph_content(paragraph: Paragraph) -> Dict[str, Any]:
                 html_parts.append(h)
                 plain_parts.append(t)
                 images.extend(imgs)
+        elif child.tag in (qn("m:oMath"), qn("m:oMathPara")):
+            # Word Math AutoCorrect converte $...$ em OMML e remove os `$`.
+            # Recompomos como LaTeX delimitado para KaTeX no frontend/PDF.
+            math_text = _omml_element_to_delimited(child)
+            if math_text:
+                html_parts.append(html.escape(math_text))
+                plain_parts.append(math_text)
 
     plain = "".join(plain_parts).strip()
     inner_html = "".join(html_parts).strip()
@@ -244,17 +346,16 @@ def _flush_alternative(buf: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "text": text,
         "isCorrect": bool(buf.get("is_correct")),
     }
-    if html_body and (images or "<img" in html_body):
-        option["formattedText"] = html_body
-    if len(images) == 1 and not text:
+    # Mobile/web esperam alternatives[].image (não só HTML).
+    # Sempre promove a 1ª imagem ao campo image; demais ficam no formattedText.
+    if images:
         option["image"] = images[0]
-    elif images and not option.get("image"):
-        # múltiplas imagens: ficam no HTML; se não houver texto, ainda assim precisa de content
         if not text:
             option["text"] = ""
-            option["formattedText"] = html_body or "".join(
-                f'<img src="{u}" alt=""/>' for u in images
-            )
+        if not html_body:
+            html_body = "".join(f'<p><img src="{u}" alt=""/></p>' for u in images)
+    if html_body and (images or "<img" in html_body):
+        option["formattedText"] = html_body
     return option
 
 

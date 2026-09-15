@@ -17,7 +17,7 @@ from app import db
 from app.models.school import School
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
-from app.services.question_import.importer import (
+from app.question_import.importer import (
     _create_question_from_payload,
     prepare_docx_questions,
 )
@@ -378,6 +378,6 @@ def create_test_with_docx(
 
 def parse_indexes_arg(form, args=None) -> Optional[List[int]]:
     """Compatível com indexes / indexes[] do multipart."""
-    from app.services.question_import.importer import parse_indexes_from_request
+    from app.question_import.importer import parse_indexes_from_request
 
     return parse_indexes_from_request(form, args)

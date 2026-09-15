@@ -471,6 +471,25 @@ def normalize_manual_answers(
     return normalized
 
 
+def _is_manual_answer_filled(value: Optional[str]) -> bool:
+    """Letra marcada conta; null/''/INVALID = não respondido para validação de envio."""
+    if value is None:
+        return False
+    letter = str(value).strip().upper()
+    if not letter or letter == "INVALID":
+        return False
+    return True
+
+
+def assert_at_least_one_manual_answer(answers: Dict[int, Optional[str]]) -> None:
+    """Rejeita cartão 100% em branco (ou só INVALID)."""
+    if not any(_is_manual_answer_filled(v) for v in answers.values()):
+        raise ManualAnswerSheetError(
+            "É necessário responder pelo menos uma questão antes de salvar.",
+            400,
+        )
+
+
 def get_manual_entry_form(
     gabarito_id: Optional[str],
     test_id: Optional[str],
@@ -535,6 +554,7 @@ def submit_manual_correction(
 
     alternatives_map = _alternatives_by_question(gabarito)
     answers = normalize_manual_answers(raw_answers, gabarito_dict, alternatives_map)
+    assert_at_least_one_manual_answer(answers)
 
     corrector = AnswerSheetCorrectionNewGrid(debug=False)
     correction = corrector._build_result(answers, gabarito_dict)

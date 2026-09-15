@@ -289,6 +289,10 @@ def create_user():
         except ValueError:
             return jsonify({"error": f"role inválido: {role_value}"}), 400
 
+        # Apenas Administradores podem criar outros Administradores
+        if role_enum == RoleEnum.ADMIN and current_user.get("role") != "admin":
+            return jsonify({"error": "Apenas administradores podem criar usuários com perfil Administrador"}), 403
+
         if role_enum == RoleEnum.APLICADOR:
             if not city_id:
                 return jsonify({"error": "city_id is required for aplicador"}), 400

@@ -253,7 +253,14 @@ def _validate_multiple_choice_options(options):
 
 
 def _process_alternatives_images(question_id, alternatives, existing_images=None):
-    """Upload/processa imagens das alternativas. Retorna (alternatives, metadados)."""
+    """
+    Upload/processa imagens das alternativas. Retorna (alternatives, metadados).
+
+    Aceita:
+      - alternatives[].image (data-URL / base64 / meta MinIO)
+      - alternatives[].formattedText com <img src="data:image/...">
+    Garante alternatives[].image preenchido quando houver figura (contrato mobile/web).
+    """
     if not alternatives or not isinstance(alternatives, list):
         return alternatives, []
 
@@ -269,13 +276,35 @@ def _process_alternatives_images(question_id, alternatives, existing_images=None
             processed.append(alt)
             continue
         new_alt = {k: v for k, v in alt.items() if k != 'image'}
+
+        # 1) Base64 embutido no HTML da alternativa → MinIO + src relativo
+        ft_key = 'formattedText' if 'formattedText' in new_alt else (
+            'formatted_text' if 'formatted_text' in new_alt else None
+        )
+        ft_metas = []
+        if ft_key:
+            ft = new_alt.get(ft_key)
+            if isinstance(ft, str) and 'data:image/' in ft:
+                new_ft, ft_metas = _upload_html_base64_images_to_minio(question_id, ft)
+                new_alt[ft_key] = new_ft
+                for m in ft_metas:
+                    images_meta.append(m)
+                    existing_by_id[str(m['id'])] = m
+
+        # 2) Campo image dedicado
         image_input = alt.get('image')
+        meta = None
         if image_input is not None:
             meta = _upload_alternative_image(question_id, image_input, existing_by_id)
             if meta:
                 new_alt['image'] = meta
                 images_meta.append(meta)
                 existing_by_id[str(meta['id'])] = meta
+
+        # 3) Se só havia figura no HTML, promove a 1ª ao campo image (mobile)
+        if not new_alt.get('image') and ft_metas:
+            new_alt['image'] = ft_metas[0]
+
         processed.append(new_alt)
     return processed, images_meta
 
@@ -306,10 +335,15 @@ def _rebuild_question_images_catalog(
 
     if isinstance(alternatives, list):
         for alt in alternatives:
-            if isinstance(alt, dict):
-                img = alt.get('image')
-                if isinstance(img, dict) and img.get('id'):
-                    iid = str(img['id'])
+            if not isinstance(alt, dict):
+                continue
+            img = alt.get('image')
+            if isinstance(img, dict) and img.get('id'):
+                iid = str(img['id'])
+                if iid not in all_ids:
+                    all_ids.append(iid)
+            for content in (alt.get('formattedText') or '', alt.get('formatted_text') or ''):
+                for iid in re.findall(r'/questions/[^/]+/images/([a-f0-9-]{36})', content):
                     if iid not in all_ids:
                         all_ids.append(iid)
 
@@ -751,135 +785,6 @@ def get_questions_batch():
     except Exception as e:
         logging.error(f"Error in get_questions_batch: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao buscar questões em lote", "details": str(e)}), 500
-
-
-@bp.route('/import/template', methods=['GET'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
-def download_questions_import_template():
-    """
-    Baixa o template DOCX pré-preenchido com série e lista de disciplinas.
-
-    Query params:
-      - grade (obrigatório): UUID da série
-      - subjectIds (recomendado): id1,id2,... disciplinas do arquivo
-      - subjectId (opcional): atalho para 1 disciplina (também entra na lista)
-    """
-    try:
-        from app.services.question_import import build_questions_import_template
-        from app.services.question_import.importer import validate_import_defaults
-
-        subject_ids_raw = request.args.get("subjectIds") or request.args.get("subjects")
-        # também aceita subjectId repetido: ?subjectId=a&subjectId=b
-        listed = request.args.getlist("subjectId") or request.args.getlist("subjectIds")
-        if listed and not subject_ids_raw:
-            subject_ids_raw = ",".join(listed)
-
-        defaults = {
-            "grade": (request.args.get("grade") or request.args.get("gradeId") or "").strip(),
-            "subjectId": (request.args.get("subjectId") or "").strip() if len(listed) <= 1 else "",
-            "subjectIds": subject_ids_raw or ",".join(listed),
-        }
-        # se veio lista em subjectId repetido, não forçar um único default errado
-        if len(listed) > 1:
-            defaults["subjectId"] = ""
-            defaults["subjectIds"] = ",".join(listed)
-
-        context = validate_import_defaults(defaults)
-        buffer = build_questions_import_template(context)
-
-        safe_grade = "".join(
-            c if c.isalnum() or c in "-_" else "_" for c in (context["gradeName"] or "serie")
-        )[:40]
-        n_subj = len(context.get("subjects") or [])
-        download_name = f"template_questoes_{safe_grade}_{n_subj}disc.docx"
-
-        return send_file(
-            buffer,
-            as_attachment=True,
-            download_name=download_name,
-            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        )
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logging.error(f"Error generating questions import template: {str(e)}", exc_info=True)
-        return jsonify({"error": "Erro ao gerar template", "details": str(e)}), 500
-
-
-@bp.route('/import/docx', methods=['POST'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
-def import_questions_docx():
-    """
-    Importa questões de múltipla escolha a partir de um DOCX.
-
-    multipart/form-data:
-      - file (obrigatório): .docx
-      - grade (obrigatório): UUID da série
-      - subjectIds (opcional): lista permitida id1,id2
-      - subjectId (opcional): default se a questão não trouxer SubjectId no DOCX
-      - commit (opcional): "true" | "false"
-      - indexes (opcional no commit): "1,3,5"
-
-    Disciplina e dificuldade vêm por questão no arquivo.
-    """
-    try:
-        from app.services.question_import import import_questions_from_docx
-        from app.services.question_import.importer import parse_indexes_from_request
-
-        if "file" not in request.files:
-            return jsonify({"error": "Nenhum arquivo enviado. Use o campo 'file'."}), 400
-
-        file = request.files["file"]
-        if not file or not file.filename:
-            return jsonify({"error": "Nenhum arquivo selecionado"}), 400
-
-        current_user = get_current_user_from_token()
-        if not current_user:
-            return jsonify({"error": "User not authenticated"}), 401
-
-        commit_raw = (
-            request.form.get("commit")
-            or request.args.get("commit")
-            or "false"
-        )
-        commit = str(commit_raw).strip().lower() in ("1", "true", "yes", "sim")
-
-        defaults = {}
-        for key in ("subjectId", "grade", "gradeId", "subjectIds"):
-            value = request.form.get(key)
-            if value not in (None, ""):
-                defaults[key] = value.strip()
-
-        # subjectIds[] repetido
-        listed = request.form.getlist("subjectIds") or request.form.getlist("subjectIds[]")
-        if listed:
-            defaults["subjectIds"] = ",".join(v.strip() for v in listed if v and v.strip())
-
-        indexes = parse_indexes_from_request(request.form, request.args)
-        if indexes is not None and not commit:
-            indexes = None
-
-        result = import_questions_from_docx(
-            file,
-            current_user=current_user,
-            commit=commit,
-            defaults=defaults,
-            indexes=indexes,
-        )
-
-        status = 201 if commit and result.get("summary", {}).get("created", 0) > 0 else 200
-        if commit and result.get("summary", {}).get("created", 0) == 0 and result.get("summary", {}).get("total", 0) > 0:
-            status = 400
-        return jsonify(result), status
-
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        db.session.rollback()
-        logging.error(f"Error importing questions from DOCX: {str(e)}", exc_info=True)
-        return jsonify({"error": "Erro ao importar questões", "details": str(e)}), 500
 
 
 @bp.route('/<string:question_id>/images/<string:image_id>', methods=['GET'])

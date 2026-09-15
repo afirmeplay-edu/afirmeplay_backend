@@ -10,7 +10,7 @@ from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
 from docx.shared import Pt, RGBColor
 
-from app.services.question_import.constants import ALLOWED_DIFFICULTIES
+from app.question_import.constants import ALLOWED_DIFFICULTIES
 
 
 def _add_heading(doc: Document, text: str, size: int = 16) -> None:

@@ -329,6 +329,8 @@ def create_app():
     from app.participation_report import bp as participation_report_bp
     from app.mapa_questoes import bp as mapa_questoes_bp
     from app.boletim_aluno import bp as boletim_aluno_bp
+    from app.question_import import bp as question_import_bp
+
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
     
@@ -396,6 +398,7 @@ def create_app():
     app.register_blueprint(participation_report_bp)
     app.register_blueprint(mapa_questoes_bp)
     app.register_blueprint(boletim_aluno_bp)
+    app.register_blueprint(question_import_bp)
 
     from app.routes.mobile import mobile_bp
     app.register_blueprint(mobile_bp)

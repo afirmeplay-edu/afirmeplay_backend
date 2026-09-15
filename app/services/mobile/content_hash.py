@@ -32,6 +32,25 @@ def compute_form_content_version(form_payload: Dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _alternatives_with_image_urls(alternatives: Any, question_id: Any) -> Any:
+    """Garante imageUrl em alternatives[].image para o app mobile."""
+    if not isinstance(alternatives, list) or not question_id:
+        return alternatives
+    out = []
+    for alt in alternatives:
+        if not isinstance(alt, dict):
+            out.append(alt)
+            continue
+        new_alt = dict(alt)
+        img = new_alt.get("image")
+        if isinstance(img, dict) and img.get("id"):
+            img_out = dict(img)
+            img_out["imageUrl"] = f"/questions/{question_id}/images/{img_out['id']}"
+            new_alt["image"] = img_out
+        out.append(new_alt)
+    return out
+
+
 def question_to_canon(q) -> Dict[str, Any]:
     """Serializa Question ORM para dict estável (sem relações)."""
     return {
@@ -42,7 +61,7 @@ def question_to_canon(q) -> Dict[str, Any]:
         "formatted_text": q.formatted_text,
         "secondstatement": q.secondstatement,
         "images": q.images,
-        "alternatives": q.alternatives,
+        "alternatives": _alternatives_with_image_urls(q.alternatives, q.id),
         "command": q.command,
         "subtitle": q.subtitle,
         "question_type": q.question_type,

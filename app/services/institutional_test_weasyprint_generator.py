@@ -17,6 +17,7 @@ from app.utils.pdf_question_image_optimizer import (
     optimize_letterhead_image,
     optimize_logo_image,
 )
+from app.utils.pdf_question_image_layout import fit_questions_collection
 from app.utils.afirme_cover_layout import (
     load_afirme_cover_layout,
     student_name_overlay_lines,
@@ -244,6 +245,18 @@ class InstitutionalTestWeasyPrintGenerator:
                     alt["content"] = _optimize_field(alt["content"])
 
         return stats
+
+    def _fit_question_content_images_for_pdf(
+        self,
+        questions_by_subject: Optional[Dict],
+        questions_by_block: Optional[List],
+    ) -> None:
+        """
+        Define width/height em cm nas imagens do conteúdo das questões.
+
+        Somente para o PDF de questões (hybrid Arch4). Não usar em capa nem OMR.
+        """
+        fit_questions_collection(questions_by_subject, questions_by_block)
 
     def _optimize_print_branding_copy(
         self,
@@ -518,6 +531,10 @@ class InstitutionalTestWeasyPrintGenerator:
         # Rasters das questões: otimizar SOMENTE o conteúdo usado no PDF de questões.
         # O OMR não renderiza question.content / prompt / alternativas.
         image_opt_stats = self._optimize_question_images_for_questions_pdf(
+            questions_by_subject, questions_by_block
+        )
+        # Dimensões visuais em cm (proporção + tetos A4). Só PDF de questões / hybrid.
+        self._fit_question_content_images_for_pdf(
             questions_by_subject, questions_by_block
         )
 

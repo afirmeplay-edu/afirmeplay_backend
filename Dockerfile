@@ -1,4 +1,4 @@
-FROM python:3.11-bullseye
+FROM python:3.11-bookworm
 
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y \
     libgl1 \
     libzbar0 \
     libglib2.0-0 \
+    poppler-utils \
     fonts-dejavu-core \
     librsvg2-common \
     shared-mime-info \

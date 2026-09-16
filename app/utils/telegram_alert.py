@@ -24,7 +24,9 @@ def send_telegram_alert(
     method: Optional[str] = None,
     user_id: Optional[str] = None,
     stack_trace: Optional[str] = None,
-    additional_info: Optional[Dict] = None
+    additional_info: Optional[Dict] = None,
+    source: str = "Backend",
+    rate_limit_key: Optional[str] = None,
 ) -> bool:
     """
     Envia um alerta para o grupo do Telegram configurado.
@@ -36,6 +38,8 @@ def send_telegram_alert(
         user_id: ID do usuário que fez a requisição (se disponível)
         stack_trace: Stack trace do erro (truncado se muito longo)
         additional_info: Informações adicionais como dict
+        source: Origem do alerta (ex.: Backend, Mobile) — aparece no título
+        rate_limit_key: Chave customizada de cooldown; padrão method_route
     
     Returns:
         True se o alerta foi enviado com sucesso, False caso contrário
@@ -63,8 +67,8 @@ def send_telegram_alert(
         logging.warning(f"Telegram alert não configurado: faltam {', '.join(missing)}")
         return False
     
-    # Rate limiting: verificar se já foi enviado alerta para esta rota recentemente
-    route_key = f"{method}_{route}" if route else "unknown"
+    # Rate limiting: verificar se já foi enviado alerta para esta chave recentemente
+    route_key = rate_limit_key or (f"{method}_{route}" if route else "unknown")
     current_time = time()
     
     if route_key in _last_alert_time:
@@ -76,7 +80,19 @@ def send_telegram_alert(
     # Construir mensagem formatada
     # Usar emoji diferente baseado no tipo de erro
     error_lower = error_message.lower()
-    if ("não encontrado" in error_lower or "not found" in error_lower or "404" in error_message):
+    severity = (additional_info or {}).get("severity") if additional_info else None
+    severity_norm = str(severity).lower() if severity else ""
+
+    if severity_norm == "fatal":
+        emoji = "🚨"
+        error_type = "FATAL"
+    elif severity_norm == "warning":
+        emoji = "⚠️"
+        error_type = "WARNING"
+    elif severity_norm == "error":
+        emoji = "📱" if source.lower() == "mobile" else "🚨"
+        error_type = "ERROR"
+    elif ("não encontrado" in error_lower or "not found" in error_lower or "404" in error_message):
         emoji = "⚠️"  # Emoji para avisos (404)
         error_type = "AVISO"
     elif ("unauthorized" in error_lower or "401" in error_message):
@@ -95,9 +111,10 @@ def send_telegram_alert(
         emoji = "🚨"  # Emoji padrão para erro crítico (500)
         error_type = "ERRO CRÍTICO"
     
+    source_label = source.strip() or "Backend"
     # Montar mensagem principal
     message_parts = [
-        f"{emoji} *ALERTA - Backend* ({error_type})",
+        f"{emoji} *ALERTA - {source_label}* ({error_type})",
         f"",
         f"*⏰ Timestamp:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"",

@@ -519,21 +519,21 @@
 			}
 
 			.question-instruction {
-				font-size: 10pt;
+				font-size: 12pt;
 				color: #000;
 				margin: 10px 0;
 				font-style: italic;
 			}
 
 			.question-instruction-text {
-				font-size: 10pt;
+				font-size: 12pt;
 				color: #000;
 				margin: 10px 0 12px 0;
 				font-style: normal;
 			}
 
 			.question-title {
-				font-size: 10pt;
+				font-size: 12pt;
 				font-weight: bold;
 				color: #000;
 				text-align: center;
@@ -541,7 +541,7 @@
 			}
 
 			.question-content {
-				font-size: 10pt;
+				font-size: 12pt;
 				color: #000;
 				margin-bottom: 15px;
 				line-height: 1.5;
@@ -554,7 +554,7 @@
 			}
 
 			.question-prompt {
-				font-size: 10pt;
+				font-size: 12pt;
 				font-weight: normal; /* Formatação vem do banco (editor) — não forçamos negrito */
 				color: #000;
 				margin: 15px 0;
@@ -576,26 +576,30 @@
 			}
 
 			.question-content img {
-				max-width: 100%;
+				max-width: 16.5cm;
+				max-height: 10cm;
+				width: auto;
 				height: auto;
 				display: block;
-				margin: 12px auto;
+				margin: 8px auto;
 				border: none;
+				object-fit: contain;
 			}
 
-		/* Contenção global de imagens em todos os contextos de questão.
-		   !important garante precedência sobre qualquer width/height inline
-		   remanescente (data: URLs do editor podem trazer style inline). */
-		.question-content img,
-		.question-prompt img,
-		.question-instruction-text img,
-		.question-title img {
-				max-width: 100% !important;
-				width: auto !important;
-				height: auto !important;
+		/* Contenção de imagens do conteúdo das questões (A4 útil ≈ 17×26,7 cm).
+		   max-* com !important limita excessos; width/height sem !important
+		   permitem o fit Python (style em cm) prevalecer sobre o editor. */
+		.question-content img:not(.math-inline-img):not(.math-display-img),
+		.question-prompt img:not(.math-inline-img):not(.math-display-img),
+		.question-instruction-text img:not(.math-inline-img):not(.math-display-img),
+		.question-title img:not(.math-inline-img):not(.math-display-img) {
+				max-width: 16.5cm !important;
+				max-height: 10cm !important;
+				width: auto;
+				height: auto;
 				display: block !important;
-				margin-left: auto !important;
-				margin-right: auto !important;
+				margin: 8px auto !important;
+				object-fit: contain;
 			}
 
 		/* Fórmulas renderizadas (LaTeX → PNG): inline no fluxo do texto */
@@ -677,7 +681,7 @@
 		/* ─────────────────────────────────────────────────────────────────── */
 
 		.question-subtitle {
-				font-size: 10pt;
+				font-size: 12pt;
 				font-style: italic;
 				color: #000;
 				margin: 10px 0;
@@ -688,7 +692,7 @@
 			}
 
 			.alternative {
-				font-size: 10.5pt;
+				font-size: 12pt;
 				color: #000;
 				margin-bottom: 6px;
 				line-height: 1.4;
@@ -707,10 +711,13 @@
 			}
 
 			.alternative-content img:not(.math-inline-img):not(.math-display-img) {
-				max-width: 100%;
+				max-width: 16.5cm !important;
+				max-height: 10cm !important;
+				width: auto;
 				height: auto;
 				display: block;
-				margin: 8px 0;
+				margin: 8px auto;
+				object-fit: contain;
 			}
 
 			.alternative-content img.math-display-img {

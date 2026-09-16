@@ -4,13 +4,15 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
 from docx.shared import Pt, RGBColor
 
 from app.question_import.constants import ALLOWED_DIFFICULTIES
+
+MAX_TEMPLATE_QUESTIONS = 100
 
 
 def _add_heading(doc: Document, text: str, size: int = 16) -> None:
@@ -49,6 +51,99 @@ def _add_user_meta(doc: Document, label: str, value: str) -> None:
     p = doc.add_paragraph()
     run = p.add_run(f"{label}: {value}")
     run.font.size = Pt(11)
+
+
+def parse_template_counts(raw: Optional[str]) -> List[Tuple[str, int]]:
+    """
+    Parseia counts=subjectId:qtd,subjectId:qtd.
+
+    Retorna lista ordenada [(subject_id, count), ...].
+    Levanta ValueError se o formato for inválido.
+    """
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError(
+            "Parâmetro obrigatório ausente: counts. "
+            "Informe a quantidade por disciplina no formato subjectId:qtd,subjectId:qtd."
+        )
+
+    pairs: List[Tuple[str, int]] = []
+    seen: set = set()
+    for part in text.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            raise ValueError(
+                f"Formato inválido em counts: '{item}'. Use subjectId:qtd."
+            )
+        subject_id, qty_raw = item.rsplit(":", 1)
+        subject_id = subject_id.strip()
+        qty_raw = qty_raw.strip()
+        if not subject_id:
+            raise ValueError(f"SubjectId vazio em counts: '{item}'.")
+        if subject_id in seen:
+            raise ValueError(f"SubjectId duplicado em counts: {subject_id}")
+        try:
+            qty = int(qty_raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"Quantidade inválida para subjectId={subject_id}: '{qty_raw}'. "
+                "Informe um inteiro ≥ 1."
+            ) from exc
+        if qty < 1:
+            raise ValueError(
+                f"Quantidade inválida para subjectId={subject_id}: {qty}. "
+                "Informe um inteiro ≥ 1."
+            )
+        seen.add(subject_id)
+        pairs.append((subject_id, qty))
+
+    if not pairs:
+        raise ValueError(
+            "Parâmetro counts vazio. Informe subjectId:qtd para cada disciplina."
+        )
+
+    total = sum(q for _, q in pairs)
+    if total > MAX_TEMPLATE_QUESTIONS:
+        raise ValueError(
+            f"Total de questões ({total}) excede o limite de {MAX_TEMPLATE_QUESTIONS}."
+        )
+
+    return pairs
+
+
+def resolve_template_question_plan(
+    subjects: Sequence[Dict[str, Any]],
+    counts_raw: Optional[str],
+) -> List[Tuple[Dict[str, Any], int]]:
+    """
+    Cruza subjects validados com counts.
+
+    - Todo id em counts deve existir em subjects.
+    - Toda disciplina em subjects deve ter quantidade em counts.
+    - Retorna [(subject_dict, qty), ...] na ordem de counts.
+    """
+    counts = parse_template_counts(counts_raw)
+    by_id = {str(s.get("id")): s for s in subjects if s.get("id")}
+    subject_ids = set(by_id.keys())
+    count_ids = {sid for sid, _ in counts}
+
+    missing_in_subjects = sorted(count_ids - subject_ids)
+    if missing_in_subjects:
+        raise ValueError(
+            "counts contém disciplina(s) não selecionada(s): "
+            + ", ".join(missing_in_subjects)
+        )
+
+    missing_counts = sorted(subject_ids - count_ids)
+    if missing_counts:
+        raise ValueError(
+            "Toda disciplina selecionada precisa de quantidade em counts. "
+            "Faltando: " + ", ".join(missing_counts)
+        )
+
+    return [(by_id[sid], qty) for sid, qty in counts]
 
 
 def _add_question_block(
@@ -95,7 +190,8 @@ def build_questions_import_template(context: Optional[Dict[str, Any]] = None) ->
 
     context:
       gradeId, gradeName (obrigatórios)
-      subjects: [{id, name}, ...] — disciplinas permitidas / exemplos
+      subjects: [{id, name}, ...] — disciplinas permitidas
+      questionPlan: [(subject, qty), ...] — opcional; se ausente, gera só o exemplo
       defaultSubjectId / defaultSubjectName — opcional (atalho 1 disciplina)
     """
     context = context or {}
@@ -110,6 +206,12 @@ def build_questions_import_template(context: Optional[Dict[str, Any]] = None) ->
             }
         ]
 
+    question_plan: List[Tuple[Dict[str, Any], int]] = list(
+        context.get("questionPlan") or []
+    )
+    if not question_plan and context.get("counts") is not None:
+        question_plan = resolve_template_question_plan(subjects, context.get("counts"))
+
     doc = Document()
 
     _add_heading(doc, "Template de importação de questões — Afirme Play")
@@ -117,8 +219,7 @@ def build_questions_import_template(context: Optional[Dict[str, Any]] = None) ->
         doc,
         "Este arquivo é só para questões de múltipla escolha. "
         "A série já foi definida no formulário (campos em verde — não altere). "
-        "A disciplina é por questão: em cada bloco, copie e cole o SubjectId "
-        "da disciplina desejada (lista abaixo). "
+        "A disciplina de cada bloco já vem pré-preenchida. "
         "Não altere os marcadores em amarelo. Você pode colar imagens no enunciado, "
         "nas alternativas ou na solução.",
     )
@@ -133,8 +234,8 @@ def build_questions_import_template(context: Optional[Dict[str, Any]] = None) ->
     _add_heading(doc, "Disciplinas deste arquivo (copie o SubjectId)", size=13)
     _add_muted(
         doc,
-        "Em cada questão, preencha Disciplina (nome) e SubjectId (UUID). "
-        "O mais seguro é copiar o SubjectId da lista. Cada questão pode ter uma disciplina diferente.",
+        "Em cada questão, Disciplina (nome) e SubjectId (UUID) já vêm preenchidos. "
+        "O mais seguro é manter o SubjectId da lista. Cada questão pode ter uma disciplina diferente.",
     )
     if subjects:
         for subj in subjects:
@@ -162,27 +263,27 @@ def build_questions_import_template(context: Optional[Dict[str, Any]] = None) ->
     doc.add_paragraph()
     _add_heading(doc, "O que você preenche em cada questão", size=13)
     for line in [
-        "SubjectId + Disciplina: obrigatórios por questão (copie da lista acima)",
+        "SubjectId + Disciplina: já preenchidos (não altere)",
         "Dificuldade: obrigatória (copie e cole um dos quatro textos)",
         "Habilidade: código BNCC/código interno (ex.: EF05MA01) — opcional",
         "Título, Comando, Número, Valor — opcionais",
         "Marque a alternativa correta com [CORRETA] no final da linha",
+        "No preview, desmarque o bloco de exemplo se ele aparecer",
     ]:
         doc.add_paragraph(line, style="List Bullet")
 
-    # Exemplos: uma questão por disciplina (até 2), senão 2 da mesma
-    example_subjects = subjects[:2] if subjects else [
-        {"id": "", "name": "Matemática"},
-        {"id": "", "name": "Língua Portuguesa"},
-    ]
-    if len(example_subjects) == 1:
-        example_subjects = [example_subjects[0], example_subjects[0]]
+    example_subject = subjects[0] if subjects else {"id": "", "name": "Matemática"}
 
     doc.add_paragraph()
-    _add_heading(doc, "Exemplo 1", size=13)
+    _add_heading(doc, "Exemplo de preenchimento — não copie este bloco", size=13)
+    _add_muted(
+        doc,
+        "Referência de como preencher. Não importe este bloco no preview "
+        "(desmarque-o se aparecer na lista).",
+    )
     _add_question_block(
         doc,
-        subject=example_subjects[0],
+        subject=example_subject,
         grade_name=grade_name,
         grade_id=str(grade_id),
         difficulty="Adequado",
@@ -199,38 +300,37 @@ def build_questions_import_template(context: Optional[Dict[str, Any]] = None) ->
         skill="EF05MA01",
     )
 
-    doc.add_paragraph()
-    _add_heading(doc, "Exemplo 2 (outra disciplina e/ou dificuldade)", size=13)
-    _add_question_block(
-        doc,
-        subject=example_subjects[1],
-        grade_name=grade_name,
-        grade_id=str(grade_id),
-        difficulty="Básico",
-        title="Números pares" if example_subjects[0].get("id") == example_subjects[1].get("id") else "Interpretação de texto",
-        enunciado=(
-            "Qual dos números abaixo é par?"
-            if example_subjects[0].get("id") == example_subjects[1].get("id")
-            else "No texto, a palavra destacada indica qual ideia?"
-        ),
-        alternativas=(
-            ["A) 3", "B) 7", "C) 8 [CORRETA]", "D) 9"]
-            if example_subjects[0].get("id") == example_subjects[1].get("id")
-            else ["A) causa [CORRETA]", "B) tempo", "C) lugar", "D) modo"]
-        ),
-        solucao=(
-            "8 é divisível por 2, portanto é par."
-            if example_subjects[0].get("id") == example_subjects[1].get("id")
-            else "A palavra indica relação de causa."
-        ),
-    )
+    if question_plan:
+        doc.add_paragraph()
+        _add_heading(doc, "Questões para preencher", size=13)
+        _add_muted(
+            doc,
+            "Edite apenas o conteúdo de cada bloco abaixo. "
+            "Mantenha os marcadores em amarelo e os campos em verde.",
+        )
 
-    doc.add_paragraph()
-    _add_muted(
-        doc,
-        "Dica: copie o bloco inteiro (=== QUESTÃO === até === FIM ===) para adicionar mais questões. "
-        "Mantenha Série/GradeId; altere SubjectId (disciplina), Dificuldade e o conteúdo.",
-    )
+        question_number = 1
+        for subject, qty in question_plan:
+            subject_name = subject.get("name") or "—"
+            for _ in range(qty):
+                doc.add_paragraph()
+                _add_heading(
+                    doc,
+                    f"Questão {question_number} – {subject_name}",
+                    size=13,
+                )
+                _add_question_block(
+                    doc,
+                    subject=subject,
+                    grade_name=grade_name,
+                    grade_id=str(grade_id),
+                    difficulty="",
+                    title="",
+                    enunciado="",
+                    alternativas=["A) ", "B) ", "C) ", "D) "],
+                    solucao="",
+                )
+                question_number += 1
 
     buffer = BytesIO()
     doc.save(buffer)

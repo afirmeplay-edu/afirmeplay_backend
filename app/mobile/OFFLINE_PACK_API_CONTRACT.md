@@ -144,6 +144,19 @@ Cada item de `submissions` deve incluir o **`sync_bundle_version`** inteiro corr
 
 Autenticação: JWT do login web + tenant (`X-City-Id` ou slug).
 
+### 5.1 Validade no register / PATCH
+
+| Campo           | Tipo               | Descrição                                                                                                                                      |
+| --------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `expires_at`    | `string` \| omitir | ISO 8601 UTC (ex. `2026-09-20T21:30:00Z`). Preferido. Deve ser **> agora** e **≤ agora + 14 dias**.                                             |
+| `ttl_hours`     | `number` \| omitir | Legado (1–336). Usado só se `expires_at` não for enviado. No `POST /register`, se nenhum dos dois vier, default **48**.                        |
+| `max_redemptions` | `number`         | Limite de dispositivos (inalterado).                                                                                                           |
+
+Se **ambos** `expires_at` e `ttl_hours` forem enviados, **`expires_at` prevalece**.  
+Respostas (`register`, lista, detalhe, `PATCH`) já devolvem `expires_at` (UTC com `Z`); o painel deve editar a partir desse campo, não recalcular horas.
+
+`PATCH` de código expirado exige `expires_at` ou `ttl_hours` para renovar.
+
 Cada item (`GET` lista/detalhe, resposta de `PATCH`) inclui:
 
 | Campo                | Tipo               | Descrição                                                            |

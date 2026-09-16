@@ -18,7 +18,10 @@ from flask_jwt_extended import jwt_required
 from app import db
 from app.decorators import requires_city_context
 from app.decorators.role_required import get_current_user_from_token, role_required
-from app.question_import.docx_template import build_questions_import_template
+from app.question_import.docx_template import (
+    build_questions_import_template,
+    resolve_template_question_plan,
+)
 from app.question_import.importer import (
     import_questions_from_docx,
     parse_indexes_from_request,
@@ -42,12 +45,13 @@ _IMPORT_ROLES = ("admin", "professor", "coordenador", "diretor", "tecadm")
 @role_required(*_IMPORT_ROLES)
 def download_questions_import_template():
     """
-    Baixa o template DOCX pré-preenchido com série e lista de disciplinas.
+    Baixa o template DOCX pré-preenchido com série, disciplinas e N blocos.
 
     Query params:
       - grade (obrigatório): UUID da série
       - subjectIds (recomendado): id1,id2,... disciplinas do arquivo
       - subjectId (opcional): atalho para 1 disciplina (também entra na lista)
+      - counts (obrigatório): subjectId:qtd,subjectId:qtd — qtd ≥ 1, soma ≤ 100
     """
     try:
         subject_ids_raw = request.args.get("subjectIds") or request.args.get("subjects")
@@ -65,13 +69,19 @@ def download_questions_import_template():
             defaults["subjectIds"] = ",".join(listed)
 
         context = validate_import_defaults(defaults)
+        question_plan = resolve_template_question_plan(
+            context.get("subjects") or [],
+            request.args.get("counts"),
+        )
+        context["questionPlan"] = question_plan
         buffer = build_questions_import_template(context)
 
         safe_grade = "".join(
             c if c.isalnum() or c in "-_" else "_" for c in (context["gradeName"] or "serie")
         )[:40]
         n_subj = len(context.get("subjects") or [])
-        download_name = f"template_questoes_{safe_grade}_{n_subj}disc.docx"
+        n_q = sum(qty for _, qty in question_plan)
+        download_name = f"template_questoes_{safe_grade}_{n_subj}disc_{n_q}q.docx"
 
         return send_file(
             buffer,

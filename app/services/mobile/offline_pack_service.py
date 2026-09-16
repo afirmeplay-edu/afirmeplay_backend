@@ -10,7 +10,7 @@ import io
 import logging
 import os
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import qrcode
@@ -557,11 +557,68 @@ def _ensure_pack_bundle_versions(
     return versions, pack_valid
 
 
+_MAX_TTL_HOURS = 24 * 14
+_DEFAULT_TTL_HOURS = 48
+
+
 def _parse_iso_naive(raw: str) -> datetime:
-    s = raw.rstrip("Z")
-    if len(s) >= 26 and s[23] in "+-":
-        s = s[:23]
-    return datetime.fromisoformat(s)
+    """Parse ISO 8601 para datetime naive UTC (aceita Z e offsets)."""
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("datetime ISO vazio")
+    if s.endswith("Z") or s.endswith("z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _resolve_pack_expires_at(
+    *,
+    expires_at: Optional[Any] = None,
+    ttl_hours: Optional[int] = None,
+    default_ttl_hours: Optional[int] = None,
+) -> Optional[datetime]:
+    """
+    Resolve validade do pacote.
+    Preferência: expires_at > ttl_hours > default_ttl_hours.
+    Retorna None se nenhum for informado (update sem alterar validade).
+    """
+    now = datetime.utcnow()
+    max_until = now + timedelta(hours=_MAX_TTL_HOURS)
+
+    if expires_at is not None and expires_at != "":
+        if isinstance(expires_at, datetime):
+            dt = expires_at
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        elif isinstance(expires_at, str):
+            try:
+                dt = _parse_iso_naive(expires_at)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"expires_at inválido: {e}") from e
+        else:
+            raise ValueError("expires_at deve ser string ISO 8601")
+        if dt <= now:
+            raise ValueError("expires_at deve ser posterior ao momento atual")
+        if dt > max_until:
+            raise ValueError(
+                "expires_at não pode ultrapassar 14 dias a partir de agora"
+            )
+        return dt
+
+    if ttl_hours is not None:
+        if ttl_hours < 1 or ttl_hours > _MAX_TTL_HOURS:
+            raise ValueError("ttl_hours deve estar entre 1 e 336")
+        return now + timedelta(hours=ttl_hours)
+
+    if default_ttl_hours is not None:
+        if default_ttl_hours < 1 or default_ttl_hours > _MAX_TTL_HOURS:
+            raise ValueError("ttl_hours deve estar entre 1 e 336")
+        return now + timedelta(hours=default_ttl_hours)
+
+    return None
 
 
 def register_offline_pack(
@@ -569,14 +626,26 @@ def register_offline_pack(
     city_id: str,
     created_by_user_id: str,
     scope: Dict[str, Any],
-    ttl_hours: int,
     max_redemptions: int,
+    ttl_hours: Optional[int] = None,
+    expires_at: Optional[Any] = None,
 ) -> Tuple[str, MobileOfflinePackCode]:
     """
     Gera código único, persiste hash e escopo. Retorna (código formatado, modelo).
+
+    Validade: preferir expires_at (ISO); senão ttl_hours; senão default 48h.
     """
-    if ttl_hours < 1 or ttl_hours > 24 * 14:
-        raise ValueError("ttl_hours deve estar entre 1 e 336")
+    resolved_expires = _resolve_pack_expires_at(
+        expires_at=expires_at,
+        ttl_hours=ttl_hours,
+        default_ttl_hours=(
+            _DEFAULT_TTL_HOURS
+            if expires_at is None and ttl_hours is None
+            else None
+        ),
+    )
+    if resolved_expires is None:
+        raise ValueError("informe expires_at ou ttl_hours")
     if max_redemptions < 1 or max_redemptions > 10_000:
         raise ValueError("max_redemptions inválido")
 
@@ -606,13 +675,12 @@ def register_offline_pack(
     if not plain or not lookup_key or not formatted:
         raise RuntimeError("não foi possível gerar código único; tente novamente")
 
-    expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
     row = MobileOfflinePackCode(
         activation_code=formatted,
         code_hash=lookup_key,
         scope_json=dict(scope),
         created_by_user_id=created_by_user_id,
-        expires_at=expires_at,
+        expires_at=resolved_expires,
         max_redemptions=max_redemptions,
     )
     db.session.add(row)
@@ -633,13 +701,20 @@ def update_offline_pack(
     city_id: str,
     scope: Optional[Dict[str, Any]] = None,
     ttl_hours: Optional[int] = None,
+    expires_at: Optional[Any] = None,
     max_redemptions: Optional[int] = None,
 ) -> MobileOfflinePackCode:
     """Atualiza escopo e/ou metadados; invalida cache de bundle para novo resgate."""
     if pack.revoked_at:
         raise ValueError("código revogado")
-    if pack.expires_at < datetime.utcnow() and ttl_hours is None:
-        raise ValueError("código expirado; informe ttl_hours para renovar validade")
+    if (
+        pack.expires_at < datetime.utcnow()
+        and ttl_hours is None
+        and (expires_at is None or expires_at == "")
+    ):
+        raise ValueError(
+            "código expirado; informe expires_at ou ttl_hours para renovar validade"
+        )
 
     if scope is not None:
         resolve_school_ids(city_id, scope)
@@ -647,10 +722,12 @@ def update_offline_pack(
         flag_modified(pack, "scope_json")
         invalidate_pack_bundle_cache(pack)
 
-    if ttl_hours is not None:
-        if ttl_hours < 1 or ttl_hours > 24 * 14:
-            raise ValueError("ttl_hours deve estar entre 1 e 336")
-        pack.expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+    resolved_expires = _resolve_pack_expires_at(
+        expires_at=expires_at,
+        ttl_hours=ttl_hours,
+    )
+    if resolved_expires is not None:
+        pack.expires_at = resolved_expires
         _sync_cached_pack_generations_to_pack_expiry(pack)
 
     if max_redemptions is not None:

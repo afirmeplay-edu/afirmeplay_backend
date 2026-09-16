@@ -131,6 +131,87 @@ class TestUpdateOfflinePackValidation(unittest.TestCase):
             mock_sync.assert_called_once_with(pack)
 
 
+class TestResolvePackExpiresAt(unittest.TestCase):
+    def test_expires_at_future_valid(self):
+        target = datetime.utcnow() + timedelta(hours=36)
+        resolved = svc._resolve_pack_expires_at(
+            expires_at=target.isoformat() + "Z",
+        )
+        self.assertIsNotNone(resolved)
+        self.assertAlmostEqual(
+            resolved.timestamp(), target.timestamp(), delta=2
+        )
+
+    def test_expires_at_past_raises(self):
+        past = (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z"
+        with self.assertRaises(ValueError) as ctx:
+            svc._resolve_pack_expires_at(expires_at=past)
+        self.assertIn("posterior", str(ctx.exception).lower())
+
+    def test_expires_at_beyond_14_days_raises(self):
+        far = (datetime.utcnow() + timedelta(days=15)).isoformat() + "Z"
+        with self.assertRaises(ValueError) as ctx:
+            svc._resolve_pack_expires_at(expires_at=far)
+        self.assertIn("14 dias", str(ctx.exception).lower())
+
+    def test_expires_at_wins_over_ttl_hours(self):
+        target = datetime.utcnow() + timedelta(hours=10)
+        resolved = svc._resolve_pack_expires_at(
+            expires_at=target.isoformat() + "Z",
+            ttl_hours=96,
+        )
+        self.assertAlmostEqual(
+            resolved.timestamp(), target.timestamp(), delta=2
+        )
+
+    def test_ttl_hours_fallback(self):
+        before = datetime.utcnow()
+        resolved = svc._resolve_pack_expires_at(ttl_hours=24)
+        after = datetime.utcnow()
+        self.assertGreaterEqual(resolved, before + timedelta(hours=24))
+        self.assertLessEqual(resolved, after + timedelta(hours=24))
+
+
+class TestUpdateOfflinePackExpiresAt(unittest.TestCase):
+    @patch.object(svc, "db")
+    def test_renew_expired_with_expires_at(self, mock_db):
+        pack = MagicMock()
+        pack.revoked_at = None
+        pack.expires_at = datetime.utcnow() - timedelta(hours=1)
+        pack.scope_json = {"type": "municipality"}
+        target = datetime.utcnow() + timedelta(hours=48)
+        with patch.object(
+            svc, "_sync_cached_pack_generations_to_pack_expiry"
+        ) as mock_sync:
+            svc.update_offline_pack(
+                pack=pack,
+                city_id="city-1",
+                expires_at=target.isoformat() + "Z",
+            )
+            mock_sync.assert_called_once_with(pack)
+        self.assertAlmostEqual(
+            pack.expires_at.timestamp(), target.timestamp(), delta=2
+        )
+
+    @patch.object(svc, "db")
+    def test_expires_at_preferred_when_both_sent(self, mock_db):
+        pack = MagicMock()
+        pack.revoked_at = None
+        pack.expires_at = datetime.utcnow() + timedelta(hours=12)
+        pack.scope_json = {"type": "municipality"}
+        target = datetime.utcnow() + timedelta(hours=8)
+        with patch.object(svc, "_sync_cached_pack_generations_to_pack_expiry"):
+            svc.update_offline_pack(
+                pack=pack,
+                city_id="city-1",
+                expires_at=target.isoformat() + "Z",
+                ttl_hours=200,
+            )
+        self.assertAlmostEqual(
+            pack.expires_at.timestamp(), target.timestamp(), delta=2
+        )
+
+
 class TestRedeemOfflinePackPageFastPath(unittest.TestCase):
     @patch.object(svc, "serialize_student_for_bundle", return_value={"id": "s1"})
     @patch.object(svc, "student_bundle_query_options")

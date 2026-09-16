@@ -44,10 +44,15 @@ def _offline_pack_register_post():
     user, ctx = auth
 
     body = request.get_json(silent=True) or {}
+    expires_at_raw = body.get("expires_at")
     try:
         scope = _sanitize_scope(body.get("scope") or {})
-        ttl_hours = int(body.get("ttl_hours", 48))
         max_redemptions = int(body.get("max_redemptions", 50))
+        ttl_hours = None
+        if "ttl_hours" in body:
+            ttl_hours = int(body["ttl_hours"])
+        elif expires_at_raw is None:
+            ttl_hours = 48
     except (TypeError, ValueError) as e:
         return jsonify({"error": f"corpo inválido: {e}"}), 400
 
@@ -57,6 +62,7 @@ def _offline_pack_register_post():
             created_by_user_id=user["id"],
             scope=scope,
             ttl_hours=ttl_hours,
+            expires_at=expires_at_raw,
             max_redemptions=max_redemptions,
         )
         response_pack_id = str(row.id)
@@ -238,6 +244,10 @@ def _offline_pack_patch(pack_id):
         except (TypeError, ValueError):
             return jsonify({"error": "ttl_hours inválido"}), 400
 
+    expires_at_raw = None
+    if "expires_at" in body:
+        expires_at_raw = body.get("expires_at")
+
     max_redemptions = None
     if "max_redemptions" in body:
         try:
@@ -245,8 +255,17 @@ def _offline_pack_patch(pack_id):
         except (TypeError, ValueError):
             return jsonify({"error": "max_redemptions inválido"}), 400
 
-    if scope is None and ttl_hours is None and max_redemptions is None:
-        return jsonify({"error": "informe scope, ttl_hours e/ou max_redemptions"}), 400
+    if (
+        scope is None
+        and ttl_hours is None
+        and expires_at_raw is None
+        and max_redemptions is None
+    ):
+        return jsonify(
+            {
+                "error": "informe scope, expires_at, ttl_hours e/ou max_redemptions",
+            }
+        ), 400
 
     try:
         pack_svc.update_offline_pack(
@@ -254,6 +273,7 @@ def _offline_pack_patch(pack_id):
             city_id=str(ctx.city_id),
             scope=scope,
             ttl_hours=ttl_hours,
+            expires_at=expires_at_raw,
             max_redemptions=max_redemptions,
         )
         payload = pack_svc.pack_to_api_dict(pack, user)

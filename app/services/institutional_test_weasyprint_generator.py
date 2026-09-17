@@ -63,11 +63,29 @@ class InstitutionalTestWeasyPrintGenerator:
         return self._minio_service
 
     def _weasyprint_base_url(self) -> Optional[str]:
+        """
+        Retorna a base URL pública da API para resolver URLs relativas no WeasyPrint.
+        
+        CRÍTICO: Em produção, PUBLIC_API_BASE_URL DEVE estar configurada.
+        Sem ela, imagens relativas (ex: ícones, assets) não serão resolvidas no PDF.
+        """
         public_api_base_url = os.getenv("PUBLIC_API_BASE_URL")
         if not public_api_base_url:
             app_env = (os.getenv("APP_ENV") or "").lower()
             if app_env in ("development", "dev", "local"):
                 public_api_base_url = "http://localhost:5000"
+                logger.info(
+                    "[PDF-GEN] Ambiente dev/local: usando fallback base_url=%s",
+                    public_api_base_url
+                )
+            else:
+                # PRODUÇÃO: PUBLIC_API_BASE_URL é OBRIGATÓRIA
+                logger.error(
+                    "[PDF-GEN] PUBLIC_API_BASE_URL não configurada em ambiente '%s'; "
+                    "imagens relativas não serão resolvidas no PDF. "
+                    "Configure a variável de ambiente PUBLIC_API_BASE_URL.",
+                    app_env or "production"
+                )
         return public_api_base_url
 
     def _get_afirme_cover_layout(self) -> Dict[str, Any]:
@@ -108,14 +126,66 @@ class InstitutionalTestWeasyPrintGenerator:
         import re
         def _sanitize_img_tag(img_tag_html: str) -> str:
             """
-            Normaliza <img> vindo do editor para o PDF:
-            - Remove width/height (podem forçar largura excessiva no WeasyPrint)
-            - Remove declarações width/height do style inline (mantém o restante)
-            Mantém o layout/CSS do template como fonte de verdade.
+            Normaliza <img> vindo do editor para o PDF.
+            
+            DIFERENCIAÇÃO CRÍTICA:
+            - Ícones inline (width/height <= 50px OU src contém /icons/): 
+              preserva dimensões, adiciona classe 'icon-inline'
+            - Imagens de conteúdo: remove dimensões para que CSS do template controle
             """
             if not img_tag_html:
                 return img_tag_html
 
+            # Extrair width/height originais dos atributos
+            width_match = re.search(r'\bwidth\s*=\s*["\']?(\d+)', img_tag_html, re.IGNORECASE)
+            height_match = re.search(r'\bheight\s*=\s*["\']?(\d+)', img_tag_html, re.IGNORECASE)
+            
+            # Extrair width/height do style inline
+            style_match = re.search(r'\bstyle\s*=\s*["\']([^"\']*)["\']', img_tag_html, re.IGNORECASE)
+            style_width = None
+            style_height = None
+            if style_match:
+                style_content = style_match.group(1)
+                style_width_match = re.search(r'\bwidth\s*:\s*(\d+)(?:px)?', style_content, re.IGNORECASE)
+                style_height_match = re.search(r'\bheight\s*:\s*(\d+)(?:px)?', style_content, re.IGNORECASE)
+                if style_width_match:
+                    style_width = int(style_width_match.group(1))
+                if style_height_match:
+                    style_height = int(style_height_match.group(1))
+            
+            # Detectar se é ícone por dimensões
+            is_icon = False
+            if width_match or height_match or style_width or style_height:
+                width = int(width_match.group(1)) if width_match else style_width
+                height = int(height_match.group(1)) if height_match else style_height
+                # Ícones são pequenos: width OU height <= 50px
+                if (width and width <= 50) or (height and height <= 50):
+                    is_icon = True
+            
+            # Detectar se é ícone por padrão de URL (fallback)
+            if not is_icon:
+                src_match = re.search(r'\bsrc\s*=\s*["\']([^"\']*)["\']', img_tag_html, re.IGNORECASE)
+                if src_match:
+                    src_url = src_match.group(1)
+                    # Padrões comuns de ícones
+                    if '/icons/' in src_url.lower() or '/icon/' in src_url.lower() or '/static/' in src_url.lower():
+                        is_icon = True
+            
+            if is_icon:
+                # Preservar dimensões e adicionar classe icon-inline
+                if 'class=' not in img_tag_html:
+                    img_tag_html = img_tag_html.replace('<img ', '<img class="icon-inline" ')
+                else:
+                    img_tag_html = re.sub(
+                        r'class\s*=\s*["\']([^"\']*)["\']',
+                        lambda m: f'class="{m.group(1)} icon-inline"',
+                        img_tag_html,
+                        count=1
+                    )
+                # NÃO remover width/height - preservar dimensões originais
+                return img_tag_html
+            
+            # Imagens de conteúdo: remover dimensões (comportamento original)
             # Remove width/height como atributos (com ou sem aspas)
             img_tag_html = re.sub(r"""\s+\b(width|height)\b\s*=\s*(".*?"|'.*?'|[^\s>]+)""", "", img_tag_html, flags=re.IGNORECASE)
 
@@ -139,9 +209,10 @@ class InstitutionalTestWeasyPrintGenerator:
             img_tag_html = re.sub(r"""\s+>""", ">", img_tag_html)
             return img_tag_html
 
-        # Captura tags <img ... src="/questions/<question_id>/images/<image_id>" ...>
+        # Captura tags <img ... src="/..." ...> (qualquer URL relativa)
+        # Padrão expandido: captura URLs relativas genéricas, não só o padrão exato de UUID
         img_tag_pattern = re.compile(
-            r"""<img\b[^>]*\bsrc\s*=\s*["']/questions/([^/"']+)/images/([a-fA-F0-9-]{36})["'][^>]*>""",
+            r"""<img\b[^>]*\bsrc\s*=\s*["'](/[^"']+)["'][^>]*>""",
             flags=re.IGNORECASE
         )
 
@@ -153,22 +224,66 @@ class InstitutionalTestWeasyPrintGenerator:
 
         def _replace(match: "re.Match"):
             img_tag = match.group(0)
-            question_id = match.group(1)
-            image_id = match.group(2)
-            meta = by_id.get(image_id)
-            bucket = None
-            object_name = None
-            mime = "image/png"
-            if meta:
-                bucket = meta.get("minio_bucket")
-                object_name = meta.get("minio_object_name")
-                mime = meta.get("type") or mime
-            if not bucket or not object_name:
-                # Fallback: path padrão MinIO question-images/{question_id}/{image_id}.png
-                bucket = "question-images"
-                object_name = f"{question_id}/{image_id}.png"
+            url_path = match.group(1)  # ex: /questions/.../images/... ou /static/icons/...
+            
+            # Estratégia 1: Padrão MinIO conhecido (/questions/<id>/images/<uuid>)
+            question_img_match = re.match(r'/questions/([^/]+)/images/([a-fA-F0-9-]{36})', url_path)
+            if question_img_match:
+                question_id = question_img_match.group(1)
+                image_id = question_img_match.group(2)
+                meta = by_id.get(image_id)
+                bucket = None
+                object_name = None
+                mime = "image/png"
+                if meta:
+                    bucket = meta.get("minio_bucket")
+                    object_name = meta.get("minio_object_name")
+                    mime = meta.get("type") or mime
+                if not bucket or not object_name:
+                    # Fallback: path padrão MinIO question-images/{question_id}/{image_id}.png
+                    bucket = "question-images"
+                    object_name = f"{question_id}/{image_id}.png"
 
-            cache_key = f"{bucket}:{object_name}"
+                cache_key = f"{bucket}:{object_name}"
+                cached = self._image_data_uri_cache.get(cache_key)
+                if cached:
+                    replaced = re.sub(
+                        r"""\bsrc\s*=\s*["'][^"']*["']""",
+                        f'src="{cached}"',
+                        img_tag,
+                        count=1,
+                        flags=re.IGNORECASE
+                    )
+                    return _sanitize_img_tag(replaced)
+
+                try:
+                    data = self._get_minio_service().download_file(bucket, object_name)
+                    if not data:
+                        logger.warning(
+                            "[PDF-IMAGE] MinIO download falhou para %s:%s",
+                            bucket, object_name
+                        )
+                        return _sanitize_img_tag(img_tag)
+                    b64 = base64.b64encode(data).decode("utf-8")
+                    data_uri = f"data:{mime};base64,{b64}"
+                    self._image_data_uri_cache[cache_key] = data_uri
+                    replaced = re.sub(
+                        r"""\bsrc\s*=\s*["'][^"']*["']""",
+                        f'src="{data_uri}"',
+                        img_tag,
+                        count=1,
+                        flags=re.IGNORECASE
+                    )
+                    return _sanitize_img_tag(replaced)
+                except Exception as exc:
+                    logger.warning(
+                        "[PDF-IMAGE] Exceção MinIO para %s:%s - %s",
+                        bucket, object_name, exc
+                    )
+                    # Continuar para tentar fallback HTTP
+            
+            # Estratégia 2: URL relativa genérica → requisição HTTP via PUBLIC_API_BASE_URL
+            cache_key = f"url:{url_path}"
             cached = self._image_data_uri_cache.get(cache_key)
             if cached:
                 replaced = re.sub(
@@ -179,26 +294,84 @@ class InstitutionalTestWeasyPrintGenerator:
                     flags=re.IGNORECASE
                 )
                 return _sanitize_img_tag(replaced)
-
-            try:
-                data = self._get_minio_service().download_file(bucket, object_name)
-                if not data:
-                    return _sanitize_img_tag(img_tag)
-                b64 = base64.b64encode(data).decode("utf-8")
-                data_uri = f"data:{mime};base64,{b64}"
-                self._image_data_uri_cache[cache_key] = data_uri
-                replaced = re.sub(
-                    r"""\bsrc\s*=\s*["'][^"']*["']""",
-                    f'src="{data_uri}"',
-                    img_tag,
-                    count=1,
-                    flags=re.IGNORECASE
+            
+            base_url = self._weasyprint_base_url()
+            if not base_url:
+                logger.warning(
+                    "[PDF-IMAGE] PUBLIC_API_BASE_URL não configurada; "
+                    "imagem %s não pode ser inlined", url_path
                 )
-                return _sanitize_img_tag(replaced)
-            except Exception:
+                return _sanitize_img_tag(img_tag)
+            
+            full_url = base_url.rstrip('/') + url_path
+            try:
+                import requests
+                resp = requests.get(full_url, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.content
+                    # Detectar MIME type
+                    mime = resp.headers.get('Content-Type', 'image/png').split(';')[0]
+                    b64 = base64.b64encode(data).decode("utf-8")
+                    data_uri = f"data:{mime};base64,{b64}"
+                    # Cache
+                    self._image_data_uri_cache[cache_key] = data_uri
+                    replaced = re.sub(
+                        r"""\bsrc\s*=\s*["'][^"']*["']""",
+                        f'src="{data_uri}"',
+                        img_tag,
+                        count=1,
+                        flags=re.IGNORECASE
+                    )
+                    logger.info(
+                        "[PDF-IMAGE] HTTP download sucesso: %s (%s bytes)",
+                        url_path, len(data)
+                    )
+                    return _sanitize_img_tag(replaced)
+                else:
+                    logger.warning(
+                        "[PDF-IMAGE] Falha HTTP %s ao baixar %s",
+                        resp.status_code, full_url
+                    )
+                    return _sanitize_img_tag(img_tag)
+            except Exception as exc:
+                logger.error(
+                    "[PDF-IMAGE] Exceção ao baixar %s: %s",
+                    full_url, exc, exc_info=True
+                )
                 return _sanitize_img_tag(img_tag)
 
-        return img_tag_pattern.sub(_replace, html)
+        result_html = img_tag_pattern.sub(_replace, html)
+        
+        # Diagnóstico: contar imagens não convertidas para data URI
+        non_inlined = self._count_non_inlined_images(result_html)
+        if non_inlined > 0:
+            logger.warning(
+                "[PDF-IMAGE] %s imagem(ns) não foram convertidas para data URI; "
+                "podem não aparecer no PDF se base_url estiver incorreto ou inacessível",
+                non_inlined
+            )
+        
+        return result_html
+    
+    def _count_non_inlined_images(self, html: str) -> int:
+        """
+        Conta imagens com src não-data-URI (para diagnóstico).
+        Usado para detectar imagens que não foram convertidas e podem não aparecer no PDF.
+        """
+        if not html:
+            return 0
+        import re
+        matches = re.findall(
+            r'<img\b[^>]*\bsrc\s*=\s*["\']((?!data:)[^"\']+)["\']\s*[^>]*>',
+            html,
+            re.IGNORECASE
+        )
+        if matches:
+            logger.debug(
+                "[PDF-IMAGE] Imagens não-inlined encontradas: %s",
+                matches
+            )
+        return len(matches)
 
     def _optimize_question_images_for_questions_pdf(
         self,
@@ -1415,14 +1588,68 @@ class InstitutionalTestWeasyPrintGenerator:
     def _sanitize_all_img_dimensions(self, html: str) -> str:
         """
         Remove atributos width/height e propriedades width/height do style inline
-        de TODAS as tags <img> no HTML, independente do padrão de URL da imagem.
-        Garante que o CSS do template (max-width: 100%) seja a única fonte de verdade
-        para o tamanho das imagens no PDF.
+        de tags <img> de CONTEÚDO no HTML.
+        
+        DIFERENCIAÇÃO CRÍTICA:
+        - Ícones inline (width/height <= 50px OU src contém /icons/): 
+          preserva dimensões, adiciona classe 'icon-inline'
+        - Imagens de conteúdo: remove dimensões para que CSS do template controle
         """
         import re
 
         def _strip_img_tag(m: re.Match) -> str:
             tag = m.group(0)
+            
+            # Extrair width/height originais dos atributos
+            width_match = re.search(r'\bwidth\s*=\s*["\']?(\d+)', tag, re.IGNORECASE)
+            height_match = re.search(r'\bheight\s*=\s*["\']?(\d+)', tag, re.IGNORECASE)
+            
+            # Extrair width/height do style inline
+            style_match = re.search(r'\bstyle\s*=\s*["\']([^"\']*)["\']', tag, re.IGNORECASE)
+            style_width = None
+            style_height = None
+            if style_match:
+                style_content = style_match.group(1)
+                style_width_match = re.search(r'\bwidth\s*:\s*(\d+)(?:px)?', style_content, re.IGNORECASE)
+                style_height_match = re.search(r'\bheight\s*:\s*(\d+)(?:px)?', style_content, re.IGNORECASE)
+                if style_width_match:
+                    style_width = int(style_width_match.group(1))
+                if style_height_match:
+                    style_height = int(style_height_match.group(1))
+            
+            # Detectar se é ícone por dimensões
+            is_icon = False
+            if width_match or height_match or style_width or style_height:
+                width = int(width_match.group(1)) if width_match else style_width
+                height = int(height_match.group(1)) if height_match else style_height
+                # Ícones são pequenos: width OU height <= 50px
+                if (width and width <= 50) or (height and height <= 50):
+                    is_icon = True
+            
+            # Detectar se é ícone por padrão de URL (fallback)
+            if not is_icon:
+                src_match = re.search(r'\bsrc\s*=\s*["\']([^"\']*)["\']', tag, re.IGNORECASE)
+                if src_match:
+                    src_url = src_match.group(1)
+                    # Padrões comuns de ícones
+                    if '/icons/' in src_url.lower() or '/icon/' in src_url.lower() or '/static/' in src_url.lower():
+                        is_icon = True
+            
+            if is_icon:
+                # Preservar dimensões e adicionar classe icon-inline
+                if 'class=' not in tag:
+                    tag = tag.replace('<img ', '<img class="icon-inline" ')
+                else:
+                    tag = re.sub(
+                        r'class\s*=\s*["\']([^"\']*)["\']',
+                        lambda m: f'class="{m.group(1)} icon-inline"',
+                        tag,
+                        count=1
+                    )
+                # NÃO remover width/height - preservar dimensões originais
+                return tag
+            
+            # Imagens de conteúdo: remover dimensões (comportamento original)
             # Remove atributos width="..." e height="..."
             tag = re.sub(
                 r"""\s+\b(width|height)\b\s*=\s*(?:"[^"]*"|'[^']*'|\S+)""",

@@ -149,7 +149,20 @@ class AnswerSheetCorrectionNewGrid:
     # DETECÇÃO DE QR CODE
     # =========================================================================
 
-    def _try_decode_qr_raw(self, img: np.ndarray) -> Optional[str]:
+    def _is_valid_omr_qr_payload(self, payload: Optional[str]) -> bool:
+        """Aceita apenas payload JSON do cartão (formato legado intacto)."""
+        if not payload or not isinstance(payload, str):
+            return False
+        text = payload.strip()
+        if not text.startswith("{") or len(text) < 20:
+            return False
+        return (
+            ("student_id" in text)
+            or ("gabarito_id" in text)
+            or ("test_id" in text)
+        )
+
+    def _try_decode_qr_raw(self, img: np.ndarray, try_quad: bool = True) -> Optional[str]:
         """
         Tenta decodificar QR em uma única imagem (pyzbar → OpenCV).
         Retorna a string bruta do payload ou None.
@@ -162,7 +175,9 @@ class AnswerSheetCorrectionNewGrid:
             from pyzbar.pyzbar import decode as zbar_decode
             codes = zbar_decode(img)
             if codes:
-                return codes[0].data.decode("utf-8")
+                payload = codes[0].data.decode("utf-8")
+                if self._is_valid_omr_qr_payload(payload):
+                    return payload
         except ImportError:
             pass
         except Exception:
@@ -171,28 +186,208 @@ class AnswerSheetCorrectionNewGrid:
         # OpenCV
         try:
             detector = cv2.QRCodeDetector()
-            data, _, _ = detector.detectAndDecode(img)
-            if data:
+            data, points, _ = detector.detectAndDecode(img)
+            if self._is_valid_omr_qr_payload(data):
                 return data
+
+            if try_quad:
+                if points is None:
+                    try:
+                        found, points = detector.detect(img)
+                        if not found:
+                            points = None
+                    except Exception:
+                        points = None
+                if points is not None:
+                    payload = self._decode_qr_from_quad(img, points)
+                    if payload:
+                        return payload
         except Exception:
             pass
 
         return None
 
+    def _order_qr_quad_points(self, points: np.ndarray) -> np.ndarray:
+        """Ordena 4 pontos do QR como TL, TR, BR, BL."""
+        pts = np.asarray(points, dtype=np.float32).reshape(4, 2)
+        s = pts.sum(axis=1)
+        diff = np.diff(pts, axis=1).reshape(-1)
+        tl = pts[np.argmin(s)]
+        br = pts[np.argmax(s)]
+        tr = pts[np.argmin(diff)]
+        bl = pts[np.argmax(diff)]
+        return np.float32([tl, tr, br, bl])
+
+    def _decode_qr_from_quad(self, gray: np.ndarray, points: np.ndarray) -> Optional[str]:
+        """Warpa o QR detectado para um quadrado e tenta decodificar com upscale."""
+        try:
+            if len(gray.shape) == 3:
+                gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+            src = self._order_qr_quad_points(points)
+            for side in (200, 300, 400):
+                dst = np.float32([
+                    [0, 0],
+                    [side - 1, 0],
+                    [side - 1, side - 1],
+                    [0, side - 1],
+                ])
+                matrix = cv2.getPerspectiveTransform(src, dst)
+                warped = cv2.warpPerspective(gray, matrix, (side, side))
+                for prep in (
+                    warped,
+                    cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+                    cv2.adaptiveThreshold(
+                        warped, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                        cv2.THRESH_BINARY, 31, 5,
+                    ),
+                ):
+                    # Evitar recursão infinita: decoders diretos sem re-warp
+                    try:
+                        from pyzbar.pyzbar import decode as zbar_decode
+                        codes = zbar_decode(prep)
+                        if codes:
+                            payload = codes[0].data.decode("utf-8")
+                            if self._is_valid_omr_qr_payload(payload):
+                                return payload
+                    except Exception:
+                        pass
+                    try:
+                        data, _, _ = cv2.QRCodeDetector().detectAndDecode(prep)
+                        if self._is_valid_omr_qr_payload(data):
+                            return data
+                    except Exception:
+                        pass
+        except Exception:
+            return None
+        return None
+
+    def _iter_qr_roi_variants(self, roi: np.ndarray):
+        """Gera variantes de pré-processamento para um ROI de QR (ordem: mais eficaz primeiro)."""
+        blur = cv2.GaussianBlur(roi, (0, 0), 1.0)
+        sharpened = cv2.addWeighted(roi, 1.8, blur, -0.8, 0)
+        _, otsu = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        adaptive = cv2.adaptiveThreshold(
+            roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 5
+        )
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(roi)
+        return (
+            ("raw", roi),
+            ("sharpen", sharpened),
+            ("otsu", otsu),
+            ("adaptive", adaptive),
+            ("clahe", clahe),
+        )
+
+    def _decode_qr_roi_cascade(self, roi: np.ndarray, label: str) -> Optional[str]:
+        """Tenta decodificar um ROI com variantes e upscales (limitado por tamanho)."""
+        if roi is None or roi.size == 0:
+            return None
+
+        rh, rw = roi.shape[:2]
+        # Se o ROI já é grande, poucos upscales bastam
+        if max(rh, rw) >= 280:
+            scales = (1, 2)
+        elif max(rh, rw) >= 160:
+            scales = (1, 2, 3)
+        else:
+            scales = (2, 3, 4, 5)
+
+        for prep_name, prep in self._iter_qr_roi_variants(roi):
+            for scale in scales:
+                if scale == 1:
+                    candidate = prep
+                else:
+                    interp = (
+                        cv2.INTER_NEAREST
+                        if prep_name in ("otsu", "adaptive")
+                        else cv2.INTER_CUBIC
+                    )
+                    candidate = cv2.resize(
+                        prep, None, fx=scale, fy=scale, interpolation=interp
+                    )
+                payload = self._try_decode_qr_raw(candidate, try_quad=False)
+                if payload:
+                    self.logger.info(
+                        f"✅ QR Code detectado via ROI ({label}, {prep_name}"
+                        f"{'' if scale == 1 else f' x{scale}'})"
+                    )
+                    return payload
+        return None
+
+    def _find_qr_density_crops(self, gray: np.ndarray) -> List[np.ndarray]:
+        """
+        Localiza recortes candidatos ao QR no cabeçalho (canto superior direito)
+        por densidade de pixels escuros — busca em miniatura para ficar rápido.
+        """
+        h, w = gray.shape[:2]
+        y1, y2 = int(h * 0.02), int(h * 0.20)
+        x1, x2 = int(w * 0.60), int(w * 0.99)
+        region = gray[y1:y2, x1:x2]
+        if region.size == 0:
+            return []
+
+        # Trabalha em escala reduzida e mapeia de volta
+        target_w = 320
+        scale = min(1.0, target_w / float(region.shape[1]))
+        small = (
+            region
+            if scale >= 0.999
+            else cv2.resize(region, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        )
+        sh, sw = small.shape[:2]
+        crops = []
+        seen = set()
+
+        for win in (48, 64, 80):
+            if win >= min(sh, sw):
+                continue
+            best = None
+            step = max(4, win // 6)
+            for yy in range(0, sh - win, step):
+                for xx in range(0, sw - win, step):
+                    patch = small[yy:yy + win, xx:xx + win]
+                    dark = float(np.mean(patch < 140))
+                    if not (0.28 < dark < 0.55):
+                        continue
+                    std = float(patch.std())
+                    score = std * (1.0 - abs(dark - 0.40))
+                    if best is None or score > best[0]:
+                        best = (score, xx, yy, win)
+            if best is None:
+                continue
+            _, xx, yy, win = best
+            # mapear para coordenadas da imagem original
+            ox = int(xx / scale)
+            oy = int(yy / scale)
+            owin = int(win / scale)
+            for pad in (10, 20):
+                xa = max(0, x1 + ox - pad)
+                ya = max(0, y1 + oy - pad)
+                xb = min(w, x1 + ox + owin + pad)
+                yb = min(h, y1 + oy + owin + pad)
+                key = (xa, ya, xb, yb)
+                if key in seen:
+                    continue
+                seen.add(key)
+                crop = gray[ya:yb, xa:xb]
+                if crop.size:
+                    crops.append(crop)
+        return crops[:6]
+
     def _detectar_qr_code_via_roi(self, gray: np.ndarray) -> Optional[str]:
         """
         Cascata para scans com muita luz / QR pequeno:
         recorta o canto superior direito (posição fixa do template) e tenta
-        upscale + pré-processamentos locais.
+        upscale + pré-processamentos locais. Formato do payload inalterado.
         """
         h, w = gray.shape[:2]
-        # Janelas progressivamente mais amplas (QR no canto superior direito)
+        # Crops relativos ao template (QR no header à direita) — do mais justo ao amplo
         roi_boxes = [
+            (0.02, 0.16, 0.70, 0.98),
+            (0.00, 0.20, 0.62, 1.00),
             (0.00, 0.22, 0.55, 1.00),
             (0.00, 0.28, 0.50, 1.00),
-            (0.00, 0.32, 0.45, 1.00),
         ]
-        scales = (2, 3, 4)
 
         self.logger.info("🔍 Tentando QR via ROI (canto superior direito)...")
 
@@ -200,205 +395,50 @@ class AnswerSheetCorrectionNewGrid:
             y1, y2 = int(h * y1r), int(h * y2r)
             x1, x2 = int(w * x1r), int(w * x2r)
             roi = gray[y1:y2, x1:x2]
-            if roi.size == 0:
-                continue
+            payload = self._decode_qr_roi_cascade(
+                roi, f"box=y{y1r:.2f}-{y2r:.2f}/x{x1r:.2f}-{x2r:.2f}"
+            )
+            if payload:
+                return payload
 
-            # Pré-processamentos locais (overexposure)
-            blur = cv2.GaussianBlur(roi, (0, 0), 1.0)
-            sharpened = cv2.addWeighted(roi, 1.8, blur, -0.8, 0)
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(roi)
-            gamma = np.clip((roi.astype(np.float32) / 255.0) ** 1.6 * 255.0, 0, 255).astype(np.uint8)
-            _, otsu = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-            variants = [
-                ("raw", roi),
-                ("sharpen", sharpened),
-                ("clahe", clahe),
-                ("gamma", gamma),
-                ("otsu", otsu),
-            ]
-
-            for prep_name, prep in variants:
-                # 1x no ROI (às vezes já basta)
-                payload = self._try_decode_qr_raw(prep)
-                if payload:
-                    self.logger.info(
-                        f"✅ QR Code detectado via ROI ({prep_name}, "
-                        f"box=y{y1r:.2f}-{y2r:.2f}/x{x1r:.2f}-{x2r:.2f})"
-                    )
-                    return payload
-
-                for scale in scales:
-                    enlarged = cv2.resize(
-                        prep,
-                        None,
-                        fx=scale,
-                        fy=scale,
-                        interpolation=cv2.INTER_CUBIC if prep_name != "otsu" else cv2.INTER_NEAREST,
-                    )
-                    payload = self._try_decode_qr_raw(enlarged)
-                    if payload:
-                        self.logger.info(
-                            f"✅ QR Code detectado via ROI ({prep_name} x{scale}, "
-                            f"box=y{y1r:.2f}-{y2r:.2f}/x{x1r:.2f}-{x2r:.2f})"
-                        )
-                        return payload
+        for idx, crop in enumerate(self._find_qr_density_crops(gray)):
+            payload = self._decode_qr_roi_cascade(crop, f"density#{idx}")
+            if payload:
+                return payload
 
         return None
-    
-    def _detectar_qr_code(self, img: np.ndarray) -> Optional[Dict[str, str]]:
-        """
-        Detecta e decodifica QR Code no cartão resposta
-        Usa múltiplas estratégias para aumentar taxa de sucesso
-        
-        Returns:
-            Dict com gabarito_id, student_id, test_id ou None
-        """
-        import json as json_module
-        
-        self.logger.info("🔍 Iniciando detecção de QR Code...")
-        
-        # Converter para grayscale se necessário
-        if len(img.shape) == 3:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = img.copy()
-        
-        qr_data_str = None
-        
-        # ========================================
-        # ESTRATÉGIA 1: pyzbar (mais confiável)
-        # ========================================
-        try:
-            from pyzbar.pyzbar import decode
-            
-            self.logger.debug("Tentando pyzbar na imagem original...")
-            qr_codes = decode(img)
-            
-            if qr_codes:
-                qr_data_str = qr_codes[0].data.decode('utf-8')
-                self.logger.info("✅ QR Code detectado com pyzbar (imagem original)")
-            
-            if not qr_data_str:
-                self.logger.debug("Tentando pyzbar em grayscale...")
-                qr_codes = decode(gray)
-                if qr_codes:
-                    qr_data_str = qr_codes[0].data.decode('utf-8')
-                    self.logger.info("✅ QR Code detectado com pyzbar (grayscale)")
-            
-            # Tentar com imagem aumentada (para QR codes pequenos)
-            if not qr_data_str:
-                self.logger.debug("Tentando pyzbar com imagem aumentada (2x)...")
-                h, w = gray.shape
-                enlarged = cv2.resize(gray, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
-                qr_codes = decode(enlarged)
-                if qr_codes:
-                    qr_data_str = qr_codes[0].data.decode('utf-8')
-                    self.logger.info("✅ QR Code detectado com pyzbar (aumentado)")
-            
-            # Tentar com equalização de histograma
-            if not qr_data_str:
-                self.logger.debug("Tentando pyzbar com equalização...")
-                equalized = cv2.equalizeHist(gray)
-                qr_codes = decode(equalized)
-                if qr_codes:
-                    qr_data_str = qr_codes[0].data.decode('utf-8')
-                    self.logger.info("✅ QR Code detectado com pyzbar (equalizado)")
-                    
-        except ImportError:
-            self.logger.warning("⚠️ pyzbar não disponível, tentando OpenCV...")
-        except Exception as e:
-            self.logger.warning(f"⚠️ Erro ao usar pyzbar: {str(e)}")
-        
-        # ========================================
-        # ESTRATÉGIA 2: OpenCV QRCodeDetector (fallback)
-        # ========================================
-        if not qr_data_str:
-            try:
-                self.logger.debug("Tentando OpenCV QRCodeDetector...")
-                qr_detector = cv2.QRCodeDetector()
-                
-                # Tentar na imagem original
-                data, bbox, _ = qr_detector.detectAndDecode(img)
-                if data:
-                    qr_data_str = data
-                    self.logger.info("✅ QR Code detectado com OpenCV (imagem original)")
-                
-                # Tentar em grayscale
-                if not qr_data_str:
-                    data, bbox, _ = qr_detector.detectAndDecode(gray)
-                    if data:
-                        qr_data_str = data
-                        self.logger.info("✅ QR Code detectado com OpenCV (grayscale)")
-                
-                # Tentar com threshold
-                if not qr_data_str:
-                    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                    data, bbox, _ = qr_detector.detectAndDecode(thresh)
-                    if data:
-                        qr_data_str = data
-                        self.logger.info("✅ QR Code detectado com OpenCV (threshold)")
-                        
-            except Exception as e:
-                self.logger.warning(f"⚠️ Erro ao usar OpenCV QRCodeDetector: {str(e)}")
 
-        # ========================================
-        # ESTRATÉGIA 3: ROI canto superior direito
-        # (scans com muita luz / QR pequeno — casos que falham na folha inteira)
-        # ========================================
-        if not qr_data_str:
-            try:
-                qr_data_str = self._detectar_qr_code_via_roi(gray)
-            except Exception as e:
-                self.logger.warning(f"⚠️ Erro na detecção QR via ROI: {str(e)}")
-        
-        # ========================================
-        # PROCESSAR DADOS DO QR CODE
-        # ========================================
-        if not qr_data_str:
-            self.logger.error("❌ QR Code não encontrado após todas as tentativas")
-            self.logger.error("Dicas:")
-            self.logger.error("  - Verifique se o QR code está visível na imagem")
-            self.logger.error("  - Aumente a resolução da imagem (mínimo 1000x1400)")
-            self.logger.error("  - Certifique-se que o QR code tem pelo menos 100x100px")
-            return None
-        
+    def _parse_qr_payload(self, qr_data_str: str) -> Optional[Dict[str, str]]:
+        """Parseia JSON legado do QR (student_id + gabarito_id/test_id)."""
+        import json as json_module
+
         try:
-            # Decodificar JSON
             qr_data = json_module.loads(qr_data_str)
-            
-            gabarito_id = qr_data.get('gabarito_id')
-            student_id = qr_data.get('student_id')
-            test_id = qr_data.get('test_id')
-            
-            # ✅ ACEITAR gabarito_id OU test_id
+            gabarito_id = qr_data.get("gabarito_id")
+            student_id = qr_data.get("student_id")
+            test_id = qr_data.get("test_id")
+
             if not gabarito_id and not test_id:
                 self.logger.error("❌ Nem gabarito_id nem test_id encontrados no QR Code")
                 self.logger.error(f"Dados do QR Code: {qr_data_str[:100]}...")
                 return None
-            
-            # Se tem test_id mas não gabarito_id, buscar gabarito pela prova
+
             if test_id and not gabarito_id:
-                # ✅ MODIFICADO: Para provas físicas, não buscar gabarito_id
-                # O QR Code de provas físicas usa apenas test_id (não gabarito_id)
-                # Os dados de correção serão buscados em PhysicalTestForm no corrigir_cartao_resposta
                 self.logger.info(f"🔍 QR Code com test_id (prova física): {test_id[:8]}...")
-                # Nota: gabarito_id ficará None, será tratado no corrigir_cartao_resposta buscando em PhysicalTestForm
-            
-            self.logger.info(f"✅ QR Code decodificado com sucesso!")
+
+            self.logger.info("✅ QR Code decodificado com sucesso!")
             if gabarito_id:
                 self.logger.info(f"   Gabarito: {gabarito_id[:8]}...")
             if student_id:
                 self.logger.info(f"   Aluno: {student_id[:8]}...")
             if test_id:
                 self.logger.info(f"   Test: {test_id[:8]}...")
-            
+
             return {
-                'gabarito_id': gabarito_id,
-                'student_id': student_id,
-                'test_id': test_id
+                "gabarito_id": gabarito_id,
+                "student_id": student_id,
+                "test_id": test_id,
             }
-            
         except json_module.JSONDecodeError as e:
             self.logger.error(f"❌ Erro ao decodificar JSON do QR Code: {str(e)}")
             self.logger.error(f"Dados recebidos: {qr_data_str[:200]}...")
@@ -406,6 +446,117 @@ class AnswerSheetCorrectionNewGrid:
         except Exception as e:
             self.logger.error(f"❌ Erro ao processar QR Code: {str(e)}")
             return None
+
+    def _detectar_qr_code(self, img: np.ndarray) -> Optional[Dict[str, str]]:
+        """
+        Detecta e decodifica QR Code no cartão resposta.
+        Mantém o formato JSON legado (student_id + gabarito_id/test_id).
+
+        Returns:
+            Dict com gabarito_id, student_id, test_id ou None
+        """
+        self.logger.info("🔍 Iniciando detecção de QR Code...")
+
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img.copy()
+
+        qr_data_str = None
+        h, w = gray.shape[:2]
+        large_image = max(h, w) >= 1600
+
+        # 1) pyzbar na imagem original/gray (caminho estável de produção)
+        try:
+            from pyzbar.pyzbar import decode
+
+            sources = [("imagem original", img), ("grayscale", gray)]
+            if large_image:
+                scale = min(1.0, 1400.0 / float(max(h, w)))
+                if scale < 0.999:
+                    small = cv2.resize(
+                        gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA
+                    )
+                    sources.append(("miniatura", small))
+
+            for label, source in sources:
+                qr_codes = decode(source)
+                if qr_codes:
+                    payload = qr_codes[0].data.decode("utf-8")
+                    if self._is_valid_omr_qr_payload(payload):
+                        qr_data_str = payload
+                        self.logger.info(f"✅ QR Code detectado com pyzbar ({label})")
+                        break
+        except ImportError:
+            self.logger.warning("⚠️ pyzbar não disponível, tentando OpenCV...")
+        except Exception as e:
+            self.logger.warning(f"⚠️ Erro ao usar pyzbar: {str(e)}")
+
+        # 2) ROI no grayscale original
+        if not qr_data_str:
+            try:
+                qr_data_str = self._detectar_qr_code_via_roi(gray)
+            except Exception as e:
+                self.logger.warning(f"⚠️ Erro na detecção QR via ROI: {str(e)}")
+
+        # 3) Low-res: ROI após upscale 2x (só se ainda falhou)
+        if not qr_data_str and max(h, w) < 1400:
+            try:
+                gray_up = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+                qr_data_str = self._detectar_qr_code_via_roi(gray_up)
+            except Exception as e:
+                self.logger.warning(f"⚠️ Erro na detecção QR via ROI (upscale): {str(e)}")
+
+        # 4) OpenCV (+ retificação)
+        if not qr_data_str:
+            try:
+                self.logger.debug("Tentando OpenCV QRCodeDetector...")
+                for source in (img, gray):
+                    payload = self._try_decode_qr_raw(source)
+                    if payload:
+                        qr_data_str = payload
+                        self.logger.info("✅ QR Code detectado com OpenCV")
+                        break
+            except Exception as e:
+                self.logger.warning(f"⚠️ Erro ao usar OpenCV QRCodeDetector: {str(e)}")
+
+        # 5) Reforço final
+        if not qr_data_str:
+            try:
+                from pyzbar.pyzbar import decode
+
+                equalized = cv2.equalizeHist(gray)
+                qr_codes = decode(equalized)
+                if qr_codes:
+                    payload = qr_codes[0].data.decode("utf-8")
+                    if self._is_valid_omr_qr_payload(payload):
+                        qr_data_str = payload
+                        self.logger.info("✅ QR Code detectado com pyzbar (equalizado)")
+
+                if not qr_data_str and not large_image:
+                    enlarged = cv2.resize(
+                        gray, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC
+                    )
+                    qr_codes = decode(enlarged)
+                    if qr_codes:
+                        payload = qr_codes[0].data.decode("utf-8")
+                        if self._is_valid_omr_qr_payload(payload):
+                            qr_data_str = payload
+                            self.logger.info("✅ QR Code detectado com pyzbar (aumentado)")
+            except ImportError:
+                pass
+            except Exception as e:
+                self.logger.warning(f"⚠️ Erro no fallback pyzbar reforçado: {str(e)}")
+
+        if not qr_data_str:
+            self.logger.error("❌ QR Code não encontrado após todas as tentativas")
+            self.logger.error("Dicas:")
+            self.logger.error("  - Verifique se o QR code está visível na imagem")
+            self.logger.error("  - Aumente a resolução da imagem (mínimo 1000x1400)")
+            self.logger.error("  - Certifique-se que o QR code tem pelo menos 100x100px")
+            return None
+
+        return self._parse_qr_payload(qr_data_str)
     
     def _criar_gabarito_de_test(self, test_id: str):
         """
@@ -536,124 +687,186 @@ class AnswerSheetCorrectionNewGrid:
     # =========================================================================
     # ETAPA 2: DETECTAR ÂNCORAS A4
     # =========================================================================
-    
-    def _detect_a4_anchors(self, img: np.ndarray, edges: np.ndarray) -> Optional[Dict]:
+
+    def _detect_a4_anchors(self, img: np.ndarray, edges: np.ndarray = None) -> Optional[Dict]:
         """
-        Detecta 4 quadrados pretos nos cantos do cartão resposta (âncoras A4)
-        
-        Implementação robusta baseada no código testado:
-        - RETR_TREE para hierarquia de contornos
-        - Área RELATIVA à imagem (não fixa)
-        - Aspect ratio restritivo (0.9-1.1)
-        - Filtro de proximidade a CANTO real (duas bordas, AND)
-        - Garantia de 1 quadrado por canto
-        - Seleção pelo mais próximo do canto (não pela maior área)
-        - Extração do vértice correto (não o centro)
-        
-        Args:
-            img: Imagem original
-            edges: Bordas detectadas (não usado, usa threshold direto)
-        
-        Returns:
-            Dict com coordenadas dos 4 quadrados ordenados (TL, TR, BR, BL) ou None
+        Detecta 4 quadrados pretos nos cantos (âncoras A4).
+
+        Estabilidade (compatibilidade primeiro):
+          1) Método clássico (Otsu global) — o que já salvava cartões em produção
+          2) Fallback ROI por canto — só se o clássico falhar
+          3) Fallback só é aceito se a geometria for um retângulo plausível
+
+        Template/bolhas/triângulos intactos; destino do warp continua A4 lógico fixo.
+        """
+        classic = self._detect_a4_anchors_classic(img, aspect_lo=0.9, aspect_hi=1.1)
+        if classic is not None:
+            self.logger.info("✅ Âncoras A4 via método clássico (0.9–1.1)")
+            self._log_and_debug_anchors(img, classic, "classic")
+            return classic
+
+        # Mesmo algoritmo clássico com aspect um pouco mais tolerante
+        classic_relaxed = self._detect_a4_anchors_classic(img, aspect_lo=0.85, aspect_hi=1.15)
+        if classic_relaxed is not None:
+            self.logger.info("✅ Âncoras A4 via método clássico relaxado (0.85–1.15)")
+            self._log_and_debug_anchors(img, classic_relaxed, "classic_relaxed")
+            return classic_relaxed
+
+        self.logger.info("ℹ️ Clássico falhou — tentando fallback ROI de canto...")
+        corner = self._detect_a4_anchors_corner_roi(img)
+        if corner is None:
+            self.logger.warning("❌ Âncoras A4 não detectadas (clássico + ROI)")
+            return None
+
+        if not self._anchors_geometry_plausible(corner, img.shape[1], img.shape[0]):
+            self.logger.warning(
+                "❌ Fallback ROI rejeitado: geometria das âncoras não é retângulo plausível"
+            )
+            return None
+
+        self.logger.info("✅ Âncoras A4 via fallback ROI de canto (geometria OK)")
+        self._log_and_debug_anchors(img, corner, "corner_roi")
+        return corner
+
+    def _log_and_debug_anchors(self, img: np.ndarray, ordered: Dict, tag: str) -> None:
+        self.logger.info(f"   [{tag}] TL={ordered['TL']}, TR={ordered['TR']}")
+        self.logger.info(f"   [{tag}] BR={ordered['BR']}, BL={ordered['BL']}")
+        if self.debug:
+            img_debug = img.copy()
+            for label, vertex in ordered.items():
+                vx, vy = int(vertex[0]), int(vertex[1])
+                cv2.circle(img_debug, (vx, vy), 15, (0, 255, 0), -1)
+                cv2.putText(
+                    img_debug,
+                    f"{label}:{tag[:3]}",
+                    (vx + 20, vy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2,
+                )
+            self._save_debug_image("01_a4_anchors_detected.jpg", img_debug)
+
+    def _anchors_geometry_plausible(
+        self, anchors: Dict, img_width: int, img_height: int
+    ) -> bool:
+        """
+        Exige retângulo/paralelogramo plausível cobrindo a folha.
+        Evita aceitar blobs errados no fallback ROI.
         """
         try:
-            # Converter para grayscale
+            tl = np.array(anchors["TL"], dtype=np.float64)
+            tr = np.array(anchors["TR"], dtype=np.float64)
+            br = np.array(anchors["BR"], dtype=np.float64)
+            bl = np.array(anchors["BL"], dtype=np.float64)
+
+            # Ordem de cantos
+            if not (tl[0] < tr[0] and bl[0] < br[0] and tl[1] < bl[1] and tr[1] < br[1]):
+                return False
+
+            top = np.linalg.norm(tr - tl)
+            bottom = np.linalg.norm(br - bl)
+            left = np.linalg.norm(bl - tl)
+            right = np.linalg.norm(br - tr)
+            if min(top, bottom, left, right) < 1:
+                return False
+
+            # Lados opostos similares (paralelogramo)
+            if abs(top - bottom) / max(top, bottom) > 0.18:
+                return False
+            if abs(left - right) / max(left, right) > 0.18:
+                return False
+
+            # Deve cobrir boa parte da imagem (marcadores nos cantos da folha)
+            width_px = float((tr[0] + br[0]) / 2.0 - (tl[0] + bl[0]) / 2.0)
+            height_px = float((bl[1] + br[1]) / 2.0 - (tl[1] + tr[1]) / 2.0)
+            width_cov = width_px / float(img_width)
+            height_cov = height_px / float(img_height)
+            if width_cov < 0.70 or height_cov < 0.70:
+                return False
+
+            # Proporção A4 aproximada em pixels (h/w ~ 1.414), com folga para skew
+            page_aspect = height_px / max(width_px, 1e-6)
+            if not (1.15 < page_aspect < 1.75):
+                return False
+
+            # Fechamento do paralelogramo: TL+BR ≈ TR+BL
+            diag_err = np.linalg.norm((tl + br) - (tr + bl))
+            diag_scale = max(top, left)
+            if diag_err / diag_scale > 0.08:
+                return False
+
+            return True
+        except Exception:
+            return False
+
+    def _detect_a4_anchors_classic(
+        self,
+        img: np.ndarray,
+        aspect_lo: float = 0.9,
+        aspect_hi: float = 1.1,
+    ) -> Optional[Dict]:
+        """
+        Método clássico de produção: Otsu global + 4 vértices + canto + aspect.
+        """
+        try:
             if len(img.shape) == 3:
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             else:
                 gray = img.copy()
-            
+
             img_height, img_width = gray.shape[:2]
             img_area = img_width * img_height
-            
-            # Aplicar threshold para detectar quadrados pretos
+
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            
-            # ✅ CORREÇÃO 1: Usar RETR_TREE para hierarquia de contornos
-            contours, hierarchy = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            
-            # ✅ CORREÇÃO 2: Área RELATIVA à imagem (nunca fixa)
-            min_area = img_area * 0.0001   # ~0.01% da imagem
-            max_area = img_area * 0.002    # ~0.2% da imagem
-            
-            # ✅ CORREÇÃO 3: Margem para filtro de proximidade a CANTO (duas bordas)
-            margin_x = img_width * 0.1   # 10% da largura
-            margin_y = img_height * 0.1  # 10% da altura
-            
+            contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+            min_area = img_area * 0.0001
+            max_area = img_area * 0.002
+            margin_x = img_width * 0.1
+            margin_y = img_height * 0.1
+
             squares = []
-            
-            for i, cnt in enumerate(contours):
-                # Aproximar contorno
+            for cnt in contours:
                 peri = cv2.arcLength(cnt, True)
                 approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-                
-                # Verificar se é um quadrado (4 vértices)
                 if len(approx) != 4:
                     continue
-                
                 area = cv2.contourArea(approx)
-                
-                # Filtrar por área relativa
                 if not (min_area < area < max_area):
                     continue
-                
-                # Verificar aspect ratio
                 x, y, w, h = cv2.boundingRect(approx)
                 aspect_ratio = w / float(h) if h > 0 else 0
-                
-                # Aspect ratio mais restritivo (quadrado real)
-                if not (0.9 < aspect_ratio < 1.1):
+                if not (aspect_lo < aspect_ratio < aspect_hi):
                     continue
-                
-                # Calcular centro do quadrado
                 M = cv2.moments(approx)
                 if M["m00"] == 0:
                     continue
-                
                 cx = int(M["m10"] / M["m00"])
                 cy = int(M["m01"] / M["m00"])
-                
-                # ✅ CORREÇÃO 4: FILTRO DE PROXIMIDADE A CANTO REAL (ESSENCIAL)
-                # Exige estar perto de DUAS bordas (AND). Evita finders do QR que
-                # passam só por "perto do topo" ou só por "perto da direita".
                 near_left = cx < margin_x
                 near_right = cx > img_width - margin_x
                 near_top = cy < margin_y
                 near_bottom = cy > img_height - margin_y
                 is_near_corner = (
-                    (near_left and near_top) or
-                    (near_right and near_top) or
-                    (near_right and near_bottom) or
-                    (near_left and near_bottom)
+                    (near_left and near_top)
+                    or (near_right and near_top)
+                    or (near_right and near_bottom)
+                    or (near_left and near_bottom)
                 )
-                
                 if not is_near_corner:
                     continue
-                
-                squares.append({
-                    'contour': approx,
-                    'center': (cx, cy),
-                    'area': area
-                })
-            
+                squares.append({"contour": approx, "center": (cx, cy), "area": area})
+
             if len(squares) < 4:
-                self.logger.warning(f"❌ Apenas {len(squares)} quadrados detectados (necessário 4)")
-                self.logger.info(f"   Área mínima: {min_area:.0f}px², máxima: {max_area:.0f}px²")
-                self.logger.info(f"   Margens: X={margin_x:.0f}px, Y={margin_y:.0f}px")
+                self.logger.debug(
+                    f"Clássico ({aspect_lo}-{aspect_hi}): {len(squares)}/4 quadrados"
+                )
                 return None
-            
-            # ✅ CORREÇÃO 5: GARANTIR 1 QUADRADO POR CANTO
-            corners = {
-                "TL": [],  # Top-Left
-                "TR": [],  # Top-Right
-                "BR": [],  # Bottom-Right
-                "BL": []   # Bottom-Left
-            }
-            
+
+            corners = {"TL": [], "TR": [], "BR": [], "BL": []}
             for s in squares:
                 cx, cy = s["center"]
-                # Classificar por quadrante
                 if cx < img_width / 2 and cy < img_height / 2:
                     corners["TL"].append(s)
                 elif cx >= img_width / 2 and cy < img_height / 2:
@@ -662,79 +875,193 @@ class AnswerSheetCorrectionNewGrid:
                     corners["BR"].append(s)
                 else:
                     corners["BL"].append(s)
-            
-            # Verificar se todos os cantos têm pelo menos 1 quadrado
-            missing_corners = [corner for corner, items in corners.items() if not items]
-            if missing_corners:
-                self.logger.warning(f"❌ Quadrados ausentes nos cantos: {missing_corners}")
+
+            if any(not items for items in corners.values()):
                 return None
-            
-            # Cantos-alvo da imagem (seleção por proximidade, não por área)
+
             corner_targets = {
                 "TL": (0, 0),
                 "TR": (img_width - 1, 0),
                 "BR": (img_width - 1, img_height - 1),
                 "BL": (0, img_height - 1),
             }
-            
-            # Para cada canto, pegar o quadrado MAIS PRÓXIMO do canto e extrair o vértice correto
-            ordered_squares = {}
+            ordered = {}
             for corner, items in corners.items():
-                if not items:
-                    self.logger.warning(f"❌ Quadrado ausente no canto {corner}")
-                    return None
-                # Pegar o quadrado mais próximo do canto da folha (rejeita finders do QR)
                 tx, ty = corner_targets[corner]
                 best_square = min(
                     items,
                     key=lambda s: (s["center"][0] - tx) ** 2 + (s["center"][1] - ty) ** 2,
                 )
-                
-                # ✅ CORREÇÃO 6: Extrair o vértice correto do quadrado ao invés do centro
-                # O vértice correto é aquele que está mais próximo do canto real do documento
-                contour = best_square["contour"]  # approx com 4 vértices
-                vertices = contour.reshape(-1, 2)  # Converter para array de pontos (x, y)
-                
-                # Selecionar o vértice correto baseado no canto
-                if corner == "TL":  # Top-Left: menor x E menor y
-                    # Encontrar vértice com menor distância ao canto (0, 0)
+                vertices = best_square["contour"].reshape(-1, 2)
+                if corner == "TL":
                     distances = vertices[:, 0] + vertices[:, 1]
                     corner_vertex = vertices[np.argmin(distances)]
-                elif corner == "TR":  # Top-Right: maior x E menor y
-                    # Encontrar vértice com maior x e menor y (mais próximo de (width, 0))
+                elif corner == "TR":
                     scores = vertices[:, 0] - vertices[:, 1]
                     corner_vertex = vertices[np.argmax(scores)]
-                elif corner == "BR":  # Bottom-Right: maior x E maior y
-                    # Encontrar vértice com maior distância ao canto (0, 0)
+                elif corner == "BR":
                     distances = vertices[:, 0] + vertices[:, 1]
                     corner_vertex = vertices[np.argmax(distances)]
-                else:  # BL - Bottom-Left: menor x E maior y
-                    # Encontrar vértice com menor x e maior y (mais próximo de (0, height))
+                else:
                     scores = vertices[:, 0] - vertices[:, 1]
                     corner_vertex = vertices[np.argmin(scores)]
-                
-                ordered_squares[corner] = [float(corner_vertex[0]), float(corner_vertex[1])]
-            
-            # Salvar debug
-            if self.debug:
-                img_debug = img.copy()
-                for label, vertex in ordered_squares.items():
-                    vx, vy = int(vertex[0]), int(vertex[1])
-                    cv2.circle(img_debug, (vx, vy), 15, (0, 255, 0), -1)
-                    cv2.putText(img_debug, label, (vx+20, vy), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
-                self._save_debug_image("01_a4_anchors_detected.jpg", img_debug)
-            
-            self.logger.info(f"✅ 4 quadrados A4 detectados (vértices)")
-            self.logger.info(f"   TL={ordered_squares['TL']}, TR={ordered_squares['TR']}")
-            self.logger.info(f"   BR={ordered_squares['BR']}, BL={ordered_squares['BL']}")
-            
-            return ordered_squares
-            
+                ordered[corner] = [float(corner_vertex[0]), float(corner_vertex[1])]
+
+            return ordered
         except Exception as e:
-            self.logger.error(f"❌ Erro ao detectar quadrados A4: {str(e)}", exc_info=True)
+            self.logger.debug(f"Clássico falhou com exceção: {e}")
             return None
-    
+
+    def _detect_a4_anchors_corner_roi(self, img: np.ndarray) -> Optional[Dict]:
+        """
+        Fallback: busca LOCAL em ROI de cada canto + inferência do 4º.
+        """
+        try:
+            if len(img.shape) == 3:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img.copy()
+
+            img_height, img_width = gray.shape[:2]
+            img_area = float(img_width * img_height)
+            min_area = img_area * 0.00005
+            max_area = img_area * 0.003
+            frac = 0.14
+
+            regions = {
+                "TL": (0, int(img_height * frac), 0, int(img_width * frac)),
+                "TR": (0, int(img_height * frac), int(img_width * (1 - frac)), img_width),
+                "BR": (
+                    int(img_height * (1 - frac)),
+                    img_height,
+                    int(img_width * (1 - frac)),
+                    img_width,
+                ),
+                "BL": (int(img_height * (1 - frac)), img_height, 0, int(img_width * frac)),
+            }
+            targets = {
+                "TL": (0.0, 0.0),
+                "TR": (float(img_width - 1), 0.0),
+                "BR": (float(img_width - 1), float(img_height - 1)),
+                "BL": (0.0, float(img_height - 1)),
+            }
+
+            ordered: Dict[str, List[float]] = {}
+            for corner, (y1, y2, x1, x2) in regions.items():
+                crop = gray[y1:y2, x1:x2]
+                if crop.size == 0:
+                    continue
+                best = None
+                for binary in self._corner_binaries(crop):
+                    binary = binary.copy()
+                    binary[0, :] = 0
+                    binary[-1, :] = 0
+                    binary[:, 0] = 0
+                    binary[:, -1] = 0
+                    contours, _ = cv2.findContours(
+                        binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                    )
+                    tx, ty = targets[corner]
+                    for cnt in contours:
+                        area = float(cv2.contourArea(cnt))
+                        if area < min_area or area > max_area:
+                            continue
+                        x, y, bw, bh = cv2.boundingRect(cnt)
+                        if bw < 4 or bh < 4:
+                            continue
+                        fill = area / float(bw * bh)
+                        if fill < 0.50:
+                            continue
+                        aspect = bw / float(bh)
+                        if not (0.45 < aspect < 2.2):
+                            continue
+                        cx = x1 + x + bw / 2.0
+                        cy = y1 + y + bh / 2.0
+                        dist2 = (cx - tx) ** 2 + (cy - ty) ** 2
+                        score = (-dist2) + (fill * 80.0) + min(area, 400.0)
+                        if best is None or score > best["score"]:
+                            best = {"score": score, "box": (x1 + x, y1 + y, bw, bh)}
+
+                if best is None:
+                    continue
+                bx, by, bw, bh = best["box"]
+                if corner == "TL":
+                    ordered[corner] = [float(bx), float(by)]
+                elif corner == "TR":
+                    ordered[corner] = [float(bx + bw - 1), float(by)]
+                elif corner == "BR":
+                    ordered[corner] = [float(bx + bw - 1), float(by + bh - 1)]
+                else:
+                    ordered[corner] = [float(bx), float(by + bh - 1)]
+
+            if len(ordered) == 3:
+                inferred = self._infer_missing_a4_anchor(ordered)
+                if inferred:
+                    corner, vertex = inferred
+                    ordered[corner] = vertex
+                    self.logger.info(
+                        f"ℹ️ Âncora {corner} inferida por paralelogramo: {vertex}"
+                    )
+
+            if len(ordered) < 4:
+                missing = [c for c in ("TL", "TR", "BR", "BL") if c not in ordered]
+                self.logger.warning(
+                    f"❌ ROI de canto: {len(ordered)}/4. Ausentes: {missing}"
+                )
+                return None
+
+            return ordered
+        except Exception as e:
+            self.logger.error(f"❌ Erro no fallback ROI de canto: {str(e)}", exc_info=True)
+            return None
+
+    def _corner_binaries(self, crop: np.ndarray) -> List[np.ndarray]:
+        """Thresholds locais para achar o marcador preto no ROI do canto."""
+        binaries = []
+        _, otsu = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        binaries.append(otsu)
+        for thr in (80, 100, 120, 140):
+            _, b = cv2.threshold(crop, thr, 255, cv2.THRESH_BINARY_INV)
+            binaries.append(b)
+        adaptive = cv2.adaptiveThreshold(
+            crop, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 5
+        )
+        binaries.append(adaptive)
+        return binaries
+
+    def _infer_missing_a4_anchor(
+        self, ordered: Dict[str, List[float]]
+    ) -> Optional[Tuple[str, List[float]]]:
+        """Infere o canto faltante: TL + BR = TR + BL (paralelogramo)."""
+        missing = [c for c in ("TL", "TR", "BR", "BL") if c not in ordered]
+        if len(missing) != 1:
+            return None
+        corner = missing[0]
+        try:
+            if corner == "TL":
+                tr = np.array(ordered["TR"], dtype=np.float64)
+                bl = np.array(ordered["BL"], dtype=np.float64)
+                br = np.array(ordered["BR"], dtype=np.float64)
+                pt = tr + bl - br
+            elif corner == "TR":
+                tl = np.array(ordered["TL"], dtype=np.float64)
+                br = np.array(ordered["BR"], dtype=np.float64)
+                bl = np.array(ordered["BL"], dtype=np.float64)
+                pt = tl + br - bl
+            elif corner == "BR":
+                tl = np.array(ordered["TL"], dtype=np.float64)
+                tr = np.array(ordered["TR"], dtype=np.float64)
+                bl = np.array(ordered["BL"], dtype=np.float64)
+                pt = tr + bl - tl
+            else:  # BL
+                tl = np.array(ordered["TL"], dtype=np.float64)
+                tr = np.array(ordered["TR"], dtype=np.float64)
+                br = np.array(ordered["BR"], dtype=np.float64)
+                pt = tl + br - tr
+            return corner, [float(pt[0]), float(pt[1])]
+        except Exception:
+            return None
+
     # =========================================================================
     # ETAPA 3: NORMALIZAR PARA A4
     # =========================================================================
@@ -2080,10 +2407,22 @@ class AnswerSheetCorrectionNewGrid:
     # PIPELINE PRINCIPAL
     # =========================================================================
     
-    def _execute_omr_pipeline(self, img: np.ndarray, topology_json: Dict) -> Dict[str, Any]:
+    def _execute_omr_pipeline(
+        self,
+        img: np.ndarray,
+        topology_json: Dict,
+        anchors: Optional[Dict] = None,
+        img_a4: Optional[np.ndarray] = None,
+    ) -> Dict[str, Any]:
         """
         Pipeline de 9 etapas - Execução sequencial
-        
+
+        Args:
+            img: Imagem original
+            topology_json: Topologia dos blocos
+            anchors: Âncoras já detectadas (opcional — evita reprocessar)
+            img_a4: Imagem já normalizada para A4 (opcional)
+
         Returns:
             {"success": True, "answers": {...}} ou
             {"success": False, "error": "..."}
@@ -2092,18 +2431,24 @@ class AnswerSheetCorrectionNewGrid:
         self.logger.info("🔄 Etapa 1: Pré-processamento")
         processed = self._preprocess_image(img)
         edges = processed["edges"]
-        
+
         # ETAPA 2: Detectar âncoras A4
         self.logger.info("🔄 Etapa 2: Detectar âncoras A4")
-        anchors = self._detect_a4_anchors(img, edges)
+        if anchors is None:
+            anchors = self._detect_a4_anchors(img, edges)
+        else:
+            self.logger.info("   (reutilizando âncoras já detectadas)")
         if anchors is None:
             error_msg = self._format_user_friendly_error("Âncoras A4 não detectadas")
             return {"success": False, "error": error_msg}
-        
+
         # ETAPA 3: Normalizar para A4 lógico
         self.logger.info("🔄 Etapa 3: Normalizar para A4")
-        img_a4 = self._normalize_to_a4(img, anchors)
-        
+        if img_a4 is None:
+            img_a4 = self._normalize_to_a4(img, anchors)
+        else:
+            self.logger.info("   (reutilizando imagem A4 já normalizada)")
+
         # ETAPA 4-5: Detectar blocos diretamente na imagem A4 normalizada
         # Os blocos têm bordas pretas de 2px, então são facilmente detectáveis
         self.logger.info("🔄 Etapa 4-5: Detectar blocos na imagem A4 completa")
@@ -2219,14 +2564,38 @@ class AnswerSheetCorrectionNewGrid:
             # Salvar imagem de entrada para debug
             if self.debug:
                 self._save_debug_image("00_input_image.jpg", img)
-            
-            # Se auto_detect_qr, detectar QR code e carregar dados
+
+            precomputed_anchors = None
+            precomputed_img_a4 = None
+            qr_data = None
+            gabarito_obj = None
+
+            # Compatibilidade primeiro:
+            # 1) QR na imagem original (caminho que já funcionava)
+            # 2) Âncoras (clássico → ROI fallback)
+            # 3) Se QR falhar: tentar na A4 normalizada
             if auto_detect_qr:
+                self.logger.info("🔍 QR na imagem original (prioridade de estabilidade)...")
                 qr_data = self._detectar_qr_code(img)
+
+                precomputed_anchors = self._detect_a4_anchors(img, None)
+
+                if not qr_data and precomputed_anchors is not None:
+                    precomputed_img_a4 = self._normalize_to_a4(img, precomputed_anchors)
+                    self.logger.info("🔍 Fallback: QR na imagem A4 normalizada...")
+                    qr_data = self._detectar_qr_code(precomputed_img_a4)
+
                 if not qr_data:
                     error_msg = self._format_user_friendly_error("QR Code não encontrado no cartão")
                     return {"success": False, "error": error_msg}
-                
+
+                if precomputed_anchors is None:
+                    error_msg = self._format_user_friendly_error("Âncoras A4 não detectadas")
+                    return {"success": False, "error": error_msg}
+
+                if precomputed_img_a4 is None:
+                    precomputed_img_a4 = self._normalize_to_a4(img, precomputed_anchors)
+
                 gabarito_id = qr_data.get('gabarito_id')
                 student_id = qr_data.get('student_id')
                 test_id = qr_data.get('test_id')
@@ -2330,9 +2699,14 @@ class AnswerSheetCorrectionNewGrid:
                 error_msg = self._format_user_friendly_error("gabarito é obrigatório ou está vazio")
                 return {"success": False, "error": error_msg}
             
-            # Executar pipeline
-            result = self._execute_omr_pipeline(img, topology_json)
-            
+            # Executar pipeline (reutiliza âncoras/A4 se já calculados para o QR)
+            result = self._execute_omr_pipeline(
+                img,
+                topology_json,
+                anchors=precomputed_anchors,
+                img_a4=precomputed_img_a4,
+            )
+
             if not result["success"]:
                 return result
             

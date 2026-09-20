@@ -67,12 +67,25 @@ def sync_enrollment_from_student_placement(session: Optional[Session], student: 
     """
     Alinha matrícula vigente à colocação atual do aluno (class_id / school_id).
     Sem turma e sem escola: apenas encerra vigência.
+    Também sincroniza FormRecipient de formulários socioeconômicos ativos no escopo.
     """
     close_active_enrollment(session, student.id)
     if student.class_id is not None and student.school_id:
         open_enrollment(session, student.id, school_id=student.school_id, class_id=student.class_id)
     elif student.school_id:
         open_enrollment(session, student.id, school_id=student.school_id, class_id=None)
+
+    try:
+        from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+        DistributionService.ensure_recipients_for_student(student, commit=False)
+    except Exception as e:
+        logger.warning(
+            "Falha ao sincronizar recipients socioeconômicos do aluno %s: %s",
+            getattr(student, "id", None),
+            e,
+            exc_info=True,
+        )
 
 
 def assert_same_municipality_two_schools(
@@ -133,6 +146,18 @@ def transfer_student_to_class(
             student.user.city_id = to_school.city_id
 
     open_enrollment(sess, student.id, school_id=new_sid, class_id=new_class.id)
+
+    try:
+        from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+        DistributionService.ensure_recipients_for_student(student, commit=False)
+    except Exception as e:
+        logger.warning(
+            "Falha ao sincronizar recipients socioeconômicos do aluno %s após transferência: %s",
+            getattr(student, "id", None),
+            e,
+            exc_info=True,
+        )
 
     if same_school:
         from app.services.student_password_log_service import (

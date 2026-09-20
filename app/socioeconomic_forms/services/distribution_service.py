@@ -535,3 +535,202 @@ class DistributionService:
             logging.error(f"Erro ao enviar formulário: {str(e)}")
             raise
 
+    @staticmethod
+    def _normalize_id_list(values):
+        if not values:
+            return []
+        return [str(v) for v in values if v is not None]
+
+    @staticmethod
+    def _student_matches_form_scope(form, school_id, grade_id, class_id):
+        """Verifica se a colocação atual do aluno entra no escopo persistido do form."""
+        if form.form_type not in ('aluno-jovem', 'aluno-velho'):
+            return False
+        if not school_id or not grade_id:
+            return False
+
+        school_id = str(school_id)
+        grade_id = str(grade_id)
+        class_id = str(class_id) if class_id else None
+
+        selected_schools = DistributionService._normalize_id_list(form.selected_schools)
+        selected_grades = DistributionService._normalize_id_list(form.selected_grades)
+        selected_classes = DistributionService._normalize_id_list(form.selected_classes)
+        filters = form.filters or {}
+
+        if filters.get('turma'):
+            if not class_id or class_id != str(filters['turma']):
+                return False
+        if filters.get('serie') and grade_id != str(filters['serie']):
+            return False
+        if filters.get('escola') and school_id != str(filters['escola']):
+            # selected_schools pode ampliar o escopo; se filter.escola diverge, respeitar filter
+            if not selected_schools or school_id not in selected_schools:
+                return False
+
+        if selected_schools and school_id not in selected_schools:
+            return False
+
+        if selected_classes:
+            return bool(class_id and class_id in selected_classes)
+
+        if selected_grades:
+            return grade_id in selected_grades
+
+        # Sem séries/turmas no form: não dá para inferir com segurança
+        return False
+
+    @staticmethod
+    def _add_recipient_if_missing(form, user_id, school_id):
+        existing = FormRecipient.query.filter_by(
+            form_id=form.id,
+            user_id=user_id,
+        ).first()
+        if existing:
+            return False
+        recipient = FormRecipient(
+            form_id=form.id,
+            user_id=user_id,
+            school_id=school_id,
+            status='pending',
+            sent_at=datetime.utcnow(),
+        )
+        db.session.add(recipient)
+        return True
+
+    @staticmethod
+    def ensure_recipients_for_student(student, commit=False):
+        """
+        Garante FormRecipient em formulários ativos cujo escopo inclui a
+        colocação atual do aluno (escola/série/turma).
+
+        Usado quando o aluno é criado ou entra/muda de turma depois do form.
+        """
+        try:
+            if not student or not getattr(student, 'user_id', None):
+                return 0
+            if not getattr(student, 'class_id', None) or not getattr(student, 'school_id', None):
+                return 0
+
+            school_id = str(student.school_id)
+            class_id = str(student.class_id) if student.class_id else None
+            grade_id = str(student.grade_id) if student.grade_id else None
+
+            if not grade_id and student.class_id:
+                cls = Class.query.get(student.class_id)
+                if cls and cls.grade_id:
+                    grade_id = str(cls.grade_id)
+
+            if not grade_id:
+                return 0
+
+            forms = Form.query.filter(
+                Form.is_active.is_(True),
+                Form.form_type.in_(['aluno-jovem', 'aluno-velho']),
+            ).all()
+
+            created = 0
+            for form in forms:
+                if not DistributionService._student_matches_form_scope(
+                    form, school_id, grade_id, class_id
+                ):
+                    continue
+                if DistributionService._add_recipient_if_missing(
+                    form, student.user_id, school_id
+                ):
+                    created += 1
+
+            if commit and created:
+                db.session.commit()
+
+            if created:
+                logging.info(
+                    "[distribution/sync] student_id=%s user_id=%s → %s FormRecipient(s) criado(s)",
+                    getattr(student, 'id', None),
+                    student.user_id,
+                    created,
+                )
+            return created
+        except SQLAlchemyError as e:
+            if commit:
+                db.session.rollback()
+            logging.error(f"Erro ao sincronizar recipients do aluno: {str(e)}")
+            raise
+
+    @staticmethod
+    def sync_missing_recipients_for_form(form, commit=False):
+        """
+        Reprocessa o escopo do form e cria FormRecipient apenas para alunos
+        que ainda não estão na lista (não remove existentes).
+        """
+        try:
+            if not form or form.form_type not in ('aluno-jovem', 'aluno-velho'):
+                return 0
+            if not form.is_active:
+                return 0
+
+            recipients_data = DistributionService.determine_recipients_by_filters(
+                form.form_type,
+                filters=form.filters,
+                selected_schools=form.selected_schools,
+                selected_grades=form.selected_grades,
+                selected_classes=form.selected_classes if form.selected_classes else None,
+            )
+
+            created = 0
+            for recipient_data in recipients_data:
+                if DistributionService._add_recipient_if_missing(
+                    form,
+                    recipient_data['user_id'],
+                    recipient_data.get('school_id'),
+                ):
+                    created += 1
+
+            if commit and created:
+                db.session.commit()
+
+            if created:
+                logging.info(
+                    "[distribution/sync] form_id=%s → %s FormRecipient(s) faltantes criados",
+                    form.id,
+                    created,
+                )
+            return created
+        except SQLAlchemyError as e:
+            if commit:
+                db.session.rollback()
+            logging.error(f"Erro ao sincronizar recipients do formulário: {str(e)}")
+            raise
+
+    @staticmethod
+    def sync_missing_recipients_for_school(school_id, commit=False):
+        """Sincroniza recipients faltantes de forms ativos que abrangem a escola."""
+        if not school_id:
+            return 0
+        school_id = str(school_id)
+        forms = Form.query.filter(
+            Form.is_active.is_(True),
+            Form.form_type.in_(['aluno-jovem', 'aluno-velho']),
+        ).all()
+        created = 0
+        for form in forms:
+            selected_schools = DistributionService._normalize_id_list(form.selected_schools)
+            filters = form.filters or {}
+            in_scope = False
+            if selected_schools and school_id in selected_schools:
+                in_scope = True
+            elif filters.get('escola') and str(filters['escola']) == school_id:
+                in_scope = True
+            elif not selected_schools and not filters.get('escola'):
+                # Sem escola no escopo: ainda pode ter recipients nessa escola
+                has_rec = FormRecipient.query.filter_by(
+                    form_id=form.id, school_id=school_id
+                ).first()
+                in_scope = bool(has_rec)
+            if not in_scope:
+                continue
+            created += DistributionService.sync_missing_recipients_for_form(form, commit=False)
+        if commit and created:
+            db.session.commit()
+        return created
+

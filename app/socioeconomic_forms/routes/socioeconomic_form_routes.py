@@ -454,6 +454,24 @@ def get_my_forms():
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Aluno novo na turma após criação do form: garantir recipients do escopo atual
+        try:
+            from app.models.student import Student
+            from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+            student = Student.query.filter_by(user_id=user['id']).first()
+            if student:
+                created = DistributionService.ensure_recipients_for_student(student, commit=False)
+                if created:
+                    db.session.commit()
+        except Exception as sync_err:
+            logging.warning(
+                "Falha ao sincronizar recipients em /forms/me user=%s: %s",
+                user.get('id'),
+                sync_err,
+                exc_info=True,
+            )
         
         # Buscar todos os recipients do usuário
         recipients = FormRecipient.query.filter_by(

@@ -21,8 +21,11 @@ from datetime import datetime
 
 class FormService:
     """Serviço para operações CRUD de formulários"""
+
+    # Educação Especial (ADAP): aceita aluno-jovem OU aluno-velho (não trava em um tipo).
+    ADAP_EDUCATION_STAGE_ID = '247c4af5-2688-41b0-95fa-443f503a9d87'
     
-    # Mapeamento de education_stage_id para formType
+    # Mapeamento de education_stage_id para formType (1:1; ADAP NÃO entra aqui — é wildcard)
     EDUCATION_STAGE_TO_FORM_TYPE = {
         # aluno-jovem
         'd1142d12-ed98-46f4-ae78-62c963371464': 'aluno-jovem',  # Educação Infantil
@@ -39,12 +42,18 @@ class FormService:
             'd1142d12-ed98-46f4-ae78-62c963371464',  # Educação Infantil
             '614b7d10-b758-42ec-a04e-86f78dc7740a',  # Anos Iniciais
             '63cb6876-3221-4fa2-89e8-a82ad1733032',  # EJA 1-5
+            '247c4af5-2688-41b0-95fa-443f503a9d87',  # Educação Especial (ADAP)
         ],
         'aluno-velho': [
             'c78fcd8e-00a1-485d-8c03-70bcf59e3025',  # Anos Finais
             '63cb6876-3221-4fa2-89e8-a82ad1733032',  # EJA
+            '247c4af5-2688-41b0-95fa-443f503a9d87',  # Educação Especial (ADAP)
         ],
     }
+
+    @staticmethod
+    def _is_adap_education_stage(education_stage_id):
+        return str(education_stage_id) == FormService.ADAP_EDUCATION_STAGE_ID if education_stage_id else False
     
     @staticmethod
     def _get_grade_ids_for_form_type(form_type):
@@ -67,10 +76,17 @@ class FormService:
     
     @staticmethod
     def _grade_is_compatible_with_form_type(grade, form_type):
-        """Verifica se a série é compatível com o tipo de formulário."""
+        """Verifica se a série é compatível com o tipo de formulário.
+
+        ADAP (Educação Especial) é compatível com aluno-jovem e aluno-velho.
+        """
         if not grade or not form_type:
             return False
+        if form_type not in ('aluno-jovem', 'aluno-velho'):
+            return False
         stage_id = str(grade.education_stage_id)
+        if FormService._is_adap_education_stage(stage_id):
+            return True
         return FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(stage_id) == form_type
     
     @staticmethod
@@ -195,12 +211,16 @@ class FormService:
             education_stage_id = str(grade.education_stage_id)
             expected_form_type = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(education_stage_id)
             
-            # Para EJA, o mesmo education_stage_id pode ser usado para ambos os tipos
-            # O frontend envia os IDs corretos das séries, então validamos apenas se o tipo corresponde
+            # EJA e ADAP: mesmo stage pode ir em aluno-jovem ou aluno-velho
             if education_stage_id == '63cb6876-3221-4fa2-89e8-a82ad1733032':
-                # EJA - aceitar ambos os tipos pois o frontend já enviou os IDs corretos
                 if form_type not in ['aluno-jovem', 'aluno-velho']:
                     raise ValueError(f"A série {grade.name} (EJA) não corresponde ao tipo de formulário {form_type}")
+            elif FormService._is_adap_education_stage(education_stage_id):
+                if form_type not in ['aluno-jovem', 'aluno-velho']:
+                    raise ValueError(
+                        f"A série {grade.name} (Educação Especial/ADAP) não corresponde "
+                        f"ao tipo de formulário {form_type}"
+                    )
             elif expected_form_type and expected_form_type != form_type:
                 raise ValueError(
                     f"A série {grade.name} (education_stage_id: {education_stage_id}) "
@@ -298,15 +318,20 @@ class FormService:
                 found = {str(c.id) for c in classes}
                 missing = [c for c in selected_classes if str(c) not in found]
                 raise ValueError(f"Turma(s) não encontrada(s): {missing}")
-            # Se formType não foi enviado, inferir do primeiro tipo encontrado
+            # Se formType não foi enviado, inferir do primeiro tipo rígido encontrado
             scope_form_type = form_type
             valid_classes = []
+            adap_classes = []
             for c in classes:
                 grade = Grade.query.get(c.grade_id)
                 if not grade:
                     warnings.append(f"Turma {c.id} possui série inválida e foi ignorada.")
                     continue
-                type_for_grade = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(str(grade.education_stage_id))
+                stage_id = str(grade.education_stage_id)
+                if FormService._is_adap_education_stage(stage_id):
+                    adap_classes.append(c)
+                    continue
+                type_for_grade = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(stage_id)
                 if not type_for_grade or type_for_grade not in ('aluno-jovem', 'aluno-velho'):
                     warnings.append(f"Turma (série: {grade.name}) não é compatível com formulário de aluno e foi ignorada.")
                     continue
@@ -316,6 +341,17 @@ class FormService:
                     warnings.append(f"Turma (série: {grade.name}) não é compatível com o tipo de formulário '{scope_form_type}' e foi ignorada.")
                     continue
                 valid_classes.append(c)
+            if adap_classes:
+                if scope_form_type in ('aluno-jovem', 'aluno-velho'):
+                    valid_classes.extend(adap_classes)
+                elif not valid_classes:
+                    raise ValueError(
+                        "Turmas de Educação Especial (ADAP) exigem formType "
+                        "(aluno-jovem ou aluno-velho)."
+                    )
+                else:
+                    # Há turmas rígidas sem formType resolvido — não deve ocorrer
+                    valid_classes.extend(adap_classes)
             if not valid_classes:
                 raise ValueError("Nenhuma turma selecionada é compatível com o tipo de formulário.")
             if not data.get('formType') and scope_form_type:
@@ -436,24 +472,32 @@ class FormService:
         return grades
     
     @staticmethod
-    def _group_grades_by_form_type(grades):
+    def _group_grades_by_form_type(grades, preferred_form_type=None):
         """
-        Agrupa séries por tipo de formulário baseado no education_stage_id
+        Agrupa séries por tipo de formulário baseado no education_stage_id.
+
+        ADAP (Educação Especial) não cria bucket próprio: anexa ao preferred_form_type
+        ou ao único grupo rígido existente. Só ADAP exige formType explícito.
         
         Args:
             grades: Lista de objetos Grade
+            preferred_form_type: formType explícito do request (aluno-jovem / aluno-velho)
             
         Returns:
             dict: {form_type: [grade_ids]}
         """
         groups = {}
+        adap_grade_ids = []
         
         for grade in grades:
             education_stage_id = str(grade.education_stage_id)
+            if FormService._is_adap_education_stage(education_stage_id):
+                adap_grade_ids.append(str(grade.id))
+                continue
+
             form_type = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(education_stage_id)
             
             if not form_type:
-                # Se não encontrar mapeamento, tentar inferir
                 logging.warning(f"Education stage {education_stage_id} não mapeado para form_type")
                 continue
             
@@ -461,6 +505,26 @@ class FormService:
                 groups[form_type] = []
             
             groups[form_type].append(str(grade.id))
+
+        if adap_grade_ids:
+            target = None
+            if preferred_form_type in ('aluno-jovem', 'aluno-velho'):
+                target = preferred_form_type
+            elif len(groups) == 1:
+                target = next(iter(groups))
+            elif len(groups) == 0:
+                raise ValueError(
+                    "Séries de Educação Especial (ADAP) exigem formType "
+                    "(aluno-jovem ou aluno-velho)."
+                )
+            else:
+                raise ValueError(
+                    "Séries ADAP junto com Anos Iniciais e Anos Finais no mesmo envio "
+                    "exigem formType explícito, ou envie em requisições separadas."
+                )
+            if target not in groups:
+                groups[target] = []
+            groups[target].extend(adap_grade_ids)
         
         return groups
     
@@ -615,7 +679,10 @@ class FormService:
             
             # 2. Agrupar séries por tipo de formulário
             if grades:
-                groups = FormService._group_grades_by_form_type(grades)
+                groups = FormService._group_grades_by_form_type(
+                    grades,
+                    preferred_form_type=form_type,
+                )
                 
                 # Se não há grupos, significa que nenhuma série foi mapeada
                 if not groups:
@@ -639,8 +706,10 @@ class FormService:
                     return created_forms, scope_warnings
                 
                 # Se há apenas um grupo, usar o tipo detectado
+                # (preserva formType explícito quando o grupo coincide / ADAP anexado)
                 form_type = list(groups.keys())[0]
                 data['formType'] = form_type
+                data['selectedGrades'] = groups[form_type]
             
             # 3. Criar formulário único
             form = FormService._create_single_form(data, created_by)

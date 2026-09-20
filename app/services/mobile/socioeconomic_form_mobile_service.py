@@ -86,6 +86,21 @@ def collect_forms_for_school(
         - student_form_links: [(student_id, form_id), ...]
         - user_form_links: [(user_id, form_id), ...] professor/diretor/secretario
     """
+    # Inclui alunos que entraram na turma depois da criação do form
+    try:
+        from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+        created = DistributionService.sync_missing_recipients_for_school(school_id, commit=False)
+        if created:
+            db.session.commit()
+    except Exception as sync_err:
+        logger.warning(
+            "Falha ao sincronizar recipients socioeconômicos da escola %s: %s",
+            school_id,
+            sync_err,
+            exc_info=True,
+        )
+
     recipients = _recipient_query_for_school(school_id, form_ids).all()
     if not recipients:
         return {}, [], []

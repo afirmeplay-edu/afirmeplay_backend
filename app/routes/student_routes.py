@@ -171,6 +171,18 @@ def criar_usuario_e_aluno():
             )
             get_orm_session().add(password_log)
         
+        try:
+            from app.services.student_enrollment_service import sync_enrollment_from_student_placement
+
+            sync_enrollment_from_student_placement(get_orm_session(), novo_aluno)
+        except Exception as enroll_err:
+            logging.warning(
+                "Falha ao sincronizar matrícula/recipients do aluno novo %s: %s",
+                novo_aluno.id,
+                enroll_err,
+                exc_info=True,
+            )
+
         get_orm_session().commit()
 
         logging.info(f"Aluno criado com sucesso para o usuário ID: {usuario.id}")

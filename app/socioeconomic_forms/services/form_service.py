@@ -24,6 +24,10 @@ class FormService:
 
     # Educação Especial (ADAP): aceita aluno-jovem OU aluno-velho (não trava em um tipo).
     ADAP_EDUCATION_STAGE_ID = '247c4af5-2688-41b0-95fa-443f503a9d87'
+
+    # EJA: mesmo education_stage cobre períodos 1-5 (aluno-jovem) e 6-9 (aluno-velho);
+    # portanto é compatível com ambos os tipos (o frontend envia os IDs de série corretos).
+    EJA_EDUCATION_STAGE_ID = '63cb6876-3221-4fa2-89e8-a82ad1733032'
     
     # Mapeamento de education_stage_id para formType (1:1; ADAP NÃO entra aqui — é wildcard)
     EDUCATION_STAGE_TO_FORM_TYPE = {
@@ -78,16 +82,30 @@ class FormService:
     def _grade_is_compatible_with_form_type(grade, form_type):
         """Verifica se a série é compatível com o tipo de formulário.
 
-        ADAP (Educação Especial) é compatível com aluno-jovem e aluno-velho.
+        Regras:
+        - ADAP (Educação Especial) é compatível com aluno-jovem e aluno-velho.
+        - EJA é compatível com ambos (mesmo stage cobre períodos 1-5 e 6-9).
+        - Série sem education_stage ou com stage não mapeado NÃO é rejeitada:
+          aceita e deixa o filtro de destinatários resolver.
         """
         if not grade or not form_type:
             return False
         if form_type not in ('aluno-jovem', 'aluno-velho'):
             return False
-        stage_id = str(grade.education_stage_id)
+        stage_id = str(grade.education_stage_id) if grade.education_stage_id else None
+        # Sem classificação: não rejeitar (filtro de destinatários resolve)
+        if not stage_id:
+            return True
         if FormService._is_adap_education_stage(stage_id):
             return True
-        return FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(stage_id) == form_type
+        # EJA atende aluno-jovem (períodos 1-5) e aluno-velho (períodos 6-9)
+        if stage_id == FormService.EJA_EDUCATION_STAGE_ID:
+            return True
+        expected = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(stage_id)
+        # Stage não mapeado: não rejeitar
+        if expected is None:
+            return True
+        return expected == form_type
     
     @staticmethod
     def _validate_filters(filters):
@@ -291,17 +309,21 @@ class FormService:
                 raise ValueError("formType é obrigatório quando apenas selectedGrades é enviado")
             grade_uuids = ensure_uuid_list(selected_grades)
             grades = Grade.query.filter(Grade.id.in_(grade_uuids)).all()
-            compatible_ids = []
+            if not grades:
+                raise ValueError("Nenhuma das séries selecionadas foi encontrada no sistema.")
+            # Não descartar séries de outro tipo: o agrupamento automático
+            # (_group_grades_by_form_type) cria o formulário do tipo adequado.
             for g in grades:
-                if FormService._grade_is_compatible_with_form_type(g, form_type):
-                    compatible_ids.append(str(g.id))
-                else:
-                    warnings.append(f"Série '{g.name}' não é compatível com o tipo de formulário '{form_type}' e foi ignorada.")
-            if not compatible_ids:
-                raise ValueError("Nenhuma série selecionada é compatível com o tipo de formulário.")
-            data['selectedGrades'] = compatible_ids
-            selected_grades = compatible_ids
-            grade_uuids = ensure_uuid_list(compatible_ids)
+                if not FormService._grade_is_compatible_with_form_type(g, form_type):
+                    expected = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(str(g.education_stage_id))
+                    warnings.append(
+                        f"Série '{g.name}' pertence ao tipo '{expected or 'desconhecido'}' "
+                        f"(não '{form_type}'); será criado um formulário do tipo adequado."
+                    )
+            all_ids = [str(g.id) for g in grades]
+            data['selectedGrades'] = all_ids
+            selected_grades = all_ids
+            grade_uuids = ensure_uuid_list(all_ids)
             classes = Class.query.filter(Class.grade_id.in_(grade_uuids)).all()
             school_ids = list({str(c.school_id) for c in classes})
             if not school_ids:
@@ -490,16 +512,28 @@ class FormService:
         adap_grade_ids = []
         
         for grade in grades:
-            education_stage_id = str(grade.education_stage_id)
-            if FormService._is_adap_education_stage(education_stage_id):
+            education_stage_id = str(grade.education_stage_id) if grade.education_stage_id else None
+            if education_stage_id and FormService._is_adap_education_stage(education_stage_id):
                 adap_grade_ids.append(str(grade.id))
                 continue
 
-            form_type = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(education_stage_id)
-            
+            form_type = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(education_stage_id) if education_stage_id else None
+
+            # EJA atende ambos os tipos: respeitar formType explícito quando enviado
+            if (
+                education_stage_id == FormService.EJA_EDUCATION_STAGE_ID
+                and preferred_form_type in ('aluno-jovem', 'aluno-velho')
+            ):
+                form_type = preferred_form_type
+
             if not form_type:
-                logging.warning(f"Education stage {education_stage_id} não mapeado para form_type")
-                continue
+                # Série sem education_stage ou stage não mapeado: não rejeitar.
+                # Com formType explícito, anexar a ele (filtro de destinatários resolve).
+                if preferred_form_type in ('aluno-jovem', 'aluno-velho'):
+                    form_type = preferred_form_type
+                else:
+                    logging.warning(f"Education stage {education_stage_id} não mapeado para form_type; série {grade.id} ignorada (sem formType explícito)")
+                    continue
             
             if form_type not in groups:
                 groups[form_type] = []
@@ -639,10 +673,10 @@ class FormService:
         
         Args:
             data: Dicionário com dados do formulário
-                - selectedGrades: Lista de IDs de séries (obrigatório para aluno)
-                - selectedSchools: Lista de IDs de escolas
-                - selectedClasses: Lista de IDs de turmas
-                - formType: Tipo (opcional, será ignorado se houver múltiplas stages)
+                - selectedSchools: Lista de IDs de escolas (opcional se selectedGrades/selectedClasses fornecidos)
+                - selectedGrades: Lista de IDs de séries (opcional - se vazio, busca todas as séries compatíveis)
+                - selectedClasses: Lista de IDs de turmas (opcional)
+                - formType: Tipo (obrigatório quando selectedGrades vazio; ignorado se múltiplas stages)
                 - deadline: Data limite
                 - isActive: Status ativo
                 - questions: Perguntas (opcional, carrega do template se não fornecido)
@@ -914,7 +948,87 @@ class FormService:
         except SQLAlchemyError as e:
             logging.error(f"Erro ao listar formulários: {str(e)}")
             raise
-    
+
+    @staticmethod
+    def list_forms_all_tenants(form_type=None, is_active=None, page=1, limit=20, created_by=None):
+        """
+        Lista formulários do criador em TODOS os municípios (schemas city_*).
+
+        Os formulários vivem em schemas por cidade (tabela tenant.forms). Quando o
+        request não possui contexto de tenant (ex.: admin chamando GET /forms sem
+        X-City-ID), esta função varre os schemas das cidades e agrega os resultados,
+        ordenando por createdAt DESC (mais recentes primeiro).
+
+        Returns:
+            dict: Dicionário com 'data' e 'pagination' (mesmo shape de list_forms).
+        """
+        from sqlalchemy import text
+        from app.models.city import City
+        from app.multitenant.physical_schema_binding import (
+            set_physical_schema_override,
+            clear_physical_schema_override,
+        )
+
+        # Pré-carregar dados das cidades (evita lazy-load após trocas de schema)
+        cities = [(str(c.id), c.name) for c in City.query.all()]
+
+        all_forms = []
+        try:
+            for city_id, city_name in cities:
+                schema = f"city_{city_id.replace('-', '_')}"
+                # Pular cidades sem schema/tabela de formulários
+                try:
+                    exists = db.session.execute(
+                        text(
+                            "SELECT 1 FROM information_schema.tables "
+                            "WHERE table_schema = :schema AND table_name = 'forms'"
+                        ),
+                        {"schema": schema},
+                    ).first()
+                except SQLAlchemyError:
+                    db.session.rollback()
+                    continue
+                if not exists:
+                    continue
+
+                set_physical_schema_override(schema)
+                try:
+                    query = Form.query
+                    if created_by:
+                        query = query.filter(Form.created_by == created_by)
+                    if form_type:
+                        query = query.filter(Form.form_type == form_type)
+                    if is_active is not None:
+                        query = query.filter(Form.is_active == is_active)
+                    for form in query.all():
+                        form_dict = form.to_dict(include_questions=False, include_statistics=True)
+                        # Contexto de origem: permite ao frontend enviar X-City-ID
+                        # nas próximas chamadas (detalhes, exclusão etc.)
+                        form_dict['cityId'] = city_id
+                        form_dict['cityName'] = city_name
+                        all_forms.append(form_dict)
+                except SQLAlchemyError as tenant_err:
+                    db.session.rollback()
+                    logging.warning(f"Erro ao listar formulários no schema {schema}: {tenant_err}")
+                finally:
+                    db.session.expunge_all()
+        finally:
+            clear_physical_schema_override()
+
+        # Ordenar por criação (mais recentes primeiro) e paginar em memória
+        all_forms.sort(key=lambda f: f.get('createdAt') or '', reverse=True)
+        total = len(all_forms)
+        start = (page - 1) * limit
+        return {
+            'data': all_forms[start:start + limit],
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total,
+                'totalPages': ((total + limit - 1) // limit) if limit else 0,
+            },
+        }
+
     @staticmethod
     def update_form(form_id, data):
         """

@@ -36,6 +36,103 @@ def handle_value_error(error):
     return jsonify({"error": str(error)}), 400
 
 
+def _request_has_tenant_context():
+    """True se o request resolveu um município (X-City-ID, subdomínio ou city do usuário)."""
+    ctx = get_current_tenant_context()
+    return bool(ctx and getattr(ctx, 'has_tenant_context', False))
+
+
+def _city_id_from_schema(schema):
+    """Converte city_<uuid_com_underscores> em UUID com hífens, ou None."""
+    if not schema or not str(schema).startswith('city_'):
+        return None
+    parts = str(schema)[5:].split('_')
+    if len(parts) == 5:
+        return '-'.join(parts)
+    return None
+
+
+def _register_resolved_form_city(city_id):
+    """Guarda o município onde o form foi encontrado (para GET /forms/{id})."""
+    g.form_resolved_city_id = str(city_id) if city_id else None
+
+
+def _current_request_city_id():
+    """city_id do contexto do request ou derivado do schema efetivo."""
+    ctx = get_current_tenant_context()
+    if ctx and getattr(ctx, 'city_id', None):
+        return str(ctx.city_id)
+    return _city_id_from_schema(get_effective_tenant_physical_schema())
+
+
+def _attach_city_context(form_dict):
+    """Anexa cityId/cityName ao payload (origem do form, não a referência global)."""
+    from app.models.city import City
+
+    city_id = getattr(g, 'form_resolved_city_id', None) or _current_request_city_id()
+    if not city_id:
+        return form_dict
+    form_dict['cityId'] = city_id
+    city = City.query.get(city_id)
+    if city:
+        form_dict['cityName'] = city.name
+    return form_dict
+
+
+def _find_form_any_tenant(form_id):
+    """
+    Busca o formulário no schema atual; se não achar, procura nos schemas de
+    todas as cidades (admin pode chegar com X-City-ID da cidade de referência,
+    diferente do município onde o form foi criado).
+
+    Quando encontrado em outro schema, o override permanece ativo pelo resto do
+    request (to_dict, delete etc. usam o schema correto) e g.form_resolved_city_id
+    guarda o município de origem.
+
+    Returns:
+        Form ou None
+    """
+    from sqlalchemy import text
+    from app.models.city import City
+    from app.multitenant.physical_schema_binding import (
+        set_physical_schema_override,
+        clear_physical_schema_override,
+    )
+
+    form = FormService.get_form(form_id)
+    if form:
+        _register_resolved_form_city(_current_request_city_id())
+        return form
+
+    current_schema = get_effective_tenant_physical_schema()
+    cities = [str(c.id) for c in City.query.all()]
+    for city_id in cities:
+        schema = f"city_{city_id.replace('-', '_')}"
+        if schema == current_schema:
+            continue
+        try:
+            exists = db.session.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = :schema AND table_name = 'forms'"
+                ),
+                {"schema": schema},
+            ).first()
+        except SQLAlchemyError:
+            db.session.rollback()
+            continue
+        if not exists:
+            continue
+        set_physical_schema_override(schema)
+        form = Form.query.get(form_id)
+        if form:
+            _register_resolved_form_city(city_id)
+            return form
+    clear_physical_schema_override()
+    _register_resolved_form_city(None)
+    return None
+
+
 # ==================== GERENCIAMENTO DE FORMULÁRIOS ====================
 
 @bp.route('', methods=['POST'])
@@ -190,8 +287,8 @@ def create_form():
 @role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
 def list_forms():
     """
-    Lista questionários com filtros de escopo
-    
+    Lista questionários criados pelo usuário logado.
+
     Query Parameters:
     - formType: Filtrar por tipo de formulário
     - isActive: Filtrar por status ativo (true/false)
@@ -200,6 +297,11 @@ def list_forms():
     - selectedClasses: IDs de turmas separadas por vírgula
     - page: Número da página (default: 1)
     - limit: Itens por página (default: 20)
+
+    Admin: sempre agrega formulários de TODOS os municípios (ignora X-City-ID),
+    porque o interceptor do front costuma enviar a cidade de referência global,
+    que pode diferir do município usado na criação.
+    Demais roles: listam no tenant do usuário (cidade fixa).
     """
     try:
         # Filtros básicos
@@ -236,17 +338,31 @@ def list_forms():
         # Apenas formulários criados pelo usuário logado
         user = get_current_user_from_token()
         created_by = user['id'] if user else None
-        
-        result = FormService.list_forms(
-            form_type=form_type,
-            is_active=is_active,
-            selected_schools=selected_schools,
-            selected_grades=selected_grades,
-            selected_classes=selected_classes,
-            page=page,
-            limit=limit,
-            created_by=created_by
-        )
+        user_role = (user or {}).get('role')
+
+        # Admin: SEMPRE agregar em todos os tenants, independentemente de X-City-ID.
+        # O front envia X-City-ID da cidade de referência global no GET, que muitas
+        # vezes difere do município usado no POST — isso tornava o form "invisível".
+        if user_role == 'admin' or not _request_has_tenant_context():
+            result = FormService.list_forms_all_tenants(
+                form_type=form_type,
+                is_active=is_active,
+                page=page,
+                limit=limit,
+                created_by=created_by
+            )
+        else:
+            # tecadm/diretor/etc.: cidade fixa — listar só no schema do tenant
+            result = FormService.list_forms(
+                form_type=form_type,
+                is_active=is_active,
+                selected_schools=selected_schools,
+                selected_grades=selected_grades,
+                selected_classes=selected_classes,
+                page=page,
+                limit=limit,
+                created_by=created_by
+            )
         
         return jsonify(result), 200
         
@@ -263,16 +379,14 @@ def get_form(form_id):
     try:
         include_statistics = request.args.get('includeStatistics', 'false').lower() == 'true'
         
-        form = FormService.get_form(
-            form_id,
-            include_questions=True,
-            include_statistics=include_statistics
-        )
+        # Fallback cross-tenant: admin pode chegar com X-City-ID da cidade de referência
+        form = _find_form_any_tenant(form_id)
         
         if not form:
             return jsonify({"error": "Questionário não encontrado"}), 404
         
         form_dict = form.to_dict(include_questions=True, include_statistics=include_statistics)
+        form_dict = _attach_city_context(form_dict)
         
         # Adicionar informações do criador
         if form.creator:
@@ -298,6 +412,10 @@ def update_form(form_id):
         if not data:
             return jsonify({"error": "Dados não fornecidos"}), 400
         
+        # Garantir schema correto quando admin chama sem X-City-ID
+        if not _find_form_any_tenant(form_id):
+            return jsonify({"error": "Questionário não encontrado"}), 404
+        
         form = FormService.update_form(form_id, data)
         
         if not form:
@@ -322,7 +440,8 @@ def delete_form(form_id):
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
         
-        form = FormService.get_form(form_id, include_questions=False)
+        # Busca com fallback cross-tenant (admin sem X-City-ID)
+        form = _find_form_any_tenant(form_id)
         if not form:
             return jsonify({"error": "Questionário não encontrado"}), 404
         

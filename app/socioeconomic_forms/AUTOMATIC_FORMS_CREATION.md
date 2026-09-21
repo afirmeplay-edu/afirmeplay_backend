@@ -256,13 +256,15 @@ Cria um único formulário (método interno).
 }
 ```
 
-### selectedGrades obrigatório
+### formType obrigatório quando selectedGrades vazio
 
 ```json
 {
-	"error": "selectedGrades é obrigatório para formulários de alunos"
+	"error": "formType é obrigatório quando apenas selectedSchools é enviado"
 }
 ```
+
+**Nota**: `selectedGrades` agora é **opcional**. Quando vazio/ausente, o backend busca automaticamente todas as séries compatíveis com o `formType` das escolas selecionadas.
 
 ### Template não encontrado
 

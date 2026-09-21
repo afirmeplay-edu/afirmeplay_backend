@@ -33,17 +33,22 @@ class DistributionService:
         
         Args:
             school_ids: Lista de IDs de escolas
-            selected_grades: Lista de IDs de séries (obrigatório)
+            selected_grades: Lista de IDs de séries (opcional - se vazio, busca todas as séries compatíveis)
             selected_classes: Lista opcional de IDs de turmas (quando informada, restringe o escopo)
             
         Returns:
             list: Lista de dicionários com user_id e school_id
         """
         try:
-            if not selected_grades or len(selected_grades) == 0:
-                raise ValueError("selected_grades é obrigatório para aluno-jovem")
-            
             recipients = []
+            
+            # Se selected_grades vazio, buscar todas as séries compatíveis com aluno-jovem
+            if not selected_grades or len(selected_grades) == 0:
+                from app.socioeconomic_forms.services.form_service import FormService
+                selected_grades = FormService._get_grade_ids_for_form_type('aluno-jovem')
+                if not selected_grades:
+                    # Nenhuma série compatível cadastrada
+                    return []
             
             # Converter strings para UUID se necessário
             import uuid as uuid_lib
@@ -127,14 +132,19 @@ class DistributionService:
         
         Args:
             school_ids: Lista de IDs de escolas
-            selected_grades: Lista de IDs de séries (obrigatório)
+            selected_grades: Lista de IDs de séries (opcional - se vazio, busca todas as séries compatíveis)
             
         Returns:
             list: Lista de dicionários com user_id e school_id
         """
         try:
+            # Se selected_grades vazio, buscar todas as séries compatíveis com aluno-velho
             if not selected_grades or len(selected_grades) == 0:
-                raise ValueError("selected_grades é obrigatório para aluno-velho")
+                from app.socioeconomic_forms.services.form_service import FormService
+                selected_grades = FormService._get_grade_ids_for_form_type('aluno-velho')
+                if not selected_grades:
+                    # Nenhuma série compatível cadastrada
+                    return []
             
             recipients = []
             

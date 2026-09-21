@@ -24,8 +24,9 @@ Content-Type: application/json
 
 ```typescript
 interface CreateFormRequest {
+	formType?: string; // "aluno-jovem" | "aluno-velho" (obrigatório se selectedGrades vazio)
 	selectedSchools: string[]; // IDs das escolas
-	selectedGrades: string[]; // IDs das séries (obrigatório para alunos)
+	selectedGrades?: string[]; // IDs das séries (opcional - se vazio, usa todas as séries compatíveis)
 	selectedClasses?: string[]; // IDs das turmas (opcional)
 	deadline?: string; // ISO 8601 format
 	isActive?: boolean; // Default: true
@@ -34,20 +35,50 @@ interface CreateFormRequest {
 }
 ```
 
+**Comportamento de `selectedGrades`:**
+- ✅ **Opcional** - pode ser omitido, enviado como `null`, ou como array vazio `[]`
+- Se vazio + `selectedSchools` fornecido → Backend busca **todas as séries compatíveis** com o `formType` das escolas selecionadas
+- Se vazio + `selectedClasses` fornecido → Backend infere as séries das turmas selecionadas
+- ⚠️ **Importante**: Quando `selectedGrades` vazio, `formType` é **obrigatório** para saber quais séries buscar
+
 ### Exemplo de Request
 
+**Caso 1: Especificando séries manualmente**
 ```json
 {
+	"formType": "aluno-jovem",
 	"selectedSchools": ["escola-uuid-1"],
 	"selectedGrades": [
 		"pre-i-uuid", // Educação Infantil
 		"1-ano-uuid", // Anos Iniciais
-		"7-ano-uuid", // Anos Finais
-		"eja-5-uuid" // EJA
+		"7-ano-uuid" // Anos Finais (será separado em outro formulário)
 	],
 	"deadline": "2025-12-31T23:59:59Z",
 	"isActive": true,
 	"description": "Questionário socioeconômico para avaliação 2025"
+}
+```
+
+**Caso 2: Todas as séries da escola (selectedGrades vazio ou ausente)**
+```json
+{
+	"formType": "aluno-jovem",
+	"selectedSchools": ["escola-uuid-1"],
+	"selectedGrades": [],  // ✅ Vazio = TODAS as séries compatíveis com aluno-jovem
+	"deadline": "2025-12-31T23:59:59Z",
+	"isActive": true,
+	"description": "Questionário para todos os alunos de Educação Infantil e Anos Iniciais"
+}
+```
+
+**Caso 3: Omitindo selectedGrades completamente**
+```json
+{
+	"formType": "aluno-velho",
+	"selectedSchools": ["escola-uuid-1", "escola-uuid-2"],
+	// selectedGrades não enviado = TODAS as séries de Anos Finais
+	"deadline": "2025-12-31T23:59:59Z",
+	"isActive": true
 }
 ```
 
@@ -154,6 +185,10 @@ async function createForm(data: CreateFormRequest) {
 ## 2. Listagem de Formulários
 
 A listagem retorna **apenas os formulários criados pelo usuário logado** (campo `createdBy` do formulário = ID do usuário no token).
+
+**Admin:** a listagem agrega formulários de **todos os municípios**, independentemente do header `X-City-ID`. Isso evita o caso em que o formulário é criado com o município dos filtros e a listagem usa a cidade de referência global do admin (tenant diferente → lista vazia). Cada item inclui `cityId` e `cityName` para o front enviar o contexto correto em detalhes/exclusão.
+
+**Demais roles (tecadm, diretor, etc.):** listam apenas no município do usuário.
 
 ### Endpoint
 
@@ -656,6 +691,8 @@ Antes de exibir o formulário para o aluno responder, você precisa buscar as pe
 GET /forms/{formId}?includeQuestions=true
 Authorization: Bearer <token>
 ```
+
+A busca não depende do `X-City-ID` estar correto: se o formulário não estiver no schema atual, o backend procura nos demais municípios. A resposta inclui `cityId` e `cityName` — o front deve usar esse `cityId` (via `meta.cityId` / `X-City-ID`) nas chamadas subsequentes a `/school/{id}` e `/classes/{id}`, que continuam escopadas ao tenant.
 
 ### Response
 

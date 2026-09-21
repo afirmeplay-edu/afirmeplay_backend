@@ -55,6 +55,24 @@ from app.utils.municipality_availability import (
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
 
+
+def _resolve_grade_id_from_payload(data):
+    """
+    Extrai grade_id do payload de create/update.
+    Aceita grade_id (preferencial) ou grade; se vier objeto {id, name}, usa o id.
+    """
+    if not isinstance(data, dict):
+        return None
+    raw = data.get('grade_id')
+    if raw is None or raw == '':
+        raw = data.get('grade')
+    if isinstance(raw, dict):
+        raw = raw.get('id') or raw.get('grade_id')
+    if raw is None or raw == '':
+        return None
+    return str(raw)
+
+
 def process_image(image_data, image_type):
     """
     Processa uma imagem em base64 e retorna um dicionário com suas informações
@@ -239,7 +257,7 @@ def criar_avaliacao():
             description=data.get('description'),
             type=data.get('type'),
             subject=data.get('subject') if data.get('subject') else None,
-            grade_id=data.get('grade') or data.get('grade_id'),  # Aceita tanto 'grade' quanto 'grade_id'
+            grade_id=_resolve_grade_id_from_payload(data),
             intructions=data.get('intructions'),
             max_score=data.get('max_score'),
             time_limit=datetime.fromisoformat(data.get('time_limit')) if data.get('time_limit') else None,
@@ -1092,13 +1110,15 @@ def atualizar_avaliacao(test_id):
             'schools', 'classes', 'course', 'model', 'subjects_info'
         ]
 
+        if 'grade_id' in data or 'grade' in data:
+            test.grade_id = _resolve_grade_id_from_payload(data)
+
         for campo in campos:
+            if campo == 'grade_id':
+                continue  # já resolvido acima (aceita grade ou grade_id)
             if campo in data:
                 if campo in ['time_limit', 'end_time'] and data[campo]:
                     setattr(test, campo, datetime.fromisoformat(data[campo]))
-                elif campo == 'grade_id':
-                    # Aceita tanto 'grade' quanto 'grade_id'
-                    setattr(test, campo, data.get('grade') or data.get('grade_id'))
                 elif campo == 'subjects_info':
                     # Aceita tanto 'subjects' quanto 'subjects_info'
                     setattr(test, campo, data.get('subjects') or data.get('subjects_info'))

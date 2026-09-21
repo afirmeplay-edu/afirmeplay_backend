@@ -34,6 +34,7 @@ class DistributionService:
         Args:
             school_ids: Lista de IDs de escolas
             selected_grades: Lista de IDs de séries (obrigatório)
+            selected_classes: Lista opcional de IDs de turmas (quando informada, restringe o escopo)
             
         Returns:
             list: Lista de dicionários com user_id e school_id
@@ -59,16 +60,34 @@ class DistributionService:
                 else:
                     grade_uuids.append(g)
             
-            # 1. Buscar todas as turmas que pertencem às séries selecionadas e escolas selecionadas
+            # 1. Buscar turmas das séries/escolas selecionadas
             # class.school_id é VARCHAR → comparar com strings para evitar operator does not exist: character varying = uuid
             school_ids_uuids = ensure_uuid_list(school_ids)
             school_ids_str = [str(s) for s in school_ids_uuids]
-            classes = Class.query.filter(
-                Class.grade_id.in_(grade_uuids),
-                Class.school_id.in_(school_ids_str)
-            ).all()
+
+            query = Class.query.filter(Class.grade_id.in_(grade_uuids))
+
+            if len(school_ids_str) == 1:
+                query = query.filter(Class.school_id == school_ids_str[0])
+            else:
+                query = query.filter(Class.school_id.in_(school_ids_str))
+
+            # Se selected_classes for fornecido, filtrar apenas essas turmas
+            if selected_classes:
+                class_ids_uuids = ensure_uuid_list(selected_classes)
+                if len(class_ids_uuids) == 1:
+                    query = query.filter(Class.id == class_ids_uuids[0])
+                else:
+                    query = query.filter(Class.id.in_(class_ids_uuids))
+
+            classes = query.all()
             
-            print("[distribution/aluno-jovem] school_ids=%s grades_count=%s → turmas encontradas: %s" % (school_ids_str, len(grade_uuids), len(classes)))
+            print("[distribution/aluno-jovem] school_ids=%s grades_count=%s classes_filter=%s → turmas encontradas: %s" % (
+                school_ids_str,
+                len(grade_uuids),
+                len(selected_classes) if selected_classes else 0,
+                len(classes),
+            ))
             if not classes:
                 return recipients  # Nenhuma turma encontrada
             

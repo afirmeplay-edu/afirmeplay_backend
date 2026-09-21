@@ -73,6 +73,40 @@ COMMENT ON TABLE "{schema}".play_tv_video_classes IS 'Vídeos do Play TV disponi
 """
 
 
+def get_content_rewards_tables_ddl(schema: str) -> str:
+    """
+    DDL idempotente das tabelas de recompensa de Jogos/Play TV no schema city_xxx.
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".content_sessions (
+    id VARCHAR PRIMARY KEY,
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id) ON DELETE CASCADE,
+    content_type VARCHAR(16) NOT NULL,
+    content_id VARCHAR NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_content_sessions_type CHECK (content_type IN ('game', 'video'))
+);
+CREATE INDEX IF NOT EXISTS ix_content_sessions_student_id ON "{schema}".content_sessions(student_id);
+CREATE INDEX IF NOT EXISTS ix_content_sessions_content ON "{schema}".content_sessions(student_id, content_type, content_id);
+COMMENT ON TABLE "{schema}".content_sessions IS 'Sessões de uso de jogos e Play TV para recompensa';
+
+CREATE TABLE IF NOT EXISTS "{schema}".content_rewards (
+    id VARCHAR PRIMARY KEY,
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id) ON DELETE CASCADE,
+    content_type VARCHAR(16) NOT NULL,
+    content_id VARCHAR NOT NULL,
+    coins INTEGER NOT NULL,
+    coin_transaction_id VARCHAR REFERENCES "{schema}".coin_transactions(id) ON DELETE SET NULL,
+    paid_at TIMESTAMP NOT NULL,
+    CONSTRAINT chk_content_rewards_type CHECK (content_type IN ('game', 'video')),
+    CONSTRAINT uq_content_rewards_student_type_id UNIQUE(student_id, content_type, content_id)
+);
+CREATE INDEX IF NOT EXISTS ix_content_rewards_student_paid ON "{schema}".content_rewards(student_id, paid_at);
+COMMENT ON TABLE "{schema}".content_rewards IS 'Recompensas pagas de jogos e Play TV (1x por conteúdo)';
+"""
+
+
 def get_plantao_online_tables_ddl(schema: str) -> str:
     """
     DDL idempotente das tabelas Plantão Online no schema city_xxx.
@@ -1171,6 +1205,7 @@ def _get_city_tables_ddl(schema: str) -> str:
     afirme_ler_block = get_afirme_ler_evaluation_tables_ddl(schema)
     subjective_evaluation_block = get_subjective_evaluation_tables_ddl(schema)
     cover_templates_block = get_cover_templates_table_ddl(schema)
+    content_rewards_block = get_content_rewards_tables_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
 CREATE TABLE IF NOT EXISTS "{schema}".school (
@@ -1954,7 +1989,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".coin_transactions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".coin_transactions IS 'Transações de moedas dos alunos';
-
+""" + content_rewards_block + f"""
 -- Compras da loja: por tenant (student_id do schema). Catálogo store_items fica em public.
 CREATE TABLE IF NOT EXISTS "{schema}".student_purchases (
     id VARCHAR PRIMARY KEY,

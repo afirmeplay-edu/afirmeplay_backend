@@ -59,6 +59,7 @@ class MigrationValidator:
         'play_tv_video_schools', 'play_tv_video_classes', 'plantao_schools',
         'certificate_templates', 'certificates',
         'student_coins', 'coin_transactions',
+        'content_sessions', 'content_rewards',
         'student_password_log'
     ]
     

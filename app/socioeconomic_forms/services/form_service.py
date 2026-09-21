@@ -738,10 +738,15 @@ class FormService:
         selected_grades = data.get('selectedGrades', [])
         selected_classes = data.get('selectedClasses', [])
         
-        # Gerar título automático
+        # Gerar título automático (sempre)
         school_id = selected_schools[0] if selected_schools else None
         application_number = FormService._count_previous_applications(form_type, school_id)
         title = FormService._generate_title(form_type, school_id, selected_grades, application_number)
+
+        # Título informado pelo front (opcional) — não substitui o gerado
+        custom_title = data.get('customTitle') or data.get('custom_title') or data.get('title')
+        if custom_title is not None:
+            custom_title = str(custom_title).strip() or None
         
         # Carregar perguntas do template se não fornecidas
         questions = data.get('questions')
@@ -761,6 +766,7 @@ class FormService:
         # Criar formulário
         form = Form(
             title=title,
+            custom_title=custom_title,
             description=data.get('description'),
             form_type=form_type,
             target_groups=data.get('targetGroups', []),
@@ -928,7 +934,12 @@ class FormService:
             
             # Atualizar campos básicos
             if 'title' in data:
+                # Em update, 'title' sozinho atualiza o título gerado/exibido principal
+                # Preferir customTitle para o texto do usuário
                 form.title = data['title']
+            if 'customTitle' in data or 'custom_title' in data:
+                custom = data.get('customTitle', data.get('custom_title'))
+                form.custom_title = (str(custom).strip() if custom is not None else None) or None
             if 'description' in data:
                 form.description = data.get('description')
             if 'formType' in data:
@@ -1024,6 +1035,7 @@ class FormService:
             # Criar novo formulário
             new_form = Form(
                 title=new_title or f"Cópia de {original_form.title}",
+                custom_title=original_form.custom_title,
                 description=original_form.description,
                 form_type=original_form.form_type,
                 target_groups=original_form.target_groups,

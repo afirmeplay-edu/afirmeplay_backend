@@ -78,8 +78,8 @@ def create_form():
         
         # Validações básicas
         # formType é opcional - será detectado automaticamente pelas séries
-        # title não é mais necessário - gerado automaticamente
-        
+        # title não é mais necessário para o sistema — gerado automaticamente.
+        # Se o front enviar title/customTitle, fica em custom_title.        
         # Criar formulário(s); retorno inclui avisos de escopo (ex.: escola sem turmas compatíveis)
         result, warnings = FormService.create_form(data, user['id'])
         
@@ -112,19 +112,17 @@ def create_form():
                     len(recipients_data),
                     getattr(get_current_tenant_context(), "schema", None) if get_current_tenant_context() else None,
                 ))
-                
-                # Para formulários de aluno: se não houver nenhum destinatário, não criar o formulário
+
+                # Permitir criar com 0 destinatários: alunos podem ser adicionados à turma depois
+                # (DistributionService.ensure_recipients_for_student sincroniza na matrícula).
                 if form.form_type in ('aluno-jovem', 'aluno-velho') and len(recipients_data) == 0:
-                    # Remover formulários já criados (e questões em cascade) e retornar aviso
-                    for f in forms:
-                        db.session.delete(f)
-                    db.session.commit()
-                    return jsonify({
-                        "error": "Não há alunos nas turmas do escopo selecionado. Cadastre alunos nas turmas"
-                    }), 400
+                    warnings.append(
+                        "Nenhum aluno nas turmas do escopo no momento. "
+                        "O formulário foi criado e novos alunos serão incluídos ao entrar na turma."
+                    )
                 
                 # Criar registros de FormRecipient
-                sent_at = datetime.utcnow()
+                sent_at = datetime.utcnow() if recipients_data else None
                 for recipient_data in recipients_data:
                     # Verificar se já existe (evitar duplicatas)
                     existing = FormRecipient.query.filter_by(
@@ -157,9 +155,9 @@ def create_form():
             
             # Preparar resposta para este formulário
             form_data = form.to_dict(include_questions=True)
-            if recipients_count > 0:
-                form_data['recipientsCount'] = recipients_count
-                form_data['sentAt'] = sent_at.isoformat() if sent_at else None
+            form_data['recipientsCount'] = recipients_count
+            if sent_at:
+                form_data['sentAt'] = sent_at.isoformat()
             
             forms_response.append(form_data)
         

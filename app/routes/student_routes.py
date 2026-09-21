@@ -586,9 +586,15 @@ def atualizar_aluno(student_id, class_id):
                     usuario.city_id = new_school.city_id
                     logging.info(f"Aluno {student_id} movido para escola {new_class.school_id}. City_id atualizado para {new_school.city_id}")
         
-        # Atualizar outros dados do usuário
+        # Atualizar outros dados do usuário (e espelhar nome em student.name)
         if "name" in dados:
-            usuario.name = dados["name"]
+            novo_nome = dados["name"]
+            if isinstance(novo_nome, str) and novo_nome.strip():
+                novo_nome = novo_nome.strip()
+                usuario.name = novo_nome
+                aluno.name = novo_nome
+            else:
+                return jsonify({"error": "name deve ser uma string não vazia"}), 400
         if "email" in dados:
             usuario.email = dados["email"]
         if "registration" in dados:

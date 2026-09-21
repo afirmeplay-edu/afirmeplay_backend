@@ -177,8 +177,9 @@ EDUCATION_STAGE_TO_FORM_TYPE = {
 
     # aluno-velho
     'c78fcd8e-00a1-485d-8c03-70bcf59e3025': 'aluno-velho',  # Anos Finais
-    '63cb6876-3221-4fa2-89e8-a82ad1733032': 'aluno-velho',  # EJA (removido do aluno-jovem)
 }
+# EJA (mesmo stage_id): períodos 1–5 → aluno-jovem; 6–9 → aluno-velho (pelo nome da série).
+# ADAP/Suporte: único wildcard (aceita os dois formTypes).
 ```
 
 ## ⚠️ Observações Importantes
@@ -205,10 +206,12 @@ São coisas **diferentes** e **independentes**:
 - Mas aluno pode responder que estuda na "Creche" na pergunta q1
 - Isso é normal e esperado!
 
-### EJA Agora em aluno-velho
+### EJA e ADAP
 
-- ✅ EJA agora está **incluído** no `aluno-velho`
-- ❌ EJA foi **removido** do `aluno-jovem`
+- EJA períodos **1–5** → só `aluno-jovem`
+- EJA períodos **6–9** → só `aluno-velho`
+- **ADAP / Educação Especial / Suporte** → único wildcard (ambos os tipos)
+- Série incompatível com o `formType` → **400** (não cria formulário de outro tipo)
 - ✅ Formulário `aluno-velho` tem 26 perguntas (inclui q26 sobre planos futuros)
 
 ### Contagem Compartilhada

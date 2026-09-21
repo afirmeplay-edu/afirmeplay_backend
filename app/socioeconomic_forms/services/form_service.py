@@ -22,35 +22,33 @@ from datetime import datetime
 class FormService:
     """Serviço para operações CRUD de formulários"""
 
-    # Educação Especial (ADAP): aceita aluno-jovem OU aluno-velho (não trava em um tipo).
+    # Educação Especial (ADAP / Suporte): ÚNICO wildcard — aceita aluno-jovem OU aluno-velho.
     ADAP_EDUCATION_STAGE_ID = '247c4af5-2688-41b0-95fa-443f503a9d87'
 
-    # EJA: mesmo education_stage cobre períodos 1-5 (aluno-jovem) e 6-9 (aluno-velho);
-    # portanto é compatível com ambos os tipos (o frontend envia os IDs de série corretos).
+    # EJA: mesmo education_stage_id para todos os períodos; a distinção 1–5 vs 6–9
+    # é feita pelo nome da série (ex.: "EJA 3º Período").
     EJA_EDUCATION_STAGE_ID = '63cb6876-3221-4fa2-89e8-a82ad1733032'
     
-    # Mapeamento de education_stage_id para formType (1:1; ADAP NÃO entra aqui — é wildcard)
+    # Mapeamento rígido stage → formType (ADAP e EJA NÃO entram aqui)
     EDUCATION_STAGE_TO_FORM_TYPE = {
         # aluno-jovem
         'd1142d12-ed98-46f4-ae78-62c963371464': 'aluno-jovem',  # Educação Infantil
         '614b7d10-b758-42ec-a04e-86f78dc7740a': 'aluno-jovem',  # Anos Iniciais
-        '63cb6876-3221-4fa2-89e8-a82ad1733032': 'aluno-jovem',  # EJA períodos 1-5 (frontend envia IDs corretos)
         # aluno-velho
         'c78fcd8e-00a1-485d-8c03-70bcf59e3025': 'aluno-velho',  # Anos Finais
-        # EJA períodos 6-9 também usa '63cb6876-3221-4fa2-89e8-a82ad1733032' mas frontend envia IDs corretos
     }
     
-    # Mapeamento reverso: formType -> education_stage_ids (para inferir séries do formulário)
+    # Stages usados ao inferir "todas as séries" de um formType (EJA filtrada por período depois)
     FORM_TYPE_TO_EDUCATION_STAGE_IDS = {
         'aluno-jovem': [
             'd1142d12-ed98-46f4-ae78-62c963371464',  # Educação Infantil
             '614b7d10-b758-42ec-a04e-86f78dc7740a',  # Anos Iniciais
-            '63cb6876-3221-4fa2-89e8-a82ad1733032',  # EJA 1-5
+            '63cb6876-3221-4fa2-89e8-a82ad1733032',  # EJA (só períodos 1–5 após filtro)
             '247c4af5-2688-41b0-95fa-443f503a9d87',  # Educação Especial (ADAP)
         ],
         'aluno-velho': [
             'c78fcd8e-00a1-485d-8c03-70bcf59e3025',  # Anos Finais
-            '63cb6876-3221-4fa2-89e8-a82ad1733032',  # EJA
+            '63cb6876-3221-4fa2-89e8-a82ad1733032',  # EJA (só períodos 6–9 após filtro)
             '247c4af5-2688-41b0-95fa-443f503a9d87',  # Educação Especial (ADAP)
         ],
     }
@@ -58,55 +56,149 @@ class FormService:
     @staticmethod
     def _is_adap_education_stage(education_stage_id):
         return str(education_stage_id) == FormService.ADAP_EDUCATION_STAGE_ID if education_stage_id else False
+
+    @staticmethod
+    def _is_eja_education_stage(education_stage_id):
+        return str(education_stage_id) == FormService.EJA_EDUCATION_STAGE_ID if education_stage_id else False
+
+    @staticmethod
+    def _eja_period_from_grade_name(name):
+        """
+        Extrai o período EJA (1–9) do nome da série.
+        Exemplos: "EJA 3º Período", "EJA 7o Periodo", "3º Período EJA".
+        Returns:
+            int 1–9 ou None se não for possível identificar.
+        """
+        import re
+        if not name:
+            return None
+        text = str(name).lower().replace('í', 'i')
+        # Preferir dígito imediatamente associado a "eja"
+        match = re.search(r'eja\D{0,12}(\d{1,2})', text)
+        if not match:
+            match = re.search(r'(\d{1,2})\D{0,8}periodo', text)
+        if not match and 'eja' in text:
+            match = re.search(r'(\d{1,2})', text)
+        if not match:
+            return None
+        period = int(match.group(1))
+        if 1 <= period <= 9:
+            return period
+        return None
+
+    @staticmethod
+    def _resolve_grade_form_type(grade):
+        """
+        Classifica a série em um formType rígido.
+
+        Returns:
+            'aluno-jovem' | 'aluno-velho' | None
+            None = ADAP/Suporte (wildcard — válido para ambos).
+
+        Raises:
+            ValueError: série sem education_stage, EJA sem período legível,
+                        ou stage não mapeado.
+        """
+        if not grade:
+            raise ValueError("Série inválida")
+        stage_id = str(grade.education_stage_id) if grade.education_stage_id else None
+        grade_name = getattr(grade, 'name', None) or str(getattr(grade, 'id', ''))
+
+        if not stage_id:
+            raise ValueError(
+                f"Série '{grade_name}' não possui education_stage e não pode ser "
+                f"incluída no formulário."
+            )
+        if FormService._is_adap_education_stage(stage_id):
+            return None  # wildcard
+        if FormService._is_eja_education_stage(stage_id):
+            period = FormService._eja_period_from_grade_name(grade_name)
+            if period is None:
+                raise ValueError(
+                    f"Série '{grade_name}' (EJA) não tem período identificável no nome; "
+                    f"esperado 1–5 (aluno-jovem) ou 6–9 (aluno-velho)."
+                )
+            if 1 <= period <= 5:
+                return 'aluno-jovem'
+            return 'aluno-velho'  # 6–9
+
+        expected = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(stage_id)
+        if expected is None:
+            raise ValueError(
+                f"Série '{grade_name}' possui education_stage não mapeado "
+                f"({stage_id}) e não pode ser incluída no formulário."
+            )
+        return expected
     
     @staticmethod
     def _get_grade_ids_for_form_type(form_type):
         """
-        Retorna todos os IDs de séries (Grade) compatíveis com o tipo de formulário.
-        
-        Args:
-            form_type: aluno-jovem ou aluno-velho
-            
-        Returns:
-            list: Lista de IDs (string) de séries
+        Retorna IDs de séries compatíveis com o tipo de formulário.
+        EJA é filtrada por período no nome (1–5 → jovem; 6–9 → velho).
+        Séries sem classificação válida são omitidas (não entram no escopo).
         """
         stage_ids = FormService.FORM_TYPE_TO_EDUCATION_STAGE_IDS.get(form_type, [])
         if not stage_ids:
             return []
         stage_uuids = [ensure_uuid(s) for s in stage_ids]
         grades = Grade.query.filter(Grade.education_stage_id.in_(stage_uuids)).all()
-        return [str(g.id) for g in grades]
+        result = []
+        for g in grades:
+            try:
+                if FormService._grade_is_compatible_with_form_type(g, form_type):
+                    result.append(str(g.id))
+            except ValueError:
+                # Sem stage / EJA ilegível / stage desconhecido: não incluir
+                continue
+        return result
 
     
     @staticmethod
     def _grade_is_compatible_with_form_type(grade, form_type):
-        """Verifica se a série é compatível com o tipo de formulário.
+        """
+        Verifica se a série é compatível com o tipo de formulário.
 
         Regras:
-        - ADAP (Educação Especial) é compatível com aluno-jovem e aluno-velho.
-        - EJA é compatível com ambos (mesmo stage cobre períodos 1-5 e 6-9).
-        - Série sem education_stage ou com stage não mapeado NÃO é rejeitada:
-          aceita e deixa o filtro de destinatários resolver.
+        - ADAP/Suporte: único wildcard (jovem e velho).
+        - EJA 1–5 → só aluno-jovem; EJA 6–9 → só aluno-velho.
+        - Infantil/Anos Iniciais → só aluno-jovem; Anos Finais → só aluno-velho.
+        - Sem education_stage ou stage não mapeado → ValueError (não aceitar).
         """
         if not grade or not form_type:
             return False
         if form_type not in ('aluno-jovem', 'aluno-velho'):
             return False
-        stage_id = str(grade.education_stage_id) if grade.education_stage_id else None
-        # Sem classificação: não rejeitar (filtro de destinatários resolve)
-        if not stage_id:
-            return True
-        if FormService._is_adap_education_stage(stage_id):
-            return True
-        # EJA atende aluno-jovem (períodos 1-5) e aluno-velho (períodos 6-9)
-        if stage_id == FormService.EJA_EDUCATION_STAGE_ID:
-            return True
-        expected = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(stage_id)
-        # Stage não mapeado: não rejeitar
+        expected = FormService._resolve_grade_form_type(grade)  # None = ADAP
         if expected is None:
             return True
         return expected == form_type
-    
+
+    @staticmethod
+    def _require_grades_compatible(grades, form_type):
+        """
+        Garante que todas as séries são compatíveis com formType.
+        Incompatível / sem stage → ValueError (vira 400 na rota).
+        """
+        if not form_type or form_type not in ('aluno-jovem', 'aluno-velho'):
+            return
+        for grade in grades:
+            grade_name = getattr(grade, 'name', None) or str(getattr(grade, 'id', ''))
+            try:
+                expected = FormService._resolve_grade_form_type(grade)
+            except ValueError:
+                raise
+            if expected is None:
+                continue  # ADAP ok
+            if expected != form_type:
+                label = (
+                    'anos iniciais / educação infantil / EJA 1–5'
+                    if expected == 'aluno-jovem'
+                    else 'anos finais / EJA 6–9'
+                )
+                raise ValueError(
+                    f"Série '{grade_name}' não é compatível com o formulário '{form_type}'. "
+                    f"Ela pertence a {label} (tipo '{expected}')."
+                )    
     @staticmethod
     def _validate_filters(filters):
         """
@@ -225,25 +317,7 @@ class FormService:
         if len(grades) != len(grade_ids):
             raise ValueError("Uma ou mais séries não foram encontradas")
         
-        for grade in grades:
-            education_stage_id = str(grade.education_stage_id)
-            expected_form_type = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(education_stage_id)
-            
-            # EJA e ADAP: mesmo stage pode ir em aluno-jovem ou aluno-velho
-            if education_stage_id == '63cb6876-3221-4fa2-89e8-a82ad1733032':
-                if form_type not in ['aluno-jovem', 'aluno-velho']:
-                    raise ValueError(f"A série {grade.name} (EJA) não corresponde ao tipo de formulário {form_type}")
-            elif FormService._is_adap_education_stage(education_stage_id):
-                if form_type not in ['aluno-jovem', 'aluno-velho']:
-                    raise ValueError(
-                        f"A série {grade.name} (Educação Especial/ADAP) não corresponde "
-                        f"ao tipo de formulário {form_type}"
-                    )
-            elif expected_form_type and expected_form_type != form_type:
-                raise ValueError(
-                    f"A série {grade.name} (education_stage_id: {education_stage_id}) "
-                    f"corresponde ao tipo '{expected_form_type}', não '{form_type}'"
-                )
+        FormService._require_grades_compatible(grades, form_type)
     
     @staticmethod
     def _resolve_scope_and_warnings(data):
@@ -303,7 +377,7 @@ class FormService:
                 raise ValueError("Nenhuma das escolas selecionadas possui turmas compatíveis com este formulário.")
             return data, warnings
         
-        # Caso 2: só séries → validar compatibilidade; inferir escolas a partir das turmas
+        # Caso 2: só séries → validar compatibilidade (400 se incompatível); inferir escolas
         if has_grades and not has_schools and not has_classes:
             if not form_type:
                 raise ValueError("formType é obrigatório quando apenas selectedGrades é enviado")
@@ -311,23 +385,16 @@ class FormService:
             grades = Grade.query.filter(Grade.id.in_(grade_uuids)).all()
             if not grades:
                 raise ValueError("Nenhuma das séries selecionadas foi encontrada no sistema.")
-            # Não descartar séries de outro tipo: o agrupamento automático
-            # (_group_grades_by_form_type) cria o formulário do tipo adequado.
-            for g in grades:
-                if not FormService._grade_is_compatible_with_form_type(g, form_type):
-                    expected = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(str(g.education_stage_id))
-                    warnings.append(
-                        f"Série '{g.name}' pertence ao tipo '{expected or 'desconhecido'}' "
-                        f"(não '{form_type}'); será criado um formulário do tipo adequado."
-                    )
-            all_ids = [str(g.id) for g in grades]
-            data['selectedGrades'] = all_ids
-            selected_grades = all_ids
-            grade_uuids = ensure_uuid_list(all_ids)
+            # Incompatível / sem stage → ValueError (400). Não cria formulário de outro tipo.
+            FormService._require_grades_compatible(grades, form_type)
+            compatible_ids = [str(g.id) for g in grades]
+            data['selectedGrades'] = compatible_ids
+            selected_grades = compatible_ids
+            grade_uuids = ensure_uuid_list(compatible_ids)
             classes = Class.query.filter(Class.grade_id.in_(grade_uuids)).all()
             school_ids = list({str(c.school_id) for c in classes})
             if not school_ids:
-                raise ValueError("Nenhuma turma encontrada para as séries compatíveis.")
+                raise ValueError("Nenhuma turma encontrada para as séries selecionadas.")
             data['selectedSchools'] = school_ids
             selected_schools = school_ids
             return data, warnings
@@ -340,28 +407,37 @@ class FormService:
                 found = {str(c.id) for c in classes}
                 missing = [c for c in selected_classes if str(c) not in found]
                 raise ValueError(f"Turma(s) não encontrada(s): {missing}")
-            # Se formType não foi enviado, inferir do primeiro tipo rígido encontrado
             scope_form_type = form_type
             valid_classes = []
             adap_classes = []
             for c in classes:
                 grade = Grade.query.get(c.grade_id)
                 if not grade:
-                    warnings.append(f"Turma {c.id} possui série inválida e foi ignorada.")
+                    raise ValueError(f"Turma {c.id} possui série inválida.")
+                try:
+                    type_for_grade = FormService._resolve_grade_form_type(grade)
+                except ValueError as err:
+                    # Sem stage / EJA ilegível / stage desconhecido
+                    if form_type:
+                        raise
+                    warnings.append(str(err))
                     continue
-                stage_id = str(grade.education_stage_id)
-                if FormService._is_adap_education_stage(stage_id):
+                if type_for_grade is None:
+                    # ADAP
                     adap_classes.append(c)
                     continue
-                type_for_grade = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(stage_id)
-                if not type_for_grade or type_for_grade not in ('aluno-jovem', 'aluno-velho'):
-                    warnings.append(f"Turma (série: {grade.name}) não é compatível com formulário de aluno e foi ignorada.")
-                    continue
+                if form_type and type_for_grade != form_type:
+                    raise ValueError(
+                        f"Turma (série: {grade.name}) não é compatível com o tipo de "
+                        f"formulário '{form_type}' (série é '{type_for_grade}')."
+                    )
                 if not scope_form_type:
                     scope_form_type = type_for_grade
                 if type_for_grade != scope_form_type:
-                    warnings.append(f"Turma (série: {grade.name}) não é compatível com o tipo de formulário '{scope_form_type}' e foi ignorada.")
-                    continue
+                    raise ValueError(
+                        f"Turma (série: {grade.name}) não é compatível com o tipo de "
+                        f"formulário '{scope_form_type}' (série é '{type_for_grade}')."
+                    )
                 valid_classes.append(c)
             if adap_classes:
                 if scope_form_type in ('aluno-jovem', 'aluno-velho'):
@@ -372,7 +448,6 @@ class FormService:
                         "(aluno-jovem ou aluno-velho)."
                     )
                 else:
-                    # Há turmas rígidas sem formType resolvido — não deve ocorrer
                     valid_classes.extend(adap_classes)
             if not valid_classes:
                 raise ValueError("Nenhuma turma selecionada é compatível com o tipo de formulário.")
@@ -385,20 +460,19 @@ class FormService:
             data['selectedClasses'] = [str(c.id) for c in valid_classes]
             return data, warnings
         
-        # Caso 4: combinação (schools+grades, schools+classes, etc.) → validar compatibilidade e avisar
-        if has_grades:
+        # Caso 4: combinação (schools+grades, schools+classes, etc.) → rejeitar incompatível
+        if has_grades and form_type:
             grade_uuids = ensure_uuid_list(selected_grades)
             grades = Grade.query.filter(Grade.id.in_(grade_uuids)).all()
-            for g in grades:
-                if form_type and not FormService._grade_is_compatible_with_form_type(g, form_type):
-                    warnings.append(f"Série '{g.name}' não é compatível com o tipo de formulário '{form_type}'.")
-        if has_classes:
+            FormService._require_grades_compatible(grades, form_type)
+        if has_classes and form_type:
             class_ids_uuids = ensure_uuid_list(selected_classes)
             classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
             for c in classes:
                 grade = Grade.query.get(c.grade_id) if c else None
-                if grade and form_type and not FormService._grade_is_compatible_with_form_type(grade, form_type):
-                    warnings.append(f"Turma (série: {grade.name}) não é compatível com o tipo de formulário.")
+                if not grade:
+                    raise ValueError(f"Turma {c.id} possui série inválida.")
+                FormService._require_grades_compatible([grade], form_type)
         return data, warnings
     
     @staticmethod
@@ -496,49 +570,32 @@ class FormService:
     @staticmethod
     def _group_grades_by_form_type(grades, preferred_form_type=None):
         """
-        Agrupa séries por tipo de formulário baseado no education_stage_id.
+        Agrupa séries por tipo de formulário.
 
         ADAP (Educação Especial) não cria bucket próprio: anexa ao preferred_form_type
-        ou ao único grupo rígido existente. Só ADAP exige formType explícito.
-        
-        Args:
-            grades: Lista de objetos Grade
-            preferred_form_type: formType explícito do request (aluno-jovem / aluno-velho)
-            
-        Returns:
-            dict: {form_type: [grade_ids]}
+        ou ao único grupo rígido existente. Só ADAP é wildcard.
+        EJA é classificada pelo período no nome (1–5 → jovem; 6–9 → velho).
+
+        Raises:
+            ValueError: série sem stage / EJA sem período / stage não mapeado.
         """
         groups = {}
         adap_grade_ids = []
         
         for grade in grades:
-            education_stage_id = str(grade.education_stage_id) if grade.education_stage_id else None
-            if education_stage_id and FormService._is_adap_education_stage(education_stage_id):
+            type_for_grade = FormService._resolve_grade_form_type(grade)  # None = ADAP
+            if type_for_grade is None:
                 adap_grade_ids.append(str(grade.id))
                 continue
 
-            form_type = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(education_stage_id) if education_stage_id else None
+            # Se o request já escolheu formType, série de outro tipo não deveria chegar aqui
+            # (_require_grades_compatible). Se chegar, rejeitar.
+            if preferred_form_type in ('aluno-jovem', 'aluno-velho') and type_for_grade != preferred_form_type:
+                FormService._require_grades_compatible([grade], preferred_form_type)
 
-            # EJA atende ambos os tipos: respeitar formType explícito quando enviado
-            if (
-                education_stage_id == FormService.EJA_EDUCATION_STAGE_ID
-                and preferred_form_type in ('aluno-jovem', 'aluno-velho')
-            ):
-                form_type = preferred_form_type
-
-            if not form_type:
-                # Série sem education_stage ou stage não mapeado: não rejeitar.
-                # Com formType explícito, anexar a ele (filtro de destinatários resolve).
-                if preferred_form_type in ('aluno-jovem', 'aluno-velho'):
-                    form_type = preferred_form_type
-                else:
-                    logging.warning(f"Education stage {education_stage_id} não mapeado para form_type; série {grade.id} ignorada (sem formType explícito)")
-                    continue
-            
-            if form_type not in groups:
-                groups[form_type] = []
-            
-            groups[form_type].append(str(grade.id))
+            if type_for_grade not in groups:
+                groups[type_for_grade] = []
+            groups[type_for_grade].append(str(grade.id))
 
         if adap_grade_ids:
             target = None

@@ -303,8 +303,10 @@ class ResultsService:
             FormResponse.status == 'completed'
         )
         
-        # Aplicar filtros
+        # Aplicar filtros (escola/série/turma aceitam UUID único, lista ou CSV)
         if filters:
+            from app.socioeconomic_forms.services.filter_utils import apply_id_filter
+
             if filters.get('state'):
                 query = query.filter(City.state == filters['state'])
             
@@ -312,13 +314,13 @@ class ResultsService:
                 query = query.filter(City.id == filters['municipio'])
             
             if filters.get('escola'):
-                query = query.filter(School.id == filters['escola'])
+                query = apply_id_filter(query, School.id, filters['escola'])
             
             if filters.get('serie'):
-                query = query.filter(Student.grade_id == filters['serie'])
+                query = apply_id_filter(query, Student.grade_id, filters['serie'])
             
             if filters.get('turma'):
-                query = query.filter(Student.class_id == filters['turma'])
+                query = apply_id_filter(query, Student.class_id, filters['turma'])
         
         return query
 
@@ -329,6 +331,8 @@ class ResultsService:
         definido pelos filtros (state, municipio, escola, serie, turma).
         Usa User -> Student -> School -> City para aplicar os mesmos filtros de _build_base_query.
         """
+        from app.socioeconomic_forms.services.filter_utils import apply_id_filter
+
         query = db.session.query(FormRecipient.id).join(
             User, FormRecipient.user_id == User.id
         ).join(
@@ -344,11 +348,11 @@ class ResultsService:
             if filters.get('municipio'):
                 query = query.filter(City.id == filters['municipio'])
             if filters.get('escola'):
-                query = query.filter(School.id == filters['escola'])
+                query = apply_id_filter(query, School.id, filters['escola'])
             if filters.get('serie'):
-                query = query.filter(Student.grade_id == filters['serie'])
+                query = apply_id_filter(query, Student.grade_id, filters['serie'])
             if filters.get('turma'):
-                query = query.filter(Student.class_id == filters['turma'])
+                query = apply_id_filter(query, Student.class_id, filters['turma'])
         return query.distinct().count()
     
     @staticmethod
@@ -635,15 +639,24 @@ class ResultsService:
             filter_info['municipioNome'] = city.name if city else None
         
         if filters.get('escola'):
-            filter_info['escola'] = filters['escola']
+            from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
+            escola_ids = normalize_id_list(filters['escola'])
+            filter_info['escola'] = escola_ids if len(escola_ids) != 1 else (escola_ids[0] if escola_ids else None)
             filter_info['escolaNome'] = school.name if school else None
         
         if filters.get('serie'):
-            filter_info['serie'] = filters['serie']
+            from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
+            serie_ids = normalize_id_list(filters['serie'])
+            filter_info['serie'] = serie_ids if len(serie_ids) != 1 else (serie_ids[0] if serie_ids else None)
             filter_info['serieName'] = grade.name if grade else None
         
         if filters.get('turma'):
-            filter_info['turma'] = filters['turma']
+            from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
+            turma_ids = normalize_id_list(filters['turma'])
+            filter_info['turma'] = turma_ids if len(turma_ids) != 1 else (turma_ids[0] if turma_ids else None)
             filter_info['turmaName'] = class_.name if class_ else None
         
         return filter_info

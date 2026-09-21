@@ -343,24 +343,29 @@ class DistributionService:
             school_ids = []
             
             if filters:
+                from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
                 # Prioridade: turma > serie > escola > municipio > estado
                 if filters.get('turma'):
                     # Filtrar apenas pela turma específica
-                    # Converter turma_id para UUID (Class.id é UUID)
-                    turma_id_uuid = ensure_uuid(filters['turma'])
-                    turma = Class.query.get(turma_id_uuid)
-                    if turma and turma.school_id:
-                        school_ids = [turma.school_id]
+                    turma_ids = normalize_id_list(filters['turma'])
+                    if turma_ids:
+                        turma_id_uuid = ensure_uuid(turma_ids[0])
+                        turma = Class.query.get(turma_id_uuid)
+                        if turma and turma.school_id:
+                            school_ids = [turma.school_id]
                 elif filters.get('serie'):
                     # Filtrar por série na escola
                     if filters.get('escola'):
-                        school_ids = [filters['escola']]
+                        school_ids = normalize_id_list(filters['escola'])
                     else:
                         # Buscar todas as escolas que têm turmas dessa série
-                        classes = Class.query.filter_by(grade_id=filters['serie']).all()
+                        serie_ids = normalize_id_list(filters['serie'])
+                        grade_uuids = ensure_uuid_list(serie_ids) if serie_ids else []
+                        classes = Class.query.filter(Class.grade_id.in_(grade_uuids)).all() if grade_uuids else []
                         school_ids = list(set([c.school_id for c in classes if c.school_id]))
                 elif filters.get('escola'):
-                    school_ids = [filters['escola']]
+                    school_ids = normalize_id_list(filters['escola'])
                 elif filters.get('municipio'):
                     # Buscar todas as escolas do município
                     schools = School.query.filter_by(city_id=filters['municipio']).all()
@@ -386,14 +391,16 @@ class DistributionService:
             # Determinar séries baseado nos filtros
             grade_ids = []
             if filters and filters.get('serie'):
-                grade_ids = [filters['serie']]
+                from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+                grade_ids = normalize_id_list(filters['serie'])
             elif selected_grades:
                 grade_ids = selected_grades
             
             # Determinar turmas baseado nos filtros
             class_ids = []
             if filters and filters.get('turma'):
-                class_ids = [filters['turma']]
+                from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+                class_ids = normalize_id_list(filters['turma'])
             elif selected_classes:
                 class_ids = selected_classes
             
@@ -544,6 +551,8 @@ class DistributionService:
     @staticmethod
     def _student_matches_form_scope(form, school_id, grade_id, class_id):
         """Verifica se a colocação atual do aluno entra no escopo persistido do form."""
+        from app.socioeconomic_forms.services.filter_utils import filter_value_includes_id
+
         if form.form_type not in ('aluno-jovem', 'aluno-velho'):
             return False
         if not school_id or not grade_id:
@@ -559,11 +568,11 @@ class DistributionService:
         filters = form.filters or {}
 
         if filters.get('turma'):
-            if not class_id or class_id != str(filters['turma']):
+            if not filter_value_includes_id(filters['turma'], class_id):
                 return False
-        if filters.get('serie') and grade_id != str(filters['serie']):
+        if filters.get('serie') and not filter_value_includes_id(filters['serie'], grade_id):
             return False
-        if filters.get('escola') and school_id != str(filters['escola']):
+        if filters.get('escola') and not filter_value_includes_id(filters['escola'], school_id):
             # selected_schools pode ampliar o escopo; se filter.escola diverge, respeitar filter
             if not selected_schools or school_id not in selected_schools:
                 return False
@@ -714,12 +723,14 @@ class DistributionService:
         ).all()
         created = 0
         for form in forms:
+            from app.socioeconomic_forms.services.filter_utils import filter_value_includes_id
+
             selected_schools = DistributionService._normalize_id_list(form.selected_schools)
             filters = form.filters or {}
             in_scope = False
             if selected_schools and school_id in selected_schools:
                 in_scope = True
-            elif filters.get('escola') and str(filters['escola']) == school_id:
+            elif filters.get('escola') and filter_value_includes_id(filters['escola'], school_id):
                 in_scope = True
             elif not selected_schools and not filters.get('escola'):
                 # Sem escola no escopo: ainda pode ter recipients nessa escola

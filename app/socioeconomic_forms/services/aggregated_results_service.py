@@ -225,16 +225,23 @@ class AggregatedResultsService:
             
             # Escola (pode estar em 'filters.escola' ou em 'selected_schools')
             if filters.get('escola'):
+                from app.socioeconomic_forms.services.filter_utils import (
+                    id_lists_intersect,
+                    normalize_id_list,
+                )
+
                 escola_match = False
+                filter_escolas = normalize_id_list(filters['escola'])
                 
                 # Verificar em form.filters.escola
                 if form_filters.get('escola'):
-                    if form_filters['escola'] == filters['escola']:
+                    if id_lists_intersect(form_filters['escola'], filters['escola']):
                         escola_match = True
                 
                 # Se não tem em filters.escola, verificar em selected_schools
                 if not escola_match and form.selected_schools:
-                    if filters['escola'] in form.selected_schools:
+                    selected = {str(s) for s in form.selected_schools}
+                    if any(eid in selected for eid in filter_escolas):
                         escola_match = True
                 
                 if not escola_match:
@@ -242,14 +249,20 @@ class AggregatedResultsService:
             
             # Série (pode estar em 'filters.serie' ou em 'selected_grades')
             if filters.get('serie'):
+                from app.socioeconomic_forms.services.filter_utils import (
+                    id_lists_intersect,
+                    normalize_id_list,
+                )
+
                 serie_match = False
                 
                 if form_filters.get('serie'):
-                    if form_filters['serie'] == filters['serie']:
+                    if id_lists_intersect(form_filters['serie'], filters['serie']):
                         serie_match = True
                 
                 if not serie_match and form.selected_grades:
-                    if filters['serie'] in form.selected_grades:
+                    selected = {str(g) for g in form.selected_grades}
+                    if any(sid in selected for sid in normalize_id_list(filters['serie'])):
                         serie_match = True
                 
                 if not serie_match:
@@ -257,14 +270,20 @@ class AggregatedResultsService:
             
             # Turma (pode estar em 'filters.turma' ou em 'selected_classes')
             if filters.get('turma'):
+                from app.socioeconomic_forms.services.filter_utils import (
+                    id_lists_intersect,
+                    normalize_id_list,
+                )
+
                 turma_match = False
                 
                 if form_filters.get('turma'):
-                    if form_filters['turma'] == filters['turma']:
+                    if id_lists_intersect(form_filters['turma'], filters['turma']):
                         turma_match = True
                 
                 if not turma_match and form.selected_classes:
-                    if filters['turma'] in form.selected_classes:
+                    selected = {str(c) for c in form.selected_classes}
+                    if any(tid in selected for tid in normalize_id_list(filters['turma'])):
                         turma_match = True
                 
                 if not turma_match:
@@ -278,23 +297,32 @@ class AggregatedResultsService:
         else:
             # Escola
             if filters.get('escola'):
+                from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
                 if not form.selected_schools:
                     return False
-                if filters['escola'] not in form.selected_schools:
+                selected = {str(s) for s in form.selected_schools}
+                if not any(eid in selected for eid in normalize_id_list(filters['escola'])):
                     return False
             
             # Série
             if filters.get('serie'):
+                from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
                 if not form.selected_grades:
                     return False
-                if filters['serie'] not in form.selected_grades:
+                selected = {str(g) for g in form.selected_grades}
+                if not any(sid in selected for sid in normalize_id_list(filters['serie'])):
                     return False
             
             # Turma
             if filters.get('turma'):
+                from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
                 if not form.selected_classes:
                     return False
-                if filters['turma'] not in form.selected_classes:
+                selected = {str(c) for c in form.selected_classes}
+                if not any(tid in selected for tid in normalize_id_list(filters['turma'])):
                     return False
             
             # Município e/ou Estado: verificar via escolas selecionadas
@@ -540,9 +568,17 @@ class AggregatedResultsService:
             scope_info['municipioNome'] = city.name if city else None
         
         if filters.get('escola'):
-            school = School.query.get(filters['escola'])
-            scope_info['escola'] = filters['escola']
-            scope_info['escolaNome'] = school.name if school else None
+            from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
+            escola_ids = normalize_id_list(filters['escola'])
+            scope_info['escola'] = escola_ids if len(escola_ids) != 1 else escola_ids[0]
+            if len(escola_ids) == 1:
+                school = School.query.get(escola_ids[0])
+                scope_info['escolaNome'] = school.name if school else None
+            else:
+                schools = School.query.filter(School.id.in_(escola_ids)).all() if escola_ids else []
+                by_id = {str(s.id): s.name for s in schools}
+                scope_info['escolaNomes'] = [by_id.get(eid) for eid in escola_ids]
         
         if filters.get('serie'):
             grade = Grade.query.get(filters['serie'])

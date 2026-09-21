@@ -1817,6 +1817,7 @@ COMMENT ON TABLE "{schema}".competition_ranking_payouts IS 'Pagamentos de rankin
 CREATE TABLE IF NOT EXISTS "{schema}".forms (
     id VARCHAR PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
+    custom_title VARCHAR(255),
     description TEXT,
     form_type VARCHAR(50) NOT NULL,
     instructions TEXT,
@@ -1833,6 +1834,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".forms (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".forms IS 'Formulários socioeconômicos';
+COMMENT ON COLUMN "{schema}".forms.custom_title IS 'Título customizado informado pelo usuário (frontend). title permanece o gerado pelo sistema.';
 
 CREATE TABLE IF NOT EXISTS "{schema}".form_questions (
     id VARCHAR PRIMARY KEY,

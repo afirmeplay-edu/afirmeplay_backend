@@ -12,6 +12,16 @@ class StoreItemNotFoundError(Exception):
     pass
 
 
+class AlreadyPurchasedError(Exception):
+    """Aluno já comprou este item (compra única)."""
+    pass
+
+
+class RequirementNotMetError(Exception):
+    """Aluno não atende ao requisito de desempenho do item."""
+    pass
+
+
 def _norm_id(x):
     if x is None:
         return None
@@ -111,6 +121,9 @@ class StoreService:
             scope_filter=data.get('scope_filter'),
             is_active=bool(data.get('is_active', True)),
             sort_order=int(data.get('sort_order', 0)),
+            icon=data.get('icon') or None,
+            icon_color=data.get('icon_color') or None,
+            requirement=_validated_requirement(data.get('requirement')),
         )
         db.session.add(item)
         db.session.commit()
@@ -150,6 +163,12 @@ class StoreService:
             item.is_active = bool(data['is_active'])
         if 'sort_order' in data:
             item.sort_order = int(data['sort_order'])
+        if 'icon' in data:
+            item.icon = data.get('icon') or None
+        if 'icon_color' in data:
+            item.icon_color = data.get('icon_color') or None
+        if 'requirement' in data:
+            item.requirement = _validated_requirement(data.get('requirement'))
         db.session.commit()
         return item
 
@@ -173,10 +192,12 @@ class StoreService:
         scope_city_id=None,
         scope_school_id=None,
         scope_class_id=None,
+        user_id=None,
     ):
         """
         Processa a compra: debita afirmecoins do aluno e registra a compra.
         Se escopo for passado, só permite comprar itens visíveis para esse escopo.
+        Recusa recompra (compra única) e recusa se o requisito de desempenho não for atendido.
         """
         item = StoreItem.query.filter_by(id=store_item_id, is_active=True).first()
         if not item:
@@ -184,6 +205,16 @@ class StoreService:
         if scope_city_id is not None or scope_school_id is not None or scope_class_id is not None:
             if not _item_visible_for_scope(item, scope_city_id, scope_school_id, scope_class_id):
                 raise StoreItemNotFoundError("Item não disponível para o seu contexto (turma/escola/município).")
+
+        if StoreService.has_purchased(student_id, item.id):
+            raise AlreadyPurchasedError("Você já comprou este item.")
+
+        requirement = getattr(item, 'requirement', None)
+        if requirement:
+            from app.store.services.requirement_service import check_requirement
+            met, reason = check_requirement(student_id, requirement)
+            if not met:
+                raise RequirementNotMetError(reason or "Você ainda não atende ao requisito deste item.")
 
         # Débito de moedas (levanta InsufficientBalanceError se saldo insuficiente)
         transaction = CoinService.debit_coins(
@@ -200,9 +231,28 @@ class StoreService:
             price_paid=item.price,
         )
         db.session.add(purchase)
+        StoreService._apply_frame_reward(item, user_id)
         db.session.commit()
 
         return purchase, transaction
+
+    @staticmethod
+    def _apply_frame_reward(item, user_id):
+        """Persiste moldura comprada em user_settings.frame_id (mesmo padrão de selo/tema)."""
+        if not user_id:
+            return
+        reward_type = (getattr(item, 'reward_type', None) or getattr(item, 'category', None) or '')
+        if str(reward_type).strip().lower() != 'frame':
+            return
+        frame_id = (getattr(item, 'reward_data', None) or '').strip()
+        if not frame_id:
+            return
+        from app.models.user_settings import UserSettings
+        settings = UserSettings.query.filter_by(user_id=user_id).first()
+        if not settings:
+            settings = UserSettings(user_id=user_id)
+            db.session.add(settings)
+        settings.frame_id = frame_id
 
     @staticmethod
     def get_student_purchases(student_id: str, limit: int = 50, offset: int = 0):
@@ -225,3 +275,29 @@ class StoreService:
             ).first()
             is not None
         )
+
+    @staticmethod
+    def attach_requirement_status(item_dict, student_id, snapshot=None):
+        """
+        Acrescenta requirement_met e requirement_reason ao dict do item.
+        Sem requisito: ambos None (comportamento atual da vitrine).
+        """
+        req = item_dict.get('requirement')
+        if not req:
+            item_dict['requirement_met'] = None
+            item_dict['requirement_reason'] = None
+            return item_dict
+        from app.store.services.requirement_service import check_requirement, missing_reason
+        if not student_id:
+            item_dict['requirement_met'] = False
+            item_dict['requirement_reason'] = missing_reason(req)
+            return item_dict
+        met, reason = check_requirement(student_id, req, snapshot=snapshot)
+        item_dict['requirement_met'] = bool(met)
+        item_dict['requirement_reason'] = None if met else reason
+        return item_dict
+
+
+def _validated_requirement(raw):
+    from app.store.services.requirement_service import validate_requirement
+    return validate_requirement(raw)

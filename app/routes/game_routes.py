@@ -593,4 +593,87 @@ def delete_game(game_id):
     except Exception as e:
         db.session.rollback()
         logging.error(f"Erro ao excluir jogo: {str(e)}", exc_info=True)
-        return jsonify({"erro": "Erro ao excluir jogo", "detalhes": str(e)}), 500 
+        return jsonify({"erro": "Erro ao excluir jogo", "detalhes": str(e)}), 500
+
+
+def _student_may_access_game(student, game):
+    if not student or not game:
+        return False
+    game_class_ids = [gc.class_id for gc in game.game_classes]
+    return student.class_id in game_class_ids
+
+
+@bp.route('/<string:game_id>/session/start', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+def start_game_reward_session(game_id):
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"erro": "Aluno não encontrado"}), 404
+        game = Game.query.get(game_id)
+        if not game:
+            return jsonify({"erro": "Jogo não encontrado"}), 404
+        if not _student_may_access_game(student, game):
+            return jsonify({"erro": "Você não tem permissão para acessar este jogo"}), 403
+
+        from app.rewards.config import CONTENT_TYPE_GAME
+        from app.rewards.services import ContentRewardService
+
+        payload = ContentRewardService.start_session(
+            student_id=student.id,
+            content_type=CONTENT_TYPE_GAME,
+            content_id=game_id,
+        )
+        return jsonify(payload), 200
+    except Exception as e:
+        logging.error(f"Erro ao iniciar sessão de jogo: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"erro": "Erro ao iniciar sessão", "detalhes": str(e)}), 500
+
+
+@bp.route('/<string:game_id>/claim-reward', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+def claim_game_reward(game_id):
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"erro": "Aluno não encontrado"}), 404
+
+        from app.rewards.config import CONTENT_TYPE_GAME
+        from app.rewards.services import ContentRewardService
+        from app.balance.services.coin_service import CoinService
+
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        if not session_id:
+            return jsonify({
+                "granted": False,
+                "coins": 0,
+                "status": "not_eligible",
+                "daily_remaining": ContentRewardService.daily_remaining(student.id),
+                "new_balance": CoinService.get_balance(student.id),
+                "achievement_progress": None,
+            }), 200
+
+        game = Game.query.get(game_id)
+        eligible = bool(game) and _student_may_access_game(student, game)
+        result = ContentRewardService.claim_reward(
+            student_id=student.id,
+            content_type=CONTENT_TYPE_GAME,
+            content_id=game_id,
+            session_id=session_id,
+            eligible=eligible,
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        logging.error(f"Erro ao reivindicar recompensa de jogo: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"erro": "Erro ao reivindicar recompensa", "detalhes": str(e)}), 500 

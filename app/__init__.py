@@ -319,6 +319,7 @@ def create_app():
     from app.socioeconomic_forms.routes import results_routes
     from app.socioeconomic_forms.routes import aggregated_results_routes
     from .play_tv import routes as playtv_routes
+    from app.rewards import models as content_reward_models  # noqa: F401  registra ContentSession/ContentReward
     from .plantao_online import routes as plantao_online_routes
     from app.certification.routes import certificate_routes
     from app.balance.routes import bp as balance_bp

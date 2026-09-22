@@ -750,7 +750,7 @@ ALTER TABLE "{schema}".subjective_questions
     ADD COLUMN IF NOT EXISTS rubric_group_id VARCHAR;
 
 INSERT INTO "{schema}".subjective_rubric_groups (id, subjective_test_id, name, sort_order)
-SELECT md5(t.id || ':default-rubric-group'), t.id, 'Grupo de critérios', 0
+SELECT md5(t.id || chr(58) || 'default-rubric-group'), t.id, 'Grupo de critérios', 0
 FROM "{schema}".subjective_tests t
 WHERE NOT EXISTS (
     SELECT 1 FROM "{schema}".subjective_rubric_groups g WHERE g.subjective_test_id = t.id

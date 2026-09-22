@@ -47,6 +47,10 @@ class StoreItem(db.Model):
     scope_filter = db.Column(db.JSON, nullable=True)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     sort_order = db.Column(db.Integer, default=0, nullable=False)
+    icon = db.Column(db.String(128), nullable=True)
+    icon_color = db.Column(db.String(32), nullable=True)
+    # Requisito opcional de desempenho: { "type": "...", ...params }. None = sem requisito.
+    requirement = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
     updated_at = db.Column(db.TIMESTAMP, server_default=db.func.now(), onupdate=db.func.now())
 
@@ -64,6 +68,9 @@ class StoreItem(db.Model):
             'scope_filter': self.scope_filter,
             'is_active': self.is_active,
             'sort_order': self.sort_order,
+            'icon': self.icon,
+            'icon_color': self.icon_color,
+            'requirement': self.requirement,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 

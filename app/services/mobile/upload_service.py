@@ -13,6 +13,23 @@ from app.models.mobile_models import MobileSyncSubmission, MobileSyncBundleGener
 
 from app.services.mobile.bundle_service import collect_school_scope, build_tests_questions_payload
 
+# Paliativo temporário (Limoeiro / 9º): Q20 editada após download do pacote offline.
+# Remover após a aplicação (ou quando UNTIL passar o bypass deixa de valer sozinho).
+_TEST_VERSION_MISMATCH_BYPASS_IDS = frozenset(
+    {
+        "e99fa9a5-5f89-48f2-847d-35ab9b35838d",  # 9º ANO - 2º AVALIA LIMOEIRO
+        "9bcc0486-38b4-462a-9eb1-8c63ad5a0170",  # ADAP I - 9º ANO - 2º AVALIA LIMOEIRO
+    }
+)
+_TEST_VERSION_MISMATCH_BYPASS_UNTIL = datetime(2026, 10, 2, 3, 3, 0)  # UTC, fim do pacote T8GN
+
+
+def _test_version_mismatch_bypassed(test_id: str) -> bool:
+    return (
+        str(test_id) in _TEST_VERSION_MISMATCH_BYPASS_IDS
+        and datetime.utcnow() < _TEST_VERSION_MISMATCH_BYPASS_UNTIL
+    )
+
 
 def get_bundle_generation(
     school_id: str, sync_bundle_version: int
@@ -138,12 +155,20 @@ def process_one_submission(
     _, versions, _ = build_tests_questions_payload({test_id: test})
     expected = versions.get(test_id)
     if not expected or expected != test_content_version:
-        return {
-            "submission_id": str(submission_uuid),
-            "status": "error",
-            "message": "test_content_version inválido ou desatualizado",
-            "code": "TEST_VERSION_MISMATCH",
-        }
+        if _test_version_mismatch_bypassed(test_id):
+            print(
+                f"[mobile/v1/sync/upload] TEST_VERSION_MISMATCH bypass — "
+                f"test_id={test_id} submission_id={submission_uuid} "
+                f"school_id={school_id} student_id={student_id} "
+                f"until={_TEST_VERSION_MISMATCH_BYPASS_UNTIL.isoformat()}"
+            )
+        else:
+            return {
+                "submission_id": str(submission_uuid),
+                "status": "error",
+                "message": "test_content_version inválido ou desatualizado",
+                "code": "TEST_VERSION_MISMATCH",
+            }
 
     tq_ids = {tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).all()}
     for ans in answers:

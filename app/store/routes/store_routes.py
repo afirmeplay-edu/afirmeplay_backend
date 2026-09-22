@@ -12,6 +12,8 @@ from app.models.student import Student
 from app.store.services.store_service import (
     StoreService,
     StoreItemNotFoundError,
+    AlreadyPurchasedError,
+    RequirementNotMetError,
 )
 from app.balance.services.coin_service import InsufficientBalanceError
 from app.store.store_scope_permissions import get_allowed_store_scopes
@@ -40,6 +42,16 @@ def handle_item_not_found(error):
     return jsonify({"erro": "Item não encontrado ou indisponível", "detalhes": str(error)}), 404
 
 
+@bp.errorhandler(AlreadyPurchasedError)
+def handle_already_purchased(error):
+    return jsonify({"erro": str(error)}), 400
+
+
+@bp.errorhandler(RequirementNotMetError)
+def handle_requirement_not_met(error):
+    return jsonify({"erro": str(error)}), 400
+
+
 @bp.errorhandler(InsufficientBalanceError)
 def handle_insufficient_balance(error):
     return jsonify({"erro": "Saldo insuficiente", "detalhes": str(error)}), 400
@@ -50,9 +62,9 @@ def handle_permission_error(error):
     return jsonify({"erro": "Sem permissão", "detalhes": str(error)}), 403
 
 
-def _current_student_id():
+def _current_student():
     """
-    Retorna student_id do usuário logado (aluno) ou (None, error_response).
+    Retorna (student, None) do usuário logado (aluno) ou (None, error_response).
     Para compra, apenas o próprio aluno pode comprar.
     """
     user_id = get_jwt_identity()
@@ -64,6 +76,14 @@ def _current_student_id():
     student = Student.query.filter_by(user_id=user_id).first()
     if not student:
         return None, (jsonify({"erro": "Estudante não encontrado para este usuário"}), 404)
+    return student, None
+
+
+def _current_student_id():
+    """Retorna student_id do usuário logado (aluno) ou (None, error_response)."""
+    student, err = _current_student()
+    if err is not None:
+        return None, err
     return student.id, None
 
 
@@ -120,11 +140,21 @@ def list_items():
     )
     result = [item.to_dict() for item in items]
 
+    snapshot = None
     if student_id:
+        if user_id:
+            ensure_tenant_schema_for_user(user_id)
+        from app.store.services.requirement_service import build_snapshot
+        needs_snapshot = any(it.get('requirement') for it in result)
+        if needs_snapshot:
+            snapshot = build_snapshot(student_id)
         for it in result:
             it['already_purchased'] = StoreService.has_purchased(student_id, it['id'])
+            StoreService.attach_requirement_status(it, student_id, snapshot=snapshot)
     for it in result:
         it.setdefault('already_purchased', False)
+        it.setdefault('requirement_met', None)
+        it.setdefault('requirement_reason', None)
 
     return jsonify({'items': result}), 200
 
@@ -137,9 +167,11 @@ def purchase():
     Body: { "store_item_id": "uuid" }
     Apenas o próprio aluno (token) pode comprar.
     """
-    student_id, err = _current_student_id()
+    student, err = _current_student()
     if err is not None:
         return err
+    student_id = student.id
+    user_id = student.user_id
 
     data = request.get_json()
     if not data:
@@ -158,6 +190,7 @@ def purchase():
             scope_city_id=scope_city_id,
             scope_school_id=scope_school_id,
             scope_class_id=scope_class_id,
+            user_id=user_id,
         )
         return jsonify({
             'message': 'Compra realizada com sucesso',
@@ -169,6 +202,10 @@ def purchase():
     except StoreItemNotFoundError:
         raise
     except InsufficientBalanceError:
+        raise
+    except AlreadyPurchasedError:
+        raise
+    except RequirementNotMetError:
         raise
 
 
@@ -299,6 +336,15 @@ def admin_delete_item(item_id):
         return jsonify({"message": "Item removido"}), 200
     except PermissionError as e:
         return jsonify({"erro": str(e)}), 403
+
+
+@bp.route('/admin/requirement-options', methods=['GET'])
+@jwt_required()
+@role_required('admin', 'tecadm', 'diretor', 'coordenador', 'professor')
+def admin_requirement_options():
+    """Faixas, classificações, conquistas e medalhas para o seletor de requisito no admin."""
+    from app.store.services.requirement_service import get_requirement_options
+    return jsonify(get_requirement_options()), 200
 
 
 @bp.route('/admin/allowed-scopes', methods=['GET'])

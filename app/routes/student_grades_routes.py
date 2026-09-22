@@ -398,6 +398,39 @@ def get_my_conquistas():
         return jsonify({"error": "Erro ao obter conquistas", "details": str(e)}), 500
 
 
+@bp.route('/me/content-rewards', methods=['GET'])
+@jwt_required()
+@role_required("aluno")
+def get_my_content_rewards():
+    """Lista content_ids já pagos e o saldo restante do teto diário."""
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+
+        from app.rewards.config import CONTENT_TYPE_GAME, CONTENT_TYPE_VIDEO
+        from app.rewards.services import ContentRewardService
+
+        content_type = (request.args.get("type") or "").strip().lower()
+        if content_type and content_type not in (CONTENT_TYPE_GAME, CONTENT_TYPE_VIDEO):
+            return jsonify({"error": "type deve ser game ou video"}), 400
+
+        content_ids = ContentRewardService.list_claimed_ids(
+            student.id,
+            content_type=content_type or None,
+        )
+        return jsonify({
+            "content_ids": content_ids,
+            "daily_remaining": ContentRewardService.daily_remaining(student.id),
+        }), 200
+    except Exception as e:
+        logging.error(f"Erro ao listar recompensas de conteúdo: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao listar recompensas", "details": str(e)}), 500
+
+
 @bp.route('/<string:student_id>/conquistas', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")

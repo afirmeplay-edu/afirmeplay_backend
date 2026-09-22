@@ -20,6 +20,7 @@ from app.models.student import Student
 from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.manager import Manager
+from app.models.teacher import Teacher
 from app.models.studentPasswordLog import StudentPasswordLog
 from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
@@ -37,6 +38,36 @@ from xlrd import open_workbook
 import re
 
 bp = Blueprint('users', __name__, url_prefix='/users')
+
+
+def _sync_profile_names_from_user(user):
+    """
+    Espelha users.name nos perfis vinculados (student/teacher no tenant e manager no public).
+    Evita divergência em listas que leem student.name / teacher.name.
+    """
+    if not user or not user.name:
+        return
+
+    manager = Manager.query.filter_by(user_id=user.id).first()
+    if manager:
+        manager.name = user.name
+
+    try:
+        from app.utils.tenant_middleware import ensure_tenant_schema_for_user
+        if not ensure_tenant_schema_for_user(user.id):
+            return
+        student = Student.query.filter_by(user_id=user.id).first()
+        if student:
+            student.name = user.name
+        teacher = Teacher.query.filter_by(user_id=user.id).first()
+        if teacher:
+            teacher.name = user.name
+    except Exception as e:
+        logging.warning(
+            "Falha ao sincronizar nome de perfil para user %s: %s",
+            getattr(user, "id", None),
+            e,
+        )
 
 
 def normalizar_nome_para_busca(nome):
@@ -432,6 +463,7 @@ def submit_onboarding():
         name = data.get("name")
         if name is not None and isinstance(name, str) and name.strip():
             user.name = name.strip()
+            _sync_profile_names_from_user(user)
 
         # birth_date
         birth_date_value = data.get("birth_date")
@@ -846,6 +878,8 @@ def update_user(user_id):
         if name is not None:
             if isinstance(name, str) and name.strip():
                 user.name = name.strip()
+                # users.name e perfis (student/teacher/manager) precisam ficar alinhados
+                _sync_profile_names_from_user(user)
             else:
                 return jsonify({"erro": "name deve ser uma string não vazia"}), 400
 

@@ -40,15 +40,15 @@ class DistributionService:
             list: Lista de dicionários com user_id e school_id
         """
         try:
-            if not selected_grades or len(selected_grades) == 0:
-                raise ValueError("selected_grades é obrigatório para aluno-jovem")
+            if (not selected_grades or len(selected_grades) == 0) and not selected_classes:
+                raise ValueError("selected_grades ou selected_classes é obrigatório para aluno-jovem")
             
             recipients = []
             
             # Converter strings para UUID se necessário
             import uuid as uuid_lib
             grade_uuids = []
-            for g in selected_grades:
+            for g in selected_grades or []:
                 if isinstance(g, str):
                     try:
                         # Tentar converter string para UUID
@@ -65,7 +65,9 @@ class DistributionService:
             school_ids_uuids = ensure_uuid_list(school_ids)
             school_ids_str = [str(s) for s in school_ids_uuids]
 
-            query = Class.query.filter(Class.grade_id.in_(grade_uuids))
+            query = Class.query
+            if grade_uuids:
+                query = query.filter(Class.grade_id.in_(grade_uuids))
 
             if len(school_ids_str) == 1:
                 query = query.filter(Class.school_id == school_ids_str[0])
@@ -133,15 +135,15 @@ class DistributionService:
             list: Lista de dicionários com user_id e school_id
         """
         try:
-            if not selected_grades or len(selected_grades) == 0:
-                raise ValueError("selected_grades é obrigatório para aluno-velho")
+            if (not selected_grades or len(selected_grades) == 0) and not selected_classes:
+                raise ValueError("selected_grades ou selected_classes é obrigatório para aluno-velho")
             
             recipients = []
             
             # Converter strings para UUID se necessário
             import uuid as uuid_lib
             grade_uuids = []
-            for g in selected_grades:
+            for g in selected_grades or []:
                 if isinstance(g, str):
                     try:
                         # Tentar converter string para UUID
@@ -159,7 +161,9 @@ class DistributionService:
             school_ids_str = [str(s) for s in school_ids_uuids]
             
             # Construir query de forma que evite inferência de tipo incorreta quando há apenas 1 elemento
-            query = Class.query.filter(Class.grade_id.in_(grade_uuids))
+            query = Class.query
+            if grade_uuids:
+                query = query.filter(Class.grade_id.in_(grade_uuids))
             
             if len(school_ids_str) == 1:
                 query = query.filter(Class.school_id == school_ids_str[0])
@@ -471,12 +475,8 @@ class DistributionService:
             if not form.is_active:
                 raise ValueError("Formulário não está ativo")
             
-            # Verificar se já foi enviado (se já tem recipients)
-            existing_recipients = FormRecipient.query.filter_by(form_id=form_id).count()
-            if existing_recipients > 0:
-                raise ValueError("Formulário já foi enviado. Use reenvio se necessário.")
-            
-            # Identificar destinatários baseado no tipo
+            # Identificar destinatários baseado no tipo (inclui alunos que
+            # entraram no escopo depois do primeiro envio)
             recipients_data = []
             
             # Usar filtros se disponíveis, senão usar método tradicional
@@ -547,13 +547,19 @@ class DistributionService:
             
             # TODO: Implementar notificações aqui se notify_users=True
             
+            total_recipients = FormRecipient.query.filter_by(form_id=form_id).count()
             return {
                 'formId': form_id,
-                'totalRecipients': recipients_created,
+                'totalRecipients': total_recipients,
+                'newRecipients': recipients_created,
                 'sentAt': datetime.utcnow().isoformat(),
                 'notificationsSent': recipients_created if notify_users else 0,
                 'emailsSent': 0,  # TODO: Implementar envio de emails
-                'message': f'Questionário enviado para {recipients_created} destinatários'
+                'message': (
+                    f'Questionário enviado para {recipients_created} destinatários'
+                    if recipients_created
+                    else f'Nenhum destinatário novo. {total_recipients} já haviam recebido o questionário'
+                )
             }
             
         except SQLAlchemyError as e:
@@ -568,45 +574,52 @@ class DistributionService:
         return [str(v) for v in values if v is not None]
 
     @staticmethod
+    def _school_matches_geo_filters(school_id, filters):
+        """Confere município/estado do form quando a escola não veio explícita no escopo."""
+        if not filters or not school_id:
+            return True
+        needs_city = bool(filters.get('municipio') or filters.get('estado'))
+        if not needs_city:
+            return True
+        school = School.query.get(str(school_id))
+        if not school:
+            return False
+        if filters.get('municipio') and str(school.city_id) != str(filters['municipio']):
+            return False
+        if filters.get('estado'):
+            city = City.query.get(school.city_id) if school.city_id else None
+            if not city or city.state != filters['estado']:
+                return False
+        return True
+
+    @staticmethod
     def _student_matches_form_scope(form, school_id, grade_id, class_id):
-        """Verifica se a colocação atual do aluno entra no escopo persistido do form."""
-        from app.socioeconomic_forms.services.filter_utils import filter_value_includes_id
+        """
+        Mesma regra da criação: o aluno entra se a turma/série/escola atuais
+        estiverem no escopo persistido (selected_* ou filters).
+        """
+        from app.socioeconomic_forms.services.filter_utils import (
+            form_scope_needs_geo_school_check,
+            student_matches_form_scope,
+        )
 
-        if form.form_type not in ('aluno-jovem', 'aluno-velho'):
-            return False
-        if not school_id or not grade_id:
-            return False
-
-        school_id = str(school_id)
-        grade_id = str(grade_id)
-        class_id = str(class_id) if class_id else None
-
-        selected_schools = DistributionService._normalize_id_list(form.selected_schools)
-        selected_grades = DistributionService._normalize_id_list(form.selected_grades)
-        selected_classes = DistributionService._normalize_id_list(form.selected_classes)
-        filters = form.filters or {}
-
-        if filters.get('turma'):
-            if not filter_value_includes_id(filters['turma'], class_id):
-                return False
-        if filters.get('serie') and not filter_value_includes_id(filters['serie'], grade_id):
-            return False
-        if filters.get('escola') and not filter_value_includes_id(filters['escola'], school_id):
-            # selected_schools pode ampliar o escopo; se filter.escola diverge, respeitar filter
-            if not selected_schools or school_id not in selected_schools:
-                return False
-
-        if selected_schools and school_id not in selected_schools:
+        if not student_matches_form_scope(
+            form.form_type,
+            school_id,
+            grade_id,
+            class_id,
+            selected_schools=form.selected_schools,
+            selected_grades=form.selected_grades,
+            selected_classes=form.selected_classes,
+            filters=form.filters,
+        ):
             return False
 
-        if selected_classes:
-            return bool(class_id and class_id in selected_classes)
-
-        if selected_grades:
-            return grade_id in selected_grades
-
-        # Sem séries/turmas no form: não dá para inferir com segurança
-        return False
+        if form_scope_needs_geo_school_check(form.selected_schools, form.filters):
+            return DistributionService._school_matches_geo_filters(
+                school_id, form.filters or {}
+            )
+        return True
 
     @staticmethod
     def _add_recipient_if_missing(form, user_id, school_id):
@@ -642,12 +655,13 @@ class DistributionService:
 
             school_id = str(student.school_id)
             class_id = str(student.class_id) if student.class_id else None
-            grade_id = str(student.grade_id) if student.grade_id else None
-
-            if not grade_id and student.class_id:
+            grade_id = None
+            if student.class_id:
                 cls = Class.query.get(student.class_id)
                 if cls and cls.grade_id:
                     grade_id = str(cls.grade_id)
+            if not grade_id and getattr(student, 'grade_id', None):
+                grade_id = str(student.grade_id)
 
             if not grade_id:
                 return 0
@@ -724,6 +738,13 @@ class DistributionService:
                     created,
                 )
             return created
+        except ValueError as e:
+            logging.warning(
+                "Não foi possível reprocessar destinatários do form %s: %s",
+                getattr(form, "id", None),
+                e,
+            )
+            return 0
         except SQLAlchemyError as e:
             if commit:
                 db.session.rollback()

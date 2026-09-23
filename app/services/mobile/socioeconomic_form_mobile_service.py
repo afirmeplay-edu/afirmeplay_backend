@@ -295,6 +295,20 @@ def list_students_for_form(
             400,
         )
 
+    try:
+        from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+        created = DistributionService.sync_missing_recipients_for_form(form, commit=False)
+        if created:
+            db.session.commit()
+    except Exception as sync_err:
+        logger.warning(
+            "Falha ao sincronizar recipients em list_students_for_form form=%s: %s",
+            form_id,
+            sync_err,
+            exc_info=True,
+        )
+
     q = FormRecipient.query.filter_by(form_id=form_id)
     if school_id:
         q = q.filter(FormRecipient.school_id == school_id)

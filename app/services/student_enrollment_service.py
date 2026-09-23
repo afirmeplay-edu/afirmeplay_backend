@@ -235,4 +235,15 @@ def transfer_class_to_school(
         if st.user and ns.city_id and st.user.city_id != ns.city_id:
             st.user.city_id = ns.city_id
         open_enrollment(sess, st.id, school_id=target_school_id, class_id=class_obj.id)
+        try:
+            from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+            DistributionService.ensure_recipients_for_student(st, commit=False)
+        except Exception as e:
+            logger.warning(
+                "Falha ao sincronizar recipients socioeconômicos do aluno %s após mover turma: %s",
+                getattr(st, "id", None),
+                e,
+                exc_info=True,
+            )
     return len(students)

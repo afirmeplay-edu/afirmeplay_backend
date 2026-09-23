@@ -271,6 +271,23 @@ def get_form(form_id):
         
         if not form:
             return jsonify({"error": "Questionário não encontrado"}), 404
+
+        try:
+            created = DistributionService.sync_missing_recipients_for_form(form, commit=False)
+            if created:
+                db.session.commit()
+                form = FormService.get_form(
+                    form_id,
+                    include_questions=True,
+                    include_statistics=include_statistics
+                )
+        except Exception as sync_err:
+            logging.warning(
+                "Falha ao sincronizar recipients em GET /forms/%s: %s",
+                form_id,
+                sync_err,
+                exc_info=True,
+            )
         
         form_dict = form.to_dict(include_questions=True, include_statistics=include_statistics)
         
@@ -395,6 +412,22 @@ def send_form(form_id):
 def list_recipients(form_id):
     """Lista destinatários do questionário"""
     try:
+        form = Form.query.get(form_id)
+        if not form:
+            return jsonify({"error": "Questionário não encontrado"}), 404
+
+        try:
+            created = DistributionService.sync_missing_recipients_for_form(form, commit=False)
+            if created:
+                db.session.commit()
+        except Exception as sync_err:
+            logging.warning(
+                "Falha ao sincronizar recipients em GET /forms/%s/recipients: %s",
+                form_id,
+                sync_err,
+                exc_info=True,
+            )
+
         status = request.args.get('status')
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))

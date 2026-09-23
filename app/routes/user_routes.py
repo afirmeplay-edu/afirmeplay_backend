@@ -1399,6 +1399,7 @@ def bulk_upload_students():
         
         # Conjunto de emails já atribuídos neste batch (para evitar duplicatas)
         emails_usados_no_batch = set()
+        schools_to_sync_forms = set()
         from app.services.mobile.student_registration_pin import (
             assign_registration_pin,
             collect_used_student_registrations,
@@ -1595,6 +1596,18 @@ def bulk_upload_students():
                     city_id=escola.city_id
                 )
                 db.session.add(password_log)
+
+                try:
+                    from app.services.student_enrollment_service import sync_enrollment_from_student_placement
+
+                    sync_enrollment_from_student_placement(db.session, novo_aluno)
+                except Exception as enroll_err:
+                    logging.warning(
+                        "Falha ao sincronizar matrícula/recipients do aluno importado %s: %s",
+                        novo_aluno.id,
+                        enroll_err,
+                        exc_info=True,
+                    )
                 
                 # Montar dados da resposta ANTES do commit (evita acessar objetos expirados após commit)
                 aluno_criado_info = {
@@ -1609,6 +1622,8 @@ def bulk_upload_students():
                 
                 # Commit para esta linha
                 db.session.commit()
+                if escola and escola.id:
+                    schools_to_sync_forms.add(str(escola.id))
                 
                 results["sucessos"] += 1
                 results["alunos_criados"].append(aluno_criado_info)
@@ -1624,6 +1639,19 @@ def bulk_upload_students():
                 })
                 logging.error(f"Erro ao processar linha {index + 2}: {str(e)}")
                 continue
+
+        if schools_to_sync_forms:
+            try:
+                from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+                for school_id in schools_to_sync_forms:
+                    DistributionService.sync_missing_recipients_for_school(school_id, commit=True)
+            except Exception as sync_err:
+                logging.warning(
+                    "Falha ao sincronizar recipients socioeconômicos após upload em lote: %s",
+                    sync_err,
+                    exc_info=True,
+                )
         
         # Preparar resposta
         if results["sucessos"] > 0:

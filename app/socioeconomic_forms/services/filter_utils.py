@@ -79,3 +79,66 @@ def apply_id_filter(query, column, value: Any):
     if len(ids) == 1:
         return query.filter(column == ids[0])
     return query.filter(column.in_(ids))
+
+
+def student_matches_form_scope(
+    form_type: Optional[str],
+    school_id: Optional[str],
+    grade_id: Optional[str],
+    class_id: Optional[str],
+    selected_schools: Any = None,
+    selected_grades: Any = None,
+    selected_classes: Any = None,
+    filters: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    True se a colocação atual do aluno entra no escopo persistido do form
+    (selected_* ou filters). Não consulta banco (município/estado ficam a cargo
+    do caller quando escola não vem explícita).
+    """
+    if form_type not in ('aluno-jovem', 'aluno-velho'):
+        return False
+    if not school_id or not grade_id:
+        return False
+
+    school_id = str(school_id)
+    grade_id = str(grade_id)
+    class_id = str(class_id) if class_id else None
+    filters = filters or {}
+
+    selected_schools = normalize_id_list(selected_schools)
+    selected_grades = normalize_id_list(selected_grades)
+    selected_classes = normalize_id_list(selected_classes)
+    filter_classes = normalize_id_list(filters.get('turma')) if filters.get('turma') else []
+    filter_grades = normalize_id_list(filters.get('serie')) if filters.get('serie') else []
+    filter_schools = normalize_id_list(filters.get('escola')) if filters.get('escola') else []
+
+    effective_classes = filter_classes or selected_classes
+    if effective_classes and (not class_id or class_id not in effective_classes):
+        return False
+
+    effective_grades = filter_grades or selected_grades
+    if effective_grades and grade_id not in effective_grades:
+        return False
+
+    if selected_schools and school_id not in selected_schools:
+        return False
+    if not selected_schools and filter_schools and school_id not in filter_schools:
+        return False
+
+    if effective_classes or effective_grades:
+        return True
+    return False
+
+
+def form_scope_needs_geo_school_check(
+    selected_schools: Any = None,
+    filters: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True quando o form não lista escola e o caller precisa checar município/estado."""
+    filters = filters or {}
+    if normalize_id_list(selected_schools):
+        return False
+    if filters.get('escola') and normalize_id_list(filters.get('escola')):
+        return False
+    return bool(filters.get('municipio') or filters.get('estado'))

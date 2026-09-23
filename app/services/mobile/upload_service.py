@@ -23,12 +23,32 @@ _TEST_VERSION_MISMATCH_BYPASS_IDS = frozenset(
 )
 _TEST_VERSION_MISMATCH_BYPASS_UNTIL = datetime(2026, 10, 2, 3, 3, 0)  # UTC, fim do pacote T8GN
 
+# Paliativo temporário: tablet aplica 1º regular em aluno ADAP I (mesmas 22 questões).
+# Remap só se o aluno já tiver vínculo com a ADAP I correspondente. Expira no mesmo prazo.
+_REGULAR_1ANO_TO_ADAP_I = {
+    "a5764cc4-3464-448f-9c63-c07d68c614b9": "797664a9-7f20-4b23-9319-d4daebbdff10",  # LP
+    "a7bdf340-1796-4f93-a1f2-5825394bd946": "0bef89ea-6329-42c7-9f83-7f4c0c00979e",  # MAT
+}
+
 
 def _test_version_mismatch_bypassed(test_id: str) -> bool:
     return (
         str(test_id) in _TEST_VERSION_MISMATCH_BYPASS_IDS
         and datetime.utcnow() < _TEST_VERSION_MISMATCH_BYPASS_UNTIL
     )
+
+
+def _remap_regular_1ano_to_adap_i(
+    student_id: str, test_id: str, school_id: str
+) -> Optional[str]:
+    if datetime.utcnow() >= _TEST_VERSION_MISMATCH_BYPASS_UNTIL:
+        return None
+    target = _REGULAR_1ANO_TO_ADAP_I.get(str(test_id))
+    if not target:
+        return None
+    if validate_student_test_link(student_id, target, school_id):
+        return target
+    return None
 
 
 def get_bundle_generation(
@@ -137,12 +157,25 @@ def process_one_submission(
             "message": "aluno não encontrado nesta escola",
         }
 
+    incoming_test_id = str(test_id)
+    remapped_from: Optional[str] = None
     if not validate_student_test_link(student_id, test_id, school_id):
-        return {
-            "submission_id": str(submission_uuid),
-            "status": "error",
-            "message": "vínculo aluno-prova inválido para esta escola",
-        }
+        remapped = _remap_regular_1ano_to_adap_i(student_id, test_id, school_id)
+        if remapped:
+            remapped_from = incoming_test_id
+            test_id = remapped
+            print(
+                f"[mobile/v1/sync/upload] remap regular→ADAP I — "
+                f"from={remapped_from} to={test_id} "
+                f"submission_id={submission_uuid} school_id={school_id} "
+                f"student_id={student_id}"
+            )
+        else:
+            return {
+                "submission_id": str(submission_uuid),
+                "status": "error",
+                "message": "vínculo aluno-prova inválido para esta escola",
+            }
 
     test = Test.query.get(test_id)
     if not test:
@@ -152,13 +185,25 @@ def process_one_submission(
             "message": "prova não encontrada",
         }
 
-    _, versions, _ = build_tests_questions_payload({test_id: test})
-    expected = versions.get(test_id)
+    # Hash do tablet é da prova regular; após remap validar contra o test_id original.
+    version_test_id = remapped_from or test_id
+    version_test = Test.query.get(version_test_id) if remapped_from else test
+    if remapped_from and not version_test:
+        return {
+            "submission_id": str(submission_uuid),
+            "status": "error",
+            "message": "prova não encontrada",
+        }
+    _, versions, _ = build_tests_questions_payload({version_test_id: version_test})
+    expected = versions.get(version_test_id)
     if not expected or expected != test_content_version:
-        if _test_version_mismatch_bypassed(test_id):
+        if _test_version_mismatch_bypassed(test_id) or _test_version_mismatch_bypassed(
+            version_test_id
+        ):
             print(
                 f"[mobile/v1/sync/upload] TEST_VERSION_MISMATCH bypass — "
-                f"test_id={test_id} submission_id={submission_uuid} "
+                f"test_id={test_id} version_test_id={version_test_id} "
+                f"submission_id={submission_uuid} "
                 f"school_id={school_id} student_id={student_id} "
                 f"until={_TEST_VERSION_MISMATCH_BYPASS_UNTIL.isoformat()}"
             )

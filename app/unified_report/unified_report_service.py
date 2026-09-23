@@ -2,14 +2,19 @@
 """
 Relatório Unificado — junta resultados de avaliação (digital/cartão) com leitura.
 
-Dependência explícita: este service chama FluencyResultsService._build_bundle
-(método interno do Alfabetômetro) para obter níveis de leitura em lote e o
-mesmo denominador de ICA (% LF / presentes) que o Afirme Ler. Não altera
-_build_bundle nem o scoring; apenas consome o retorno.
+Dependências explícitas (somente leitura/consumo; não alterar esses módulos):
+- FluencyResultsService._build_bundle — níveis de leitura em lote / ICA (% LF).
+- app.boletim_aluno.helpers.attach_disciplina_cards (+ build_disciplina_cards_computed)
+  — fallback de nota/proficiência/classificação por disciplina quando
+  subject_results / proficiency_by_subject estão ausentes (mesmo comportamento
+  do Boletim). Contagem de acertos espelha o loop de _build_one_boletim /
+  _build_one_boletim_answer_sheet, com StudentAnswer / detected_answers em lote
+  (sem N+1).
 """
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy.orm import joinedload
@@ -20,6 +25,9 @@ from app.afirme_ler.services.fluency_results_service import (
     evaluation_year,
 )
 from app.afirme_ler.services.parsing import EVALUATION_KIND_LABELS
+from app.boletim_aluno.helpers import attach_disciplina_cards, build_questao_boletim
+from app.boletim_aluno.services import _course_name_for_test, _load_objective_items
+from app.mapa_questoes.helpers import answer_to_letter, gabarito_letter
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.answerSheetResult import AnswerSheetResult
 from app.models.city import City
@@ -27,6 +35,7 @@ from app.models.evaluationResult import EvaluationResult
 from app.models.grades import Grade
 from app.models.school import School
 from app.models.student import Student
+from app.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
 from app.models.subject import Subject
 from app.models.test import Test
@@ -252,6 +261,240 @@ def _subject_payload_from_map(
     return out
 
 
+def _subject_map_missing(subject_map: Any) -> bool:
+    """True quando subject_results / proficiency_by_subject está ausente ou vazio."""
+    return not isinstance(subject_map, dict) or not subject_map
+
+
+def _empty_disciplina_payload(subject_ids: List[str]) -> Dict[str, Any]:
+    return {
+        sid: {"proficiencia": None, "nota": None, "classificacao": None}
+        for sid in subject_ids
+    }
+
+
+def _payload_from_boletim_cards(
+    cards: Optional[dict],
+) -> Dict[str, Any]:
+    data = cards if isinstance(cards, dict) else {}
+    return {
+        "proficiencia": _metric_cell(data.get("proficiencia")),
+        "nota": _metric_cell(data.get("nota")),
+        "classificacao": _metric_cell(data.get("nivel"), is_classification=True),
+    }
+
+
+def _payload_from_disciplina_blocos(
+    blocos: List[Dict[str, Any]],
+    subject_ids: List[str],
+) -> Dict[str, Any]:
+    """Mapeia cards do Boletim (por disciplina_id) para o contrato do unificado."""
+    by_id = {
+        str(b.get("disciplina_id")): b for b in blocos if b.get("disciplina_id") is not None
+    }
+    out = _empty_disciplina_payload(subject_ids)
+    for sid in subject_ids:
+        bloco = by_id.get(str(sid))
+        if bloco:
+            out[sid] = _payload_from_boletim_cards(bloco.get("cards"))
+    return out
+
+
+def _build_digital_disciplina_blocos(
+    objective_items: List[Dict[str, Any]],
+    answers: Dict[Any, Any],
+    *,
+    course_name: str,
+    use_simple_calculation: bool,
+) -> List[Dict[str, Any]]:
+    """
+    Espelha a montagem de questões/acertos de _build_one_boletim (sem skills)
+    e aplica attach_disciplina_cards com subject_data=None (fallback).
+    """
+    por_disciplina_map: Dict[str, Dict[str, Any]] = {}
+    disciplina_ordem: List[str] = []
+
+    for item in objective_items:
+        q = item["question"]
+        gabarito = gabarito_letter(q.correct_answer, q.alternatives)
+        ans = answers.get(q.id)
+        marked = None
+        if ans and ans.answer is not None and str(ans.answer).strip():
+            marked = answer_to_letter(ans.answer, q.alternatives)
+        respondeu = marked is not None
+        acertou = bool(gabarito and marked == gabarito)
+
+        disciplina_id = str(q.subject_id) if q.subject_id else "sem_disciplina"
+        disciplina_nome = q.subject.name if q.subject else "Sem disciplina"
+        if disciplina_id not in por_disciplina_map:
+            disciplina_ordem.append(disciplina_id)
+            por_disciplina_map[disciplina_id] = {
+                "disciplina_id": disciplina_id,
+                "disciplina": disciplina_nome,
+                "questoes": [],
+            }
+        por_disciplina_map[disciplina_id]["questoes"].append(
+            build_questao_boletim(
+                numero=item["numero"],
+                habilidade="—",
+                resposta=marked,
+                gabarito=gabarito,
+                acertou=acertou,
+                respondeu=respondeu,
+            )
+        )
+
+    blocos: List[Dict[str, Any]] = []
+    for disciplina_id in disciplina_ordem:
+        bloco = por_disciplina_map[disciplina_id]
+        # Dependência: attach_disciplina_cards (fallback = build_disciplina_cards_computed).
+        attach_disciplina_cards(
+            bloco,
+            None,
+            course_name=course_name,
+            use_simple_calculation=use_simple_calculation,
+        )
+        blocos.append(bloco)
+    return blocos
+
+
+def _compute_digital_fallback_batch(
+    test: Test,
+    student_ids_needing: List[str],
+    subject_ids: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Fallback digital em lote: 1 load de questões + 1 query de StudentAnswer.
+    Mesma contagem/cálculo do Boletim (_build_one_boletim + attach_disciplina_cards).
+    """
+    if not student_ids_needing:
+        return {}
+    objective_items, _skills = _load_objective_items(str(test.id))
+    answers_by_student: Dict[Any, Dict[Any, StudentAnswer]] = defaultdict(dict)
+    for row in StudentAnswer.query.filter(
+        StudentAnswer.test_id == str(test.id),
+        StudentAnswer.student_id.in_(student_ids_needing),
+    ).all():
+        answers_by_student[row.student_id][row.question_id] = row
+        answers_by_student[str(row.student_id)][row.question_id] = row
+
+    course_name = _course_name_for_test(test)
+    use_simple = getattr(test, "grade_calculation_type", None) == "simple"
+    out: Dict[str, Dict[str, Any]] = {}
+    for sid in student_ids_needing:
+        answers = answers_by_student.get(sid) or answers_by_student.get(str(sid)) or {}
+        blocos = _build_digital_disciplina_blocos(
+            objective_items,
+            answers,
+            course_name=course_name,
+            use_simple_calculation=use_simple,
+        )
+        out[str(sid)] = _payload_from_disciplina_blocos(blocos, subject_ids)
+    return out
+
+
+def _build_cartao_disciplina_blocos(
+    gab_map: Dict[int, str],
+    q_to_subject: Dict[int, str],
+    nome_por_disciplina: Dict[str, str],
+    detected: Dict[int, str],
+    *,
+    course_name: str,
+) -> List[Dict[str, Any]]:
+    """
+    Espelha _build_one_boletim_as (sem skills) + attach_disciplina_cards(None).
+    """
+    from app.mapa_questoes.answer_sheet import _resolve_subject_name
+
+    por_disciplina_map: Dict[str, Dict[str, Any]] = {}
+    disciplina_ordem: List[str] = []
+    question_numbers = sorted(gab_map.keys())
+
+    for qn in question_numbers:
+        gabarito = (gab_map.get(qn) or "").strip().upper() or None
+        marked = (detected.get(qn) or "").strip().upper() or None
+        respondeu = bool(marked)
+        acertou = bool(gabarito and marked == gabarito)
+
+        disciplina_id = str(q_to_subject.get(qn) or "geral")
+        disciplina_nome = _resolve_subject_name(
+            disciplina_id, nome_por_disciplina.get(disciplina_id, "Geral")
+        )
+        if disciplina_id not in por_disciplina_map:
+            disciplina_ordem.append(disciplina_id)
+            por_disciplina_map[disciplina_id] = {
+                "disciplina_id": disciplina_id,
+                "disciplina": disciplina_nome,
+                "questoes": [],
+            }
+        por_disciplina_map[disciplina_id]["questoes"].append(
+            build_questao_boletim(
+                numero=qn,
+                habilidade="—",
+                resposta=marked,
+                gabarito=gabarito,
+                acertou=acertou,
+                respondeu=respondeu,
+            )
+        )
+
+    blocos: List[Dict[str, Any]] = []
+    for disciplina_id in disciplina_ordem:
+        bloco = por_disciplina_map[disciplina_id]
+        attach_disciplina_cards(bloco, None, course_name=course_name)
+        blocos.append(bloco)
+    return blocos
+
+
+def _compute_cartao_fallback_batch(
+    gab: AnswerSheetGabarito,
+    results_needing: Dict[str, AnswerSheetResult],
+    subject_ids: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Fallback cartão em lote: gab_map/q_to_subject uma vez; detected_answers já no result.
+    Mesma lógica do Boletim (_build_one_boletim_as + attach_disciplina_cards).
+    """
+    if not results_needing:
+        return {}
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        infer_course_name_from_grade,
+        resolve_grade_name_for_proficiency,
+    )
+    from app.services.skills_map_service import (
+        _disciplinas_config_from_gabarito_blocks,
+        _gabarito_answer_map,
+        _parse_detected,
+        _question_num_to_subject_id,
+    )
+
+    gab_map = _gabarito_answer_map(gab)
+    disciplinas_config = _disciplinas_config_from_gabarito_blocks(getattr(gab, "blocks", None))
+    q_to_subject = _question_num_to_subject_id(disciplinas_config, list(gab_map.keys()))
+    nome_por_disciplina: Dict[str, str] = {}
+    for conf in disciplinas_config:
+        sid = conf.get("subject_id")
+        if sid:
+            nome_por_disciplina[str(sid)] = (
+                conf.get("subject_name") or conf.get("nome") or str(sid)
+            )
+    grade_name = resolve_grade_name_for_proficiency(gabarito_obj=gab)
+    course_name = infer_course_name_from_grade(grade_name) or "Anos Iniciais"
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for sid, result in results_needing.items():
+        detected = _parse_detected(result.detected_answers if result else None)
+        blocos = _build_cartao_disciplina_blocos(
+            gab_map,
+            q_to_subject,
+            nome_por_disciplina,
+            detected,
+            course_name=course_name,
+        )
+        out[str(sid)] = _payload_from_disciplina_blocos(blocos, subject_ids)
+    return out
+
+
 def _geral_payload(
     proficiency: Any,
     grade: Any,
@@ -446,6 +689,32 @@ def build_unified_report(
 
     subject_ids = [d["id"] for d in disciplinas]
 
+    # Fallback por disciplina (mesmo attach_disciplina_cards do Boletim) em lote,
+    # só para alunos com resultado e subject_results / proficiency_by_subject ausente.
+    fallback_por_aluno: Dict[str, Dict[str, Any]] = {}
+    if is_cartao:
+        needing: Dict[str, AnswerSheetResult] = {}
+        for student in students:
+            sid = str(student.id)
+            res = results_map.get(sid) or results_map.get(student.id)
+            if res is None:
+                continue
+            if _subject_map_missing(getattr(res, "proficiency_by_subject", None)):
+                needing[sid] = res
+        fallback_por_aluno = _compute_cartao_fallback_batch(gab, needing, subject_ids)
+    else:
+        needing_ids: List[str] = []
+        for student in students:
+            sid = str(student.id)
+            res = results_map.get(sid) or results_map.get(student.id)
+            if res is None:
+                continue
+            if _subject_map_missing(getattr(res, "subject_results", None)):
+                needing_ids.append(sid)
+        fallback_por_aluno = _compute_digital_fallback_batch(
+            test, needing_ids, subject_ids
+        )
+
     # Escopo de leitura alinhado ao Alfabetômetro (um id de escola/série/turma)
     escola_cut = escola_ids[0] if escola_ids and len(escola_ids) == 1 else None
     serie_cut = serie_ids[0] if serie_ids and len(serie_ids) == 1 else None
@@ -492,14 +761,12 @@ def build_unified_report(
                 else _geral_payload(None, None, None)
             )
 
-        por_disciplina = _subject_payload_from_map(subject_map, subject_ids)
         if sem_prova:
-            for sid_disc in subject_ids:
-                por_disciplina[sid_disc] = {
-                    "proficiencia": None,
-                    "nota": None,
-                    "classificacao": None,
-                }
+            por_disciplina = _empty_disciplina_payload(subject_ids)
+        elif sid in fallback_por_aluno:
+            por_disciplina = fallback_por_aluno[sid]
+        else:
+            por_disciplina = _subject_payload_from_map(subject_map, subject_ids)
 
         score = reading_by_student.get(sid)
         # Idêntico ao Alfabetômetro: avaliado = presente (status finalizada → presente).

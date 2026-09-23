@@ -22,6 +22,8 @@ from sqlalchemy.orm import joinedload
 from app.afirme_ler.scoring.levels import LEVEL_LF, nivel_label
 from app.afirme_ler.services.fluency_results_service import (
     FluencyResultsService,
+    _as_str_set,
+    _eval_ids,
     evaluation_year,
 )
 from app.afirme_ler.services.parsing import EVALUATION_KIND_LABELS
@@ -45,6 +47,7 @@ from app.participation_report.filters import (
 )
 from app.participation_report.services import _restrict_class_ids_for_user
 from app.permissions import get_user_permission_scope
+from app.unified_report.reading_mode_edicao import build_reading_by_edition
 from app.utils.class_label_helpers import format_grade_class_label
 from app.utils.decimal_helpers import round_to_two_decimals
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
@@ -576,10 +579,12 @@ def _build_reading_by_student(
     escola_id: Optional[str],
     serie_id: Optional[str],
     turma_id: Optional[str],
-) -> Tuple[Any, Dict[str, Any], dict]:
+) -> Tuple[Any, Dict[str, Any], dict, Any]:
     """
     Obtém scores de leitura via FluencyResultsService._build_bundle
     (mesma base do Alfabetômetro para a avaliação de leitura selecionada).
+
+    Retorna (aggregate, by_student, meta, selected_evaluation).
     """
     selected, _visible = FluencyResultsService._require_evaluation(
         user, {"avaliacaoId": avaliacao_leitura_id}
@@ -600,14 +605,27 @@ def _build_reading_by_student(
         if student is None:
             continue
         by_student[str(student.id)] = row.get("score")
+    titulo = selected.title or ""
     meta = {
+        "modo": "avaliacao",
         "id": selected.id,
-        "titulo": selected.title,
+        "titulo": titulo,
         "ano": ano,
         "edicao": edicao,
         "edicaoLabel": EVALUATION_KIND_LABELS.get(edicao, edicao),
+        "escopoMensagem": f"Mostrando as turmas da avaliação de leitura {titulo}",
     }
-    return bundle.get("aggregate"), by_student, meta
+    return bundle.get("aggregate"), by_student, meta, selected
+
+
+def _intersect_class_ids_with_reading_eval(
+    class_ids: List[str], evaluation: Any
+) -> List[str]:
+    """Modo A: turmas do filtro ∩ class_ids da ReadingEvaluation."""
+    eval_classes = _as_str_set(_eval_ids(evaluation, "class_ids"))
+    if not eval_classes:
+        return list(class_ids)
+    return [str(cid) for cid in class_ids if str(cid) in eval_classes]
 
 
 def build_unified_report(
@@ -617,7 +635,10 @@ def build_unified_report(
     municipio_id: str,
     report_entity_type: str,
     avaliacao_id: str,
-    avaliacao_leitura_id: str,
+    modo_leitura: str = "avaliacao",
+    avaliacao_leitura_id: Optional[str] = None,
+    leitura_ano: Optional[int] = None,
+    leitura_edicao: Optional[str] = None,
     escola_ids: Optional[List[str]] = None,
     serie_ids: Optional[List[str]] = None,
     turma_ids: Optional[List[str]] = None,
@@ -629,11 +650,20 @@ def build_unified_report(
     city = _assert_municipio(user, municipio_id, permissao)
     _ensure_tenant_schema(municipio_id)
 
+    modo = (modo_leitura or "avaliacao").strip().lower()
+    if modo not in ("avaliacao", "edicao"):
+        raise ValueError("modo_leitura deve ser 'avaliacao' ou 'edicao'")
+
     is_cartao = str(report_entity_type or "").strip().lower() == "answer_sheet"
     if not avaliacao_id:
         raise ValueError("Informe a avaliação (avaliacao)")
-    if not avaliacao_leitura_id:
+    if modo == "avaliacao" and not avaliacao_leitura_id:
         raise ValueError("Informe a avaliação de leitura (avaliacao_leitura)")
+    if modo == "edicao":
+        if leitura_ano is None:
+            raise ValueError("Informe o ano da leitura (ano)")
+        if not leitura_edicao:
+            raise ValueError("Informe a edição da leitura (edicao)")
     if not escola_ids and not turma_ids:
         raise ValueError("Informe ao menos escola ou turma para delimitar o universo de alunos")
     # Cut do Alfabetômetro aceita um id por nível; multi-select quebraria a paridade do ICA.
@@ -647,6 +677,21 @@ def build_unified_report(
     class_ids = _resolve_class_ids(
         user, permissao, municipio_id, escola_ids, serie_ids, turma_ids
     )
+
+    escola_cut = escola_ids[0] if escola_ids and len(escola_ids) == 1 else None
+    serie_cut = serie_ids[0] if serie_ids and len(serie_ids) == 1 else None
+    turma_cut = turma_ids[0] if turma_ids and len(turma_ids) == 1 else None
+
+    # Modo A: restringe o roster às turmas cobertas pela ReadingEvaluation.
+    reading_eval_selected = None
+    if modo == "avaliacao":
+        reading_eval_selected, _visible = FluencyResultsService._require_evaluation(
+            user, {"avaliacaoId": str(avaliacao_leitura_id)}
+        )
+        class_ids = _intersect_class_ids_with_reading_eval(
+            class_ids, reading_eval_selected
+        )
+
     students = (
         Student.query.filter(Student.class_id.in_(class_ids))
         .options(joinedload(Student.class_).joinedload(Class.grade))
@@ -715,25 +760,37 @@ def build_unified_report(
             test, needing_ids, subject_ids
         )
 
-    # Escopo de leitura alinhado ao Alfabetômetro (um id de escola/série/turma)
-    escola_cut = escola_ids[0] if escola_ids and len(escola_ids) == 1 else None
-    serie_cut = serie_ids[0] if serie_ids and len(serie_ids) == 1 else None
-    turma_cut = turma_ids[0] if turma_ids and len(turma_ids) == 1 else None
-
-    aggregate, reading_by_student, leitura_meta = _build_reading_by_student(
-        user,
-        city,
-        str(avaliacao_leitura_id),
-        escola_cut,
-        serie_cut,
-        turma_cut,
-    )
-
-    rotulo_leitura = _LEITURA_EDICAO_ROTULO.get(
-        leitura_meta["edicao"],
-        f"Leitura {leitura_meta.get('edicaoLabel') or leitura_meta['edicao']}",
-    )
-    rotulo_combinado = f"{eval_title} · {rotulo_leitura}"
+    if modo == "edicao":
+        # Modo B isolado (reading_mode_edicao) — roster = filtro original.
+        aggregate, reading_by_student, leitura_meta = build_reading_by_edition(
+            user,
+            city,
+            ano=int(leitura_ano),
+            edicao=str(leitura_edicao),
+            scope_class_ids=class_ids,
+            student_ids=student_ids,
+        )
+        rotulo_leitura = _LEITURA_EDICAO_ROTULO.get(
+            leitura_meta["edicao"],
+            f"Leitura {leitura_meta.get('edicaoLabel') or leitura_meta['edicao']}",
+        )
+        rotulo_combinado = (
+            f"{eval_title} · {rotulo_leitura} — todas as avaliações de {leitura_meta['ano']}"
+        )
+    else:
+        aggregate, reading_by_student, leitura_meta, _selected = _build_reading_by_student(
+            user,
+            city,
+            str(avaliacao_leitura_id),
+            escola_cut,
+            serie_cut,
+            turma_cut,
+        )
+        rotulo_leitura = _LEITURA_EDICAO_ROTULO.get(
+            leitura_meta["edicao"],
+            f"Leitura {leitura_meta.get('edicaoLabel') or leitura_meta['edicao']}",
+        )
+        rotulo_combinado = f"{eval_title} · {rotulo_leitura}"
 
     alunos_payload: List[Dict[str, Any]] = []
     alunos_com_leitura = 0
@@ -811,8 +868,8 @@ def build_unified_report(
         else 0.0
     )
 
-    # Comparação silenciosa com o Alfabetômetro (mesmo cut / _build_bundle).
-    if aggregate is not None:
+    # Comparação com o Alfabetômetro — somente modo A (uma ReadingEvaluation).
+    if modo == "avaliacao" and aggregate is not None:
         alf_pct = float(getattr(aggregate, "leitores_fluentes_pct", 0.0) or 0.0)
         if float(ica_pct_lf) != float(alf_pct):
             logger.warning(

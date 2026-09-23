@@ -5,7 +5,7 @@ Rotas do Relatório Unificado.
 GET /unified-report/opcoes-filtros
 GET /unified-report/dados
 
-Contrato de resposta (GET /dados) — exemplo:
+Contrato de resposta (GET /dados) — exemplo (modo A / avaliacao):
 
 {
   "metadados": {
@@ -19,11 +19,13 @@ Contrato de resposta (GET /dados) — exemplo:
       "reportEntityType": "digital"
     },
     "leitura": {
+      "modo": "avaliacao",
       "id": "...",
       "titulo": "Fluência 2026 Formativa",
       "ano": 2026,
       "edicao": "formativa",
-      "edicaoLabel": "Avaliação Formativa"
+      "edicaoLabel": "Avaliação Formativa",
+      "escopoMensagem": "Mostrando as turmas da avaliação de leitura …"
     },
     "escopo": { "escolas": ["..."], "series": [], "turmas": ["..."] }
   },
@@ -35,36 +37,11 @@ Contrato de resposta (GET /dados) — exemplo:
     "icaPctLf": 62.22,
     "alunosSemLeitura": 5
   },
-  "alunos": [
-    {
-      "id": "...",
-      "nome": "Maria Silva",
-      "turmaId": "...",
-      "turmaNome": "5º Ano A",
-      "escolaId": "...",
-      "porDisciplina": {
-        "<subject_id>": {
-          "proficiencia": 250.5,
-          "nota": 7.2,
-          "classificacao": "Adequado"
-        }
-      },
-      "geral": {
-        "proficiencia": 240.0,
-        "nota": 6.8,
-        "classificacao": "Básico"
-      },
-      "nivelLeitura": "LF",
-      "nivelLeituraLabel": "Leitor Fluente",
-      "alfabetizado": true,
-      "semProva": false,
-      "semLeitura": false
-    }
-  ]
+  "alunos": [ … ]
 }
 
-Campos null em proficiencia/nota/classificacao/nivelLeitura/alfabetizado
-devem ser exibidos no frontend como "não avaliado".
+Modo B (modo_leitura=edicao): leitura.avaliacoesIncluidas + rotuloCombinado
+com sufixo "— todas as avaliações de {ano}".
 
 icaPctLf = % de LF entre presentes com leitura (mesmo cálculo de
 leitoresFluentesPct do Alfabetômetro). NÃO é o ica_score/Leiturômetro.
@@ -143,11 +120,14 @@ def dados_relatorio():
     """
     Relatório unificado no escopo.
 
-    Obrigatórios:
+    Obrigatórios comuns:
       - estado, municipio
       - avaliacao (test_id ou gabarito_id)
-      - avaliacao_leitura (ReadingEvaluation.id) — mesma seleção do Alfabetômetro
       - escola e/ou turma (uma escola / uma turma para paridade do ICA)
+
+    Modo de leitura (modo_leitura=avaliacao|edicao, padrão avaliacao):
+      - avaliacao: avaliacao_leitura (ReadingEvaluation.id)
+      - edicao: ano + edicao (entrada|formativa|saida)
 
     Opcionais:
       - report_entity_type=answer_sheet (default: digital)
@@ -177,16 +157,55 @@ def dados_relatorio():
         if len(avaliacao_ids) != 1:
             return jsonify({"error": "Informe exatamente uma avaliação"}), 400
 
-        leitura_ids = _parse_multi(
-            "avaliacao_leitura",
-            "avaliacaoLeitura",
-            "avaliacao_leitura_id",
-            "avaliacaoLeituraId",
-        )
-        if len(leitura_ids) != 1:
+        modo_leitura = (
+            request.args.get("modo_leitura")
+            or request.args.get("modoLeitura")
+            or "avaliacao"
+        ).strip().lower()
+        if modo_leitura not in ("avaliacao", "edicao"):
             return jsonify(
-                {"error": "Informe exatamente uma avaliação de leitura (avaliacao_leitura)"}
+                {"error": "modo_leitura deve ser 'avaliacao' ou 'edicao'"}
             ), 400
+
+        avaliacao_leitura_id = None
+        leitura_ano = None
+        leitura_edicao = None
+
+        if modo_leitura == "avaliacao":
+            leitura_ids = _parse_multi(
+                "avaliacao_leitura",
+                "avaliacaoLeitura",
+                "avaliacao_leitura_id",
+                "avaliacaoLeituraId",
+            )
+            if len(leitura_ids) != 1:
+                return jsonify(
+                    {
+                        "error": "Informe exatamente uma avaliação de leitura "
+                        "(avaliacao_leitura)"
+                    }
+                ), 400
+            avaliacao_leitura_id = leitura_ids[0]
+        else:
+            ano_raw = (
+                request.args.get("ano")
+                or request.args.get("leitura_ano")
+                or request.args.get("leituraAno")
+            )
+            edicao_raw = (
+                request.args.get("edicao")
+                or request.args.get("leitura_edicao")
+                or request.args.get("leituraEdicao")
+            )
+            if not ano_raw:
+                return jsonify({"error": "Informe o ano da leitura (ano)"}), 400
+            if not edicao_raw:
+                return jsonify({"error": "Informe a edição da leitura (edicao)"}), 400
+            try:
+                leitura_ano = int(ano_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "ano deve ser um inteiro"}), 400
+            leitura_edicao = str(edicao_raw).strip()
 
         data = build_unified_report(
             user=user,
@@ -194,7 +213,10 @@ def dados_relatorio():
             municipio_id=municipio,
             report_entity_type=report_entity_type,
             avaliacao_id=avaliacao_ids[0],
-            avaliacao_leitura_id=leitura_ids[0],
+            modo_leitura=modo_leitura,
+            avaliacao_leitura_id=avaliacao_leitura_id,
+            leitura_ano=leitura_ano,
+            leitura_edicao=leitura_edicao,
             escola_ids=_parse_multi("escolas", "escola") or None,
             serie_ids=_parse_multi("series", "serie") or None,
             turma_ids=_parse_multi("turmas", "turma") or None,

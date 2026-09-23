@@ -115,6 +115,65 @@ class TestEvaluationResultsParticipation(unittest.TestCase):
         self.assertEqual(aluno["total_acertos_geral"], 29)
         self.assertEqual(aluno["total_questoes_geral"], 52)
 
+    def test_calcular_dados_gerais_ignora_disciplina_ausente_do_grupo(self):
+        questoes_por_disciplina = {
+            "portugues": {
+                "alunos": [
+                    {
+                        "id": "aluno-1",
+                        "nome": "Aluno 1",
+                        "escola_id": "escola-a",
+                        "escola": "Escola A",
+                        "serie": "1º Ano",
+                        "turma": "A",
+                        "nota": 7.0,
+                        "proficiencia": 210.0,
+                        "total_acertos": 14,
+                        "total_respondidas": 20,
+                        "total_questoes_disciplina": 20,
+                        "status": "concluida",
+                    }
+                ]
+            },
+            "matematica": {
+                "alunos": [
+                    {
+                        "id": "aluno-1",
+                        "nome": "Aluno 1",
+                        "escola_id": "escola-a",
+                        "escola": "Escola A",
+                        "serie": "1º Ano",
+                        "turma": "A",
+                        "nota": None,
+                        "proficiencia": None,
+                        "total_acertos": 0,
+                        "total_respondidas": 0,
+                        "total_questoes_disciplina": 20,
+                        "status": "pendente",
+                        "_ausente_grupo": True,
+                    }
+                ]
+            },
+        }
+        participacao = {
+            "aluno-1": {
+                "provas_grupo": 2,
+                "provas_realizadas": 1,
+                "completo": False,
+                "provas": [],
+            }
+        }
+        result = _calcular_dados_gerais_alunos(
+            questoes_por_disciplina,
+            "Anos Iniciais",
+            participacao_por_aluno=participacao,
+        )
+        aluno = result["alunos"][0]
+        self.assertEqual(aluno["status_geral"], "pendente")
+        self.assertEqual(aluno["nota_geral"], 7.0)
+        self.assertEqual(aluno["total_questoes_geral"], 20)
+        self.assertIn("participacao", aluno)
+
 
 if __name__ == "__main__":
     unittest.main()

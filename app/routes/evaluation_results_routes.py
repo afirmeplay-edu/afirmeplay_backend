@@ -65,6 +65,14 @@ from app.utils.school_equal_weight_means import (
     granularidade_to_hierarchical_target,
     hierarchical_mean_grade_and_proficiency,
 )
+from app.services.evaluation_group_service import (
+    apply_test_id_filter,
+    escopo_test_ids,
+    merge_student_group_results,
+    parse_avaliacao_ids,
+    resolve_evaluation_group,
+    test_id_clause,
+)
 from sqlalchemy import cast, String, or_, and_, not_
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app.models.classTest import ClassTest
@@ -600,7 +608,9 @@ def listar_avaliacoes():
     Query Parameters:
     - estado (obrigatório): Estado geográfico (não pode ser 'all')
     - municipio (obrigatório): Município do estado
-    - avaliacao (opcional): ID da avaliação específica ou 'all' para todas as avaliações
+    - avaliacao (opcional): ID da avaliação específica ou 'all' para todas as avaliações.
+      Com group_id, enviar 2+ IDs separados por vírgula (mesma série).
+    - group_id (opcional): Se 1/true, junta os IDs de avaliacao num único cálculo (GERAL = média das disciplinas).
     - escola (opcional): ID da escola ou 'all' para todas as escolas
     - serie (opcional): ID da série ou 'all' para todas as séries
     - turma (opcional): ID da turma ou 'all' para todas as turmas
@@ -629,6 +639,8 @@ def listar_avaliacoes():
             return jsonify({"error": "Usuário não encontrado"}), 401
 
         periodo_raw = request.args.get("periodo")
+        group_id_param = request.args.get("group_id")
+        grupo_ctx = None
         if not is_answer_sheet_report_entity():
             if periodo_raw is not None and str(periodo_raw).strip():
                 try:
@@ -647,6 +659,11 @@ def listar_avaliacoes():
         serie = request.args.get('serie')
         turma = request.args.get('turma')
         avaliacao = request.args.get('avaliacao')
+        if not is_answer_sheet_report_entity():
+            grupo_ctx, grupo_err = resolve_evaluation_group(avaliacao, group_id_param)
+            if grupo_err:
+                return jsonify({"error": grupo_err[0]}), grupo_err[1]
+        avaliacao_ids = list(grupo_ctx.test_ids) if grupo_ctx else parse_avaliacao_ids(avaliacao)
         ai_analises = (request.args.get("ai_analises") or "").strip().lower() in {"1", "true", "yes"}
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('per_page', 10, type=int)
@@ -696,7 +713,7 @@ def listar_avaliacoes():
                 .join(School, School.city_id == City.id)
                 .join(Class, School.id == cast(Class.school_id, String))
                 .join(ClassTest, Class.id == ClassTest.class_id)
-                .filter(ClassTest.test_id == str(avaliacao))
+                .filter(ClassTest.test_id == str((avaliacao_ids[0] if avaliacao_ids else avaliacao)))
                 .first()
             )
             if city_from_eval:
@@ -738,6 +755,11 @@ def listar_avaliacoes():
         
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+        if avaliacao_ids:
+            scope_info["avaliacao_ids"] = avaliacao_ids
+        if grupo_ctx:
+            scope_info["grupo"] = grupo_ctx.payload
+            scope_info["grupo_tests_info"] = grupo_ctx.tests_info
         
         # Atualizar a variável escola com a escola padrão definida pelo escopo (se houver)
         if scope_info.get('escola') and not escola:
@@ -1018,12 +1040,15 @@ def listar_avaliacoes():
                     query_base = query_base.filter(City.name.ilike(f"%{municipio}%"))
             
             if avaliacao and avaliacao.lower() != 'all':
-                # Tentar filtrar por ID primeiro, depois por título
-                test_filter = Test.query.get(avaliacao)
-                if test_filter:
-                    query_base = query_base.filter(Test.id == avaliacao)
+                if avaliacao_ids and (grupo_ctx or len(avaliacao_ids) > 1):
+                    query_base = query_base.filter(Test.id.in_(avaliacao_ids))
                 else:
-                    query_base = query_base.filter(Test.title.ilike(f"%{avaliacao}%"))
+                    # Tentar filtrar por ID primeiro, depois por título
+                    test_filter = Test.query.get(avaliacao)
+                    if test_filter:
+                        query_base = query_base.filter(Test.id == avaliacao)
+                    else:
+                        query_base = query_base.filter(Test.title.ilike(f"%{avaliacao}%"))
             
             if escola and escola.lower() != 'all':
                 # Tentar filtrar por ID primeiro, depois por nome
@@ -1131,9 +1156,12 @@ def listar_avaliacoes():
                         if city_filter:
                             query_base = query_base.filter(City.id == municipio)
                     if avaliacao and avaliacao.lower() != 'all':
-                        test_filter = Test.query.get(avaliacao)
-                        if test_filter:
-                            query_base = query_base.filter(Test.id == avaliacao)
+                        if avaliacao_ids and (grupo_ctx or len(avaliacao_ids) > 1):
+                            query_base = query_base.filter(Test.id.in_(avaliacao_ids))
+                        else:
+                            test_filter = Test.query.get(avaliacao)
+                            if test_filter:
+                                query_base = query_base.filter(Test.id == avaliacao)
                     if user['role'] == 'professor':
                         # Para professores, usar a nova lógica de permissões
                         from app.models.teacher import Teacher
@@ -1230,9 +1258,12 @@ def listar_avaliacoes():
                         if city_filter:
                             query_base = query_base.filter(City.id == municipio)
                     if avaliacao and avaliacao.lower() != 'all':
-                        test_filter = Test.query.get(avaliacao)
-                        if test_filter:
-                            query_base = query_base.filter(Test.id == avaliacao)
+                        if avaliacao_ids and (grupo_ctx or len(avaliacao_ids) > 1):
+                            query_base = query_base.filter(Test.id.in_(avaliacao_ids))
+                        else:
+                            test_filter = Test.query.get(avaliacao)
+                            if test_filter:
+                                query_base = query_base.filter(Test.id == avaliacao)
                     if permissao['scope'] == 'escola' and user['role'] == 'professor':
                         # Professor vê avaliações que criou OU que foram aplicadas em suas escolas/turmas
                         from app.models.teacher import Teacher
@@ -1302,13 +1333,21 @@ def listar_avaliacoes():
             restrict_class_ids = set(professor_allowed_class_ids)
 
         if avaliacao and avaliacao.lower() != 'all':
-            tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
-                avaliacao, scope_info, nivel_granularidade, user, restrict_class_ids
-            )
+            if grupo_ctx:
+                tabela_detalhada = _gerar_tabela_detalhada_grupo(
+                    grupo_ctx.test_ids, scope_info, nivel_granularidade, user, restrict_class_ids
+                )
+                ranking_alunos = _calcular_ranking_global_grupo(
+                    grupo_ctx.test_ids, scope_info, nivel_granularidade, user, restrict_class_ids
+                )
+            else:
+                tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
+                    avaliacao, scope_info, nivel_granularidade, user, restrict_class_ids
+                )
 
-            ranking_alunos = _calcular_ranking_global_alunos(
-                avaliacao, scope_info, nivel_granularidade, user, restrict_class_ids
-            )
+                ranking_alunos = _calcular_ranking_global_alunos(
+                    avaliacao, scope_info, nivel_granularidade, user, restrict_class_ids
+                )
         
         periodo_raw_clean = (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None)
 
@@ -1339,6 +1378,8 @@ def listar_avaliacoes():
             "ranking": ranking_alunos,
             "opcoes_proximos_filtros": opcoes_proximos_filtros
         }
+        if grupo_ctx:
+            response_payload["grupo"] = grupo_ctx.payload
 
         if ai_analises:
             try:
@@ -1440,6 +1481,7 @@ def listar_avaliacoes():
                         "turma": turma,
                         "avaliacao": avaliacao,
                         "periodo": periodo_raw_clean,
+                        "group_id": group_id_param,
                         "page": page,
                         "per_page": per_page,
                     },
@@ -1508,7 +1550,12 @@ def listar_avaliacoes_analise_ia():
         serie = request.args.get("serie")
         turma = request.args.get("turma")
         avaliacao = request.args.get("avaliacao")
+        group_id_param = request.args.get("group_id")
         periodo_raw = request.args.get("periodo")
+        grupo_ctx, grupo_err = resolve_evaluation_group(avaliacao, group_id_param)
+        if grupo_err:
+            return jsonify({"error": grupo_err[0]}), grupo_err[1]
+        avaliacao_ids = list(grupo_ctx.test_ids) if grupo_ctx else parse_avaliacao_ids(avaliacao)
 
         if not estado or str(estado).lower() == "all":
             return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
@@ -1555,6 +1602,7 @@ def listar_avaliacoes_analise_ia():
                 "turma": turma,
                 "avaliacao": avaliacao,
                 "periodo": periodo_raw_clean,
+                "group_id": group_id_param,
             },
         )
 
@@ -1586,6 +1634,11 @@ def listar_avaliacoes_analise_ia():
         scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+        if avaliacao_ids:
+            scope_info["avaliacao_ids"] = avaliacao_ids
+        if grupo_ctx:
+            scope_info["grupo"] = grupo_ctx.payload
+            scope_info["grupo_tests_info"] = grupo_ctx.tests_info
 
         permissao = verificar_permissao_filtros(user)
         if not permissao.get("permitted"):
@@ -1606,7 +1659,10 @@ def listar_avaliacoes_analise_ia():
         q = ClassTest.query
         q = _apply_class_test_application_period(q, periodo_bounds_dados)
         if avaliacao and str(avaliacao).lower() != "all":
-            q = q.filter(ClassTest.test_id == str(avaliacao))
+            if avaliacao_ids and (grupo_ctx or len(avaliacao_ids) > 1):
+                q = q.filter(ClassTest.test_id.in_(avaliacao_ids))
+            else:
+                q = q.filter(ClassTest.test_id == str(avaliacao))
 
         todas_avaliacoes_escopo = q.all()
         estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(
@@ -1618,9 +1674,14 @@ def listar_avaliacoes_analise_ia():
         tabela_detalhada = {}
         restrict_class_ids = None
         if avaliacao and str(avaliacao).lower() != "all":
-            tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
-                str(avaliacao), scope_info, nivel_granularidade, user, restrict_class_ids
-            )
+            if grupo_ctx:
+                tabela_detalhada = _gerar_tabela_detalhada_grupo(
+                    grupo_ctx.test_ids, scope_info, nivel_granularidade, user, restrict_class_ids
+                )
+            else:
+                tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
+                    str(avaliacao), scope_info, nivel_granularidade, user, restrict_class_ids
+                )
 
         serie_ano = (
             str(serie).strip()
@@ -2082,6 +2143,7 @@ def _calcular_dados_gerais_alunos(
     questoes_por_disciplina: dict,
     course_name: str = "Anos Iniciais",
     results_dict: Optional[Dict[Any, Any]] = None,
+    participacao_por_aluno: Optional[Dict[Any, Any]] = None,
 ) -> dict:
     """
     Consolida totais gerais por aluno a partir das disciplinas.
@@ -2111,6 +2173,9 @@ def _calcular_dados_gerais_alunos(
                         "total_questoes_geral": 0,
                         "total_respondidas_geral": 0
                     }
+
+                if aluno_data.get("_ausente_grupo"):
+                    continue
                 
                 # Acumular dados das disciplinas (já arredondados para 2 casas decimais)
                 dados_alunos[aluno_id]["notas_disciplinas"].append(aluno_data["nota"])
@@ -2154,7 +2219,11 @@ def _calcular_dados_gerais_alunos(
                 percentual_acertos_geral = 0.0
             
             # Determinar status geral
-            status_geral = "concluida" if dados["total_respondidas_geral"] > 0 else "pendente"
+            participacao = (participacao_por_aluno or {}).get(aluno_id)
+            if participacao:
+                status_geral = "concluida" if participacao.get("completo") else "pendente"
+            else:
+                status_geral = "concluida" if dados["total_respondidas_geral"] > 0 else "pendente"
             
             aluno_geral = {
                 "id": dados["id"],
@@ -2173,6 +2242,8 @@ def _calcular_dados_gerais_alunos(
                 "percentual_acertos_geral": percentual_acertos_geral,  # Já arredondado para 2 casas decimais
                 "status_geral": status_geral
             }
+            if participacao:
+                aluno_geral["participacao"] = participacao
             
             alunos_gerais.append(aluno_geral)
         
@@ -2542,7 +2613,15 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
         if is_valid_filter(avaliacao):
             # Buscar na tabela class_test todas as entradas para esta avaliação
             # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter avaliacao para string
-            class_tests_avaliacao = ClassTest.query.filter_by(test_id=str(avaliacao)).all()
+            avaliacao_ids_escopo = parse_avaliacao_ids(avaliacao)
+            if len(avaliacao_ids_escopo) > 1:
+                class_tests_avaliacao = ClassTest.query.filter(
+                    ClassTest.test_id.in_(avaliacao_ids_escopo)
+                ).all()
+            else:
+                class_tests_avaliacao = ClassTest.query.filter_by(
+                    test_id=str(avaliacao_ids_escopo[0] if avaliacao_ids_escopo else avaliacao)
+                ).all()
             
             if class_tests_avaliacao:
                 # Extrair os class_ids únicos
@@ -2635,6 +2714,9 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
             'turma': turma,
             'avaliacao': avaliacao
         }
+        avaliacao_ids_escopo = parse_avaliacao_ids(avaliacao) if is_valid_filter(avaliacao) else []
+        if avaliacao_ids_escopo:
+            scope_result['avaliacao_ids'] = avaliacao_ids_escopo
         logging.info(f"Escopo de busca determinado: {scope_result}")
         return scope_result
         
@@ -2649,6 +2731,20 @@ def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, n
     CORRIGIDO: Agora aplica filtros de granularidade
     """
     try:
+        grupo_ids = (scope_info or {}).get("avaliacao_ids") or []
+        if (scope_info or {}).get("grupo") and len(grupo_ids) > 1:
+            scoped = dict(scope_info or {})
+            scoped.pop("grupo", None)
+            scoped.pop("avaliacao_ids", None)
+            rows: List[Dict[str, Any]] = []
+            for tid in grupo_ids:
+                subset = [ct for ct in class_tests if str(ct.test_id) == str(tid)]
+                if subset:
+                    rows.extend(
+                        _calcular_estatisticas_por_disciplina(subset, scoped, nivel_granularidade)
+                    )
+            return rows
+
         from app.services.evaluation_result_service import EvaluationResultService
         from app.models.school import School
         from app.models.studentClass import Class
@@ -2808,6 +2904,22 @@ def _calcular_estatisticas_gerais_por_disciplina_escopo(
 
         if not class_tests:
             return []
+
+        grupo_ids = (scope_info or {}).get("avaliacao_ids") or []
+        if (scope_info or {}).get("grupo") and len(grupo_ids) > 1:
+            scoped = dict(scope_info or {})
+            scoped.pop("grupo", None)
+            scoped.pop("avaliacao_ids", None)
+            rows: List[Dict[str, Any]] = []
+            for tid in grupo_ids:
+                subset = [ct for ct in class_tests if str(ct.test_id) == str(tid)]
+                if subset:
+                    rows.extend(
+                        _calcular_estatisticas_gerais_por_disciplina_escopo(
+                            subset, scoped, nivel_granularidade
+                        )
+                    )
+            return rows
 
         test = class_tests[0].test
         if not test or not getattr(test, "subjects_info", None):
@@ -3048,6 +3160,8 @@ def _get_empty_statistics_gerais(scope_info, nivel_granularidade):
         "total_avaliacoes": 0,
         "total_alunos": 0,
         "alunos_participantes": 0,
+        "alunos_completos": 0,
+        "alunos_parciais": 0,
         "alunos_pendentes": 0,
         "alunos_pendentes_detalhe": [],
         "alunos_ausentes": 0,
@@ -3149,7 +3263,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                            .join(ClassTest, Class.id == ClassTest.class_id)\
                                            .join(Test, ClassTest.test_id == Test.id)\
                                            .join(City, School.city_id == City.id)\
-                                           .filter(Test.id == avaliacao_id)\
+                                           .filter(test_id_clause(Test.id, avaliacao_id))\
                                            .filter(City.id == municipio_id)
                 
                 # Aplicar filtros baseados no papel do usuário
@@ -3202,7 +3316,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
                                              .join(City, School.city_id == City.id)\
-                                             .filter(Test.id == avaliacao_id)\
+                                             .filter(test_id_clause(Test.id, avaliacao_id))\
                                              .filter(School.id == escola_id)\
                                              .filter(City.id == municipio_id)\
                                              .distinct()
@@ -3215,7 +3329,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
                                              .join(City, School.city_id == City.id)\
-                                             .filter(Test.id == avaliacao_id)\
+                                             .filter(test_id_clause(Test.id, avaliacao_id))\
                                              .filter(City.id == municipio_id)\
                                              .distinct()
                 
@@ -3256,7 +3370,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .join(School, School.id == cast(Class.school_id, String))\
                                              .join(City, School.city_id == City.id)\
                                              .join(Grade, Class.grade_id == Grade.id)\
-                                             .filter(Test.id == avaliacao_id)\
+                                             .filter(test_id_clause(Test.id, avaliacao_id))\
                                              .filter(School.id == escola_id)\
                                              .filter(Grade.id == serie_id)\
                                              .filter(City.id == municipio_id)\
@@ -3268,7 +3382,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
                                              .join(City, School.city_id == City.id)\
-                                             .filter(Test.id == avaliacao_id)\
+                                             .filter(test_id_clause(Test.id, avaliacao_id))\
                                              .filter(School.id == escola_id)\
                                              .filter(City.id == municipio_id)\
                                              .distinct()
@@ -3280,7 +3394,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .join(School, School.id == cast(Class.school_id, String))\
                                              .join(City, School.city_id == City.id)\
                                              .join(Grade, Class.grade_id == Grade.id)\
-                                             .filter(Test.id == avaliacao_id)\
+                                             .filter(test_id_clause(Test.id, avaliacao_id))\
                                              .filter(Grade.id == serie_id)\
                                              .filter(City.id == municipio_id)\
                                              .distinct()
@@ -3291,7 +3405,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .join(Test, ClassTest.test_id == Test.id)\
                                              .join(School, School.id == cast(Class.school_id, String))\
                                              .join(City, School.city_id == City.id)\
-                                             .filter(Test.id == avaliacao_id)\
+                                             .filter(test_id_clause(Test.id, avaliacao_id))\
                                              .filter(City.id == municipio_id)\
                                              .distinct()
                 
@@ -5881,7 +5995,7 @@ def _format_avaliacoes_opcoes_filtro(avaliacoes_rows: List) -> List[Dict[str, An
     test_ids = [str(row[0]) for row in avaliacoes_rows]
     tests = (
         Test.query.filter(Test.id.in_(test_ids))
-        .options(joinedload(Test.subject_rel))
+        .options(joinedload(Test.subject_rel), joinedload(Test.grade))
         .all()
     )
     tests_by_id = {str(t.id): t for t in tests}
@@ -5902,11 +6016,17 @@ def _format_avaliacoes_opcoes_filtro(avaliacoes_rows: List) -> List[Dict[str, An
         if not disciplinas and legacy_subject:
             disciplinas = [legacy_subject]
 
+        grade_id = str(test.grade_id) if test and test.grade_id else None
+        grade_nome = ""
+        if test and getattr(test, "grade", None):
+            grade_nome = test.grade.name or ""
         result.append({
             "id": tid,
             "titulo": titulo,
             "disciplina": disciplinas[0] if disciplinas else "",
             "disciplinas": disciplinas,
+            "grade_id": grade_id,
+            "grade_nome": grade_nome,
         })
     return result
 
@@ -6033,8 +6153,8 @@ def _obter_escolas_por_avaliacao(
                            .join(ClassTest, Class.id == ClassTest.class_id)\
                            .join(Test, ClassTest.test_id == Test.id)\
                            .join(City, School.city_id == City.id)\
-                           .filter(Test.id == avaliacao_id)\
                            .filter(City.id == city.id)
+    query_escolas = apply_test_id_filter(query_escolas, Test.id, avaliacao_id)
     query_escolas = _apply_class_test_application_period(query_escolas, periodo_bounds)
 
     # Aplicar filtros baseados no papel do usuário
@@ -6105,9 +6225,9 @@ def _obter_series_por_escola(
                          .join(Test, ClassTest.test_id == Test.id)\
                          .join(School, School.id == cast(Class.school_id, String))\
                          .join(City, School.city_id == City.id)\
-                         .filter(Test.id == avaliacao_id)\
                          .filter(School.id == escola_id)\
                          .filter(City.id == city.id)
+    query_series = apply_test_id_filter(query_series, Test.id, avaliacao_id)
     query_series = _apply_class_test_application_period(query_series, periodo_bounds)
 
     series = query_series.distinct().all()
@@ -6153,10 +6273,10 @@ def _obter_turmas_por_serie(
                          .join(School, School.id == cast(Class.school_id, String))\
                          .join(City, School.city_id == City.id)\
                          .join(Grade, Class.grade_id == Grade.id)\
-                         .filter(Test.id == avaliacao_id)\
                          .filter(School.id == escola_id)\
                          .filter(Grade.id == serie_id)\
                          .filter(City.id == city.id)
+    query_turmas = apply_test_id_filter(query_turmas, Test.id, avaliacao_id)
     query_turmas = _apply_class_test_application_period(query_turmas, periodo_bounds)
 
     # Aplicar filtros específicos para professores
@@ -6215,9 +6335,9 @@ def _obter_series_por_avaliacao_municipio(
         .join(Test, ClassTest.test_id == Test.id)
         .join(School, School.id == cast(Class.school_id, String))
         .join(City, School.city_id == City.id)
-        .filter(Test.id == avaliacao_id)
         .filter(City.id == city.id)
     )
+    query_series = apply_test_id_filter(query_series, Test.id, avaliacao_id)
     query_series = _apply_class_test_application_period(query_series, periodo_bounds)
 
     if permissao["scope"] == "escola" and user.get("role") in ["diretor", "coordenador"]:
@@ -6274,10 +6394,10 @@ def _obter_turmas_por_serie_municipio(
         .join(School, School.id == cast(Class.school_id, String))
         .join(City, School.city_id == City.id)
         .join(Grade, Class.grade_id == Grade.id)
-        .filter(Test.id == avaliacao_id)
         .filter(Grade.id == serie_id)
         .filter(City.id == city.id)
     )
+    query_turmas = apply_test_id_filter(query_turmas, Test.id, avaliacao_id)
     query_turmas = _apply_class_test_application_period(query_turmas, periodo_bounds)
 
     if permissao["scope"] == "escola" and user.get("role") in ["diretor", "coordenador"]:
@@ -8569,7 +8689,24 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
 
         student_ids_com_resultado = {er.student_id for er in resultados_escopo if getattr(er, "student_id", None)}
         alunos_participantes = len(student_ids_com_resultado)
-        resultados_por_aluno_unico = _dedupe_evaluation_results_by_student(resultados_escopo)
+        alunos_completos = None
+        alunos_parciais = None
+        if scope_info.get("grupo") and scope_info.get("grupo_tests_info"):
+            course_name_grupo = "Anos Iniciais"
+            if class_tests:
+                first_test = getattr(class_tests[0], "test", None) or Test.query.get(class_tests[0].test_id)
+                if first_test:
+                    course_name_grupo = _get_curso_nome(getattr(first_test, "course", None))
+            resultados_por_aluno_unico = merge_student_group_results(
+                resultados_escopo, scope_info["grupo_tests_info"], course_name_grupo
+            )
+            student_ids_com_resultado = {m.student_id for m in resultados_por_aluno_unico}
+            alunos_participantes = len(resultados_por_aluno_unico)
+            alunos_completos = sum(1 for m in resultados_por_aluno_unico if m.completo)
+            alunos_parciais = alunos_participantes - alunos_completos
+            resultados_por_aluno_unico = [m for m in resultados_por_aluno_unico if m.completo]
+        else:
+            resultados_por_aluno_unico = _dedupe_evaluation_results_by_student(resultados_escopo)
         logging.info(
             "resultados_escopo rows=%s alunos_distintos=%s test_ids=%s total_alunos=%s",
             len(resultados_escopo),
@@ -8658,9 +8795,11 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             "total_escolas": len(set(ct.class_.school.id for ct in class_tests if ct.class_ and ct.class_.school)),
             "total_series": len(set(ct.class_.grade.id for ct in class_tests if ct.class_ and ct.class_.grade)),
             "total_turmas": len(set(ct.class_id for ct in class_tests)),
-            "total_avaliacoes": len(test_ids),
+            "total_avaliacoes": 1 if scope_info.get("grupo") else len(test_ids),
             "total_alunos": total_alunos,
             "alunos_participantes": alunos_participantes,
+            "alunos_completos": alunos_completos if alunos_completos is not None else alunos_participantes,
+            "alunos_parciais": alunos_parciais if alunos_parciais is not None else 0,
             "alunos_pendentes": alunos_pendentes,
             "alunos_pendentes_detalhe": alunos_pendentes_detalhe,
             "alunos_ausentes": alunos_ausentes,
@@ -8688,26 +8827,35 @@ def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Di
     if restrict_class_ids is not None:
         escopo["restrict_class_ids"] = restrict_class_ids
     
+    avaliacao_ids = scope_info.get("avaliacao_ids") or parse_avaliacao_ids(scope_info.get("avaliacao"))
+    avaliacao_id = avaliacao_ids[0] if avaliacao_ids else scope_info.get("avaliacao")
+
     if nivel_granularidade == "municipio":
         # Estado + Município + Avaliação específica (dados de todas as escolas do município)
         escopo['tipo'] = "municipio"
         escopo['municipio_id'] = scope_info.get('municipio_id')
-        escopo['avaliacao_id'] = scope_info.get('avaliacao')
+        escopo['avaliacao_id'] = avaliacao_id
+        if avaliacao_ids:
+            escopo['avaliacao_ids'] = avaliacao_ids
         
     elif nivel_granularidade == "escola":
         # Estado + Município + Avaliação + Escola específica
         escopo['tipo'] = "escola"
         escopo['escola_id'] = scope_info.get('escola')
-        escopo['avaliacao_id'] = scope_info.get('avaliacao')
+        escopo['avaliacao_id'] = avaliacao_id
         escopo['municipio_id'] = scope_info.get('municipio_id')
+        if avaliacao_ids:
+            escopo['avaliacao_ids'] = avaliacao_ids
         
     elif nivel_granularidade == "serie":
         # Estado + Município + Avaliação + Escola + Série específica
         escopo['tipo'] = "serie"
         escopo['serie_id'] = scope_info.get('serie')
         escopo['escola_id'] = scope_info.get('escola')
-        escopo['avaliacao_id'] = scope_info.get('avaliacao')
+        escopo['avaliacao_id'] = avaliacao_id
         escopo['municipio_id'] = scope_info.get('municipio_id')
+        if avaliacao_ids:
+            escopo['avaliacao_ids'] = avaliacao_ids
         
     elif nivel_granularidade == "turma":
         # Estado + Município + Avaliação + Escola + Série + Turma específica
@@ -8715,12 +8863,28 @@ def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Di
         escopo['turma_id'] = scope_info.get('turma')
         escopo['serie_id'] = scope_info.get('serie')
         escopo['escola_id'] = scope_info.get('escola')
-        escopo['avaliacao_id'] = scope_info.get('avaliacao')
+        escopo['avaliacao_id'] = avaliacao_id
         escopo['municipio_id'] = scope_info.get('municipio_id')
+        if avaliacao_ids:
+            escopo['avaliacao_ids'] = avaliacao_ids
     
     
     logging.info(f"Escopo calculado para {nivel_granularidade}: {escopo}")
     return escopo
+
+
+def _class_ids_aplicacao_escopo(escopo_calculo: dict) -> List[Any]:
+    """Turmas onde uma ou mais avaliações do escopo foram aplicadas."""
+    from app.models.classTest import ClassTest
+
+    test_ids = escopo_test_ids(escopo_calculo)
+    if not test_ids:
+        return []
+    if len(test_ids) == 1:
+        class_tests = ClassTest.query.filter_by(test_id=test_ids[0]).all()
+    else:
+        class_tests = ClassTest.query.filter(ClassTest.test_id.in_(test_ids)).all()
+    return [ct.class_id for ct in class_tests]
 
 
 def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
@@ -8743,11 +8907,8 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                 query = query.filter(Student.class_id.in_(restrict_class_ids))
             
             # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
-            if escopo_calculo.get('avaliacao_id'):
-                from app.models.classTest import ClassTest
-                # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter para string
-                class_tests = ClassTest.query.filter_by(test_id=str(escopo_calculo['avaliacao_id'])).all()
-                class_ids = [ct.class_id for ct in class_tests]
+            if escopo_calculo.get('avaliacao_id') or escopo_calculo.get('avaliacao_ids'):
+                class_ids = _class_ids_aplicacao_escopo(escopo_calculo)
                 if class_ids:
                     query = query.filter(Student.class_id.in_(class_ids))
             
@@ -8766,11 +8927,8 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                 query = query.filter(Student.class_id.in_(restrict_class_ids))
             
             # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
-            if escopo_calculo.get('avaliacao_id'):
-                from app.models.classTest import ClassTest
-                # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter para string
-                class_tests = ClassTest.query.filter_by(test_id=str(escopo_calculo['avaliacao_id'])).all()
-                class_ids = [ct.class_id for ct in class_tests]
+            if escopo_calculo.get('avaliacao_id') or escopo_calculo.get('avaliacao_ids'):
+                class_ids = _class_ids_aplicacao_escopo(escopo_calculo)
                 if class_ids:
                     query = query.filter(Student.class_id.in_(class_ids))
             
@@ -8793,11 +8951,8 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                 query = query.filter(Class.school_id == escopo_calculo['escola_id'])
             
             # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
-            if escopo_calculo.get('avaliacao_id'):
-                from app.models.classTest import ClassTest
-                # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter para string
-                class_tests = ClassTest.query.filter_by(test_id=str(escopo_calculo['avaliacao_id'])).all()
-                class_ids = [ct.class_id for ct in class_tests]
+            if escopo_calculo.get('avaliacao_id') or escopo_calculo.get('avaliacao_ids'):
+                class_ids = _class_ids_aplicacao_escopo(escopo_calculo)
                 if class_ids:
                     query = query.filter(Student.class_id.in_(class_ids))
             
@@ -8820,15 +8975,16 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                     return []
             
             # Se há avaliação específica, verificar se a turma aplicou a avaliação
-            if escopo_calculo.get('avaliacao_id'):
+            if escopo_calculo.get('avaliacao_id') or escopo_calculo.get('avaliacao_ids'):
                 from app.models.classTest import ClassTest
-                class_test = ClassTest.query.filter_by(
-                    test_id=str(escopo_calculo['avaliacao_id']),
-                    class_id=turma_uuid,
-                ).first()
+                test_ids = escopo_test_ids(escopo_calculo)
+                class_test_q = ClassTest.query.filter(ClassTest.class_id == turma_uuid)
+                if test_ids:
+                    class_test_q = apply_test_id_filter(class_test_q, ClassTest.test_id, test_ids)
+                class_test = class_test_q.first()
                 if not class_test:
                     # Turma não aplicou a avaliação, mas retornar alunos para dados zerados
-                    logging.warning(f"Turma {escopo_calculo['turma_id']} não aplicou avaliação {escopo_calculo['avaliacao_id']} - retornando alunos para dados zerados")
+                    logging.warning(f"Turma {escopo_calculo['turma_id']} não aplicou avaliação {test_ids} - retornando alunos para dados zerados")
             
             alunos = query.all()
             logging.info(f"Alunos encontrados para turma: {len(alunos)}")
@@ -9008,6 +9164,229 @@ def _collect_participating_student_ids(
     )
     participants.update(row[0] for row in persisted_rows if row and row[0] is not None)
     return participants
+
+
+def _aluno_pendente_disciplina_grupo(template: Dict[str, Any], disciplina_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Mesmo shape da multidisciplinar: disciplina não feita = pendente e nota 0.0."""
+    questoes = disciplina_data.get("questoes") or []
+    total_questoes = len(questoes)
+    return {
+        "id": template.get("id"),
+        "nome": template.get("nome"),
+        "escola_id": template.get("escola_id"),
+        "escola": template.get("escola"),
+        "serie": template.get("serie"),
+        "turma": template.get("turma"),
+        "shift": template.get("shift", ""),
+        "contexto_colocacao": template.get("contexto_colocacao"),
+        "respostas_por_questao": [
+            {
+                "questao": q.get("numero"),
+                "acertou": False,
+                "respondeu": False,
+                "resposta": None,
+            }
+            for q in questoes
+        ],
+        "total_acertos": 0,
+        "total_erros": 0,
+        "total_respondidas": 0,
+        "total_questoes_disciplina": total_questoes,
+        "total_em_branco": total_questoes,
+        "nivel_proficiencia": None,
+        "nota": 0.0,
+        "proficiencia": 0.0,
+        "status": "pendente",
+        "percentual_acertos": 0.0,
+        "_ausente_grupo": True,
+    }
+
+
+def _gerar_tabela_detalhada_grupo(
+    test_ids: List[str],
+    scope_info: Dict,
+    nivel_granularidade: str,
+    user: Dict,
+    restrict_class_ids: Optional[Set[Any]] = None,
+) -> Dict[str, Any]:
+    """Tabela detalhada de N provas da mesma série, com participação por aluno."""
+    from app.services.evaluation_group_service import build_participacao
+
+    disciplinas_por_id: Dict[str, Dict[str, Any]] = {}
+    alunos_template: Dict[str, Dict[str, Any]] = {}
+    realizados_por_aluno: Dict[str, List[str]] = {}
+    results_merged_by_student: Dict[str, Any] = {}
+
+    tests_info = (scope_info or {}).get("grupo_tests_info") or []
+    course_name = "Anos Iniciais"
+    if test_ids:
+        first_test = Test.query.get(test_ids[0])
+        if first_test:
+            course_name = _get_curso_nome(getattr(first_test, "course", None))
+
+    all_results: List[Any] = []
+    for tid in test_ids:
+        parte = _gerar_tabela_detalhada_por_disciplina(
+            tid, scope_info, nivel_granularidade, user, restrict_class_ids
+        )
+        for disc in (parte or {}).get("disciplinas") or []:
+            sid = str(disc.get("id") or "")
+            if not sid:
+                continue
+            if sid not in disciplinas_por_id:
+                disciplinas_por_id[sid] = {
+                    "id": sid,
+                    "nome": disc.get("nome"),
+                    "questoes": list(disc.get("questoes") or []),
+                    "alunos": {},
+                    "test_id": tid,
+                }
+            else:
+                disciplinas_por_id[sid]["questoes"].extend(disc.get("questoes") or [])
+            for aluno in disc.get("alunos") or []:
+                aluno_id = aluno.get("id")
+                if not aluno_id:
+                    continue
+                disciplinas_por_id[sid]["alunos"][aluno_id] = aluno
+                alunos_template[aluno_id] = aluno
+                realizados_por_aluno.setdefault(aluno_id, [])
+                if tid not in realizados_por_aluno[aluno_id]:
+                    realizados_por_aluno[aluno_id].append(tid)
+
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        resultados, _students = _carregar_participantes_avaliacao_escopo(
+            tid, escopo_calculo, nivel_granularidade, user, restrict_class_ids
+        )
+        all_results.extend(resultados)
+
+    if tests_info:
+        for merged in merge_student_group_results(all_results, tests_info, course_name):
+            results_merged_by_student[merged.student_id] = merged
+
+    all_student_ids = set(alunos_template.keys())
+    for disc in disciplinas_por_id.values():
+        for aluno_id in all_student_ids:
+            if aluno_id not in disc["alunos"] and aluno_id in alunos_template:
+                disc["alunos"][aluno_id] = _aluno_pendente_disciplina_grupo(
+                    alunos_template[aluno_id], disc
+                )
+        disc["alunos"] = list(disc["alunos"].values())
+
+    participacao_por_aluno = {}
+    for aluno_id in all_student_ids:
+        if aluno_id in results_merged_by_student:
+            participacao_por_aluno[aluno_id] = results_merged_by_student[aluno_id].participacao
+        else:
+            participacao_por_aluno[aluno_id] = build_participacao(
+                tests_info, realizados_por_aluno.get(aluno_id) or []
+            )
+
+    questoes_por_disciplina = {
+        sid: {k: v for k, v in disc.items() if k != "test_id"}
+        for sid, disc in disciplinas_por_id.items()
+    }
+    dados_gerais = _calcular_dados_gerais_alunos(
+        questoes_por_disciplina,
+        course_name,
+        results_merged_by_student,
+        participacao_por_aluno,
+    )
+    disciplinas = []
+    for disc in questoes_por_disciplina.values():
+        for aluno in disc.get("alunos") or []:
+            aluno.pop("_ausente_grupo", None)
+        disciplinas.append(disc)
+    return {
+        "disciplinas": disciplinas,
+        "geral": dados_gerais,
+    }
+
+
+def _calcular_ranking_global_grupo(
+    test_ids: List[str],
+    scope_info: Dict,
+    nivel_granularidade: str,
+    user: Dict,
+    restrict_class_ids: Optional[Set[Any]] = None,
+) -> List[Dict]:
+    """Ranking no GERAL do grupo; inclui alunos parciais com participação."""
+    from app.services.evaluation_result_snapshot import (
+        prefetch_placement_from_results,
+        resolve_participant_display_context,
+    )
+
+    if not test_ids:
+        return []
+
+    escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+    tests_info = (scope_info or {}).get("grupo_tests_info") or []
+    course_name = "Anos Iniciais"
+    first_test = Test.query.get(test_ids[0])
+    if first_test:
+        course_name = _get_curso_nome(getattr(first_test, "course", None))
+
+    all_results: List[Any] = []
+    students_by_id: Dict[str, Student] = {}
+    for tid in test_ids:
+        resultados, students = _carregar_participantes_avaliacao_escopo(
+            tid, escopo_calculo, nivel_granularidade, user, restrict_class_ids
+        )
+        all_results.extend(resultados)
+        students_by_id.update(students)
+
+    if not all_results:
+        return []
+
+    merged = merge_student_group_results(all_results, tests_info, course_name)
+    if not merged:
+        return []
+
+    schools_by_id, classes_by_id, grades_by_id = prefetch_placement_from_results(all_results)
+    alunos_ranking = []
+    for resultado in merged:
+        student = students_by_id.get(resultado.student_id)
+        ctx = resolve_participant_display_context(
+            student,
+            resultado,
+            schools_by_id,
+            classes_by_id,
+            grades_by_id,
+        )
+        aluno_ranking = {
+            "id": resultado.student_id,
+            "nome": ctx["nome"],
+            "escola_id": ctx["escola_id"],
+            "escola": ctx["escola"],
+            "serie": ctx["serie"],
+            "turma": ctx["turma"],
+            "shift": ctx["shift"],
+            "contexto_colocacao": ctx["contexto_colocacao"],
+            "total_acertos": resultado.correct_answers,
+            "total_respondidas": resultado.total_questions,
+            "nota": resultado.grade,
+            "proficiencia": format_decimal_two_places(resultado.proficiency),
+            "nivel_proficiencia": resultado.classification,
+            "participacao": resultado.participacao,
+        }
+        alunos_ranking.append(aluno_ranking)
+
+    for aluno in alunos_ranking:
+        nota = float(aluno.get("nota", 0) or 0)
+        acertos = int(aluno.get("total_acertos", 0) or 0)
+        respondidas = int(aluno.get("total_respondidas", 0) or 0)
+        aluno["pontuacao_ranking"] = (nota * 100) + (acertos * 10) + respondidas
+
+    alunos_ordenados = sorted(alunos_ranking, key=lambda x: x["pontuacao_ranking"], reverse=True)
+    ranking_final = []
+    for i, aluno in enumerate(alunos_ordenados):
+        del aluno["pontuacao_ranking"]
+        descricao_ranking = f"{aluno['nome']}, Acertos {aluno['total_acertos']}, Nota {aluno['nota']:.2f}"
+        ranking_final.append({
+            "posicao": i + 1,
+            "descricao": descricao_ranking,
+            "aluno": aluno,
+        })
+    return ranking_final
 
 
 # ==================== ENDPOINT 1: GET /avaliacoes ====================
@@ -9254,7 +9633,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                 else "turma"
             )
             stats_grupo = _calcular_estatisticas_grupo(
-                class_tests_grupo, evaluation, agg_level
+                class_tests_grupo, evaluation, agg_level, scope_info
             )
             
             # Determinar informações baseadas na granularidade
@@ -9264,8 +9643,8 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                 
                 result = {
                     "id": f"escola_{escola.id}",
-                    "titulo": f"{evaluation.title} - {escola.name}",
-                    "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
+                    "titulo": f"{_titulo_avaliacao_detalhe(evaluation, scope_info)} - {escola.name}",
+                    "disciplina": _disciplina_avaliacao_detalhe(evaluation, scope_info),
                     "curso": _get_curso_nome(evaluation.course),
                     "serie": "Todas as séries",
                     "turma": "Todas as turmas",
@@ -9296,8 +9675,8 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
 
                 result = {
                     "id": f"turma_{turma.id}",
-                    "titulo": f"{evaluation.title} - {titulo_sufixo}",
-                    "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
+                    "titulo": f"{_titulo_avaliacao_detalhe(evaluation, scope_info)} - {titulo_sufixo}",
+                    "disciplina": _disciplina_avaliacao_detalhe(evaluation, scope_info),
                     "curso": _get_curso_nome(evaluation.course),
                     "serie": serie_nome,
                     "turma": turma_nome,
@@ -9324,8 +9703,8 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                 
                 result = {
                     "id": f"turma_{turma.id}",
-                    "titulo": f"{evaluation.title} - {turma.name}",
-                    "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
+                    "titulo": f"{_titulo_avaliacao_detalhe(evaluation, scope_info)} - {turma.name}",
+                    "disciplina": _disciplina_avaliacao_detalhe(evaluation, scope_info),
                     "curso": _get_curso_nome(evaluation.course),
                     "serie": serie.name if serie else "N/A",
                     "turma": turma.name if turma.name else f"Turma {turma.id}",
@@ -9353,7 +9732,21 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
         return []
 
 
-def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_level: str = "municipio"):
+def _titulo_avaliacao_detalhe(evaluation, scope_info: Optional[Dict] = None) -> str:
+    disciplinas = ((scope_info or {}).get("grupo") or {}).get("disciplinas") or []
+    if disciplinas:
+        return " + ".join(disciplinas)
+    return getattr(evaluation, "title", None) or "Avaliação"
+
+
+def _disciplina_avaliacao_detalhe(evaluation, scope_info: Optional[Dict] = None) -> str:
+    disciplinas = ((scope_info or {}).get("grupo") or {}).get("disciplinas") or []
+    if disciplinas:
+        return " + ".join(disciplinas)
+    return evaluation.subject_rel.name if getattr(evaluation, "subject_rel", None) else "N/A"
+
+
+def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_level: str = "municipio", scope_info: Optional[Dict] = None):
     """
     Calcula estatísticas consolidadas para um grupo de class_tests.
 
@@ -9391,26 +9784,48 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
             student_ids_for_class_group_with_snapshots,
         )
 
-        merged_ids = student_ids_for_class_group_with_snapshots(
-            evaluation.id, class_ids, base_ids_set
-        )
+        grupo_ids = (scope_info or {}).get("avaliacao_ids") or []
+        tests_info = (scope_info or {}).get("grupo_tests_info") or []
+        test_ids_grupo = grupo_ids or list({str(ct.test_id) for ct in class_tests_grupo if ct.test_id})
+        if not test_ids_grupo:
+            test_ids_grupo = [str(evaluation.id)]
+
+        merged_ids: Set[Any] = set(base_ids_set)
+        for tid in test_ids_grupo:
+            merged_ids |= student_ids_for_class_group_with_snapshots(
+                tid, class_ids, base_ids_set
+            )
         todos_alunos = Student.query.filter(Student.id.in_(merged_ids)).all() if merged_ids else []
         total_alunos = len(todos_alunos)
 
         base_orig_list = list(base_ids_set)
-        resultados = query_evaluation_results_for_class_group(
-            evaluation.id, class_ids, base_orig_list
-        ).all()
+        resultados = []
+        for tid in test_ids_grupo:
+            resultados.extend(
+                query_evaluation_results_for_class_group(
+                    tid, class_ids, base_orig_list
+                ).all()
+            )
 
-        resultados = _dedupe_evaluation_results_by_student(resultados)
+        if (scope_info or {}).get("grupo") and tests_info:
+            resultados = merge_student_group_results(
+                resultados,
+                tests_info,
+                _get_curso_nome(getattr(evaluation, "course", None)),
+            )
+        else:
+            resultados = _dedupe_evaluation_results_by_student(resultados)
         alunos_participantes = len(resultados)
         alunos_pendentes = total_alunos - alunos_participantes
         alunos_ausentes = alunos_pendentes
+        resultados_media = [
+            r for r in resultados if getattr(r, "completo", True)
+        ]
 
         # Calcular médias (agregação hierárquica; nota = calculate_grade(média_prof))
-        if resultados:
+        if resultados_media:
             media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
-                resultados,
+                resultados_media,
                 aggregation_level,
                 course_name=_get_curso_nome(getattr(evaluation, "course", None)),
             )
@@ -9426,7 +9841,7 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
             'avancado': 0
         }
 
-        for resultado in resultados:
+        for resultado in resultados_media:
             if resultado.classification:
                 if resultado.classification == "Abaixo do Básico":
                     distribuicao['abaixo_do_basico'] += 1

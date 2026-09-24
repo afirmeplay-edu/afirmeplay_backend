@@ -331,8 +331,11 @@ def subject_statistics_from_virtual_results(
 ) -> Dict[str, Any]:
     """
     Estatísticas por disciplina no mesmo formato de
-    ``EvaluationResultService.get_subject_detailed_statistics``, a partir do
-    dataset virtual multidisciplinar (um universo, um cálculo).
+    ``EvaluationResultService.get_subject_detailed_statistics``.
+
+    Cada disciplina usa só alunos que têm aquela entrada em ``subject_results``
+    (universo da prova isolada). Com dataset ``only_complete=False``, N por
+    disciplina pode diferir; o GERAL do relatório continua na interseção.
     """
     from app.utils.school_equal_weight_means import (
         mean_grade_and_proficiency_equal_weight_by_school_from_subject_rows,

@@ -289,13 +289,114 @@ class TestVirtualMultidisciplinaryPipeline(unittest.TestCase):
         subjects = stats["subjects"]
         self.assertEqual(subjects["Português"]["total_students"], 2)
         self.assertEqual(subjects["Matemática"]["total_students"], 2)
-        # Mesmo universo nas duas disciplinas (não N cálculos isolados)
-        self.assertEqual(
-            subjects["Português"]["total_students"],
-            subjects["Matemática"]["total_students"],
-        )
         self.assertEqual(subjects["Português"]["average_grade"], 4.2)
         self.assertEqual(subjects["Matemática"]["average_grade"], 6.2)
+
+    def test_subject_stats_use_per_subject_universe_with_partials(self):
+        """Por disciplina: quem fez só PT entra em PT; GERAL completo continua separado."""
+        from app.services.evaluation_group_service import (
+            build_virtual_multidisciplinary_results,
+            subject_statistics_from_virtual_results,
+        )
+
+        results = [
+            # Completo
+            SimpleNamespace(
+                student_id="a1",
+                test_id="t-pt",
+                grade=6.0,
+                proficiency=216.0,
+                classification="Adequado",
+                correct_answers=12,
+                total_questions=20,
+                subject_results={
+                    "pt": {
+                        "subject_name": "Português",
+                        "grade": 6.0,
+                        "proficiency": 216.0,
+                        "classification": "Adequado",
+                        "score_percentage": 60.0,
+                    }
+                },
+                school_id_snapshot="esc",
+                class_id_snapshot="c",
+                grade_id_snapshot="g1",
+                enrollment_id_snapshot=None,
+            ),
+            SimpleNamespace(
+                student_id="a1",
+                test_id="t-mat",
+                grade=6.7,
+                proficiency=236.0,
+                classification="Adequado",
+                correct_answers=14,
+                total_questions=20,
+                subject_results={
+                    "mat": {
+                        "subject_name": "Matemática",
+                        "grade": 6.7,
+                        "proficiency": 236.0,
+                        "classification": "Adequado",
+                        "score_percentage": 70.0,
+                    }
+                },
+                school_id_snapshot="esc",
+                class_id_snapshot="c",
+                grade_id_snapshot="g1",
+                enrollment_id_snapshot=None,
+            ),
+            # Só PT (como turmas A/B sem Mat)
+            SimpleNamespace(
+                student_id="so-pt",
+                test_id="t-pt",
+                grade=3.0,
+                proficiency=130.0,
+                classification="Abaixo do Básico",
+                correct_answers=5,
+                total_questions=20,
+                subject_results={
+                    "pt": {
+                        "subject_name": "Português",
+                        "grade": 3.0,
+                        "proficiency": 130.0,
+                        "classification": "Abaixo do Básico",
+                        "score_percentage": 25.0,
+                    }
+                },
+                school_id_snapshot="esc",
+                class_id_snapshot="a",
+                grade_id_snapshot="g1",
+                enrollment_id_snapshot=None,
+            ),
+        ]
+
+        complete = build_virtual_multidisciplinary_results(
+            results, self._infos(), "Anos Iniciais", only_complete=True
+        )
+        self.assertEqual(len(complete), 1)
+        self.assertEqual(complete[0].student_id, "a1")
+
+        per_subject = build_virtual_multidisciplinary_results(
+            results, self._infos(), "Anos Iniciais", only_complete=False
+        )
+        self.assertEqual(len(per_subject), 2)
+
+        with patch(
+            "app.utils.school_equal_weight_means.mean_grade_and_proficiency_equal_weight_by_school_from_subject_rows",
+            side_effect=lambda rows, **kwargs: (
+                sum(float(r["grade"]) for r in rows) / len(rows),
+                sum(float(r["proficiency"]) for r in rows) / len(rows),
+                0.0,
+            ),
+        ):
+            stats = subject_statistics_from_virtual_results(
+                per_subject, self._infos(), "Anos Iniciais"
+            )
+
+        self.assertEqual(stats["subjects"]["Português"]["total_students"], 2)
+        self.assertEqual(stats["subjects"]["Matemática"]["total_students"], 1)
+        self.assertEqual(stats["subjects"]["Português"]["average_grade"], 4.5)
+        self.assertEqual(stats["subjects"]["Matemática"]["average_grade"], 6.7)
 
     def test_only_complete_excludes_partial(self):
         from app.services.evaluation_group_service import build_virtual_multidisciplinary_results

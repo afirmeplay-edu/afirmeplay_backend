@@ -91,12 +91,16 @@ def create_form():
         filters = data.get('filters')
         forms_response = []
         
+        # Rascunho (isActive=false): cria o formulário sem distribuir recipients.
+        # A distribuição ocorre em POST /forms/:id/apply ao confirmar turmas.
+        distribute_now = data.get('isActive', True) is not False
+
         for form in forms:
             recipients_count = 0
             sent_at = None
             form_has_scope = bool(filters or form.selected_schools or form.selected_grades or form.selected_classes)
             
-            if form_has_scope:
+            if form_has_scope and distribute_now:
                 # Determinar destinatários para este formulário específico
                 recipients_data = DistributionService.determine_recipients_by_filters(
                     form.form_type,
@@ -309,13 +313,23 @@ def get_form(form_id):
 @jwt_required()
 @role_required("admin", "tecadm")
 def update_form(form_id):
-    """Atualiza um questionário"""
+    """
+    Atualiza um questionário.
+
+    Query/body metadataOnly=true restringe a edição a metadados
+    (título, descrição, instruções, prazo, ativo) — usado após envio.
+    """
     try:
         data = request.get_json()
         if not data:
             return jsonify({"error": "Dados não fornecidos"}), 400
+
+        metadata_only = (
+            str(request.args.get('metadataOnly', '')).lower() == 'true'
+            or bool(data.pop('metadataOnly', False))
+        )
         
-        form = FormService.update_form(form_id, data)
+        form = FormService.update_form(form_id, data, metadata_only=metadata_only)
         
         if not form:
             return jsonify({"error": "Questionário não encontrado"}), 404
@@ -390,7 +404,7 @@ def duplicate_form(form_id):
 @jwt_required()
 @role_required("admin", "tecadm")
 def send_form(form_id):
-    """Envia questionário para grupos de destinatários"""
+    """Envia questionário para grupos de destinatários (escopo já persistido)."""
     try:
         data = request.get_json() or {}
         notify_users = data.get('notifyUsers', True)
@@ -404,6 +418,48 @@ def send_form(form_id):
     except Exception as e:
         logging.error(f"Erro ao enviar formulário: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao enviar formulário", "details": str(e)}), 500
+
+
+@bp.route('/<form_id>/apply', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def apply_form(form_id):
+    """
+    Aplica/reaplica o questionário a um novo escopo (escolas/séries/turmas).
+
+    Une o escopo enviado ao já persistido e cria FormRecipient apenas para
+    destinatários ainda inexistentes. Não altera perguntas nem respostas.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+
+        form = FormService.get_form(form_id, include_questions=False)
+        if not form:
+            return jsonify({"error": "Questionário não encontrado"}), 404
+
+        if str(form.created_by) != str(user['id']):
+            return jsonify({
+                "error": "Apenas o usuário que criou o questionário pode aplicá-lo"
+            }), 403
+
+        data = request.get_json() or {}
+        updated_form, stats = FormService.apply_form_scope(form_id, data)
+
+        if not updated_form:
+            return jsonify({"error": "Questionário não encontrado"}), 404
+
+        payload = updated_form.to_dict(include_questions=False, include_statistics=True)
+        payload['apply'] = stats
+        payload['message'] = stats.get('message') or 'Questionário aplicado com sucesso'
+        return jsonify(payload), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Erro ao aplicar formulário: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao aplicar formulário", "details": str(e)}), 500
 
 
 @bp.route('/<form_id>/recipients', methods=['GET'])

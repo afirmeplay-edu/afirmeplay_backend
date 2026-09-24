@@ -1221,6 +1221,7 @@ def listar_avaliacoes():
             estatisticas_consolidadas["por_disciplina"] = _calcular_estatisticas_gerais_por_disciplina_escopo(
                 todas_avaliacoes_escopo, scope_info, nivel_granularidade
             )
+            _aplicar_media_geral_das_disciplinas_grupo(estatisticas_consolidadas, scope_info)
         
         # Calcular estatísticas por disciplina
         resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo, scope_info, nivel_granularidade)
@@ -1672,6 +1673,11 @@ def listar_avaliacoes_analise_ia():
         estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(
             todas_avaliacoes_escopo, scope_info, nivel_granularidade, user
         )
+        if isinstance(estatisticas_consolidadas, dict) and scope_info.get("grupo"):
+            estatisticas_consolidadas["por_disciplina"] = _calcular_estatisticas_gerais_por_disciplina_escopo(
+                todas_avaliacoes_escopo, scope_info, nivel_granularidade
+            )
+            _aplicar_media_geral_das_disciplinas_grupo(estatisticas_consolidadas, scope_info)
         resultados_por_disciplina = _calcular_estatisticas_por_disciplina(
             todas_avaliacoes_escopo, scope_info, nivel_granularidade
         )
@@ -2740,10 +2746,15 @@ def _carregar_dataset_virtual_grupo(
     class_tests: list,
     scope_info: dict,
     nivel_granularidade: str,
+    *,
+    only_complete: bool = True,
 ) -> Tuple[List[Any], str]:
     """
-    Carrega EvaluationResults das N provas e monta o dataset virtual multidisciplinar
-    (mesmo universo de alunos em todas as disciplinas).
+    Carrega EvaluationResults das N provas e monta o dataset virtual multidisciplinar.
+
+    ``only_complete=True``: só quem fez todas as provas (GERAL / ranking).
+    ``only_complete=False``: inclui parciais — cada disciplina fica com o mesmo
+    universo da prova isolada (quem fez aquela disciplina).
     """
     from app.services.evaluation_result_snapshot import (
         merge_participant_student_ids,
@@ -2777,7 +2788,7 @@ def _carregar_dataset_virtual_grupo(
         test_ids, escopo_calculo, class_ids, base_orig_ids
     ).all()
     virtual = build_virtual_multidisciplinary_results(
-        raw, tests_info, course_name, only_complete=True
+        raw, tests_info, course_name, only_complete=only_complete
     )
     return virtual, course_name
 
@@ -2814,10 +2825,13 @@ def _calcular_estatisticas_por_disciplina_grupo_virtual(
     scope_info: dict,
     nivel_granularidade: str,
 ) -> List[Dict[str, Any]]:
-    """Uma prova virtual multidisciplinar → um cálculo por disciplina (não N provas isoladas)."""
+    """
+    Estatísticas por disciplina no grupo: universo de cada prova isolada
+    (inclui quem fez só aquela disciplina). O GERAL continua na interseção.
+    """
     tests_info = (scope_info or {}).get("grupo_tests_info") or []
     virtual, course_name = _carregar_dataset_virtual_grupo(
-        class_tests, scope_info, nivel_granularidade
+        class_tests, scope_info, nivel_granularidade, only_complete=False
     )
     if not virtual or not tests_info:
         return []
@@ -3060,8 +3074,9 @@ def _calcular_estatisticas_gerais_por_disciplina_escopo(
         grupo_ids = (scope_info or {}).get("avaliacao_ids") or []
         if (scope_info or {}).get("grupo") and len(grupo_ids) > 1:
             tests_info = (scope_info or {}).get("grupo_tests_info") or []
+            # Mesmo universo da prova isolada por disciplina (não só interseção).
             virtual, course_name = _carregar_dataset_virtual_grupo(
-                class_tests, scope_info, nivel_granularidade
+                class_tests, scope_info, nivel_granularidade, only_complete=False
             )
             if not virtual or not tests_info:
                 return []
@@ -8871,7 +8886,35 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         )
 
         # Calcular estatísticas consolidadas (agregação hierárquica conforme granularidade)
-        if resultados_por_aluno_unico:
+        if scope_info.get("grupo") and scope_info.get("grupo_tests_info"):
+            # GERAL do grupo = média dos cards de disciplina (universos por prova).
+            virtual_disciplinas = build_virtual_multidisciplinary_results(
+                resultados_escopo,
+                scope_info["grupo_tests_info"],
+                course_name_grupo,
+                only_complete=False,
+            )
+            stats_disc = subject_statistics_from_virtual_results(
+                virtual_disciplinas,
+                scope_info["grupo_tests_info"],
+                course_name_grupo,
+            )
+            medias_cards = _media_geral_from_subject_statistics(stats_disc)
+            if medias_cards:
+                media_nota, media_proficiencia = medias_cards
+            elif resultados_por_aluno_unico:
+                media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
+                    resultados_por_aluno_unico,
+                    granularidade_to_hierarchical_target(nivel_granularidade),
+                    course_name=course_name_grupo,
+                    has_matematica=_has_matematica_para_geral(
+                        scope_info=scope_info, class_tests=class_tests
+                    ),
+                )
+            else:
+                media_nota = 0.0
+                media_proficiencia = 0.0
+        elif resultados_por_aluno_unico:
             course_name = "Anos Iniciais"
             if class_tests:
                 first_test = getattr(class_tests[0], "test", None) or Test.query.get(class_tests[0].test_id)
@@ -9970,34 +10013,65 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
             )
 
         if (scope_info or {}).get("grupo") and tests_info:
-            resultados = build_virtual_multidisciplinary_results(
+            course_name = _get_curso_nome(getattr(evaluation, "course", None))
+            resultados_completos = build_virtual_multidisciplinary_results(
                 resultados,
                 tests_info,
-                _get_curso_nome(getattr(evaluation, "course", None)),
+                course_name,
                 only_complete=True,
             )
+            resultados_por_disciplina = build_virtual_multidisciplinary_results(
+                resultados,
+                tests_info,
+                course_name,
+                only_complete=False,
+            )
+            alunos_participantes = len(resultados_completos)
+            alunos_pendentes = total_alunos - alunos_participantes
+            alunos_ausentes = alunos_pendentes
+            resultados_media = resultados_completos
+
+            stats = subject_statistics_from_virtual_results(
+                resultados_por_disciplina, tests_info, course_name
+            )
+            medias_cards = _media_geral_from_subject_statistics(stats)
+            if medias_cards:
+                media_nota, media_proficiencia = medias_cards
+            elif resultados_completos:
+                media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
+                    resultados_completos,
+                    aggregation_level,
+                    course_name=course_name,
+                    has_matematica=_has_matematica_para_geral(
+                        scope_info=scope_info,
+                        class_tests=class_tests_grupo,
+                        evaluation=evaluation,
+                    ),
+                )
+            else:
+                media_nota = 0.0
+                media_proficiencia = 0.0
         else:
             resultados = _dedupe_evaluation_results_by_student(resultados)
-        alunos_participantes = len(resultados)
-        alunos_pendentes = total_alunos - alunos_participantes
-        alunos_ausentes = alunos_pendentes
-        resultados_media = resultados
+            alunos_participantes = len(resultados)
+            alunos_pendentes = total_alunos - alunos_participantes
+            alunos_ausentes = alunos_pendentes
+            resultados_media = resultados
 
-        # Calcular médias (agregação hierárquica; nota = calculate_grade(média_prof))
-        if resultados_media:
-            media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
-                resultados_media,
-                aggregation_level,
-                course_name=_get_curso_nome(getattr(evaluation, "course", None)),
-                has_matematica=_has_matematica_para_geral(
-                    scope_info=scope_info,
-                    class_tests=class_tests_grupo,
-                    evaluation=evaluation,
-                ),
-            )
-        else:
-            media_nota = 0.0
-            media_proficiencia = 0.0
+            if resultados_media:
+                media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
+                    resultados_media,
+                    aggregation_level,
+                    course_name=_get_curso_nome(getattr(evaluation, "course", None)),
+                    has_matematica=_has_matematica_para_geral(
+                        scope_info=scope_info,
+                        class_tests=class_tests_grupo,
+                        evaluation=evaluation,
+                    ),
+                )
+            else:
+                media_nota = 0.0
+                media_proficiencia = 0.0
 
         # Calcular distribuição de classificação
         distribuicao = {
@@ -10138,6 +10212,64 @@ def _has_matematica_para_geral(
         if seen_false:
             return False
     return None
+
+
+def _media_geral_media_das_disciplinas(
+    por_disciplina: Optional[List[Dict[str, Any]]],
+) -> Optional[Tuple[float, float]]:
+    """
+    GERAL do grupo = média aritmética das médias dos cards de disciplina
+    (media_PT + media_Mat + …) / N.
+    """
+    if not por_disciplina:
+        return None
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for row in por_disciplina:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("disciplina") or "").strip()
+        if not name:
+            continue
+        by_name[name] = row
+    if not by_name:
+        return None
+    notas = [float(r.get("media_nota") or 0) for r in by_name.values()]
+    profs = [float(r.get("media_proficiencia") or 0) for r in by_name.values()]
+    n = len(by_name)
+    return (
+        round_to_two_decimals(sum(notas) / n),
+        round_to_two_decimals(sum(profs) / n),
+    )
+
+
+def _aplicar_media_geral_das_disciplinas_grupo(
+    estatisticas: Optional[Dict[str, Any]],
+    scope_info: Optional[Dict] = None,
+) -> None:
+    """Sobrescreve media_*_geral no consolidado do grupo a partir de por_disciplina."""
+    if not isinstance(estatisticas, dict):
+        return
+    if not (scope_info or {}).get("grupo"):
+        return
+    medias = _media_geral_media_das_disciplinas(estatisticas.get("por_disciplina"))
+    if not medias:
+        return
+    estatisticas["media_nota_geral"] = medias[0]
+    estatisticas["media_proficiencia_geral"] = format_decimal_two_places(medias[1])
+
+
+def _media_geral_from_subject_statistics(statistics: Optional[Dict[str, Any]]) -> Optional[Tuple[float, float]]:
+    """Mesma regra a partir do dict retornado por subject_statistics_from_virtual_results."""
+    subjects = (statistics or {}).get("subjects") or {}
+    if not subjects:
+        return None
+    notas = [float((s or {}).get("average_grade") or 0) for s in subjects.values()]
+    profs = [float((s or {}).get("average_proficiency") or 0) for s in subjects.values()]
+    n = len(subjects)
+    return (
+        round_to_two_decimals(sum(notas) / n),
+        round_to_two_decimals(sum(profs) / n),
+    )
 
 
 def _get_curso_nome(course_id):

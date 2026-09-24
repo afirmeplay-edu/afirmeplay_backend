@@ -75,3 +75,39 @@ def test_hierarchical_geral_math_only_matches_subject_grade():
     )
     assert media_prof == 235.63
     assert media_nota_geral == media_nota_mat == 6.7
+
+
+def test_media_geral_media_das_disciplinas():
+    from app.routes.evaluation_results_routes import (
+        _aplicar_media_geral_das_disciplinas_grupo,
+        _media_geral_from_subject_statistics,
+        _media_geral_media_das_disciplinas,
+    )
+
+    rows = [
+        {"disciplina": "Português", "media_nota": 4.5, "media_proficiencia": 172.75},
+        {"disciplina": "Matemática", "media_nota": 6.7, "media_proficiencia": 235.63},
+    ]
+    nota, prof = _media_geral_media_das_disciplinas(rows)
+    assert nota == 5.6
+    assert prof == round((172.75 + 235.63) / 2, 2)
+
+    stats = {
+        "subjects": {
+            "Português": {"average_grade": 4.5, "average_proficiency": 172.75},
+            "Matemática": {"average_grade": 6.7, "average_proficiency": 235.63},
+        }
+    }
+    assert _media_geral_from_subject_statistics(stats) == (
+        5.6,
+        round((172.75 + 235.63) / 2, 2),
+    )
+
+    payload = {
+        "media_nota_geral": 6.4,
+        "media_proficiencia_geral": 226.0,
+        "por_disciplina": rows,
+    }
+    _aplicar_media_geral_das_disciplinas_grupo(payload, {"grupo": {"agrupado": True}})
+    assert payload["media_nota_geral"] == 5.6
+    assert payload["media_proficiencia_geral"] == round((172.75 + 235.63) / 2, 2)

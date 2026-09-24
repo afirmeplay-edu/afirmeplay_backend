@@ -67,10 +67,14 @@ from app.utils.school_equal_weight_means import (
 )
 from app.services.evaluation_group_service import (
     apply_test_id_filter,
+    build_virtual_multidisciplinary_results,
     escopo_test_ids,
+    filter_virtual_results_by_class,
+    filter_virtual_results_by_school,
     merge_student_group_results,
     parse_avaliacao_ids,
     resolve_evaluation_group,
+    subject_statistics_from_virtual_results,
     test_id_clause,
 )
 from sqlalchemy import cast, String, or_, and_, not_
@@ -2725,6 +2729,155 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
         return None
 
 
+def _carregar_dataset_virtual_grupo(
+    class_tests: list,
+    scope_info: dict,
+    nivel_granularidade: str,
+) -> Tuple[List[Any], str]:
+    """
+    Carrega EvaluationResults das N provas e monta o dataset virtual multidisciplinar
+    (mesmo universo de alunos em todas as disciplinas).
+    """
+    from app.services.evaluation_result_snapshot import (
+        merge_participant_student_ids,
+        query_evaluation_results_for_stats,
+    )
+
+    tests_info = (scope_info or {}).get("grupo_tests_info") or []
+    test_ids = (scope_info or {}).get("avaliacao_ids") or [
+        str(ct.test_id) for ct in class_tests if ct.test_id
+    ]
+    test_ids = list(dict.fromkeys(str(t) for t in test_ids if t))
+    if not test_ids or not tests_info:
+        return [], "Anos Iniciais"
+
+    course_name = "Anos Iniciais"
+    if class_tests:
+        first_test = getattr(class_tests[0], "test", None) or Test.query.get(class_tests[0].test_id)
+        if first_test:
+            course_name = _get_curso_nome(getattr(first_test, "course", None))
+
+    escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+    class_ids = [ct.class_id for ct in class_tests]
+    if nivel_granularidade == "avaliacao":
+        todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all() if class_ids else []
+    else:
+        todos_alunos = _buscar_alunos_por_escopo(escopo_calculo)
+
+    base_orig_ids = [a.id for a in todos_alunos]
+    merge_participant_student_ids(test_ids, escopo_calculo, class_ids, set(base_orig_ids))
+    raw = query_evaluation_results_for_stats(
+        test_ids, escopo_calculo, class_ids, base_orig_ids
+    ).all()
+    virtual = build_virtual_multidisciplinary_results(
+        raw, tests_info, course_name, only_complete=True
+    )
+    return virtual, course_name
+
+
+def _converter_subjects_stats_para_rows(statistics: dict) -> List[Dict[str, Any]]:
+    if not isinstance(statistics, dict) or "subjects" not in statistics:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for subject_name, subject_data in (statistics.get("subjects") or {}).items():
+        distribuicao_classificacao = (subject_data or {}).get("classification_distribution", {}) or {}
+        rows.append(
+            {
+                "disciplina": subject_name,
+                "total_avaliacoes": 1,
+                "total_alunos": (subject_data or {}).get("total_students", 0),
+                "alunos_participantes": (subject_data or {}).get("total_students", 0),
+                "alunos_pendentes": 0,
+                "alunos_ausentes": 0,
+                "media_nota": (subject_data or {}).get("average_grade", 0.0),
+                "media_proficiencia": (subject_data or {}).get("average_proficiency", 0.0),
+                "distribuicao_classificacao": {
+                    "abaixo_do_basico": distribuicao_classificacao.get("abaixo_do_basico", 0),
+                    "basico": distribuicao_classificacao.get("basico", 0),
+                    "adequado": distribuicao_classificacao.get("adequado", 0),
+                    "avancado": distribuicao_classificacao.get("avancado", 0),
+                },
+            }
+        )
+    return rows
+
+
+def _calcular_estatisticas_por_disciplina_grupo_virtual(
+    class_tests: list,
+    scope_info: dict,
+    nivel_granularidade: str,
+) -> List[Dict[str, Any]]:
+    """Uma prova virtual multidisciplinar → um cálculo por disciplina (não N provas isoladas)."""
+    tests_info = (scope_info or {}).get("grupo_tests_info") or []
+    virtual, course_name = _carregar_dataset_virtual_grupo(
+        class_tests, scope_info, nivel_granularidade
+    )
+    if not virtual or not tests_info:
+        return []
+
+    resultados_disciplina: List[Dict[str, Any]] = []
+
+    if nivel_granularidade == "municipio":
+        escolas = scope_info.get("escolas") if isinstance(scope_info, dict) else None
+        if not escolas:
+            escolas = []
+            seen = set()
+            for ct in class_tests:
+                try:
+                    sc = ct.class_.school if ct.class_ and ct.class_.school else None
+                except Exception:
+                    sc = None
+                if not sc or sc.id in seen:
+                    continue
+                seen.add(sc.id)
+                escolas.append(sc)
+
+        for sc in escolas or []:
+            subset = filter_virtual_results_by_school(virtual, sc.id)
+            stats = subject_statistics_from_virtual_results(subset, tests_info, course_name)
+            for r in _converter_subjects_stats_para_rows(stats):
+                r["escola_id"] = str(sc.id)
+                r["escola"] = getattr(sc, "name", None)
+                resultados_disciplina.append(r)
+        return resultados_disciplina
+
+    if nivel_granularidade in ("escola", "serie"):
+        turmas: List[Any] = []
+        seen = set()
+        for ct in class_tests:
+            t = getattr(ct, "class_", None)
+            if not t or getattr(t, "id", None) is None or t.id in seen:
+                continue
+            seen.add(t.id)
+            turmas.append(t)
+
+        for turma_obj in turmas:
+            subset = filter_virtual_results_by_class(virtual, turma_obj.id)
+            stats = subject_statistics_from_virtual_results(subset, tests_info, course_name)
+            for r in _converter_subjects_stats_para_rows(stats):
+                r["turma_id"] = str(turma_obj.id)
+                r["turma"] = getattr(turma_obj, "name", None)
+                try:
+                    grade = getattr(turma_obj, "grade", None)
+                    if grade is not None:
+                        r["serie_id"] = str(getattr(grade, "id", "") or "")
+                        r["serie"] = getattr(grade, "name", None)
+                except Exception:
+                    pass
+                try:
+                    school = getattr(turma_obj, "school", None)
+                    if school is not None:
+                        r["escola_id"] = str(getattr(school, "id", "") or "")
+                        r["escola"] = getattr(school, "name", None)
+                except Exception:
+                    pass
+                resultados_disciplina.append(r)
+        return resultados_disciplina
+
+    stats = subject_statistics_from_virtual_results(virtual, tests_info, course_name)
+    return _converter_subjects_stats_para_rows(stats)
+
+
 def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, nivel_granularidade: str):
     """
     Calcula estatísticas agrupadas por disciplina usando a função corrigida do EvaluationResultService
@@ -2733,17 +2886,9 @@ def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, n
     try:
         grupo_ids = (scope_info or {}).get("avaliacao_ids") or []
         if (scope_info or {}).get("grupo") and len(grupo_ids) > 1:
-            scoped = dict(scope_info or {})
-            scoped.pop("grupo", None)
-            scoped.pop("avaliacao_ids", None)
-            rows: List[Dict[str, Any]] = []
-            for tid in grupo_ids:
-                subset = [ct for ct in class_tests if str(ct.test_id) == str(tid)]
-                if subset:
-                    rows.extend(
-                        _calcular_estatisticas_por_disciplina(subset, scoped, nivel_granularidade)
-                    )
-            return rows
+            return _calcular_estatisticas_por_disciplina_grupo_virtual(
+                class_tests, scope_info, nivel_granularidade
+            )
 
         from app.services.evaluation_result_service import EvaluationResultService
         from app.models.school import School
@@ -2907,19 +3052,16 @@ def _calcular_estatisticas_gerais_por_disciplina_escopo(
 
         grupo_ids = (scope_info or {}).get("avaliacao_ids") or []
         if (scope_info or {}).get("grupo") and len(grupo_ids) > 1:
-            scoped = dict(scope_info or {})
-            scoped.pop("grupo", None)
-            scoped.pop("avaliacao_ids", None)
-            rows: List[Dict[str, Any]] = []
-            for tid in grupo_ids:
-                subset = [ct for ct in class_tests if str(ct.test_id) == str(tid)]
-                if subset:
-                    rows.extend(
-                        _calcular_estatisticas_gerais_por_disciplina_escopo(
-                            subset, scoped, nivel_granularidade
-                        )
-                    )
-            return rows
+            tests_info = (scope_info or {}).get("grupo_tests_info") or []
+            virtual, course_name = _carregar_dataset_virtual_grupo(
+                class_tests, scope_info, nivel_granularidade
+            )
+            if not virtual or not tests_info:
+                return []
+            statistics = subject_statistics_from_virtual_results(
+                virtual, tests_info, course_name
+            )
+            return _converter_subjects_stats_para_rows(statistics)
 
         test = class_tests[0].test
         if not test or not getattr(test, "subjects_info", None):
@@ -8697,14 +8839,17 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
                 first_test = getattr(class_tests[0], "test", None) or Test.query.get(class_tests[0].test_id)
                 if first_test:
                     course_name_grupo = _get_curso_nome(getattr(first_test, "course", None))
-            resultados_por_aluno_unico = merge_student_group_results(
-                resultados_escopo, scope_info["grupo_tests_info"], course_name_grupo
+            # Dataset virtual multidisciplinar: um resultado por aluno, todas as disciplinas
+            resultados_por_aluno_unico = build_virtual_multidisciplinary_results(
+                resultados_escopo,
+                scope_info["grupo_tests_info"],
+                course_name_grupo,
+                only_complete=True,
             )
             student_ids_com_resultado = {m.student_id for m in resultados_por_aluno_unico}
             alunos_participantes = len(resultados_por_aluno_unico)
-            alunos_completos = sum(1 for m in resultados_por_aluno_unico if m.completo)
-            alunos_parciais = alunos_participantes - alunos_completos
-            resultados_por_aluno_unico = [m for m in resultados_por_aluno_unico if m.completo]
+            alunos_completos = alunos_participantes
+            alunos_parciais = 0
         else:
             resultados_por_aluno_unico = _dedupe_evaluation_results_by_student(resultados_escopo)
         logging.info(
@@ -9260,7 +9405,9 @@ def _gerar_tabela_detalhada_grupo(
         all_results.extend(resultados)
 
     if tests_info:
-        for merged in merge_student_group_results(all_results, tests_info, course_name):
+        for merged in build_virtual_multidisciplinary_results(
+            all_results, tests_info, course_name, only_complete=True
+        ):
             results_merged_by_student[merged.student_id] = merged
 
     all_student_ids = set(alunos_template.keys())
@@ -9337,7 +9484,9 @@ def _calcular_ranking_global_grupo(
     if not all_results:
         return []
 
-    merged = merge_student_group_results(all_results, tests_info, course_name)
+    merged = build_virtual_multidisciplinary_results(
+        all_results, tests_info, course_name, only_complete=True
+    )
     if not merged:
         return []
 
@@ -9808,19 +9957,18 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
             )
 
         if (scope_info or {}).get("grupo") and tests_info:
-            resultados = merge_student_group_results(
+            resultados = build_virtual_multidisciplinary_results(
                 resultados,
                 tests_info,
                 _get_curso_nome(getattr(evaluation, "course", None)),
+                only_complete=True,
             )
         else:
             resultados = _dedupe_evaluation_results_by_student(resultados)
         alunos_participantes = len(resultados)
         alunos_pendentes = total_alunos - alunos_participantes
         alunos_ausentes = alunos_pendentes
-        resultados_media = [
-            r for r in resultados if getattr(r, "completo", True)
-        ]
+        resultados_media = resultados
 
         # Calcular médias (agregação hierárquica; nota = calculate_grade(média_prof))
         if resultados_media:

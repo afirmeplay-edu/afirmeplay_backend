@@ -101,7 +101,7 @@ from app.routes.answer_sheet_evaluation_listing import (
 from app import db
 import os
 import logging
-from typing import Dict, Any, List, Optional, Tuple, Set
+from typing import Dict, Any, List, Optional, Tuple, Set, Sequence
 from collections import defaultdict
 from sqlalchemy import func, case
 from datetime import datetime
@@ -2311,6 +2311,7 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
             evaluation_results,
             "municipio",
             course_name=_get_curso_nome(getattr(test, "course", None)),
+            has_matematica=_has_matematica_para_geral(test=test),
         )
         media_nota = round_to_two_decimals(mn)
         media_proficiencia = format_decimal_two_places(mp)
@@ -2376,6 +2377,7 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
             evaluation_results,
             "turma",
             course_name=_get_curso_nome(getattr(test, "course", None)),
+            has_matematica=_has_matematica_para_geral(test=test),
         )
         media_nota = round_to_two_decimals(mn)
         media_proficiencia = format_decimal_two_places(mp)
@@ -2480,7 +2482,12 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
                 if first_test:
                     course_name = _get_curso_nome(getattr(first_test, "course", None))
             media_nota_geral, media_proficiencia_geral = hierarchical_mean_grade_and_proficiency(
-                todos_resultados, "municipio", course_name=course_name
+                todos_resultados,
+                "municipio",
+                course_name=course_name,
+                has_matematica=_has_matematica_para_geral(
+                    scope_info=scope_info, class_tests=class_tests
+                ),
             )
         else:
             media_nota_geral = 0.0
@@ -3215,6 +3222,9 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
                 todos_resultados,
                 granularidade_to_hierarchical_target(nivel_granularidade),
                 course_name=course_name,
+                has_matematica=_has_matematica_para_geral(
+                    scope_info=scope_info, class_tests=class_tests
+                ),
             )
         else:
             media_nota_geral = 0.0
@@ -8871,6 +8881,9 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
                 resultados_por_aluno_unico,
                 granularidade_to_hierarchical_target(nivel_granularidade),
                 course_name=course_name,
+                has_matematica=_has_matematica_para_geral(
+                    scope_info=scope_info, class_tests=class_tests
+                ),
             )
         else:
             media_nota = 0.0
@@ -9976,6 +9989,11 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
                 resultados_media,
                 aggregation_level,
                 course_name=_get_curso_nome(getattr(evaluation, "course", None)),
+                has_matematica=_has_matematica_para_geral(
+                    scope_info=scope_info,
+                    class_tests=class_tests_grupo,
+                    evaluation=evaluation,
+                ),
             )
         else:
             media_nota = 0.0
@@ -10032,6 +10050,94 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
                 'avancado': 0
             }
         }
+
+
+def _nome_indica_matematica(name: Optional[str]) -> bool:
+    return "matem" in str(name or "").lower()
+
+
+def _test_has_matematica(test: Any) -> Optional[bool]:
+    """
+    True se a avaliação inclui Matemática; False se tem disciplina(s) e nenhuma é Mat;
+    None se não for possível determinar.
+    """
+    if test is None:
+        return None
+    try:
+        from app.utils.response_formatters import _get_all_subjects_from_test
+
+        subjects = _get_all_subjects_from_test(test) or []
+        names = [(s.get("name") or "") for s in subjects if isinstance(s, dict)]
+        if names:
+            return any(_nome_indica_matematica(n) for n in names)
+    except Exception:
+        pass
+
+    subject_rel = getattr(test, "subject_rel", None)
+    if subject_rel is not None and getattr(subject_rel, "name", None):
+        return _nome_indica_matematica(subject_rel.name)
+
+    subjects_info = getattr(test, "subjects_info", None)
+    if isinstance(subjects_info, list) and subjects_info:
+        for item in subjects_info:
+            if isinstance(item, dict):
+                if _nome_indica_matematica(item.get("name")):
+                    return True
+        # Lista de IDs sem nome: não dá para afirmar False
+        return None
+    return None
+
+
+def _subjects_from_tests_info(tests_info: Sequence) -> List[str]:
+    names: List[str] = []
+    for info in tests_info or []:
+        subjects = getattr(info, "subjects", None)
+        if subjects is None and isinstance(info, dict):
+            subjects = info.get("subjects")
+        for subject in subjects or []:
+            if isinstance(subject, dict):
+                name = subject.get("name") or ""
+            else:
+                name = str(getattr(subject, "name", "") or "")
+            if name:
+                names.append(name)
+    return names
+
+
+def _has_matematica_para_geral(
+    scope_info: Optional[Dict] = None,
+    test: Any = None,
+    class_tests: Optional[list] = None,
+    evaluation: Any = None,
+) -> Optional[bool]:
+    """Resolve has_matematica para agregação GERAL (nota a partir da média de proficiência)."""
+    disciplinas_grupo = ((scope_info or {}).get("grupo") or {}).get("disciplinas") or []
+    if disciplinas_grupo:
+        return any(_nome_indica_matematica(d) for d in disciplinas_grupo)
+
+    names_from_info = _subjects_from_tests_info((scope_info or {}).get("grupo_tests_info") or [])
+    if names_from_info:
+        return any(_nome_indica_matematica(n) for n in names_from_info)
+
+    for candidate in (evaluation, test):
+        detected = _test_has_matematica(candidate)
+        if detected is not None:
+            return detected
+
+    if class_tests:
+        seen_false = False
+        for ct in class_tests:
+            t = getattr(ct, "test", None)
+            if t is None and getattr(ct, "test_id", None):
+                t = Test.query.get(ct.test_id)
+            detected = _test_has_matematica(t)
+            if detected is True:
+                return True
+            if detected is False:
+                seen_false = True
+        if seen_false:
+            return False
+    return None
 
 
 def _get_curso_nome(course_id):

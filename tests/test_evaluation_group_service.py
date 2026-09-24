@@ -199,6 +199,129 @@ class TestDetalheHelpers(unittest.TestCase):
         self.assertFalse(aluno["respostas_por_questao"][0]["respondeu"])
 
 
+class TestVirtualMultidisciplinaryPipeline(unittest.TestCase):
+    def _infos(self):
+        return [
+            GroupTestInfo("t-pt", "PT", "g1", "1º Ano", [{"id": "pt", "name": "Português"}]),
+            GroupTestInfo("t-mat", "MAT", "g1", "1º Ano", [{"id": "mat", "name": "Matemática"}]),
+        ]
+
+    def test_virtual_dataset_same_universe_both_subjects(self):
+        from app.services.evaluation_group_service import (
+            build_virtual_multidisciplinary_results,
+            subject_statistics_from_virtual_results,
+        )
+
+        results = []
+        for sid in ("a1", "a2"):
+            results.append(
+                SimpleNamespace(
+                    student_id=sid,
+                    test_id="t-pt",
+                    grade=4.2,
+                    proficiency=164.5,
+                    classification="Básico",
+                    correct_answers=8,
+                    total_questions=20,
+                    subject_results={
+                        "pt": {
+                            "subject_name": "Português",
+                            "grade": 4.2,
+                            "proficiency": 164.5,
+                            "classification": "Básico",
+                            "score_percentage": 40.0,
+                        }
+                    },
+                    school_id_snapshot=None,
+                    class_id_snapshot=None,
+                    grade_id_snapshot=None,
+                    enrollment_id_snapshot=None,
+                )
+            )
+            results.append(
+                SimpleNamespace(
+                    student_id=sid,
+                    test_id="t-mat",
+                    grade=6.2,
+                    proficiency=222.4,
+                    classification="Básico",
+                    correct_answers=12,
+                    total_questions=20,
+                    subject_results={
+                        "mat": {
+                            "subject_name": "Matemática",
+                            "grade": 6.2,
+                            "proficiency": 222.4,
+                            "classification": "Básico",
+                            "score_percentage": 60.0,
+                        }
+                    },
+                    school_id_snapshot=None,
+                    class_id_snapshot=None,
+                    grade_id_snapshot=None,
+                    enrollment_id_snapshot=None,
+                )
+            )
+
+        virtual = build_virtual_multidisciplinary_results(
+            results, self._infos(), "Anos Iniciais", only_complete=True
+        )
+        self.assertEqual(len(virtual), 2)
+        for aluno in virtual:
+            self.assertTrue(aluno.completo)
+            self.assertIn("pt", aluno.subject_results)
+            self.assertIn("mat", aluno.subject_results)
+            # GERAL do aluno = média das disciplinas (como multidisciplinar)
+            self.assertEqual(aluno.grade, 5.2)
+            self.assertEqual(aluno.proficiency, 193.45)
+
+        with patch(
+            "app.utils.school_equal_weight_means.mean_grade_and_proficiency_equal_weight_by_school_from_subject_rows",
+            side_effect=lambda rows, **kwargs: (
+                sum(float(r["grade"]) for r in rows) / len(rows),
+                sum(float(r["proficiency"]) for r in rows) / len(rows),
+                0.0,
+            ),
+        ):
+            stats = subject_statistics_from_virtual_results(
+                virtual, self._infos(), "Anos Iniciais"
+            )
+        subjects = stats["subjects"]
+        self.assertEqual(subjects["Português"]["total_students"], 2)
+        self.assertEqual(subjects["Matemática"]["total_students"], 2)
+        # Mesmo universo nas duas disciplinas (não N cálculos isolados)
+        self.assertEqual(
+            subjects["Português"]["total_students"],
+            subjects["Matemática"]["total_students"],
+        )
+        self.assertEqual(subjects["Português"]["average_grade"], 4.2)
+        self.assertEqual(subjects["Matemática"]["average_grade"], 6.2)
+
+    def test_only_complete_excludes_partial(self):
+        from app.services.evaluation_group_service import build_virtual_multidisciplinary_results
+
+        results = [
+            SimpleNamespace(
+                student_id="so-pt",
+                test_id="t-pt",
+                grade=5.0,
+                proficiency=180.0,
+                classification="Básico",
+                correct_answers=10,
+                total_questions=20,
+                subject_results=None,
+                school_id_snapshot="esc-1",
+                class_id_snapshot=None,
+                grade_id_snapshot=None,
+                enrollment_id_snapshot=None,
+            ),
+        ]
+        virtual = build_virtual_multidisciplinary_results(
+            results, self._infos(), "Anos Iniciais", only_complete=True
+        )
+        self.assertEqual(virtual, [])
+
+
 class TestResolveEvaluationGroup(unittest.TestCase):
     @patch("app.services.evaluation_group_service.is_group_request", return_value=False)
     def test_without_flag_does_not_group(self, _flag):

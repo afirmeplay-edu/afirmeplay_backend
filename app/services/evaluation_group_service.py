@@ -301,14 +301,177 @@ def _pick_snapshot(results: Sequence[Any], attr: str) -> Any:
     return None
 
 
+def build_virtual_multidisciplinary_results(
+    results: Sequence[Any],
+    tests_info: Sequence[GroupTestInfo],
+    course_name: str = "Anos Iniciais",
+    *,
+    only_complete: bool = True,
+) -> List[MergedStudentResult]:
+    """
+    Monta um dataset como se as N provas fossem UMA multidisciplinar.
+
+    Cada aluno vira um único resultado virtual com ``subject_results`` de todas as
+    disciplinas e GERAL = média das disciplinas (mesma regra de
+    ``EvaluationResultService.calculate_and_save_result`` com subjects_info).
+
+    ``only_complete=True`` (padrão): só alunos presentes em todas as provas do
+    grupo — premissa de mesmo universo / mesma quantidade de alunos.
+    """
+    merged = merge_student_group_results(results, tests_info, course_name)
+    if only_complete:
+        return [m for m in merged if m.completo]
+    return merged
+
+
+def subject_statistics_from_virtual_results(
+    merged_results: Sequence[MergedStudentResult],
+    tests_info: Sequence[GroupTestInfo],
+    course_name: str = "Anos Iniciais",
+) -> Dict[str, Any]:
+    """
+    Estatísticas por disciplina no mesmo formato de
+    ``EvaluationResultService.get_subject_detailed_statistics``, a partir do
+    dataset virtual multidisciplinar (um universo, um cálculo).
+    """
+    from app.utils.school_equal_weight_means import (
+        mean_grade_and_proficiency_equal_weight_by_school_from_subject_rows,
+    )
+
+    # Disciplinas na ordem do grupo (sem repetir)
+    subjects_ordered: List[Dict[str, str]] = []
+    seen_ids: set = set()
+    for info in tests_info:
+        for subject in info.subjects:
+            sid = str(subject.get("id") or "")
+            if not sid or sid in seen_ids:
+                continue
+            seen_ids.add(sid)
+            subjects_ordered.append(
+                {"id": sid, "name": subject.get("name") or sid}
+            )
+
+    subject_statistics: Dict[str, Any] = {}
+    for subject in subjects_ordered:
+        sid = subject["id"]
+        subject_name = subject["name"]
+        subject_rows: List[Dict[str, Any]] = []
+        for result in merged_results:
+            srs = result.subject_results or {}
+            data = srs.get(sid) or srs.get(str(sid))
+            if not isinstance(data, dict):
+                continue
+            subject_rows.append(
+                {
+                    "student_id": result.student_id,
+                    "correct_answers": data.get("correct_answers", 0),
+                    "total_questions": data.get("total_questions", 0),
+                    "proficiency": data.get("proficiency", 0.0),
+                    "grade": data.get("grade", 0.0),
+                    "classification": data.get("classification") or "Abaixo do Básico",
+                    "score_percentage": data.get("score_percentage", 0.0),
+                    "school_id_snapshot": result.school_id_snapshot,
+                    "class_id_snapshot": result.class_id_snapshot,
+                    "grade_id_snapshot": result.grade_id_snapshot,
+                }
+            )
+
+        if not subject_rows:
+            continue
+
+        total_students = len(subject_rows)
+        avg_grade, avg_proficiency, avg_score_percentage = (
+            mean_grade_and_proficiency_equal_weight_by_school_from_subject_rows(
+                subject_rows,
+                student_id_key="student_id",
+                course_name=course_name,
+                subject_name=subject_name,
+            )
+        )
+        avg_grade = round_to_two_decimals(avg_grade)
+        avg_proficiency = round_to_two_decimals(avg_proficiency)
+        avg_score_percentage = round_to_two_decimals(avg_score_percentage)
+
+        classification_distribution = {
+            "abaixo_do_basico": 0,
+            "basico": 0,
+            "adequado": 0,
+            "avancado": 0,
+        }
+        for sr in subject_rows:
+            classification = str(sr.get("classification") or "").lower()
+            if "abaixo" in classification:
+                classification_distribution["abaixo_do_basico"] += 1
+            elif "básico" in classification or "basico" in classification:
+                classification_distribution["basico"] += 1
+            elif "adequado" in classification:
+                classification_distribution["adequado"] += 1
+            elif "avançado" in classification or "avancado" in classification:
+                classification_distribution["avancado"] += 1
+
+        subject_statistics[subject_name] = {
+            "subject_id": sid,
+            "subject_name": subject_name,
+            "total_questions": subject_rows[0].get("total_questions", 0),
+            "questions_with_answer": subject_rows[0].get("total_questions", 0),
+            "total_students": total_students,
+            "average_proficiency": avg_proficiency,
+            "average_grade": avg_grade,
+            "average_score_percentage": avg_score_percentage,
+            "classification_distribution": classification_distribution,
+            "student_results": subject_rows,
+        }
+
+    return {
+        "test_id": "grupo",
+        "test_title": " + ".join(
+            (info.subjects[0].get("name") if info.subjects else info.title)
+            for info in tests_info
+        ),
+        "course_name": course_name,
+        "subjects_count": len(subject_statistics),
+        "subjects": subject_statistics,
+    }
+
+
+def filter_virtual_results_by_school(
+    merged_results: Sequence[MergedStudentResult],
+    school_id: Any,
+) -> List[MergedStudentResult]:
+    sid = str(school_id) if school_id is not None else ""
+    if not sid:
+        return list(merged_results)
+    return [
+        m
+        for m in merged_results
+        if m.school_id_snapshot is not None and str(m.school_id_snapshot) == sid
+    ]
+
+
+def filter_virtual_results_by_class(
+    merged_results: Sequence[MergedStudentResult],
+    class_id: Any,
+) -> List[MergedStudentResult]:
+    cid = str(class_id) if class_id is not None else ""
+    if not cid:
+        return list(merged_results)
+    out: List[MergedStudentResult] = []
+    for m in merged_results:
+        if m.class_id_snapshot is None:
+            continue
+        if str(m.class_id_snapshot) == cid:
+            out.append(m)
+    return out
+
+
 def merge_student_group_results(
     results: Sequence[Any],
     tests_info: Sequence[GroupTestInfo],
     course_name: str = "Anos Iniciais",
 ) -> List[MergedStudentResult]:
     """
-    Junta EvaluationResult de várias provas por aluno.
-    GERAL = média das disciplinas que o aluno fez (mesma regra da prova multidisciplinar).
+    Junta EvaluationResult de várias provas por aluno em um resultado virtual
+    com o mesmo shape da multidisciplinar (subject_results + GERAL médio).
     """
     info_by_id = {info.id: info for info in tests_info}
     by_student: Dict[str, List[Any]] = {}

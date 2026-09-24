@@ -41,6 +41,7 @@ from app.services.mobile.answer_sheet_mobile_service import (
     collect_gabaritos_for_school,
 )
 from app.services.mobile.socioeconomic_form_mobile_service import (
+    build_form_school_bundle_warnings,
     build_forms_content_versions,
     collect_forms_for_school,
 )
@@ -228,7 +229,39 @@ def pack_to_api_dict(
     if current_user is not None:
         body["can_delete"] = can_manage_offline_pack(pack, current_user)
         body["can_edit"] = body["can_delete"]
+    body["warnings"] = form_bundle_school_warnings_for_pack(pack)
     return body
+
+
+def form_bundle_school_warnings_for_scope(
+    city_id: str,
+    scope: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Escolas do formulário que ficam fora do bundle por não terem aluno."""
+    try:
+        school_ids = resolve_school_ids(city_id, scope)
+        form_ids = _optional_id_set("form_ids", scope)
+        return build_form_school_bundle_warnings(school_ids, form_ids)
+    except Exception:
+        logger.warning(
+            "Falha ao montar avisos de escolas sem aluno no bundle",
+            exc_info=True,
+        )
+        return []
+
+
+def form_bundle_school_warnings_for_pack(
+    pack: MobileOfflinePackCode,
+) -> List[Dict[str, Any]]:
+    from flask import g, has_request_context
+
+    if not has_request_context():
+        return []
+    ctx = getattr(g, "tenant_context", None)
+    city_id = str(ctx.city_id) if ctx and getattr(ctx, "city_id", None) else None
+    if not city_id:
+        return []
+    return form_bundle_school_warnings_for_scope(city_id, user_scope_persisted(pack))
 
 
 def resolve_school_ids(city_id: str, scope: Dict[str, Any]) -> List[str]:
@@ -1002,6 +1035,11 @@ def redeem_offline_pack_page(
         "student_form_links": student_form_links_out if include_full else [],
         "user_form_links": user_form_links_out if include_full else [],
         "form_content_version": form_content_versions if include_full else {},
+        "warnings": (
+            form_bundle_school_warnings_for_scope(city_id, user_sc)
+            if include_full
+            else []
+        ),
     }
     if not include_full:
         body["includes_full_payload"] = False

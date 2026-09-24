@@ -23,7 +23,7 @@ services:
 
   # MinIO Object Storage
   minio:
-    image: quay.io/minio/minio:latest
+    image: minio/minio:latest
     container_name: minio-server-prod
     command: server /data --console-address ":9003"
     environment:
@@ -46,7 +46,7 @@ services:
 
   # Script de inicialização do MinIO (cria buckets e configura permissões)
   minio-init:
-    image: quay.io/minio/mc:latest
+    image: minio/mc:latest
     container_name: minio-init-prod
     entrypoint: /bin/sh
     command:

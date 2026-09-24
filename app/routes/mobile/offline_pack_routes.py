@@ -88,6 +88,10 @@ def _offline_pack_register_post():
                 "scope": response_scope,
                 "qr_code_png_base64": qr_payload["qr_code_png_base64"],
                 "qr_code_data_url": qr_payload["qr_code_data_url"],
+                "warnings": pack_svc.form_bundle_school_warnings_for_scope(
+                    str(ctx.city_id),
+                    response_scope,
+                ),
             }
         ),
         200,

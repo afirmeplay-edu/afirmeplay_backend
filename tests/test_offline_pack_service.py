@@ -334,5 +334,51 @@ class TestDeleteOfflinePacksBulk(unittest.TestCase):
         )
 
 
+class TestSchoolsExcludedForMissingStudents(unittest.TestCase):
+    def test_mixed_schools_warns_only_the_empty_ones(self):
+        from app.services.mobile.socioeconomic_form_mobile_service import (
+            schools_excluded_for_missing_students,
+        )
+
+        linked = {f"s{i}" for i in range(10)}
+        placements = {
+            f"s{i}": [("class-a", "grade-1")] for i in range(5)
+        }
+        missing = schools_excluded_for_missing_students(
+            linked,
+            selected_grades=["grade-1"],
+            placements_by_school=placements,
+        )
+        self.assertEqual(missing, [f"s{i}" for i in range(5, 10)])
+
+    def test_form_with_no_students_anywhere_has_no_per_school_warning(self):
+        from app.services.mobile.socioeconomic_form_mobile_service import (
+            schools_excluded_for_missing_students,
+        )
+
+        missing = schools_excluded_for_missing_students(
+            {"s1", "s2"},
+            selected_grades=["grade-1"],
+            placements_by_school={},
+        )
+        self.assertIsNone(missing)
+
+    def test_school_with_students_outside_the_form_class_is_excluded(self):
+        from app.services.mobile.socioeconomic_form_mobile_service import (
+            schools_excluded_for_missing_students,
+        )
+
+        missing = schools_excluded_for_missing_students(
+            {"araci", "pedro"},
+            selected_classes=["turma-com-aluno"],
+            selected_grades=["suporte-1"],
+            placements_by_school={
+                "araci": [("outra-turma", "suporte-1")],
+                "pedro": [("turma-com-aluno", "suporte-1")],
+            },
+        )
+        self.assertEqual(missing, ["araci"])
+
+
 if __name__ == "__main__":
     unittest.main()

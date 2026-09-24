@@ -51,6 +51,156 @@ def build_forms_content_versions(
     return {fid: compute_form_content_version(payload) for fid, payload in forms_map.items()}
 
 
+def schools_excluded_for_missing_students(
+    linked_school_ids: Set[str],
+    *,
+    selected_classes: Any = None,
+    selected_grades: Any = None,
+    placements_by_school: Dict[str, List[Tuple[str, str]]],
+) -> Optional[List[str]]:
+    """
+    Escolas do formulário que não entram no bundle porque não têm aluno no escopo.
+
+    Retorna None quando nenhuma escola vinculada tem aluno: o formulário inteiro
+    fica de fora e não há aviso por escola.
+    Retorna a lista (possivelmente vazia) das escolas sem aluno quando ao menos
+    uma escola vinculada tem aluno e portanto o formulário entra no bundle.
+    """
+    from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
+    linked = {str(sid) for sid in linked_school_ids if sid}
+    if not linked:
+        return None
+
+    classes = set(normalize_id_list(selected_classes))
+    grades = set(normalize_id_list(selected_grades))
+    with_students: Set[str] = set()
+    for school_id in linked:
+        for class_id, grade_id in placements_by_school.get(school_id, []):
+            if classes and class_id not in classes:
+                continue
+            if grades and grade_id not in grades:
+                continue
+            if not classes and not grades:
+                continue
+            with_students.add(school_id)
+            break
+
+    if not with_students:
+        return None
+    return sorted(linked - with_students)
+
+
+def _student_placements_by_school(school_ids: List[str]) -> Dict[str, List[Tuple[str, str]]]:
+    """(class_id, grade_id) distintos dos alunos com usuário, por escola."""
+    if not school_ids:
+        return {}
+    from app.models.studentClass import Class
+
+    rows = (
+        db.session.query(Student.school_id, Student.class_id, Class.grade_id)
+        .join(Class, Class.id == Student.class_id)
+        .filter(Student.school_id.in_(list(school_ids)))
+        .filter(Student.user_id.isnot(None))
+        .distinct()
+        .all()
+    )
+    out: Dict[str, List[Tuple[str, str]]] = {}
+    for school_id, class_id, grade_id in rows:
+        if not school_id or class_id is None or grade_id is None:
+            continue
+        out.setdefault(str(school_id), []).append((str(class_id), str(grade_id)))
+    return out
+
+
+def _linked_schools_for_form(form: Form, pack_school_ids: Set[str]) -> Set[str]:
+    from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
+    linked = set(normalize_id_list(form.selected_schools)) & pack_school_ids
+    if linked:
+        return linked
+    class_ids = normalize_id_list(form.selected_classes)
+    if not class_ids:
+        return set()
+    from app.models.studentClass import Class
+    from app.utils.uuid_helpers import ensure_uuid_list
+
+    try:
+        class_uuids = ensure_uuid_list(class_ids)
+    except (TypeError, ValueError):
+        return set()
+    rows = Class.query.filter(Class.id.in_(class_uuids)).all()
+    return {str(row.school_id) for row in rows if row.school_id} & pack_school_ids
+
+
+def build_form_school_bundle_warnings(
+    school_ids: List[str],
+    form_ids: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Avisa escolas vinculadas a um formulário que entra no bundle, mas que
+    ficam de fora porque não têm aluno no escopo desse formulário.
+    """
+    pack_schools = {str(sid) for sid in school_ids if sid}
+    if not pack_schools:
+        return []
+
+    query = Form.query.filter(
+        Form.is_active.is_(True),
+        Form.form_type.in_(list(STUDENT_FORM_TYPES)),
+    )
+    if form_ids:
+        query = query.filter(Form.id.in_(list(form_ids)))
+    forms = query.all()
+    if not forms:
+        return []
+
+    placements = _student_placements_by_school(list(pack_schools))
+    excluded_by_form: List[Tuple[Form, List[str]]] = []
+    excluded_school_ids: Set[str] = set()
+    for form in forms:
+        linked = _linked_schools_for_form(form, pack_schools)
+        missing = schools_excluded_for_missing_students(
+            linked,
+            selected_classes=form.selected_classes,
+            selected_grades=form.selected_grades,
+            placements_by_school=placements,
+        )
+        if not missing:
+            continue
+        excluded_by_form.append((form, missing))
+        excluded_school_ids.update(missing)
+
+    if not excluded_by_form:
+        return []
+
+    from app.models.school import School
+
+    names = {
+        str(school.id): school.name
+        for school in School.query.filter(School.id.in_(list(excluded_school_ids))).all()
+    }
+    warnings: List[Dict[str, Any]] = []
+    for form, missing in excluded_by_form:
+        title = form.title or "Formulário socioeconômico"
+        for school_id in missing:
+            school_name = names.get(school_id) or school_id
+            warnings.append(
+                {
+                    "form_id": str(form.id),
+                    "form_title": title,
+                    "school_id": school_id,
+                    "school_name": school_name,
+                    "message": (
+                        f'A escola {school_name} não entrou no bundle do formulário '
+                        f'"{title}" porque não tem alunos.'
+                    ),
+                }
+            )
+    warnings.sort(key=lambda item: (item["form_title"], item["school_name"]))
+    return warnings
+
+
 def _recipient_query_for_school(
     school_id: str,
     form_ids: Optional[Set[str]] = None,

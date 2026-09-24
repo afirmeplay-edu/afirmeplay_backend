@@ -86,5 +86,5 @@ jobs:
                   export PUBLIC_API_BASE_URL=${{ secrets.PUBLIC_API_BASE_URL }}
                   export SUBDOMAIN_MODE=${{ secrets.SUBDOMAIN_MODE }}
                   docker compose -f docker-compose.dev.yml pull backend-dev
-                  docker compose -f docker-compose.dev.yml up --no-deps backend-dev
+                  docker compose -f docker-compose.dev.yml up -d --no-deps backend-dev
                   docker restart afirmeplay_front_dev afirmeplay_front_prod

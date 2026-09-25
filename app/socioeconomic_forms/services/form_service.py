@@ -916,13 +916,35 @@ class FormService:
             raise
     
     @staticmethod
-    def update_form(form_id, data):
+    def _union_id_lists(existing, new_ids):
+        """Une listas de IDs preservando ordem e sem duplicatas."""
+        result = []
+        seen = set()
+        for item in list(existing or []) + list(new_ids or []):
+            if item is None:
+                continue
+            key = str(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(key)
+        return result
+
+    @staticmethod
+    def _form_has_responses(form_id):
+        """True se já existir ao menos uma resposta (parcial ou completa)."""
+        from app.socioeconomic_forms.models import FormResponse
+        return FormResponse.query.filter_by(form_id=form_id).first() is not None
+
+    @staticmethod
+    def update_form(form_id, data, metadata_only=False):
         """
         Atualiza um formulário
         
         Args:
             form_id: ID do formulário
             data: Dicionário com dados para atualizar
+            metadata_only: Se True, rejeita alteração de perguntas/tipo/escopo
             
         Returns:
             Form: Objeto do formulário atualizado
@@ -931,6 +953,25 @@ class FormService:
             form = Form.query.get(form_id)
             if not form:
                 return None
+
+            has_responses = FormService._form_has_responses(form_id)
+
+            # Questionários com respostas: só metadados (perguntas bloqueadas)
+            if 'questions' in data and (has_responses or metadata_only):
+                raise ValueError(
+                    "Não é permitido alterar as perguntas de um questionário já enviado. "
+                    "Utilize a opção Reutilizar para criar um novo questionário."
+                )
+            if metadata_only and any(
+                key in data for key in (
+                    'formType', 'selectedSchools', 'selectedGrades',
+                    'selectedClasses', 'selectedTecAdminUsers', 'targetGroups',
+                )
+            ):
+                raise ValueError(
+                    "Edição de questionário enviado permite apenas metadados "
+                    "(título, descrição, instruções, prazo e status ativo)."
+                )
             
             # Atualizar campos básicos
             if 'title' in data:
@@ -942,13 +983,17 @@ class FormService:
                 form.custom_title = (str(custom).strip() if custom is not None else None) or None
             if 'description' in data:
                 form.description = data.get('description')
-            if 'formType' in data:
+            if 'formType' in data and not metadata_only:
                 form.form_type = data['formType']
-            if 'targetGroups' in data:
+            if 'targetGroups' in data and not metadata_only:
                 form.target_groups = data['targetGroups']
-            if 'selectedSchools' in data:
+            if 'selectedSchools' in data and not metadata_only:
                 form.selected_schools = data['selectedSchools']
-            if 'selectedTecAdminUsers' in data:
+            if 'selectedGrades' in data and not metadata_only:
+                form.selected_grades = data['selectedGrades']
+            if 'selectedClasses' in data and not metadata_only:
+                form.selected_classes = data['selectedClasses']
+            if 'selectedTecAdminUsers' in data and not metadata_only:
                 form.selected_tecadmin_users = data['selectedTecAdminUsers']
             if 'isActive' in data:
                 form.is_active = data['isActive']
@@ -957,12 +1002,10 @@ class FormService:
             if 'instructions' in data:
                 form.instructions = data.get('instructions')
             
-            # Atualizar questões se fornecidas
+            # Atualizar questões se fornecidas (somente sem respostas)
             if 'questions' in data:
-                # Deletar questões antigas
                 FormQuestion.query.filter_by(form_id=form_id).delete()
                 
-                # Criar novas questões
                 for q_data in data['questions']:
                     question = FormQuestion(
                         form_id=form.id,
@@ -987,6 +1030,87 @@ class FormService:
         except SQLAlchemyError as e:
             db.session.rollback()
             logging.error(f"Erro ao atualizar formulário: {str(e)}")
+            raise
+
+    @staticmethod
+    def apply_form_scope(form_id, data):
+        """
+        Une novo escopo (escolas/séries/turmas) ao formulário existente e
+        cria FormRecipient apenas para destinatários ainda ausentes.
+
+        Args:
+            form_id: ID do formulário
+            data: selectedSchools?, selectedGrades?, selectedClasses?,
+                  selectedTecAdminUsers?, notifyUsers?, isActive?
+
+        Returns:
+            tuple: (Form, dict estatísticas) ou (None, None) se não encontrado
+        """
+        from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+        try:
+            form = Form.query.get(form_id)
+            if not form:
+                return None, None
+
+            new_schools = data.get('selectedSchools') or []
+            new_grades = data.get('selectedGrades') or []
+            new_classes = data.get('selectedClasses') or []
+            new_tecadmin = data.get('selectedTecAdminUsers') or []
+
+            if not new_schools and not new_grades and not new_classes and not new_tecadmin:
+                raise ValueError(
+                    "Informe selectedSchools, selectedGrades, selectedClasses "
+                    "ou selectedTecAdminUsers para aplicar o questionário."
+                )
+
+            if new_schools:
+                form.selected_schools = FormService._union_id_lists(
+                    form.selected_schools, new_schools
+                )
+            if new_grades:
+                form.selected_grades = FormService._union_id_lists(
+                    form.selected_grades, new_grades
+                )
+            if new_classes:
+                form.selected_classes = FormService._union_id_lists(
+                    form.selected_classes, new_classes
+                )
+            if new_tecadmin:
+                form.selected_tecadmin_users = FormService._union_id_lists(
+                    form.selected_tecadmin_users, new_tecadmin
+                )
+
+            FormService._validate_selections(
+                form.selected_schools or [],
+                form.selected_grades or [],
+                form.selected_classes or [],
+            )
+
+            # Ativar ao aplicar (rascunho → ativo), salvo override explícito
+            if 'isActive' in data:
+                form.is_active = bool(data['isActive'])
+            else:
+                form.is_active = True
+
+            db.session.flush()
+
+            notify_users = data.get('notifyUsers', True)
+            stats = DistributionService.send_form_to_recipients(form_id, notify_users)
+
+            form = Form.query.get(form_id)
+            stats['selectedSchools'] = form.selected_schools or []
+            stats['selectedGrades'] = form.selected_grades or []
+            stats['selectedClasses'] = form.selected_classes or []
+            stats['addedSchools'] = [str(s) for s in new_schools]
+            stats['addedGrades'] = [str(g) for g in new_grades]
+            stats['addedClasses'] = [str(c) for c in new_classes]
+
+            return form, stats
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logging.error(f"Erro ao aplicar escopo do formulário: {str(e)}")
             raise
     
     @staticmethod

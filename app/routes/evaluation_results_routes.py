@@ -84,6 +84,14 @@ from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.skill import Skill
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path, get_current_tenant_context
+from app.utils.school_area_type import (
+    apply_area_type_to_query,
+    apply_area_type_to_scope,
+    copy_area_restriction,
+    narrow_escola_options,
+    parse_area_type_filter,
+    school_allowed,
+)
 from app.routes.answer_sheet_evaluation_listing import (
     answer_sheet_target_classes_visible_for_user,
     build_answer_sheet_evaluation_by_id_json,
@@ -754,7 +762,13 @@ def listar_avaliacoes():
             }), 400
         
         # Identificar escopo de busca baseado nos filtros aplicados
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        scope_info = apply_area_type_to_scope(scope_info, area_type)
         logging.info(f"scope_info: {scope_info}")
         
         if not scope_info:
@@ -1064,6 +1078,15 @@ def listar_avaliacoes():
                     query_base = query_base.filter(School.id == escola)
                 else:
                     query_base = query_base.filter(School.name.ilike(f"%{escola}%"))
+
+            restrict_school_ids = (scope_info or {}).get("_restrict_school_ids")
+            if restrict_school_ids is not None:
+                if not restrict_school_ids:
+                    query_base = query_base.filter(School.id.is_(None))
+                else:
+                    query_base = query_base.filter(
+                        School.id.in_([str(item) for item in restrict_school_ids])
+                    )
             
             if serie and serie.lower() != 'all':
                 # Tentar filtrar por ID primeiro, depois por nome
@@ -1487,6 +1510,7 @@ def listar_avaliacoes():
                         "avaliacao": avaliacao,
                         "periodo": periodo_raw_clean,
                         "group_id": group_id_param,
+                        "tipo_area": request.args.get("tipo_area"),
                         "page": page,
                         "per_page": per_page,
                     },
@@ -1608,6 +1632,7 @@ def listar_avaliacoes_analise_ia():
                 "avaliacao": avaliacao,
                 "periodo": periodo_raw_clean,
                 "group_id": group_id_param,
+                "tipo_area": request.args.get("tipo_area"),
             },
         )
 
@@ -1636,7 +1661,12 @@ def listar_avaliacoes_analise_ia():
             ), 200
 
         # Cache não existe: calcular dados 1x e disparar task
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
         scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        scope_info = apply_area_type_to_scope(scope_info, area_type)
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
         if avaliacao_ids:
@@ -1670,6 +1700,15 @@ def listar_avaliacoes_analise_ia():
                 q = q.filter(ClassTest.test_id == str(avaliacao))
 
         todas_avaliacoes_escopo = q.all()
+        restrict_school_ids = (scope_info or {}).get("_restrict_school_ids")
+        if restrict_school_ids is not None:
+            allowed_schools = {str(item) for item in restrict_school_ids}
+            todas_avaliacoes_escopo = [
+                ct
+                for ct in todas_avaliacoes_escopo
+                if getattr(getattr(ct, "class_", None), "school_id", None)
+                and str(ct.class_.school_id) in allowed_schools
+            ]
         estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(
             todas_avaliacoes_escopo, scope_info, nivel_granularidade, user
         )
@@ -6893,6 +6932,7 @@ def _obter_avaliacoes_evolucao(
     data_inicio: Optional[str] = None,
     data_fim: Optional[str] = None,
     nome: Optional[str] = None,
+    area_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Retorna avaliações para a tela de Evolução, aplicando todos os filtros de forma restritiva.
@@ -6948,6 +6988,7 @@ def _obter_avaliacoes_evolucao(
 
     if escola_param.lower() != "all":
         query = query.filter(School.id == str(escola_param))
+    query = apply_area_type_to_query(query, area_type)
 
     # Filtro de série: restringe às turmas da série selecionada (comparação em string para consistência)
     if serie_param:
@@ -7761,7 +7802,12 @@ def niveis_proficiencia_avaliacao_online():
         municipio_str = str(municipio).strip()
         set_search_path(city_id_to_schema_name(municipio_str))
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
         scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        scope_info = apply_area_type_to_scope(scope_info, area_type)
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
 
@@ -8303,6 +8349,11 @@ def obter_opcoes_filtros_evolucao():
                 "error": "Você só pode visualizar dados de evolução do seu município."
             }), 403
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         response = {}
         response["estados"] = _obter_estados_disponiveis(user, permissao)
 
@@ -8312,7 +8363,10 @@ def obter_opcoes_filtros_evolucao():
                 municipio_str = str(municipio).strip()
                 schema = city_id_to_schema_name(municipio_str)
                 set_search_path(schema)
-                response["escolas"] = _obter_escolas_por_municipio_evolucao(municipio_str, user, permissao)
+                response["escolas"] = narrow_escola_options(
+                    _obter_escolas_por_municipio_evolucao(municipio_str, user, permissao),
+                    area_type,
+                )
                 if escola and str(escola).strip().lower() != "all":
                     response["series"] = _obter_series_por_escola_evolucao(municipio_str, escola, user, permissao)
                     if serie and str(serie).strip().lower() != "all":
@@ -8390,6 +8444,11 @@ def listar_avaliacoes_evolucao():
         schema = city_id_to_schema_name(municipio_id)
         set_search_path(schema)
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         avaliacoes = _obter_avaliacoes_evolucao(
             municipio_id=municipio_id,
             user=user,
@@ -8400,6 +8459,7 @@ def listar_avaliacoes_evolucao():
             data_inicio=data_inicio,
             data_fim=data_fim,
             nome=nome,
+            area_type=area_type,
         )
 
         return jsonify({
@@ -8510,9 +8570,14 @@ def listar_alunos_evolucao():
         schema = city_id_to_schema_name(municipio_id)
         set_search_path(schema)
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
         scope_info = _determinar_escopo_busca(
             estado, municipio_id, escola, serie, turma, None, user
         )
+        scope_info = apply_area_type_to_scope(scope_info, area_type)
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
 
@@ -8602,6 +8667,11 @@ def obter_opcoes_filtros():
         if not permissao['permitted']:
             return jsonify({"error": permissao['error']}), 403
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         periodo_raw = request.args.get("periodo")
         periodo_bounds = None
         if not is_answer_sheet_report_entity():
@@ -8655,8 +8725,11 @@ def obter_opcoes_filtros():
                             municipio_str, user, permissao
                         )
                     if avaliacao:
-                        response["escolas"] = obter_escolas_por_gabarito(
-                            avaliacao, municipio_str, user, permissao
+                        response["escolas"] = narrow_escola_options(
+                            obter_escolas_por_gabarito(
+                                avaliacao, municipio_str, user, permissao
+                            ),
+                            area_type,
                         )
                         if _escola_param_eh_especifica(escola):
                             response["series"] = obter_series_por_gabarito_escola(
@@ -8695,8 +8768,11 @@ def obter_opcoes_filtros():
                     if avaliacao:
                         # Com avaliação já selecionada, escola/série/turma = escopo completo (sem recorte por mês).
                         periodo_bounds_escopo = _periodo_bounds_dados_digital()
-                        response["escolas"] = _obter_escolas_por_avaliacao(
-                            avaliacao, municipio, user, permissao, periodo_bounds_escopo
+                        response["escolas"] = narrow_escola_options(
+                            _obter_escolas_por_avaliacao(
+                                avaliacao, municipio, user, permissao, periodo_bounds_escopo
+                            ),
+                            area_type,
                         )
                         if _escola_param_eh_especifica(escola):
                             response["series"] = _obter_series_por_escola(
@@ -9068,8 +9144,8 @@ def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Di
         escopo['municipio_id'] = scope_info.get('municipio_id')
         if avaliacao_ids:
             escopo['avaliacao_ids'] = avaliacao_ids
-    
-    
+
+    copy_area_restriction(scope_info, escopo)
     logging.info(f"Escopo calculado para {nivel_granularidade}: {escopo}")
     return escopo
 
@@ -9085,7 +9161,15 @@ def _class_ids_aplicacao_escopo(escopo_calculo: dict) -> List[Any]:
         class_tests = ClassTest.query.filter_by(test_id=test_ids[0]).all()
     else:
         class_tests = ClassTest.query.filter(ClassTest.test_id.in_(test_ids)).all()
-    return [ct.class_id for ct in class_tests]
+    class_ids = [ct.class_id for ct in class_tests if ct.class_id]
+    restrict_school_ids = escopo_calculo.get("_restrict_school_ids")
+    if restrict_school_ids is None:
+        return class_ids
+    if not restrict_school_ids:
+        return []
+    allowed = {str(item) for item in restrict_school_ids}
+    rows = Class.query.filter(Class.id.in_(class_ids)).all() if class_ids else []
+    return [row.id for row in rows if str(row.school_id) in allowed]
 
 
 def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
@@ -9096,11 +9180,17 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
         logging.info(f"Buscando alunos por escopo: {escopo_calculo}")
 
         restrict_class_ids = escopo_calculo.get("restrict_class_ids")
+        restrict_school_ids = escopo_calculo.get("_restrict_school_ids")
+        if restrict_school_ids is not None and not list(restrict_school_ids):
+            return []
         
         if escopo_calculo['tipo'] == "municipio":
             # Todos os alunos do município (com filtro de avaliação se especificada)
             query = Student.query.join(Class).join(School, School.id == cast(Class.school_id, String)).join(City)\
                                .filter(City.id == escopo_calculo['municipio_id'])
+
+            if restrict_school_ids is not None:
+                query = query.filter(School.id.in_([str(item) for item in restrict_school_ids]))
 
             if restrict_class_ids is not None:
                 if not restrict_class_ids:
@@ -9118,6 +9208,8 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             return alunos
         
         elif escopo_calculo['tipo'] == "escola":
+            if not school_allowed(escopo_calculo.get("escola_id"), restrict_school_ids):
+                return []
             # Todos os alunos da escola (com filtro de avaliação se especificada)
             query = Student.query.join(Class).join(School, School.id == cast(Class.school_id, String))\
                                .filter(School.id == escopo_calculo['escola_id'])
@@ -9138,9 +9230,15 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             return alunos
         
         elif escopo_calculo['tipo'] == "serie":
+            if escopo_calculo.get("escola_id") and not school_allowed(
+                escopo_calculo.get("escola_id"), restrict_school_ids
+            ):
+                return []
             # Todos os alunos da série na escola específica (com filtro de avaliação se especificada)
             query = Student.query.join(Class).join(Grade)\
                                .filter(Grade.id == escopo_calculo['serie_id'])
+            if restrict_school_ids is not None:
+                query = query.filter(Class.school_id.in_([str(item) for item in restrict_school_ids]))
 
             if restrict_class_ids is not None:
                 if not restrict_class_ids:
@@ -9167,6 +9265,9 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             if not turma_uuid:
                 return []
             query = Student.query.filter(Student.class_id == turma_uuid)
+            turma_obj = Class.query.get(turma_uuid)
+            if turma_obj is not None and not school_allowed(turma_obj.school_id, restrict_school_ids):
+                return []
 
             if restrict_class_ids is not None:
                 if not restrict_class_ids:
@@ -10626,6 +10727,11 @@ def relatorio_consolidado_opcoes_filtros():
         if municipio:
             set_search_path(city_id_to_schema_name(str(municipio).strip()))
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         response = get_digital_filter_options(
             estado,
             municipio,
@@ -10637,6 +10743,7 @@ def relatorio_consolidado_opcoes_filtros():
             list_municipios_fn=_obter_municipios_por_estado,
             periodo_iso=periodo_iso,
             periodo_bounds=periodo_bounds,
+            area_type=area_type,
         )
         return jsonify(response), 200
     except Exception as e:
@@ -10680,6 +10787,10 @@ def relatorio_consolidado():
             return jsonify({"error": str(ve)}), 400
 
         escola = request.args.get("escola")
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
 
         try:
             payload = build_digital_consolidated_report(
@@ -10688,6 +10799,7 @@ def relatorio_consolidado():
                 test_ids,
                 user,
                 permissao,
+                area_type=area_type,
             )
         except PermissionError as pe:
             return jsonify({"error": str(pe)}), 403

@@ -2209,6 +2209,7 @@ def _fetch_digital_class_tests(
     municipio_id: str,
     escola_id: Optional[str],
     restrict_class_ids: Optional[Set[Any]],
+    area_type: Optional[str] = None,
 ) -> List[ClassTest]:
     q = (
         ClassTest.query.filter(ClassTest.test_id.in_([str(t) for t in test_ids]))
@@ -2218,6 +2219,10 @@ def _fetch_digital_class_tests(
     )
     if escola_id:
         q = q.filter(School.id == escola_id)
+    if area_type:
+        from app.utils.school_area_type import apply_area_type_to_query
+
+        q = apply_area_type_to_query(q, area_type)
     if restrict_class_ids is not None:
         if not restrict_class_ids:
             return []
@@ -2265,6 +2270,7 @@ def build_digital_consolidated_report(
     test_ids: List[str],
     user: dict,
     permissao: dict,
+    area_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     city = City.query.get(municipio_id)
     if not city:
@@ -2293,7 +2299,9 @@ def build_digital_consolidated_report(
     tests_by_id = {str(t.id): t for t in tests}
     itens = [_digital_item_selecionado(t) for t in tests]
 
-    class_tests_linhas = _fetch_digital_class_tests(test_ids, municipio_id, escola_id, restrict)
+    class_tests_linhas = _fetch_digital_class_tests(
+        test_ids, municipio_id, escola_id, restrict, area_type
+    )
     if not class_tests_linhas:
         return _empty_payload("avaliacao", filtros, itens)
 
@@ -2309,7 +2317,9 @@ def build_digital_consolidated_report(
     results_linhas = _digital_results_for_scope(test_ids, escopo_linhas, class_ids_linhas)
 
     if escola_id:
-        class_tests_rede = _fetch_digital_class_tests(test_ids, municipio_id, None, restrict)
+        class_tests_rede = _fetch_digital_class_tests(
+            test_ids, municipio_id, None, restrict, area_type
+        )
         escopo_rede = _build_escopo_calculo(municipio_id, None)
         if restrict is not None:
             escopo_rede["restrict_class_ids"] = restrict
@@ -2372,15 +2382,23 @@ def _fetch_answer_sheet_scope(
     escola_id: Optional[str],
     user: dict,
     permissao: dict,
+    area_type: Optional[str] = None,
 ) -> Tuple[List[AnswerSheetGabarito], List[Class], Dict[str, List[Class]]]:
     gabs = AnswerSheetGabarito.query.filter(AnswerSheetGabarito.id.in_([str(g) for g in gabarito_ids])).all()
     classes_by_gab: Dict[str, List[Class]] = {}
     all_classes: List[Class] = []
     seen: Set[str] = set()
+    area_school_ids = None
+    if area_type:
+        from app.utils.school_area_type import school_ids_for_area
+
+        area_school_ids = set(school_ids_for_area(area_type) or [])
     for gab in gabs:
         classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
         if escola_id:
             classes = [c for c in classes if str(c.school_id) == str(escola_id)]
+        if area_school_ids is not None:
+            classes = [c for c in classes if str(c.school_id) in area_school_ids]
         classes_by_gab[str(gab.id)] = classes
         for c in classes:
             if str(c.id) not in seen:
@@ -2420,6 +2438,7 @@ def build_answer_sheet_consolidated_report(
     gabarito_ids: List[str],
     user: dict,
     permissao: dict,
+    area_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     city = City.query.get(municipio_id)
     if not city:
@@ -2436,7 +2455,7 @@ def build_answer_sheet_consolidated_report(
     }
 
     gabs_linhas, all_classes_linhas, classes_by_gab_linhas = _fetch_answer_sheet_scope(
-        gabarito_ids, municipio_id, escola_id, user, permissao
+        gabarito_ids, municipio_id, escola_id, user, permissao, area_type
     )
     found = {str(g.id) for g in gabs_linhas}
     missing = [g for g in gabarito_ids if str(g) not in found]
@@ -2468,7 +2487,7 @@ def build_answer_sheet_consolidated_report(
 
     if escola_id:
         _gabs_rede, all_classes_rede, classes_by_gab_rede = _fetch_answer_sheet_scope(
-            gabarito_ids, municipio_id, None, user, permissao
+            gabarito_ids, municipio_id, None, user, permissao, area_type
         )
         class_ids_rede = [c.id for c in all_classes_rede]
         students_rede: Dict[str, List[Student]] = defaultdict(list)
@@ -2539,8 +2558,15 @@ def build_answer_sheet_consolidated_report(
 # ---------------------------------------------------------------------------
 
 
-def _escolas_municipio_digital(municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+def _escolas_municipio_digital(
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    area_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     q = School.query.filter(School.city_id == municipio_id)
+    if area_type:
+        q = q.filter(School.area_type == area_type)
     if permissao.get("scope") == "escola":
         role = (user.get("role") or "").lower()
         if role in ("diretor", "coordenador"):
@@ -2595,13 +2621,16 @@ def get_digital_filter_options(
     *,
     periodo_iso: Optional[str] = None,
     periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+    area_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     response: Dict[str, Any] = {"estados": list_estados_fn(user, permissao)}
     response.update(_periodo_response_fields(periodo_iso))
     if estado:
         response["municipios"] = list_municipios_fn(estado, user, permissao)
         if municipio:
-            response["escolas"] = _escolas_municipio_digital(municipio, user, permissao)
+            response["escolas"] = _escolas_municipio_digital(
+                municipio, user, permissao, area_type
+            )
             response["avaliacoes"] = list_avaliacoes_fn(
                 municipio, user, permissao, escola or "all", periodo_bounds
             )
@@ -2619,13 +2648,16 @@ def get_answer_sheet_filter_options(
     list_gabaritos_fn,
     *,
     periodo_iso: Optional[str] = None,
+    area_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     response: Dict[str, Any] = {"estados": list_estados_fn(user, permissao)}
     response.update(_periodo_response_fields(periodo_iso))
     if estado:
         response["municipios"] = list_municipios_fn(estado, user, permissao)
         if municipio:
-            response["escolas"] = _escolas_municipio_digital(municipio, user, permissao)
+            response["escolas"] = _escolas_municipio_digital(
+                municipio, user, permissao, area_type
+            )
             response["gabaritos"] = list_gabaritos_fn(
                 str(municipio).strip(), user, permissao, escola or "all"
             )

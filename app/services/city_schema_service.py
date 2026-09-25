@@ -215,6 +215,27 @@ COMMENT ON TABLE "{schema}".monitoring_action_history IS 'Histórico de alteraç
 """
 
 
+def get_school_area_type_column_ddl(schema: str) -> str:
+    """ALTER idempotente: tipo de área (urbana/rural) em school. Sem default."""
+    return f"""
+ALTER TABLE "{schema}".school
+    ADD COLUMN IF NOT EXISTS area_type VARCHAR(20);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_namespace n ON n.oid = c.connamespace
+        WHERE n.nspname = '{schema}' AND c.conname = 'ck_school_area_type'
+    ) THEN
+        ALTER TABLE "{schema}".school
+            ADD CONSTRAINT ck_school_area_type
+            CHECK (area_type IS NULL OR area_type IN ('urbana', 'rural'));
+    END IF;
+END $$;
+COMMENT ON COLUMN "{schema}".school.area_type IS 'Tipo de área da escola: urbana ou rural. NULL = não informado. Usado só para filtrar resultados.';
+"""
+
+
 def get_municipality_availability_column_migrations_ddl(schema: str) -> str:
     """ALTER idempotente: disponibilidade municipal em test e answer_sheet_gabaritos."""
     return f"""
@@ -1182,6 +1203,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
         cursor.execute(get_class_shift_column_migrations_ddl(schema_name))
         cursor.execute(get_answer_sheet_result_snapshot_columns_ddl(schema_name))
         cursor.execute(get_municipality_availability_column_migrations_ddl(schema_name))
+        cursor.execute(get_school_area_type_column_ddl(schema_name))
 
         mobile_ddl = get_mobile_tables_ddl(schema_name)
         cursor.execute(mobile_ddl)
@@ -1213,8 +1235,10 @@ CREATE TABLE IF NOT EXISTS "{schema}".school (
     name VARCHAR(100),
     address VARCHAR(200),
     domain VARCHAR(100),
+    area_type VARCHAR(20),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    city_id VARCHAR REFERENCES public.city(id)
+    city_id VARCHAR REFERENCES public.city(id),
+    CONSTRAINT ck_school_area_type CHECK (area_type IS NULL OR area_type IN ('urbana', 'rural'))
 );
 COMMENT ON TABLE "{schema}".school IS 'Escolas do município';
 

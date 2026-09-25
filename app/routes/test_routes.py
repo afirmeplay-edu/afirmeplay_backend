@@ -3786,6 +3786,12 @@ def comparar_avaliacoes():
             return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
         
         print(f"[COMPARE] Validação de test_ids concluída - Tempo: {time.time() - start_time:.2f}s")
+
+        from app.utils.school_area_type import parse_area_type_filter, restrict_escopo_by_area
+        try:
+            area_type = parse_area_type_filter((data or {}).get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
         
         # Buscar todas as avaliações para verificar se existem
         query_start = time.time()
@@ -3921,12 +3927,14 @@ def comparar_avaliacoes():
             "serie_id": str(serie).strip() if _valid(serie) else None,
             "turma_id": str(turma).strip() if _valid(turma) else None,
         }
+        restrict_escopo_by_area(escopo_calculo, area_type)
         filtros_aplicados = {
             "estado": str(estado).strip() if _valid(estado) else None,
             "municipio": str(municipio_id),
             "escola": escopo_calculo["escola_id"],
             "serie": escopo_calculo["serie_id"],
             "turma": escopo_calculo["turma_id"],
+            "tipo_area": area_type,
         }
 
         # Executar comparação
@@ -4013,6 +4021,11 @@ def comparar_avaliacoes_por_grupos():
         serie = data.get("serie")
         turma = data.get("turma")
         view_by = data.get("visualizar_por") or data.get("view_by") or "turma"
+        from app.utils.school_area_type import parse_area_type_filter, restrict_escopo_by_area
+        try:
+            area_type = parse_area_type_filter(data.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
 
         if _valid(municipio):
             city = City.query.get(str(municipio).strip())
@@ -4041,12 +4054,14 @@ def comparar_avaliacoes_por_grupos():
             "serie_id": str(serie).strip() if _valid(serie) else None,
             "turma_id": str(turma).strip() if _valid(turma) else None,
         }
+        restrict_escopo_by_area(escopo_calculo, area_type)
         filtros_aplicados = {
             "estado": str(estado).strip() if _valid(estado) else None,
             "municipio": str(municipio_id),
             "escola": escopo_calculo["escola_id"],
             "serie": escopo_calculo["serie_id"],
             "turma": escopo_calculo["turma_id"],
+            "tipo_area": area_type,
         }
 
         result = EvolutionGroupsService.compare_by_groups(
@@ -4134,6 +4149,11 @@ def export_evolution_excel():
         serie = data.get("serie")
         turma = data.get("turma")
         estado = data.get("estado") or state
+        from app.utils.school_area_type import parse_area_type_filter, restrict_escopo_by_area
+        try:
+            area_type = parse_area_type_filter(data.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
 
         if _valid(municipio):
             city = City.query.get(str(municipio).strip())
@@ -4161,12 +4181,14 @@ def export_evolution_excel():
                 "serie_id": str(serie).strip() if _valid(serie) else None,
                 "turma_id": str(turma).strip() if _valid(turma) else None,
             }
+            restrict_escopo_by_area(escopo_calculo, area_type)
             filtros_aplicados = {
                 "estado": str(estado).strip() if _valid(estado) else None,
                 "municipio": str(municipio_id),
                 "escola": escopo_calculo["escola_id"],
                 "serie": escopo_calculo["serie_id"],
                 "turma": escopo_calculo["turma_id"],
+                "tipo_area": area_type,
             }
         
         # Exportar para Excel

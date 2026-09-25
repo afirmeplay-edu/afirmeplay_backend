@@ -10,6 +10,8 @@ class School(db.Model):
     name = db.Column(db.String(100))
     address = db.Column(db.String(200))
     domain = db.Column(db.String(100))
+    # urbana | rural. NULL = não informado. Só filtra resultados; não entra em cálculo.
+    area_type = db.Column(db.String(20), nullable=True)
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
 
     city_id = db.Column(db.String, db.ForeignKey('public.city.id'))

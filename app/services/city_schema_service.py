@@ -600,6 +600,39 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_cover_templates_one_active_per_test
 """
 
 
+def get_certificate_artworks_table_ddl(schema: str) -> str:
+    """
+    DDL idempotente da tabela certificate_artworks (modelo gráfico de certificado).
+    Associada a "{schema}".test; isolamento via schema tenant.
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".certificate_artworks (
+    id VARCHAR PRIMARY KEY,
+    evaluation_id VARCHAR REFERENCES "{schema}".test(id) ON DELETE CASCADE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'draft',
+    original_filename VARCHAR(255) NOT NULL,
+    mime_type VARCHAR(100) NOT NULL,
+    source_kind VARCHAR(20) NOT NULL,
+    minio_bucket VARCHAR(100) NOT NULL,
+    minio_object_name VARCHAR(500) NOT NULL,
+    normalized_object_name VARCHAR(500),
+    page_count INTEGER NOT NULL DEFAULT 1,
+    page_width_pt FLOAT NOT NULL,
+    page_height_pt FLOAT NOT NULL,
+    rotation INTEGER NOT NULL DEFAULT 0,
+    fields JSON NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by VARCHAR,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_certificate_artworks_evaluation_status
+    ON "{schema}".certificate_artworks(evaluation_id, status);
+COMMENT ON TABLE "{schema}".certificate_artworks IS 'Modelos gráficos opcionais de certificados';
+"""
+
+
 def get_subjective_evaluation_tables_ddl(schema: str) -> str:
     """
     DDL idempotente das tabelas da avaliação subjetiva no schema city_xxx.
@@ -1205,6 +1238,7 @@ def _get_city_tables_ddl(schema: str) -> str:
     afirme_ler_block = get_afirme_ler_evaluation_tables_ddl(schema)
     subjective_evaluation_block = get_subjective_evaluation_tables_ddl(schema)
     cover_templates_block = get_cover_templates_table_ddl(schema)
+    certificate_artworks_block = get_certificate_artworks_table_ddl(schema)
     content_rewards_block = get_content_rewards_tables_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
@@ -1967,31 +2001,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".certificates (
 );
 COMMENT ON TABLE "{schema}".certificates IS 'Certificados emitidos';
 
-CREATE TABLE IF NOT EXISTS "{schema}".certificate_artworks (
-    id VARCHAR PRIMARY KEY,
-    evaluation_id VARCHAR REFERENCES "{schema}".test(id) ON DELETE CASCADE NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'draft',
-    original_filename VARCHAR(255) NOT NULL,
-    mime_type VARCHAR(100) NOT NULL,
-    source_kind VARCHAR(20) NOT NULL,
-    minio_bucket VARCHAR(100) NOT NULL,
-    minio_object_name VARCHAR(500) NOT NULL,
-    normalized_object_name VARCHAR(500),
-    page_count INTEGER NOT NULL DEFAULT 1,
-    page_width_pt FLOAT NOT NULL,
-    page_height_pt FLOAT NOT NULL,
-    rotation INTEGER NOT NULL DEFAULT 0,
-    fields JSON NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1,
-    created_by VARCHAR,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_certificate_artworks_evaluation_status
-    ON "{schema}".certificate_artworks(evaluation_id, status);
-COMMENT ON TABLE "{schema}".certificate_artworks IS 'Modelos gráficos opcionais de certificados';
-
+""" + certificate_artworks_block + f"""
 CREATE TABLE IF NOT EXISTS "{schema}".student_coins (
     id VARCHAR PRIMARY KEY,
     student_id VARCHAR REFERENCES "{schema}".student(id) NOT NULL UNIQUE,

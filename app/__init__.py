@@ -510,7 +510,7 @@ def create_app():
 
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager, MonitoringAction, MonitoringActionHistory
-    from app.certification.models import CertificateTemplate, Certificate
+    from app.certification.models import CertificateTemplate, Certificate, CertificateArtwork
     from app.models.coverTemplate import CoverTemplate  # noqa: F401
 
     # Rota para servir o arquivo swagger.yaml a partir do diretório raiz do projeto

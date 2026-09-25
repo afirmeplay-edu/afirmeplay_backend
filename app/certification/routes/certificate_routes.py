@@ -9,8 +9,9 @@ from flask_jwt_extended import jwt_required
 from app import db
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.decorators import requires_city_context
-from app.certification.models import CertificateTemplate, Certificate
+from app.certification.models import CertificateTemplate, Certificate, CertificateArtwork
 from app.certification.services.certificate_service import CertificateService
+from app.certification.services.certificate_artwork_service import CertificateArtworkService
 from app.models.student import Student
 from app.models.test import Test
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -261,6 +262,83 @@ def approve_certificates():
     except Exception as e:
         logging.error(f"Erro ao aprovar certificados: {str(e)}")
         return jsonify({"erro": "Erro ao aprovar certificados", "detalhes": str(e)}), 500
+
+
+# ==================== MODELOS GRÁFICOS OPCIONAIS ====================
+
+@bp.route('/<string:evaluation_id>/artworks', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def list_certificate_artworks(evaluation_id):
+    try:
+        return jsonify([item.to_dict() for item in CertificateArtworkService.list_for_evaluation(evaluation_id)]), 200
+    except ValueError as exc:
+        return jsonify({'erro': str(exc)}), 404
+
+
+@bp.route('/<string:evaluation_id>/artworks', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def create_certificate_artwork(evaluation_id):
+    try:
+        file_storage = request.files.get('file') or request.files.get('artwork')
+        artwork = CertificateArtworkService.create_from_upload(
+            evaluation_id,
+            file_storage,
+            request.form.get('name'),
+            str(get_current_user_from_token().get('id')),
+        )
+        return jsonify(artwork.to_dict()), 201
+    except ValueError as exc:
+        return jsonify({'erro': str(exc)}), 400
+
+
+@bp.route('/<string:evaluation_id>/artworks/<string:artwork_id>', methods=['GET', 'PATCH', 'DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def certificate_artwork_detail(evaluation_id, artwork_id):
+    try:
+        artwork = CertificateArtworkService.get(evaluation_id, artwork_id)
+        if request.method == 'DELETE':
+            CertificateArtworkService.delete(evaluation_id, artwork_id)
+            return '', 204
+        if request.method == 'PATCH':
+            data = request.get_json(silent=True) or {}
+            if 'name' in data and str(data['name']).strip():
+                artwork.name = str(data['name']).strip()[:255]
+            if 'fields' in data and isinstance(data['fields'], dict):
+                artwork.fields = data['fields']
+            db.session.commit()
+        return jsonify(artwork.to_dict()), 200
+    except ValueError as exc:
+        return jsonify({'erro': str(exc)}), 404
+
+
+@bp.route('/<string:evaluation_id>/artworks/<string:artwork_id>/activate', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def activate_certificate_artwork(evaluation_id, artwork_id):
+    try:
+        return jsonify(CertificateArtworkService.activate(evaluation_id, artwork_id).to_dict()), 200
+    except ValueError as exc:
+        return jsonify({'erro': str(exc)}), 404
+
+
+@bp.route('/<string:evaluation_id>/artworks/<string:artwork_id>/original', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def get_certificate_artwork_original(evaluation_id, artwork_id):
+    try:
+        artwork = CertificateArtworkService.get(evaluation_id, artwork_id)
+        data, content_type = CertificateArtworkService.load_original(artwork)
+        return send_file(BytesIO(data), mimetype=content_type, as_attachment=False, max_age=3600)
+    except ValueError as exc:
+        return jsonify({'erro': str(exc)}), 404
 
 
 # ==================== LISTAGEM DE AVALIAÇÕES (CERTIFICADOS) ====================

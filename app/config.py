@@ -8,16 +8,19 @@ class Config:
     SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # Cada processo (worker do Gunicorn ou do Celery) tem o próprio pool.
-    # O Gunicorn síncrono atende 1 request por worker, então o pool não precisa
-    # ser grande: 4 workers da API + 4 do Celery, com pool 2 + overflow 2,
-    # ficam em ~16 conexões paradas e no máximo ~32 num pico por ambiente.
-    # O servidor está em max_connections=100 e dev/prod compartilham esse teto.
+    # Um request abre duas sessões (db.session e g.public_session). No mesmo
+    # processo o scheduler ainda segura o advisory lock e, a cada 5 min, a
+    # verificação de avaliações. pool 2 + overflow 2 (4 no total) esgotava
+    # isso no run.py e o login caía com QueuePool timeout.
+    # 4 workers da API + 4 do Celery, com pool 5 + overflow 3: ~40 conexões
+    # paradas e no máximo ~64 num pico por ambiente. max_connections=100,
+    # e dev/prod compartilham esse teto.
     # pool_size 20 + overflow 40 (até 60 por processo) lotava o Postgres sozinho.
     SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_size': 2,
+        'pool_size': 5,
         'pool_recycle': 3600,  # Reciclar conexões a cada 1 hora (evitar timeout)
         'pool_pre_ping': True,  # Verificar conexões antes de usar
-        'max_overflow': 2,
+        'max_overflow': 3,
     }
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_key")
 

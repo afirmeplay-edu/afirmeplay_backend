@@ -998,16 +998,15 @@ class AnswerSheetGenerator:
         Prioriza gabarito_id se fornecido, senão usa test_id
         """
         try:
-            # Criar metadados do QR code
+            # Cartão avulso: 12 primeiros caracteres. Gabarito identifica o cartão.
             qr_metadata = {
-                "student_id": str(student_id)
+                "student_id": str(student_id)[:12]
             }
             
-            # Adicionar test_id ou gabarito_id
             if gabarito_id:
-                qr_metadata["gabarito_id"] = str(gabarito_id)
+                qr_metadata["gabarito_id"] = str(gabarito_id)[:12]
             elif test_id:
-                qr_metadata["test_id"] = str(test_id)
+                qr_metadata["test_id"] = str(test_id)[:12]
             
             # Gerar QR code com JSON
             qr = qrcode.QRCode(
@@ -1155,13 +1154,13 @@ class AnswerSheetGenerator:
             # GERAR E DESENHAR QR CODE
             # ========================================================================
             
-            student_id = str(student.get('id', ''))
-            test_id = str((test_data or {}).get('id', ''))
+            student_id = str(student.get('id', ''))[:12]
+            test_id = str((test_data or {}).get('id', ''))[:12]
             
-            # Metadados do QR code
+            # Cartão avulso: 12 primeiros caracteres. Gabarito identifica o cartão.
             qr_metadata = {"student_id": student_id}
             if gabarito_id:
-                qr_metadata["gabarito_id"] = str(gabarito_id)
+                qr_metadata["gabarito_id"] = str(gabarito_id)[:12]
             elif test_id:
                 qr_metadata["test_id"] = test_id
             

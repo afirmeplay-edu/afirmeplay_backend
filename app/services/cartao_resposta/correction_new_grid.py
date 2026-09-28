@@ -408,19 +408,60 @@ class AnswerSheetCorrectionNewGrid:
 
         return None
 
+    # QR novo grava os 12 primeiros caracteres do UUID (com hífen).
+    # Cartões já impressos continuam com o UUID inteiro.
+    QR_ID_PREFIX_LEN = 12
+
+    def _resolve_qr_id(self, model, raw: Optional[str], label: str) -> Optional[str]:
+        """
+        UUID completo volta como está.
+        Prefixo de até 12 caracteres vira o id único que começa com esse texto.
+        """
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        if len(text) > self.QR_ID_PREFIX_LEN:
+            return text
+
+        matches = model.query.filter(model.id.startswith(text)).limit(2).all()
+        if len(matches) == 1:
+            return str(matches[0].id)
+        if not matches:
+            self.logger.error(f"❌ {label} não encontrado para o prefixo {text}")
+        else:
+            self.logger.error(f"❌ Prefixo ambíguo de {label}: {text}")
+        return None
+
     def _parse_qr_payload(self, qr_data_str: str) -> Optional[Dict[str, str]]:
-        """Parseia JSON legado do QR (student_id + gabarito_id/test_id)."""
+        """Parseia JSON do QR. Aceita UUID completo ou prefixo de 12 caracteres."""
         import json as json_module
 
         try:
             qr_data = json_module.loads(qr_data_str)
-            gabarito_id = qr_data.get("gabarito_id")
-            student_id = qr_data.get("student_id")
-            test_id = qr_data.get("test_id")
+            gabarito_raw = qr_data.get("gabarito_id")
+            student_raw = qr_data.get("student_id")
+            test_raw = qr_data.get("test_id")
 
-            if not gabarito_id and not test_id:
+            if not gabarito_raw and not test_raw:
                 self.logger.error("❌ Nem gabarito_id nem test_id encontrados no QR Code")
                 self.logger.error(f"Dados do QR Code: {qr_data_str[:100]}...")
+                return None
+
+            from app.models.answerSheetGabarito import AnswerSheetGabarito
+            from app.models.student import Student
+            from app.models.test import Test
+
+            gabarito_id = self._resolve_qr_id(AnswerSheetGabarito, gabarito_raw, "Gabarito")
+            student_id = self._resolve_qr_id(Student, student_raw, "Aluno")
+            test_id = self._resolve_qr_id(Test, test_raw, "Prova")
+
+            if gabarito_raw and not gabarito_id:
+                return None
+            if student_raw and not student_id:
+                return None
+            if test_raw and not test_id:
                 return None
 
             if test_id and not gabarito_id:

@@ -8,15 +8,15 @@ class Config:
     SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # Postgres em 147.79.87.213 tem max_connections=100, compartilhado por
-    # Gunicorn (4 workers), Celery prefork (concurrency 4) e o Flask local.
-    # O pool é por processo: 20+40 abria até 60 sockets em um único processo e
-    # estourava o teto do servidor ("sorry, too many clients already").
-    # Teto por processo = pool_size + max_overflow = 10.
-    # Em idle o pool segura só pool_size (4). Um stack (4+4 processos) fica
-    # em ~32 conexões; no pico, stack + Flask local chegam a ~90, abaixo de 100.
+    # Gunicorn (4 workers), Celery prefork (concurrency 4), dev e o Flask local.
+    # O pool é por processo: 20+40 abria até 60 sockets num único processo e
+    # estourava o teto ("sorry, too many clients already").
+    # Um request de município segura 2 conexões e o scheduler segura mais 1
+    # (advisory lock). pool 5 + overflow 3 = 8 por processo: o login local cabe.
+    # Um stack (4+4) fica em ~40 paradas e no máximo ~64 no pico.
     SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_size': 4,
-        'max_overflow': 6,
+        'pool_size': 5,
+        'max_overflow': 3,
         'pool_timeout': 10,  # espera vaga no pool; não abre além do teto
         'pool_recycle': 3600,
         'pool_pre_ping': True,

@@ -171,6 +171,18 @@ def criar_usuario_e_aluno():
             )
             get_orm_session().add(password_log)
         
+        try:
+            from app.services.student_enrollment_service import sync_enrollment_from_student_placement
+
+            sync_enrollment_from_student_placement(get_orm_session(), novo_aluno)
+        except Exception as enroll_err:
+            logging.warning(
+                "Falha ao sincronizar matrícula/recipients do aluno novo %s: %s",
+                novo_aluno.id,
+                enroll_err,
+                exc_info=True,
+            )
+
         get_orm_session().commit()
 
         logging.info(f"Aluno criado com sucesso para o usuário ID: {usuario.id}")
@@ -574,9 +586,15 @@ def atualizar_aluno(student_id, class_id):
                     usuario.city_id = new_school.city_id
                     logging.info(f"Aluno {student_id} movido para escola {new_class.school_id}. City_id atualizado para {new_school.city_id}")
         
-        # Atualizar outros dados do usuário
+        # Atualizar outros dados do usuário (e espelhar nome em student.name)
         if "name" in dados:
-            usuario.name = dados["name"]
+            novo_nome = dados["name"]
+            if isinstance(novo_nome, str) and novo_nome.strip():
+                novo_nome = novo_nome.strip()
+                usuario.name = novo_nome
+                aluno.name = novo_nome
+            else:
+                return jsonify({"error": "name deve ser uma string não vazia"}), 400
         if "email" in dados:
             usuario.email = dados["email"]
         if "registration" in dados:

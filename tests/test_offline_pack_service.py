@@ -131,6 +131,87 @@ class TestUpdateOfflinePackValidation(unittest.TestCase):
             mock_sync.assert_called_once_with(pack)
 
 
+class TestResolvePackExpiresAt(unittest.TestCase):
+    def test_expires_at_future_valid(self):
+        target = datetime.utcnow() + timedelta(hours=36)
+        resolved = svc._resolve_pack_expires_at(
+            expires_at=target.isoformat() + "Z",
+        )
+        self.assertIsNotNone(resolved)
+        self.assertAlmostEqual(
+            resolved.timestamp(), target.timestamp(), delta=2
+        )
+
+    def test_expires_at_past_raises(self):
+        past = (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z"
+        with self.assertRaises(ValueError) as ctx:
+            svc._resolve_pack_expires_at(expires_at=past)
+        self.assertIn("posterior", str(ctx.exception).lower())
+
+    def test_expires_at_beyond_14_days_raises(self):
+        far = (datetime.utcnow() + timedelta(days=15)).isoformat() + "Z"
+        with self.assertRaises(ValueError) as ctx:
+            svc._resolve_pack_expires_at(expires_at=far)
+        self.assertIn("14 dias", str(ctx.exception).lower())
+
+    def test_expires_at_wins_over_ttl_hours(self):
+        target = datetime.utcnow() + timedelta(hours=10)
+        resolved = svc._resolve_pack_expires_at(
+            expires_at=target.isoformat() + "Z",
+            ttl_hours=96,
+        )
+        self.assertAlmostEqual(
+            resolved.timestamp(), target.timestamp(), delta=2
+        )
+
+    def test_ttl_hours_fallback(self):
+        before = datetime.utcnow()
+        resolved = svc._resolve_pack_expires_at(ttl_hours=24)
+        after = datetime.utcnow()
+        self.assertGreaterEqual(resolved, before + timedelta(hours=24))
+        self.assertLessEqual(resolved, after + timedelta(hours=24))
+
+
+class TestUpdateOfflinePackExpiresAt(unittest.TestCase):
+    @patch.object(svc, "db")
+    def test_renew_expired_with_expires_at(self, mock_db):
+        pack = MagicMock()
+        pack.revoked_at = None
+        pack.expires_at = datetime.utcnow() - timedelta(hours=1)
+        pack.scope_json = {"type": "municipality"}
+        target = datetime.utcnow() + timedelta(hours=48)
+        with patch.object(
+            svc, "_sync_cached_pack_generations_to_pack_expiry"
+        ) as mock_sync:
+            svc.update_offline_pack(
+                pack=pack,
+                city_id="city-1",
+                expires_at=target.isoformat() + "Z",
+            )
+            mock_sync.assert_called_once_with(pack)
+        self.assertAlmostEqual(
+            pack.expires_at.timestamp(), target.timestamp(), delta=2
+        )
+
+    @patch.object(svc, "db")
+    def test_expires_at_preferred_when_both_sent(self, mock_db):
+        pack = MagicMock()
+        pack.revoked_at = None
+        pack.expires_at = datetime.utcnow() + timedelta(hours=12)
+        pack.scope_json = {"type": "municipality"}
+        target = datetime.utcnow() + timedelta(hours=8)
+        with patch.object(svc, "_sync_cached_pack_generations_to_pack_expiry"):
+            svc.update_offline_pack(
+                pack=pack,
+                city_id="city-1",
+                expires_at=target.isoformat() + "Z",
+                ttl_hours=200,
+            )
+        self.assertAlmostEqual(
+            pack.expires_at.timestamp(), target.timestamp(), delta=2
+        )
+
+
 class TestRedeemOfflinePackPageFastPath(unittest.TestCase):
     @patch.object(svc, "serialize_student_for_bundle", return_value={"id": "s1"})
     @patch.object(svc, "student_bundle_query_options")
@@ -251,6 +332,52 @@ class TestDeleteOfflinePacksBulk(unittest.TestCase):
         self.assertFalse(
             svc.can_manage_offline_pack(pack, {"id": "user-2", "role": "aplicador"})
         )
+
+
+class TestSchoolsExcludedForMissingStudents(unittest.TestCase):
+    def test_mixed_schools_warns_only_the_empty_ones(self):
+        from app.services.mobile.socioeconomic_form_mobile_service import (
+            schools_excluded_for_missing_students,
+        )
+
+        linked = {f"s{i}" for i in range(10)}
+        placements = {
+            f"s{i}": [("class-a", "grade-1")] for i in range(5)
+        }
+        missing = schools_excluded_for_missing_students(
+            linked,
+            selected_grades=["grade-1"],
+            placements_by_school=placements,
+        )
+        self.assertEqual(missing, [f"s{i}" for i in range(5, 10)])
+
+    def test_form_with_no_students_anywhere_has_no_per_school_warning(self):
+        from app.services.mobile.socioeconomic_form_mobile_service import (
+            schools_excluded_for_missing_students,
+        )
+
+        missing = schools_excluded_for_missing_students(
+            {"s1", "s2"},
+            selected_grades=["grade-1"],
+            placements_by_school={},
+        )
+        self.assertIsNone(missing)
+
+    def test_school_with_students_outside_the_form_class_is_excluded(self):
+        from app.services.mobile.socioeconomic_form_mobile_service import (
+            schools_excluded_for_missing_students,
+        )
+
+        missing = schools_excluded_for_missing_students(
+            {"araci", "pedro"},
+            selected_classes=["turma-com-aluno"],
+            selected_grades=["suporte-1"],
+            placements_by_school={
+                "araci": [("outra-turma", "suporte-1")],
+                "pedro": [("turma-com-aluno", "suporte-1")],
+            },
+        )
+        self.assertEqual(missing, ["araci"])
 
 
 if __name__ == "__main__":

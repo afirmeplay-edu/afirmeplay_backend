@@ -78,8 +78,8 @@ def create_form():
         
         # Validações básicas
         # formType é opcional - será detectado automaticamente pelas séries
-        # title não é mais necessário - gerado automaticamente
-        
+        # title não é mais necessário para o sistema — gerado automaticamente.
+        # Se o front enviar title/customTitle, fica em custom_title.        
         # Criar formulário(s); retorno inclui avisos de escopo (ex.: escola sem turmas compatíveis)
         result, warnings = FormService.create_form(data, user['id'])
         
@@ -91,12 +91,16 @@ def create_form():
         filters = data.get('filters')
         forms_response = []
         
+        # Rascunho (isActive=false): cria o formulário sem distribuir recipients.
+        # A distribuição ocorre em POST /forms/:id/apply ao confirmar turmas.
+        distribute_now = data.get('isActive', True) is not False
+
         for form in forms:
             recipients_count = 0
             sent_at = None
             form_has_scope = bool(filters or form.selected_schools or form.selected_grades or form.selected_classes)
             
-            if form_has_scope:
+            if form_has_scope and distribute_now:
                 # Determinar destinatários para este formulário específico
                 recipients_data = DistributionService.determine_recipients_by_filters(
                     form.form_type,
@@ -112,19 +116,17 @@ def create_form():
                     len(recipients_data),
                     getattr(get_current_tenant_context(), "schema", None) if get_current_tenant_context() else None,
                 ))
-                
-                # Para formulários de aluno: se não houver nenhum destinatário, não criar o formulário
+
+                # Permitir criar com 0 destinatários: alunos podem ser adicionados à turma depois
+                # (DistributionService.ensure_recipients_for_student sincroniza na matrícula).
                 if form.form_type in ('aluno-jovem', 'aluno-velho') and len(recipients_data) == 0:
-                    # Remover formulários já criados (e questões em cascade) e retornar aviso
-                    for f in forms:
-                        db.session.delete(f)
-                    db.session.commit()
-                    return jsonify({
-                        "error": "Não há alunos nas turmas do escopo selecionado. Cadastre alunos nas turmas"
-                    }), 400
+                    warnings.append(
+                        "Nenhum aluno nas turmas do escopo no momento. "
+                        "O formulário foi criado e novos alunos serão incluídos ao entrar na turma."
+                    )
                 
                 # Criar registros de FormRecipient
-                sent_at = datetime.utcnow()
+                sent_at = datetime.utcnow() if recipients_data else None
                 for recipient_data in recipients_data:
                     # Verificar se já existe (evitar duplicatas)
                     existing = FormRecipient.query.filter_by(
@@ -157,9 +159,9 @@ def create_form():
             
             # Preparar resposta para este formulário
             form_data = form.to_dict(include_questions=True)
-            if recipients_count > 0:
-                form_data['recipientsCount'] = recipients_count
-                form_data['sentAt'] = sent_at.isoformat() if sent_at else None
+            form_data['recipientsCount'] = recipients_count
+            if sent_at:
+                form_data['sentAt'] = sent_at.isoformat()
             
             forms_response.append(form_data)
         
@@ -273,6 +275,23 @@ def get_form(form_id):
         
         if not form:
             return jsonify({"error": "Questionário não encontrado"}), 404
+
+        try:
+            created = DistributionService.sync_missing_recipients_for_form(form, commit=False)
+            if created:
+                db.session.commit()
+                form = FormService.get_form(
+                    form_id,
+                    include_questions=True,
+                    include_statistics=include_statistics
+                )
+        except Exception as sync_err:
+            logging.warning(
+                "Falha ao sincronizar recipients em GET /forms/%s: %s",
+                form_id,
+                sync_err,
+                exc_info=True,
+            )
         
         form_dict = form.to_dict(include_questions=True, include_statistics=include_statistics)
         
@@ -294,13 +313,23 @@ def get_form(form_id):
 @jwt_required()
 @role_required("admin", "tecadm")
 def update_form(form_id):
-    """Atualiza um questionário"""
+    """
+    Atualiza um questionário.
+
+    Query/body metadataOnly=true restringe a edição a metadados
+    (título, descrição, instruções, prazo, ativo) — usado após envio.
+    """
     try:
         data = request.get_json()
         if not data:
             return jsonify({"error": "Dados não fornecidos"}), 400
+
+        metadata_only = (
+            str(request.args.get('metadataOnly', '')).lower() == 'true'
+            or bool(data.pop('metadataOnly', False))
+        )
         
-        form = FormService.update_form(form_id, data)
+        form = FormService.update_form(form_id, data, metadata_only=metadata_only)
         
         if not form:
             return jsonify({"error": "Questionário não encontrado"}), 404
@@ -375,7 +404,7 @@ def duplicate_form(form_id):
 @jwt_required()
 @role_required("admin", "tecadm")
 def send_form(form_id):
-    """Envia questionário para grupos de destinatários"""
+    """Envia questionário para grupos de destinatários (escopo já persistido)."""
     try:
         data = request.get_json() or {}
         notify_users = data.get('notifyUsers', True)
@@ -391,12 +420,70 @@ def send_form(form_id):
         return jsonify({"error": "Erro ao enviar formulário", "details": str(e)}), 500
 
 
+@bp.route('/<form_id>/apply', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def apply_form(form_id):
+    """
+    Aplica/reaplica o questionário a um novo escopo (escolas/séries/turmas).
+
+    Une o escopo enviado ao já persistido e cria FormRecipient apenas para
+    destinatários ainda inexistentes. Não altera perguntas nem respostas.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+
+        form = FormService.get_form(form_id, include_questions=False)
+        if not form:
+            return jsonify({"error": "Questionário não encontrado"}), 404
+
+        if str(form.created_by) != str(user['id']):
+            return jsonify({
+                "error": "Apenas o usuário que criou o questionário pode aplicá-lo"
+            }), 403
+
+        data = request.get_json() or {}
+        updated_form, stats = FormService.apply_form_scope(form_id, data)
+
+        if not updated_form:
+            return jsonify({"error": "Questionário não encontrado"}), 404
+
+        payload = updated_form.to_dict(include_questions=False, include_statistics=True)
+        payload['apply'] = stats
+        payload['message'] = stats.get('message') or 'Questionário aplicado com sucesso'
+        return jsonify(payload), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Erro ao aplicar formulário: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao aplicar formulário", "details": str(e)}), 500
+
+
 @bp.route('/<form_id>/recipients', methods=['GET'])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador")
 def list_recipients(form_id):
     """Lista destinatários do questionário"""
     try:
+        form = Form.query.get(form_id)
+        if not form:
+            return jsonify({"error": "Questionário não encontrado"}), 404
+
+        try:
+            created = DistributionService.sync_missing_recipients_for_form(form, commit=False)
+            if created:
+                db.session.commit()
+        except Exception as sync_err:
+            logging.warning(
+                "Falha ao sincronizar recipients em GET /forms/%s/recipients: %s",
+                form_id,
+                sync_err,
+                exc_info=True,
+            )
+
         status = request.args.get('status')
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
@@ -454,6 +541,24 @@ def get_my_forms():
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Aluno novo na turma após criação do form: garantir recipients do escopo atual
+        try:
+            from app.models.student import Student
+            from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+            student = Student.query.filter_by(user_id=user['id']).first()
+            if student:
+                created = DistributionService.ensure_recipients_for_student(student, commit=False)
+                if created:
+                    db.session.commit()
+        except Exception as sync_err:
+            logging.warning(
+                "Falha ao sincronizar recipients em /forms/me user=%s: %s",
+                user.get('id'),
+                sync_err,
+                exc_info=True,
+            )
         
         # Buscar todos os recipients do usuário
         recipients = FormRecipient.query.filter_by(

@@ -60,8 +60,10 @@ class FormResultCache(db.Model):
         Returns:
             str: Hash MD5 dos filtros
         """
-        # Normalizar filtros: remover None e ordenar
-        normalized = {k: v for k, v in sorted(filters.items()) if v is not None}
+        from app.socioeconomic_forms.services.filter_utils import canonicalize_results_filters
+
+        # Canonicaliza escola/série/turma (CSV → lista ordenada) para hash estável
+        normalized = canonicalize_results_filters(filters or {})
         filters_str = json.dumps(normalized, sort_keys=True)
         return hashlib.md5(filters_str.encode()).hexdigest()
     

@@ -947,9 +947,11 @@ def add_student_to_class(class_id):
                     errors.append(f"Student {student_id} is already in class {class_id}")
                     continue
 
-                # Update the student's class_id and school_id
+                # Update the student's class_id, school_id and grade_id
                 student.class_id = class_id_uuid
                 student.school_id = class_obj.school_id
+                if getattr(class_obj, "grade_id", None) is not None:
+                    student.grade_id = class_obj.grade_id
                 
                 # Atualizar city_id do usuário se necessário
                 if student.user.city_id != class_obj.school.city_id:

@@ -77,6 +77,9 @@ class ResultsCacheService:
             FormResultCache: Objeto do cache salvo
         """
         try:
+            from app.socioeconomic_forms.services.filter_utils import canonicalize_results_filters
+
+            filters = canonicalize_results_filters(filters or {})
             filters_hash = FormResultCache.generate_filters_hash(filters)
             
             cache = cls.get(form_id, report_type, filters)
@@ -85,6 +88,7 @@ class ResultsCacheService:
                 cache.result = result
                 cache.student_count = student_count
                 cache.is_dirty = False
+                cache.filters = filters
                 cache.updated_at = datetime.utcnow()
                 logger.info(f"Cache atualizado: form_id={form_id}, type={report_type}, filters={filters}")
             else:
@@ -171,16 +175,20 @@ class ResultsCacheService:
                         if cache_filters['municipio'] != city_id:
                             continue  # Este cache não inclui este município
                     
+                    from app.socioeconomic_forms.services.filter_utils import (
+                        filter_value_includes_id,
+                    )
+
                     if cache_filters.get('escola'):
-                        if cache_filters['escola'] != school_id:
+                        if not filter_value_includes_id(cache_filters['escola'], school_id):
                             continue  # Este cache não inclui esta escola
                     
                     if cache_filters.get('serie'):
-                        if cache_filters['serie'] != grade_id:
+                        if not filter_value_includes_id(cache_filters['serie'], grade_id):
                             continue  # Este cache não inclui esta série
                     
                     if cache_filters.get('turma'):
-                        if cache_filters['turma'] != class_id:
+                        if not filter_value_includes_id(cache_filters['turma'], class_id):
                             continue  # Este cache não inclui esta turma
                     
                     # Se passou por todos os filtros, este cache inclui este estudante

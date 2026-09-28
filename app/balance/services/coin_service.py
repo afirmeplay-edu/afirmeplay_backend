@@ -23,7 +23,7 @@ class CoinService:
         return coins.balance if coins else 0
 
     @staticmethod
-    def credit_coins(student_id: str, amount: int, reason: str, **kwargs) -> CoinTransaction:
+    def credit_coins(student_id: str, amount: int, reason: str, commit: bool = True, **kwargs) -> CoinTransaction:
         """
         Credita moedas para o aluno.
 
@@ -31,6 +31,7 @@ class CoinService:
             student_id: ID do aluno
             amount: Quantidade de moedas (deve ser positivo)
             reason: Motivo (competition_participation, competition_rank_1, etc.)
+            commit: Se True (padrão), persiste imediatamente. False deixa o caller commitar.
             **kwargs: Campos opcionais (competition_id, test_session_id, description)
 
         Returns:
@@ -59,7 +60,10 @@ class CoinService:
             description=kwargs.get('description'),
         )
         db.session.add(transaction)
-        db.session.commit()
+        if commit:
+            db.session.commit()
+        else:
+            db.session.flush()
 
         return transaction
 

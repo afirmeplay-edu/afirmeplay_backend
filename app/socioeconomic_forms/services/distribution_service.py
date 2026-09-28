@@ -34,20 +34,21 @@ class DistributionService:
         Args:
             school_ids: Lista de IDs de escolas
             selected_grades: Lista de IDs de séries (obrigatório)
+            selected_classes: Lista opcional de IDs de turmas (quando informada, restringe o escopo)
             
         Returns:
             list: Lista de dicionários com user_id e school_id
         """
         try:
-            if not selected_grades or len(selected_grades) == 0:
-                raise ValueError("selected_grades é obrigatório para aluno-jovem")
+            if (not selected_grades or len(selected_grades) == 0) and not selected_classes:
+                raise ValueError("selected_grades ou selected_classes é obrigatório para aluno-jovem")
             
             recipients = []
             
             # Converter strings para UUID se necessário
             import uuid as uuid_lib
             grade_uuids = []
-            for g in selected_grades:
+            for g in selected_grades or []:
                 if isinstance(g, str):
                     try:
                         # Tentar converter string para UUID
@@ -59,16 +60,36 @@ class DistributionService:
                 else:
                     grade_uuids.append(g)
             
-            # 1. Buscar todas as turmas que pertencem às séries selecionadas e escolas selecionadas
+            # 1. Buscar turmas das séries/escolas selecionadas
             # class.school_id é VARCHAR → comparar com strings para evitar operator does not exist: character varying = uuid
             school_ids_uuids = ensure_uuid_list(school_ids)
             school_ids_str = [str(s) for s in school_ids_uuids]
-            classes = Class.query.filter(
-                Class.grade_id.in_(grade_uuids),
-                Class.school_id.in_(school_ids_str)
-            ).all()
+
+            query = Class.query
+            if grade_uuids:
+                query = query.filter(Class.grade_id.in_(grade_uuids))
+
+            if len(school_ids_str) == 1:
+                query = query.filter(Class.school_id == school_ids_str[0])
+            else:
+                query = query.filter(Class.school_id.in_(school_ids_str))
+
+            # Se selected_classes for fornecido, filtrar apenas essas turmas
+            if selected_classes:
+                class_ids_uuids = ensure_uuid_list(selected_classes)
+                if len(class_ids_uuids) == 1:
+                    query = query.filter(Class.id == class_ids_uuids[0])
+                else:
+                    query = query.filter(Class.id.in_(class_ids_uuids))
+
+            classes = query.all()
             
-            print("[distribution/aluno-jovem] school_ids=%s grades_count=%s → turmas encontradas: %s" % (school_ids_str, len(grade_uuids), len(classes)))
+            print("[distribution/aluno-jovem] school_ids=%s grades_count=%s classes_filter=%s → turmas encontradas: %s" % (
+                school_ids_str,
+                len(grade_uuids),
+                len(selected_classes) if selected_classes else 0,
+                len(classes),
+            ))
             if not classes:
                 return recipients  # Nenhuma turma encontrada
             
@@ -114,15 +135,15 @@ class DistributionService:
             list: Lista de dicionários com user_id e school_id
         """
         try:
-            if not selected_grades or len(selected_grades) == 0:
-                raise ValueError("selected_grades é obrigatório para aluno-velho")
+            if (not selected_grades or len(selected_grades) == 0) and not selected_classes:
+                raise ValueError("selected_grades ou selected_classes é obrigatório para aluno-velho")
             
             recipients = []
             
             # Converter strings para UUID se necessário
             import uuid as uuid_lib
             grade_uuids = []
-            for g in selected_grades:
+            for g in selected_grades or []:
                 if isinstance(g, str):
                     try:
                         # Tentar converter string para UUID
@@ -140,7 +161,9 @@ class DistributionService:
             school_ids_str = [str(s) for s in school_ids_uuids]
             
             # Construir query de forma que evite inferência de tipo incorreta quando há apenas 1 elemento
-            query = Class.query.filter(Class.grade_id.in_(grade_uuids))
+            query = Class.query
+            if grade_uuids:
+                query = query.filter(Class.grade_id.in_(grade_uuids))
             
             if len(school_ids_str) == 1:
                 query = query.filter(Class.school_id == school_ids_str[0])
@@ -343,24 +366,29 @@ class DistributionService:
             school_ids = []
             
             if filters:
+                from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+
                 # Prioridade: turma > serie > escola > municipio > estado
                 if filters.get('turma'):
                     # Filtrar apenas pela turma específica
-                    # Converter turma_id para UUID (Class.id é UUID)
-                    turma_id_uuid = ensure_uuid(filters['turma'])
-                    turma = Class.query.get(turma_id_uuid)
-                    if turma and turma.school_id:
-                        school_ids = [turma.school_id]
+                    turma_ids = normalize_id_list(filters['turma'])
+                    if turma_ids:
+                        turma_id_uuid = ensure_uuid(turma_ids[0])
+                        turma = Class.query.get(turma_id_uuid)
+                        if turma and turma.school_id:
+                            school_ids = [turma.school_id]
                 elif filters.get('serie'):
                     # Filtrar por série na escola
                     if filters.get('escola'):
-                        school_ids = [filters['escola']]
+                        school_ids = normalize_id_list(filters['escola'])
                     else:
                         # Buscar todas as escolas que têm turmas dessa série
-                        classes = Class.query.filter_by(grade_id=filters['serie']).all()
+                        serie_ids = normalize_id_list(filters['serie'])
+                        grade_uuids = ensure_uuid_list(serie_ids) if serie_ids else []
+                        classes = Class.query.filter(Class.grade_id.in_(grade_uuids)).all() if grade_uuids else []
                         school_ids = list(set([c.school_id for c in classes if c.school_id]))
                 elif filters.get('escola'):
-                    school_ids = [filters['escola']]
+                    school_ids = normalize_id_list(filters['escola'])
                 elif filters.get('municipio'):
                     # Buscar todas as escolas do município
                     schools = School.query.filter_by(city_id=filters['municipio']).all()
@@ -386,14 +414,16 @@ class DistributionService:
             # Determinar séries baseado nos filtros
             grade_ids = []
             if filters and filters.get('serie'):
-                grade_ids = [filters['serie']]
+                from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+                grade_ids = normalize_id_list(filters['serie'])
             elif selected_grades:
                 grade_ids = selected_grades
             
             # Determinar turmas baseado nos filtros
             class_ids = []
             if filters and filters.get('turma'):
-                class_ids = [filters['turma']]
+                from app.socioeconomic_forms.services.filter_utils import normalize_id_list
+                class_ids = normalize_id_list(filters['turma'])
             elif selected_classes:
                 class_ids = selected_classes
             
@@ -445,12 +475,8 @@ class DistributionService:
             if not form.is_active:
                 raise ValueError("Formulário não está ativo")
             
-            # Verificar se já foi enviado (se já tem recipients)
-            existing_recipients = FormRecipient.query.filter_by(form_id=form_id).count()
-            if existing_recipients > 0:
-                raise ValueError("Formulário já foi enviado. Use reenvio se necessário.")
-            
-            # Identificar destinatários baseado no tipo
+            # Identificar destinatários baseado no tipo (inclui alunos que
+            # entraram no escopo depois do primeiro envio)
             recipients_data = []
             
             # Usar filtros se disponíveis, senão usar método tradicional
@@ -521,17 +547,241 @@ class DistributionService:
             
             # TODO: Implementar notificações aqui se notify_users=True
             
+            total_recipients = FormRecipient.query.filter_by(form_id=form_id).count()
             return {
                 'formId': form_id,
-                'totalRecipients': recipients_created,
+                'totalRecipients': total_recipients,
+                'newRecipients': recipients_created,
                 'sentAt': datetime.utcnow().isoformat(),
                 'notificationsSent': recipients_created if notify_users else 0,
                 'emailsSent': 0,  # TODO: Implementar envio de emails
-                'message': f'Questionário enviado para {recipients_created} destinatários'
+                'message': (
+                    f'Questionário enviado para {recipients_created} destinatários'
+                    if recipients_created
+                    else f'Nenhum destinatário novo. {total_recipients} já haviam recebido o questionário'
+                )
             }
             
         except SQLAlchemyError as e:
             db.session.rollback()
             logging.error(f"Erro ao enviar formulário: {str(e)}")
             raise
+
+    @staticmethod
+    def _normalize_id_list(values):
+        if not values:
+            return []
+        return [str(v) for v in values if v is not None]
+
+    @staticmethod
+    def _school_matches_geo_filters(school_id, filters):
+        """Confere município/estado do form quando a escola não veio explícita no escopo."""
+        if not filters or not school_id:
+            return True
+        needs_city = bool(filters.get('municipio') or filters.get('estado'))
+        if not needs_city:
+            return True
+        school = School.query.get(str(school_id))
+        if not school:
+            return False
+        if filters.get('municipio') and str(school.city_id) != str(filters['municipio']):
+            return False
+        if filters.get('estado'):
+            city = City.query.get(school.city_id) if school.city_id else None
+            if not city or city.state != filters['estado']:
+                return False
+        return True
+
+    @staticmethod
+    def _student_matches_form_scope(form, school_id, grade_id, class_id):
+        """
+        Mesma regra da criação: o aluno entra se a turma/série/escola atuais
+        estiverem no escopo persistido (selected_* ou filters).
+        """
+        from app.socioeconomic_forms.services.filter_utils import (
+            form_scope_needs_geo_school_check,
+            student_matches_form_scope,
+        )
+
+        if not student_matches_form_scope(
+            form.form_type,
+            school_id,
+            grade_id,
+            class_id,
+            selected_schools=form.selected_schools,
+            selected_grades=form.selected_grades,
+            selected_classes=form.selected_classes,
+            filters=form.filters,
+        ):
+            return False
+
+        if form_scope_needs_geo_school_check(form.selected_schools, form.filters):
+            return DistributionService._school_matches_geo_filters(
+                school_id, form.filters or {}
+            )
+        return True
+
+    @staticmethod
+    def _add_recipient_if_missing(form, user_id, school_id):
+        existing = FormRecipient.query.filter_by(
+            form_id=form.id,
+            user_id=user_id,
+        ).first()
+        if existing:
+            return False
+        recipient = FormRecipient(
+            form_id=form.id,
+            user_id=user_id,
+            school_id=school_id,
+            status='pending',
+            sent_at=datetime.utcnow(),
+        )
+        db.session.add(recipient)
+        return True
+
+    @staticmethod
+    def ensure_recipients_for_student(student, commit=False):
+        """
+        Garante FormRecipient em formulários ativos cujo escopo inclui a
+        colocação atual do aluno (escola/série/turma).
+
+        Usado quando o aluno é criado ou entra/muda de turma depois do form.
+        """
+        try:
+            if not student or not getattr(student, 'user_id', None):
+                return 0
+            if not getattr(student, 'class_id', None) or not getattr(student, 'school_id', None):
+                return 0
+
+            school_id = str(student.school_id)
+            class_id = str(student.class_id) if student.class_id else None
+            grade_id = None
+            if student.class_id:
+                cls = Class.query.get(student.class_id)
+                if cls and cls.grade_id:
+                    grade_id = str(cls.grade_id)
+            if not grade_id and getattr(student, 'grade_id', None):
+                grade_id = str(student.grade_id)
+
+            if not grade_id:
+                return 0
+
+            forms = Form.query.filter(
+                Form.is_active.is_(True),
+                Form.form_type.in_(['aluno-jovem', 'aluno-velho']),
+            ).all()
+
+            created = 0
+            for form in forms:
+                if not DistributionService._student_matches_form_scope(
+                    form, school_id, grade_id, class_id
+                ):
+                    continue
+                if DistributionService._add_recipient_if_missing(
+                    form, student.user_id, school_id
+                ):
+                    created += 1
+
+            if commit and created:
+                db.session.commit()
+
+            if created:
+                logging.info(
+                    "[distribution/sync] student_id=%s user_id=%s → %s FormRecipient(s) criado(s)",
+                    getattr(student, 'id', None),
+                    student.user_id,
+                    created,
+                )
+            return created
+        except SQLAlchemyError as e:
+            if commit:
+                db.session.rollback()
+            logging.error(f"Erro ao sincronizar recipients do aluno: {str(e)}")
+            raise
+
+    @staticmethod
+    def sync_missing_recipients_for_form(form, commit=False):
+        """
+        Reprocessa o escopo do form e cria FormRecipient apenas para alunos
+        que ainda não estão na lista (não remove existentes).
+        """
+        try:
+            if not form or form.form_type not in ('aluno-jovem', 'aluno-velho'):
+                return 0
+            if not form.is_active:
+                return 0
+
+            recipients_data = DistributionService.determine_recipients_by_filters(
+                form.form_type,
+                filters=form.filters,
+                selected_schools=form.selected_schools,
+                selected_grades=form.selected_grades,
+                selected_classes=form.selected_classes if form.selected_classes else None,
+            )
+
+            created = 0
+            for recipient_data in recipients_data:
+                if DistributionService._add_recipient_if_missing(
+                    form,
+                    recipient_data['user_id'],
+                    recipient_data.get('school_id'),
+                ):
+                    created += 1
+
+            if commit and created:
+                db.session.commit()
+
+            if created:
+                logging.info(
+                    "[distribution/sync] form_id=%s → %s FormRecipient(s) faltantes criados",
+                    form.id,
+                    created,
+                )
+            return created
+        except ValueError as e:
+            logging.warning(
+                "Não foi possível reprocessar destinatários do form %s: %s",
+                getattr(form, "id", None),
+                e,
+            )
+            return 0
+        except SQLAlchemyError as e:
+            if commit:
+                db.session.rollback()
+            logging.error(f"Erro ao sincronizar recipients do formulário: {str(e)}")
+            raise
+
+    @staticmethod
+    def sync_missing_recipients_for_school(school_id, commit=False):
+        """Sincroniza recipients faltantes de forms ativos que abrangem a escola."""
+        if not school_id:
+            return 0
+        school_id = str(school_id)
+        forms = Form.query.filter(
+            Form.is_active.is_(True),
+            Form.form_type.in_(['aluno-jovem', 'aluno-velho']),
+        ).all()
+        created = 0
+        for form in forms:
+            from app.socioeconomic_forms.services.filter_utils import filter_value_includes_id
+
+            selected_schools = DistributionService._normalize_id_list(form.selected_schools)
+            filters = form.filters or {}
+            in_scope = False
+            if selected_schools and school_id in selected_schools:
+                in_scope = True
+            elif filters.get('escola') and filter_value_includes_id(filters['escola'], school_id):
+                in_scope = True
+            elif not selected_schools and not filters.get('escola'):
+                # Sem escola no escopo: ainda pode ter recipients nessa escola
+                has_rec = FormRecipient.query.filter_by(
+                    form_id=form.id, school_id=school_id
+                ).first()
+                in_scope = bool(has_rec)
+            if not in_scope:
+                continue
+            created += DistributionService.sync_missing_recipients_for_form(form, commit=False)
+        if commit and created:
+            db.session.commit()
+        return created
 

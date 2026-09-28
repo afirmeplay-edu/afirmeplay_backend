@@ -30,6 +30,7 @@ class Form(db.Model):
     
     # Informações básicas
     title = db.Column(db.String(255), nullable=False)
+    custom_title = db.Column(db.String(255), nullable=True)  # Título informado pelo usuário (frontend)
     description = db.Column(db.Text, nullable=True)
     form_type = db.Column(db.String(50), nullable=False)  # aluno-jovem, aluno-velho, professor, diretor, secretario
     instructions = db.Column(db.Text, nullable=True)
@@ -62,6 +63,7 @@ class Form(db.Model):
         data = {
             'id': self.id,
             'title': self.title,
+            'customTitle': self.custom_title,
             'description': self.description,
             'formType': self.form_type,
             'targetGroups': self.target_groups or [],

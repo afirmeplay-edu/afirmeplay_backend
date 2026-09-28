@@ -26,6 +26,13 @@ from app.services.cartao_resposta.manual_answer_sheet_service import (
 )
 from app.config import Config
 from app.utils.class_label_helpers import class_filter_option
+from app.utils.school_area_type import (
+    apply_area_type_to_query,
+    apply_area_type_to_scope,
+    narrow_escola_options,
+    parse_area_type_filter,
+    school_allowed,
+)
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job, purge_answer_sheet_job_keys,
@@ -3949,6 +3956,8 @@ def _class_ids_alunos_previstos_cartao(
             continue
         if restrict_school_id and str(c.school_id) != restrict_school_id:
             continue
+        if not school_allowed(c.school_id, scope_info.get("_restrict_school_ids")):
+            continue
         if _is_valid_filter(turma_param):
             if str(c.id) != str(turma_param).strip():
                 continue
@@ -5754,6 +5763,11 @@ def obter_opcoes_filtros_cartao():
         if not permissao.get('permitted'):
             return jsonify({"error": permissao.get('error', 'Acesso negado')}), 403
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         estado = request.args.get('estado')
         municipio = request.args.get('municipio')
         gabarito = request.args.get('gabarito')
@@ -5794,8 +5808,11 @@ def obter_opcoes_filtros_cartao():
                         municipio_str, user, permissao
                     )
                 if gabarito:
-                    response["escolas"] = _obter_escolas_por_gabarito_cartao(
-                        gabarito, municipio, user, permissao, _periodo_bounds_dados_cartao(), estado
+                    response["escolas"] = narrow_escola_options(
+                        _obter_escolas_por_gabarito_cartao(
+                            gabarito, municipio, user, permissao, _periodo_bounds_dados_cartao(), estado
+                        ),
+                        area_type,
                     )
                     if escola:
                         response["series"] = _obter_series_por_escola_cartao(
@@ -6020,6 +6037,7 @@ def _obter_gabaritos_evolucao_cartao(
     data_inicio: Optional[str] = None,
     data_fim: Optional[str] = None,
     nome: Optional[str] = None,
+    area_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Gabaritos com resultados no recorte geo/filtros — espelha _obter_avaliacoes_evolucao."""
     from app.routes.answer_sheet_evaluation_listing import user_can_access_gabarito
@@ -6065,6 +6083,7 @@ def _obter_gabaritos_evolucao_cartao(
 
     if escola_param.lower() != "all":
         query = query.filter(School.id == str(escola_param))
+    query = apply_area_type_to_query(query, area_type)
 
     if serie_param:
         query = query.join(Grade, Class.grade_id == Grade.id)
@@ -6167,6 +6186,11 @@ def obter_opcoes_filtros_evolucao_cartao():
                 "error": "Você só pode visualizar dados de evolução do seu município."
             }), 403
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         response: Dict[str, Any] = {}
         response["estados"] = _obter_estados_disponiveis_cartao(user, permissao)
 
@@ -6175,8 +6199,11 @@ def obter_opcoes_filtros_evolucao_cartao():
             if municipio:
                 municipio_str = str(municipio).strip()
                 set_search_path(city_id_to_schema_name(municipio_str))
-                response["escolas"] = _obter_escolas_por_municipio_evolucao_cartao(
-                    municipio_str, user, permissao
+                response["escolas"] = narrow_escola_options(
+                    _obter_escolas_por_municipio_evolucao_cartao(
+                        municipio_str, user, permissao
+                    ),
+                    area_type,
                 )
                 if escola and str(escola).strip().lower() != "all":
                     response["series"] = _obter_series_por_escola_evolucao_cartao(
@@ -6252,6 +6279,11 @@ def listar_gabaritos_evolucao_cartao():
 
         set_search_path(city_id_to_schema_name(municipio_id))
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         gabaritos = _obter_gabaritos_evolucao_cartao(
             municipio_id=municipio_id,
             user=user,
@@ -6262,6 +6294,7 @@ def listar_gabaritos_evolucao_cartao():
             data_inicio=data_inicio,
             data_fim=data_fim,
             nome=nome,
+            area_type=area_type,
         )
 
         return jsonify({
@@ -6343,9 +6376,15 @@ def listar_alunos_evolucao_cartao():
 
         set_search_path(city_id_to_schema_name(municipio_id))
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         scope_info = _determinar_escopo_busca(
             estado, municipio_id, escola, serie, turma, None, user
         )
+        scope_info = apply_area_type_to_scope(scope_info, area_type)
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
 
@@ -6476,6 +6515,11 @@ def _build_compare_scope_cartao(data: dict, user: dict) -> Tuple[Optional[dict],
         "gabarito": None,
         "escolas": [],
     }
+    try:
+        area_type = parse_area_type_filter(data.get("tipo_area"))
+    except ValueError as ve:
+        return None, "", (jsonify({"error": str(ve)}), 400)
+    apply_area_type_to_scope(scope_info, area_type, fill_from_catalog=True)
     nivel = _determinar_nivel_granularidade_cartao(
         estado_ef,
         municipio_id,
@@ -6909,9 +6953,15 @@ def get_resultados_agregados():
         if not _is_valid_filter(municipio):
             return jsonify({"error": "Município é obrigatório"}), 400
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         scope_info = _determinar_escopo_busca_cartao(
             estado, municipio, escola, serie, turma, gabarito, user, periodo_bounds_dados
         )
+        scope_info = apply_area_type_to_scope(scope_info, area_type)
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
 
@@ -7176,6 +7226,7 @@ def get_resultados_agregados_analise_ia():
                 "turma": turma,
                 "gabarito": gabarito,
                 "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
+                "tipo_area": request.args.get("tipo_area"),
             },
         )
 
@@ -7214,9 +7265,15 @@ def get_resultados_agregados_analise_ia():
                 return jsonify({"error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04)."}), 400
         periodo_bounds_dados = _periodo_bounds_dados_cartao()
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         scope_info = _determinar_escopo_busca_cartao(
             estado, municipio, escola, serie, turma, gabarito, user, periodo_bounds_dados
         )
+        scope_info = apply_area_type_to_scope(scope_info, area_type)
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
 
@@ -7861,9 +7918,15 @@ def niveis_proficiencia_cartao():
                 }
             ), 400
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         scope_info = _determinar_escopo_busca_cartao(
             estado, municipio, escola, serie, turma, gabarito, user, periodo_bounds_dados
         )
+        scope_info = apply_area_type_to_scope(scope_info, area_type)
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
 
@@ -9215,6 +9278,11 @@ def relatorio_consolidado_opcoes_filtros_cartao():
         if municipio:
             set_search_path(city_id_to_schema_name(str(municipio).strip()))
 
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         def _list_gabaritos(municipio_id: str, u: dict, p: dict, escola_param: str):
             return obter_gabaritos_por_municipio(
                 municipio_id, u, p, escola_param, periodo_bounds=periodo_bounds
@@ -9230,6 +9298,7 @@ def relatorio_consolidado_opcoes_filtros_cartao():
             list_municipios_fn=_obter_municipios_por_estado_cartao,
             list_gabaritos_fn=_list_gabaritos,
             periodo_iso=periodo_iso,
+            area_type=area_type,
         )
         return jsonify(response), 200
     except Exception as e:
@@ -9275,6 +9344,10 @@ def relatorio_consolidado_cartao():
             return jsonify({"error": str(ve)}), 400
 
         escola = request.args.get("escola")
+        try:
+            area_type = parse_area_type_filter(request.args.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
 
         try:
             payload = build_answer_sheet_consolidated_report(
@@ -9283,6 +9356,7 @@ def relatorio_consolidado_cartao():
                 gabarito_ids,
                 user,
                 permissao,
+                area_type=area_type,
             )
         except PermissionError as pe:
             return jsonify({"error": str(pe)}), 403

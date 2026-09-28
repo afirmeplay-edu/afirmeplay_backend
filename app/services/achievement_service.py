@@ -412,6 +412,24 @@ ACHIEVEMENTS_CONFIG = [
         "moedas": {"bronze": 22, "prata": 50, "ouro": 100, "platina": 200},
         "metric": "first_places",
     },
+    {
+        "id": "explorador_jogos",
+        "nome": "Explorador de Jogos",
+        "descricao": "Jogue jogos distintos e ganhe recompensas",
+        "oculta": False,
+        "limiares": {"bronze": 3, "prata": 10, "ouro": 25, "platina": 50},
+        "moedas": {"bronze": 10, "prata": 20, "ouro": 50, "platina": 100},
+        "metric": "jogos_recompensados",
+    },
+    {
+        "id": "maratonista_play_tv",
+        "nome": "Maratonista Play TV",
+        "descricao": "Conclua vídeos distintos no Play TV",
+        "oculta": False,
+        "limiares": {"bronze": 3, "prata": 10, "ouro": 25, "platina": 50},
+        "moedas": {"bronze": 10, "prata": 20, "ouro": 50, "platina": 100},
+        "metric": "videos_concluidos",
+    },
 ]
 
 PERFEccionISTA_CONFIG = {
@@ -447,6 +465,8 @@ def _get_student_metrics(student_id: str) -> Dict[str, Any]:
         "max_acertos_uma_prova": 0,
         "max_questoes_uma_prova": 0,
         "avaliacoes_nota_6_ou_mais": 0,
+        "jogos_recompensados": 0,
+        "videos_concluidos": 0,
     }
 
     # Avaliações concluídas (TestSession com status finalizado)
@@ -564,6 +584,32 @@ def _get_student_metrics(student_id: str) -> Dict[str, Any]:
             metrics["competicoes_count"] = int(comp_count or 0)
         except Exception:
             pass
+
+    # Jogos e Play TV recompensados (content_rewards)
+    try:
+        from app.rewards.models import ContentReward
+        from app.rewards.config import CONTENT_TYPE_GAME, CONTENT_TYPE_VIDEO
+
+        jogos = (
+            db.session.query(func.count(ContentReward.id))
+            .filter(
+                ContentReward.student_id == student_id,
+                ContentReward.content_type == CONTENT_TYPE_GAME,
+            )
+            .scalar()
+        )
+        metrics["jogos_recompensados"] = int(jogos or 0)
+        videos = (
+            db.session.query(func.count(ContentReward.id))
+            .filter(
+                ContentReward.student_id == student_id,
+                ContentReward.content_type == CONTENT_TYPE_VIDEO,
+            )
+            .scalar()
+        )
+        metrics["videos_concluidos"] = int(videos or 0)
+    except Exception:
+        pass
 
     return metrics
 
@@ -690,10 +736,13 @@ def get_conquistas(
         if item.get("medalha_atual"):
             medal_counts[item["medalha_atual"]] = medal_counts.get(item["medalha_atual"], 0) + 1
 
-    # Perfeccionista: todas as outras 5 em platina?
+    # Perfeccionista: platina em todas, EXCETO conquistas de Jogos/Play TV
+    from app.rewards.config import CONTENT_ACHIEVEMENT_IDS
+
     all_platina = all(
         c.get("medalha_atual") == "platina"
         for c in conquistas
+        if c.get("id") not in CONTENT_ACHIEVEMENT_IDS
     )
     valor_perfeccionista = 1.0 if all_platina else 0.0
     item_perf = _build_achievement_item(

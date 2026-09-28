@@ -73,6 +73,40 @@ COMMENT ON TABLE "{schema}".play_tv_video_classes IS 'Vídeos do Play TV disponi
 """
 
 
+def get_content_rewards_tables_ddl(schema: str) -> str:
+    """
+    DDL idempotente das tabelas de recompensa de Jogos/Play TV no schema city_xxx.
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".content_sessions (
+    id VARCHAR PRIMARY KEY,
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id) ON DELETE CASCADE,
+    content_type VARCHAR(16) NOT NULL,
+    content_id VARCHAR NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_content_sessions_type CHECK (content_type IN ('game', 'video'))
+);
+CREATE INDEX IF NOT EXISTS ix_content_sessions_student_id ON "{schema}".content_sessions(student_id);
+CREATE INDEX IF NOT EXISTS ix_content_sessions_content ON "{schema}".content_sessions(student_id, content_type, content_id);
+COMMENT ON TABLE "{schema}".content_sessions IS 'Sessões de uso de jogos e Play TV para recompensa';
+
+CREATE TABLE IF NOT EXISTS "{schema}".content_rewards (
+    id VARCHAR PRIMARY KEY,
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id) ON DELETE CASCADE,
+    content_type VARCHAR(16) NOT NULL,
+    content_id VARCHAR NOT NULL,
+    coins INTEGER NOT NULL,
+    coin_transaction_id VARCHAR REFERENCES "{schema}".coin_transactions(id) ON DELETE SET NULL,
+    paid_at TIMESTAMP NOT NULL,
+    CONSTRAINT chk_content_rewards_type CHECK (content_type IN ('game', 'video')),
+    CONSTRAINT uq_content_rewards_student_type_id UNIQUE(student_id, content_type, content_id)
+);
+CREATE INDEX IF NOT EXISTS ix_content_rewards_student_paid ON "{schema}".content_rewards(student_id, paid_at);
+COMMENT ON TABLE "{schema}".content_rewards IS 'Recompensas pagas de jogos e Play TV (1x por conteúdo)';
+"""
+
+
 def get_plantao_online_tables_ddl(schema: str) -> str:
     """
     DDL idempotente das tabelas Plantão Online no schema city_xxx.
@@ -178,6 +212,27 @@ CREATE INDEX IF NOT EXISTS idx_monitoring_action_history_action_changed_at
     ON "{schema}".monitoring_action_history (monitoring_action_id, changed_at);
 COMMENT ON TABLE "{schema}".monitoring_action IS 'Ações pedagógicas de monitoramento (avaliação/cartão resposta)';
 COMMENT ON TABLE "{schema}".monitoring_action_history IS 'Histórico de alterações em monitoring_action';
+"""
+
+
+def get_school_area_type_column_ddl(schema: str) -> str:
+    """ALTER idempotente: tipo de área (urbana/rural) em school. Sem default."""
+    return f"""
+ALTER TABLE "{schema}".school
+    ADD COLUMN IF NOT EXISTS area_type VARCHAR(20);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_namespace n ON n.oid = c.connamespace
+        WHERE n.nspname = '{schema}' AND c.conname = 'ck_school_area_type'
+    ) THEN
+        ALTER TABLE "{schema}".school
+            ADD CONSTRAINT ck_school_area_type
+            CHECK (area_type IS NULL OR area_type IN ('urbana', 'rural'));
+    END IF;
+END $$;
+COMMENT ON COLUMN "{schema}".school.area_type IS 'Tipo de área da escola: urbana ou rural. NULL = não informado. Usado só para filtrar resultados.';
 """
 
 
@@ -716,7 +771,7 @@ ALTER TABLE "{schema}".subjective_questions
     ADD COLUMN IF NOT EXISTS rubric_group_id VARCHAR;
 
 INSERT INTO "{schema}".subjective_rubric_groups (id, subjective_test_id, name, sort_order)
-SELECT md5(t.id || ':default-rubric-group'), t.id, 'Grupo de critérios', 0
+SELECT md5(t.id || chr(58) || 'default-rubric-group'), t.id, 'Grupo de critérios', 0
 FROM "{schema}".subjective_tests t
 WHERE NOT EXISTS (
     SELECT 1 FROM "{schema}".subjective_rubric_groups g WHERE g.subjective_test_id = t.id
@@ -1148,6 +1203,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
         cursor.execute(get_class_shift_column_migrations_ddl(schema_name))
         cursor.execute(get_answer_sheet_result_snapshot_columns_ddl(schema_name))
         cursor.execute(get_municipality_availability_column_migrations_ddl(schema_name))
+        cursor.execute(get_school_area_type_column_ddl(schema_name))
 
         mobile_ddl = get_mobile_tables_ddl(schema_name)
         cursor.execute(mobile_ddl)
@@ -1171,6 +1227,7 @@ def _get_city_tables_ddl(schema: str) -> str:
     afirme_ler_block = get_afirme_ler_evaluation_tables_ddl(schema)
     subjective_evaluation_block = get_subjective_evaluation_tables_ddl(schema)
     cover_templates_block = get_cover_templates_table_ddl(schema)
+    content_rewards_block = get_content_rewards_tables_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
 CREATE TABLE IF NOT EXISTS "{schema}".school (
@@ -1178,8 +1235,10 @@ CREATE TABLE IF NOT EXISTS "{schema}".school (
     name VARCHAR(100),
     address VARCHAR(200),
     domain VARCHAR(100),
+    area_type VARCHAR(20),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    city_id VARCHAR REFERENCES public.city(id)
+    city_id VARCHAR REFERENCES public.city(id),
+    CONSTRAINT ck_school_area_type CHECK (area_type IS NULL OR area_type IN ('urbana', 'rural'))
 );
 COMMENT ON TABLE "{schema}".school IS 'Escolas do município';
 
@@ -1817,6 +1876,7 @@ COMMENT ON TABLE "{schema}".competition_ranking_payouts IS 'Pagamentos de rankin
 CREATE TABLE IF NOT EXISTS "{schema}".forms (
     id VARCHAR PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
+    custom_title VARCHAR(255),
     description TEXT,
     form_type VARCHAR(50) NOT NULL,
     instructions TEXT,
@@ -1833,6 +1893,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".forms (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".forms IS 'Formulários socioeconômicos';
+COMMENT ON COLUMN "{schema}".forms.custom_title IS 'Título customizado informado pelo usuário (frontend). title permanece o gerado pelo sistema.';
 
 CREATE TABLE IF NOT EXISTS "{schema}".form_questions (
     id VARCHAR PRIMARY KEY,
@@ -1952,7 +2013,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".coin_transactions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".coin_transactions IS 'Transações de moedas dos alunos';
-
+""" + content_rewards_block + f"""
 -- Compras da loja: por tenant (student_id do schema). Catálogo store_items fica em public.
 CREATE TABLE IF NOT EXISTS "{schema}".student_purchases (
     id VARCHAR PRIMARY KEY,

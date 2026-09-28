@@ -36,6 +36,25 @@ class ResponseService:
             # Verificar se há deadline e se já passou
             if form.deadline and datetime.utcnow() > form.deadline:
                 raise ValueError("Prazo para responder este questionário expirou")
+
+            # Aluno entrou na turma depois da criação: tentar incluir no escopo
+            try:
+                from app.models.student import Student
+                from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+                student = Student.query.filter_by(user_id=user_id).first()
+                if student:
+                    created = DistributionService.ensure_recipients_for_student(student, commit=False)
+                    if created:
+                        db.session.commit()
+            except Exception as sync_err:
+                logging.warning(
+                    "Falha ao sincronizar recipient antes de responder form=%s user=%s: %s",
+                    form_id,
+                    user_id,
+                    sync_err,
+                    exc_info=True,
+                )
             
             # Verificar se usuário é destinatário
             recipient = FormRecipient.query.filter_by(
@@ -104,6 +123,24 @@ class ResponseService:
             # Verificar deadline
             if form.deadline and datetime.utcnow() > form.deadline:
                 raise ValueError("Prazo para responder este questionário expirou")
+
+            try:
+                from app.models.student import Student
+                from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+                student = Student.query.filter_by(user_id=user_id).first()
+                if student:
+                    created = DistributionService.ensure_recipients_for_student(student, commit=False)
+                    if created:
+                        db.session.commit()
+            except Exception as sync_err:
+                logging.warning(
+                    "Falha ao sincronizar recipient antes de salvar form=%s user=%s: %s",
+                    form_id,
+                    user_id,
+                    sync_err,
+                    exc_info=True,
+                )
             
             # Verificar se usuário é destinatário
             recipient = FormRecipient.query.filter_by(

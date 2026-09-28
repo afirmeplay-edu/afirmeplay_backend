@@ -20,6 +20,7 @@ from app.models.student import Student
 from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.manager import Manager
+from app.models.teacher import Teacher
 from app.models.studentPasswordLog import StudentPasswordLog
 from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
@@ -37,6 +38,36 @@ from xlrd import open_workbook
 import re
 
 bp = Blueprint('users', __name__, url_prefix='/users')
+
+
+def _sync_profile_names_from_user(user):
+    """
+    Espelha users.name nos perfis vinculados (student/teacher no tenant e manager no public).
+    Evita divergência em listas que leem student.name / teacher.name.
+    """
+    if not user or not user.name:
+        return
+
+    manager = Manager.query.filter_by(user_id=user.id).first()
+    if manager:
+        manager.name = user.name
+
+    try:
+        from app.utils.tenant_middleware import ensure_tenant_schema_for_user
+        if not ensure_tenant_schema_for_user(user.id):
+            return
+        student = Student.query.filter_by(user_id=user.id).first()
+        if student:
+            student.name = user.name
+        teacher = Teacher.query.filter_by(user_id=user.id).first()
+        if teacher:
+            teacher.name = user.name
+    except Exception as e:
+        logging.warning(
+            "Falha ao sincronizar nome de perfil para user %s: %s",
+            getattr(user, "id", None),
+            e,
+        )
 
 
 def normalizar_nome_para_busca(nome):
@@ -432,6 +463,7 @@ def submit_onboarding():
         name = data.get("name")
         if name is not None and isinstance(name, str) and name.strip():
             user.name = name.strip()
+            _sync_profile_names_from_user(user)
 
         # birth_date
         birth_date_value = data.get("birth_date")
@@ -846,6 +878,8 @@ def update_user(user_id):
         if name is not None:
             if isinstance(name, str) and name.strip():
                 user.name = name.strip()
+                # users.name e perfis (student/teacher/manager) precisam ficar alinhados
+                _sync_profile_names_from_user(user)
             else:
                 return jsonify({"erro": "name deve ser uma string não vazia"}), 400
 
@@ -1365,6 +1399,7 @@ def bulk_upload_students():
         
         # Conjunto de emails já atribuídos neste batch (para evitar duplicatas)
         emails_usados_no_batch = set()
+        schools_to_sync_forms = set()
         from app.services.mobile.student_registration_pin import (
             assign_registration_pin,
             collect_used_student_registrations,
@@ -1561,6 +1596,18 @@ def bulk_upload_students():
                     city_id=escola.city_id
                 )
                 db.session.add(password_log)
+
+                try:
+                    from app.services.student_enrollment_service import sync_enrollment_from_student_placement
+
+                    sync_enrollment_from_student_placement(db.session, novo_aluno)
+                except Exception as enroll_err:
+                    logging.warning(
+                        "Falha ao sincronizar matrícula/recipients do aluno importado %s: %s",
+                        novo_aluno.id,
+                        enroll_err,
+                        exc_info=True,
+                    )
                 
                 # Montar dados da resposta ANTES do commit (evita acessar objetos expirados após commit)
                 aluno_criado_info = {
@@ -1575,6 +1622,8 @@ def bulk_upload_students():
                 
                 # Commit para esta linha
                 db.session.commit()
+                if escola and escola.id:
+                    schools_to_sync_forms.add(str(escola.id))
                 
                 results["sucessos"] += 1
                 results["alunos_criados"].append(aluno_criado_info)
@@ -1590,6 +1639,19 @@ def bulk_upload_students():
                 })
                 logging.error(f"Erro ao processar linha {index + 2}: {str(e)}")
                 continue
+
+        if schools_to_sync_forms:
+            try:
+                from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+                for school_id in schools_to_sync_forms:
+                    DistributionService.sync_missing_recipients_for_school(school_id, commit=True)
+            except Exception as sync_err:
+                logging.warning(
+                    "Falha ao sincronizar recipients socioeconômicos após upload em lote: %s",
+                    sync_err,
+                    exc_info=True,
+                )
         
         # Preparar resposta
         if results["sucessos"] > 0:

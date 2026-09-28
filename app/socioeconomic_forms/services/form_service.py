@@ -21,8 +21,11 @@ from datetime import datetime
 
 class FormService:
     """Serviço para operações CRUD de formulários"""
+
+    # Educação Especial (ADAP): aceita aluno-jovem OU aluno-velho (não trava em um tipo).
+    ADAP_EDUCATION_STAGE_ID = '247c4af5-2688-41b0-95fa-443f503a9d87'
     
-    # Mapeamento de education_stage_id para formType
+    # Mapeamento de education_stage_id para formType (1:1; ADAP NÃO entra aqui — é wildcard)
     EDUCATION_STAGE_TO_FORM_TYPE = {
         # aluno-jovem
         'd1142d12-ed98-46f4-ae78-62c963371464': 'aluno-jovem',  # Educação Infantil
@@ -39,12 +42,18 @@ class FormService:
             'd1142d12-ed98-46f4-ae78-62c963371464',  # Educação Infantil
             '614b7d10-b758-42ec-a04e-86f78dc7740a',  # Anos Iniciais
             '63cb6876-3221-4fa2-89e8-a82ad1733032',  # EJA 1-5
+            '247c4af5-2688-41b0-95fa-443f503a9d87',  # Educação Especial (ADAP)
         ],
         'aluno-velho': [
             'c78fcd8e-00a1-485d-8c03-70bcf59e3025',  # Anos Finais
             '63cb6876-3221-4fa2-89e8-a82ad1733032',  # EJA
+            '247c4af5-2688-41b0-95fa-443f503a9d87',  # Educação Especial (ADAP)
         ],
     }
+
+    @staticmethod
+    def _is_adap_education_stage(education_stage_id):
+        return str(education_stage_id) == FormService.ADAP_EDUCATION_STAGE_ID if education_stage_id else False
     
     @staticmethod
     def _get_grade_ids_for_form_type(form_type):
@@ -67,10 +76,17 @@ class FormService:
     
     @staticmethod
     def _grade_is_compatible_with_form_type(grade, form_type):
-        """Verifica se a série é compatível com o tipo de formulário."""
+        """Verifica se a série é compatível com o tipo de formulário.
+
+        ADAP (Educação Especial) é compatível com aluno-jovem e aluno-velho.
+        """
         if not grade or not form_type:
             return False
+        if form_type not in ('aluno-jovem', 'aluno-velho'):
+            return False
         stage_id = str(grade.education_stage_id)
+        if FormService._is_adap_education_stage(stage_id):
+            return True
         return FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(stage_id) == form_type
     
     @staticmethod
@@ -195,12 +211,16 @@ class FormService:
             education_stage_id = str(grade.education_stage_id)
             expected_form_type = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(education_stage_id)
             
-            # Para EJA, o mesmo education_stage_id pode ser usado para ambos os tipos
-            # O frontend envia os IDs corretos das séries, então validamos apenas se o tipo corresponde
+            # EJA e ADAP: mesmo stage pode ir em aluno-jovem ou aluno-velho
             if education_stage_id == '63cb6876-3221-4fa2-89e8-a82ad1733032':
-                # EJA - aceitar ambos os tipos pois o frontend já enviou os IDs corretos
                 if form_type not in ['aluno-jovem', 'aluno-velho']:
                     raise ValueError(f"A série {grade.name} (EJA) não corresponde ao tipo de formulário {form_type}")
+            elif FormService._is_adap_education_stage(education_stage_id):
+                if form_type not in ['aluno-jovem', 'aluno-velho']:
+                    raise ValueError(
+                        f"A série {grade.name} (Educação Especial/ADAP) não corresponde "
+                        f"ao tipo de formulário {form_type}"
+                    )
             elif expected_form_type and expected_form_type != form_type:
                 raise ValueError(
                     f"A série {grade.name} (education_stage_id: {education_stage_id}) "
@@ -298,15 +318,20 @@ class FormService:
                 found = {str(c.id) for c in classes}
                 missing = [c for c in selected_classes if str(c) not in found]
                 raise ValueError(f"Turma(s) não encontrada(s): {missing}")
-            # Se formType não foi enviado, inferir do primeiro tipo encontrado
+            # Se formType não foi enviado, inferir do primeiro tipo rígido encontrado
             scope_form_type = form_type
             valid_classes = []
+            adap_classes = []
             for c in classes:
                 grade = Grade.query.get(c.grade_id)
                 if not grade:
                     warnings.append(f"Turma {c.id} possui série inválida e foi ignorada.")
                     continue
-                type_for_grade = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(str(grade.education_stage_id))
+                stage_id = str(grade.education_stage_id)
+                if FormService._is_adap_education_stage(stage_id):
+                    adap_classes.append(c)
+                    continue
+                type_for_grade = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(stage_id)
                 if not type_for_grade or type_for_grade not in ('aluno-jovem', 'aluno-velho'):
                     warnings.append(f"Turma (série: {grade.name}) não é compatível com formulário de aluno e foi ignorada.")
                     continue
@@ -316,6 +341,17 @@ class FormService:
                     warnings.append(f"Turma (série: {grade.name}) não é compatível com o tipo de formulário '{scope_form_type}' e foi ignorada.")
                     continue
                 valid_classes.append(c)
+            if adap_classes:
+                if scope_form_type in ('aluno-jovem', 'aluno-velho'):
+                    valid_classes.extend(adap_classes)
+                elif not valid_classes:
+                    raise ValueError(
+                        "Turmas de Educação Especial (ADAP) exigem formType "
+                        "(aluno-jovem ou aluno-velho)."
+                    )
+                else:
+                    # Há turmas rígidas sem formType resolvido — não deve ocorrer
+                    valid_classes.extend(adap_classes)
             if not valid_classes:
                 raise ValueError("Nenhuma turma selecionada é compatível com o tipo de formulário.")
             if not data.get('formType') and scope_form_type:
@@ -436,24 +472,32 @@ class FormService:
         return grades
     
     @staticmethod
-    def _group_grades_by_form_type(grades):
+    def _group_grades_by_form_type(grades, preferred_form_type=None):
         """
-        Agrupa séries por tipo de formulário baseado no education_stage_id
+        Agrupa séries por tipo de formulário baseado no education_stage_id.
+
+        ADAP (Educação Especial) não cria bucket próprio: anexa ao preferred_form_type
+        ou ao único grupo rígido existente. Só ADAP exige formType explícito.
         
         Args:
             grades: Lista de objetos Grade
+            preferred_form_type: formType explícito do request (aluno-jovem / aluno-velho)
             
         Returns:
             dict: {form_type: [grade_ids]}
         """
         groups = {}
+        adap_grade_ids = []
         
         for grade in grades:
             education_stage_id = str(grade.education_stage_id)
+            if FormService._is_adap_education_stage(education_stage_id):
+                adap_grade_ids.append(str(grade.id))
+                continue
+
             form_type = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(education_stage_id)
             
             if not form_type:
-                # Se não encontrar mapeamento, tentar inferir
                 logging.warning(f"Education stage {education_stage_id} não mapeado para form_type")
                 continue
             
@@ -461,6 +505,26 @@ class FormService:
                 groups[form_type] = []
             
             groups[form_type].append(str(grade.id))
+
+        if adap_grade_ids:
+            target = None
+            if preferred_form_type in ('aluno-jovem', 'aluno-velho'):
+                target = preferred_form_type
+            elif len(groups) == 1:
+                target = next(iter(groups))
+            elif len(groups) == 0:
+                raise ValueError(
+                    "Séries de Educação Especial (ADAP) exigem formType "
+                    "(aluno-jovem ou aluno-velho)."
+                )
+            else:
+                raise ValueError(
+                    "Séries ADAP junto com Anos Iniciais e Anos Finais no mesmo envio "
+                    "exigem formType explícito, ou envie em requisições separadas."
+                )
+            if target not in groups:
+                groups[target] = []
+            groups[target].extend(adap_grade_ids)
         
         return groups
     
@@ -615,7 +679,10 @@ class FormService:
             
             # 2. Agrupar séries por tipo de formulário
             if grades:
-                groups = FormService._group_grades_by_form_type(grades)
+                groups = FormService._group_grades_by_form_type(
+                    grades,
+                    preferred_form_type=form_type,
+                )
                 
                 # Se não há grupos, significa que nenhuma série foi mapeada
                 if not groups:
@@ -639,8 +706,10 @@ class FormService:
                     return created_forms, scope_warnings
                 
                 # Se há apenas um grupo, usar o tipo detectado
+                # (preserva formType explícito quando o grupo coincide / ADAP anexado)
                 form_type = list(groups.keys())[0]
                 data['formType'] = form_type
+                data['selectedGrades'] = groups[form_type]
             
             # 3. Criar formulário único
             form = FormService._create_single_form(data, created_by)
@@ -669,10 +738,15 @@ class FormService:
         selected_grades = data.get('selectedGrades', [])
         selected_classes = data.get('selectedClasses', [])
         
-        # Gerar título automático
+        # Gerar título automático (sempre)
         school_id = selected_schools[0] if selected_schools else None
         application_number = FormService._count_previous_applications(form_type, school_id)
         title = FormService._generate_title(form_type, school_id, selected_grades, application_number)
+
+        # Título informado pelo front (opcional) — não substitui o gerado
+        custom_title = data.get('customTitle') or data.get('custom_title') or data.get('title')
+        if custom_title is not None:
+            custom_title = str(custom_title).strip() or None
         
         # Carregar perguntas do template se não fornecidas
         questions = data.get('questions')
@@ -692,6 +766,7 @@ class FormService:
         # Criar formulário
         form = Form(
             title=title,
+            custom_title=custom_title,
             description=data.get('description'),
             form_type=form_type,
             target_groups=data.get('targetGroups', []),
@@ -841,13 +916,35 @@ class FormService:
             raise
     
     @staticmethod
-    def update_form(form_id, data):
+    def _union_id_lists(existing, new_ids):
+        """Une listas de IDs preservando ordem e sem duplicatas."""
+        result = []
+        seen = set()
+        for item in list(existing or []) + list(new_ids or []):
+            if item is None:
+                continue
+            key = str(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(key)
+        return result
+
+    @staticmethod
+    def _form_has_responses(form_id):
+        """True se já existir ao menos uma resposta (parcial ou completa)."""
+        from app.socioeconomic_forms.models import FormResponse
+        return FormResponse.query.filter_by(form_id=form_id).first() is not None
+
+    @staticmethod
+    def update_form(form_id, data, metadata_only=False):
         """
         Atualiza um formulário
         
         Args:
             form_id: ID do formulário
             data: Dicionário com dados para atualizar
+            metadata_only: Se True, rejeita alteração de perguntas/tipo/escopo
             
         Returns:
             Form: Objeto do formulário atualizado
@@ -856,19 +953,47 @@ class FormService:
             form = Form.query.get(form_id)
             if not form:
                 return None
+
+            has_responses = FormService._form_has_responses(form_id)
+
+            # Questionários com respostas: só metadados (perguntas bloqueadas)
+            if 'questions' in data and (has_responses or metadata_only):
+                raise ValueError(
+                    "Não é permitido alterar as perguntas de um questionário já enviado. "
+                    "Utilize a opção Reutilizar para criar um novo questionário."
+                )
+            if metadata_only and any(
+                key in data for key in (
+                    'formType', 'selectedSchools', 'selectedGrades',
+                    'selectedClasses', 'selectedTecAdminUsers', 'targetGroups',
+                )
+            ):
+                raise ValueError(
+                    "Edição de questionário enviado permite apenas metadados "
+                    "(título, descrição, instruções, prazo e status ativo)."
+                )
             
             # Atualizar campos básicos
             if 'title' in data:
+                # Em update, 'title' sozinho atualiza o título gerado/exibido principal
+                # Preferir customTitle para o texto do usuário
                 form.title = data['title']
+            if 'customTitle' in data or 'custom_title' in data:
+                custom = data.get('customTitle', data.get('custom_title'))
+                form.custom_title = (str(custom).strip() if custom is not None else None) or None
             if 'description' in data:
                 form.description = data.get('description')
-            if 'formType' in data:
+            if 'formType' in data and not metadata_only:
                 form.form_type = data['formType']
-            if 'targetGroups' in data:
+            if 'targetGroups' in data and not metadata_only:
                 form.target_groups = data['targetGroups']
-            if 'selectedSchools' in data:
+            if 'selectedSchools' in data and not metadata_only:
                 form.selected_schools = data['selectedSchools']
-            if 'selectedTecAdminUsers' in data:
+            if 'selectedGrades' in data and not metadata_only:
+                form.selected_grades = data['selectedGrades']
+            if 'selectedClasses' in data and not metadata_only:
+                form.selected_classes = data['selectedClasses']
+            if 'selectedTecAdminUsers' in data and not metadata_only:
                 form.selected_tecadmin_users = data['selectedTecAdminUsers']
             if 'isActive' in data:
                 form.is_active = data['isActive']
@@ -877,12 +1002,10 @@ class FormService:
             if 'instructions' in data:
                 form.instructions = data.get('instructions')
             
-            # Atualizar questões se fornecidas
+            # Atualizar questões se fornecidas (somente sem respostas)
             if 'questions' in data:
-                # Deletar questões antigas
                 FormQuestion.query.filter_by(form_id=form_id).delete()
                 
-                # Criar novas questões
                 for q_data in data['questions']:
                     question = FormQuestion(
                         form_id=form.id,
@@ -907,6 +1030,87 @@ class FormService:
         except SQLAlchemyError as e:
             db.session.rollback()
             logging.error(f"Erro ao atualizar formulário: {str(e)}")
+            raise
+
+    @staticmethod
+    def apply_form_scope(form_id, data):
+        """
+        Une novo escopo (escolas/séries/turmas) ao formulário existente e
+        cria FormRecipient apenas para destinatários ainda ausentes.
+
+        Args:
+            form_id: ID do formulário
+            data: selectedSchools?, selectedGrades?, selectedClasses?,
+                  selectedTecAdminUsers?, notifyUsers?, isActive?
+
+        Returns:
+            tuple: (Form, dict estatísticas) ou (None, None) se não encontrado
+        """
+        from app.socioeconomic_forms.services.distribution_service import DistributionService
+
+        try:
+            form = Form.query.get(form_id)
+            if not form:
+                return None, None
+
+            new_schools = data.get('selectedSchools') or []
+            new_grades = data.get('selectedGrades') or []
+            new_classes = data.get('selectedClasses') or []
+            new_tecadmin = data.get('selectedTecAdminUsers') or []
+
+            if not new_schools and not new_grades and not new_classes and not new_tecadmin:
+                raise ValueError(
+                    "Informe selectedSchools, selectedGrades, selectedClasses "
+                    "ou selectedTecAdminUsers para aplicar o questionário."
+                )
+
+            if new_schools:
+                form.selected_schools = FormService._union_id_lists(
+                    form.selected_schools, new_schools
+                )
+            if new_grades:
+                form.selected_grades = FormService._union_id_lists(
+                    form.selected_grades, new_grades
+                )
+            if new_classes:
+                form.selected_classes = FormService._union_id_lists(
+                    form.selected_classes, new_classes
+                )
+            if new_tecadmin:
+                form.selected_tecadmin_users = FormService._union_id_lists(
+                    form.selected_tecadmin_users, new_tecadmin
+                )
+
+            FormService._validate_selections(
+                form.selected_schools or [],
+                form.selected_grades or [],
+                form.selected_classes or [],
+            )
+
+            # Ativar ao aplicar (rascunho → ativo), salvo override explícito
+            if 'isActive' in data:
+                form.is_active = bool(data['isActive'])
+            else:
+                form.is_active = True
+
+            db.session.flush()
+
+            notify_users = data.get('notifyUsers', True)
+            stats = DistributionService.send_form_to_recipients(form_id, notify_users)
+
+            form = Form.query.get(form_id)
+            stats['selectedSchools'] = form.selected_schools or []
+            stats['selectedGrades'] = form.selected_grades or []
+            stats['selectedClasses'] = form.selected_classes or []
+            stats['addedSchools'] = [str(s) for s in new_schools]
+            stats['addedGrades'] = [str(g) for g in new_grades]
+            stats['addedClasses'] = [str(c) for c in new_classes]
+
+            return form, stats
+
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logging.error(f"Erro ao aplicar escopo do formulário: {str(e)}")
             raise
     
     @staticmethod
@@ -955,6 +1159,7 @@ class FormService:
             # Criar novo formulário
             new_form = Form(
                 title=new_title or f"Cópia de {original_form.title}",
+                custom_title=original_form.custom_title,
                 description=original_form.description,
                 form_type=original_form.form_type,
                 target_groups=original_form.target_groups,

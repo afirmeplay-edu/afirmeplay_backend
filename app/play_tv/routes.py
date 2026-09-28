@@ -768,6 +768,94 @@ def get_video(video_id):
         return jsonify({"erro": "Erro ao buscar vídeo", "detalhes": str(e)}), 500
 
 
+@bp.route('/videos/<string:video_id>/session/start', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+def start_playtv_reward_session(video_id):
+    try:
+        _, err = _require_play_tv_tenant()
+        if err:
+            return err
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"erro": "Aluno não encontrado"}), 404
+
+        video = _get_video_for_user_or_404(video_id)
+        if not video:
+            return jsonify({"erro": "Vídeo não encontrado"}), 404
+        if not _user_may_access_video(user, video):
+            return jsonify({"erro": "Você não tem permissão para acessar este vídeo"}), 403
+
+        from app.rewards.config import CONTENT_TYPE_VIDEO
+        from app.rewards.services import ContentRewardService
+
+        payload = ContentRewardService.start_session(
+            student_id=student.id,
+            content_type=CONTENT_TYPE_VIDEO,
+            content_id=video_id,
+        )
+        return jsonify(payload), 200
+    except Exception as e:
+        logging.error(f"Erro ao iniciar sessão de Play TV: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"erro": "Erro ao iniciar sessão", "detalhes": str(e)}), 500
+
+
+@bp.route('/videos/<string:video_id>/claim-reward', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+def claim_playtv_reward(video_id):
+    try:
+        _, err = _require_play_tv_tenant()
+        if err:
+            return err
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"erro": "Aluno não encontrado"}), 404
+
+        from app.rewards.config import CONTENT_TYPE_VIDEO
+        from app.rewards.services import ContentRewardService, is_youtube_url
+        from app.balance.services.coin_service import CoinService
+
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        if not session_id:
+            return jsonify({
+                "granted": False,
+                "coins": 0,
+                "status": "not_eligible",
+                "daily_remaining": ContentRewardService.daily_remaining(student.id),
+                "new_balance": CoinService.get_balance(student.id),
+                "achievement_progress": None,
+            }), 200
+
+        video = _get_video_for_user_or_404(video_id)
+        eligible = bool(video) and _user_may_access_video(user, video)
+        result = ContentRewardService.claim_reward(
+            student_id=student.id,
+            content_type=CONTENT_TYPE_VIDEO,
+            content_id=video_id,
+            session_id=session_id,
+            eligible=eligible,
+            is_youtube=is_youtube_url(video.url if video else None),
+            watched_percent=data.get("watched_percent"),
+            duration_seconds=data.get("duration_seconds"),
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        logging.error(f"Erro ao reivindicar recompensa de Play TV: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"erro": "Erro ao reivindicar recompensa", "detalhes": str(e)}), 500
+
+
 @bp.route('/videos/<string:video_id>', methods=['PUT'])
 @jwt_required()
 @role_required("admin", "professor", "diretor", "coordenador", "tecadm")

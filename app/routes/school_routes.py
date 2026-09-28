@@ -21,6 +21,7 @@ from app.models.schoolCourse import SchoolCourse
 import uuid
 
 from app.multitenant.flask_g import get_orm_session
+from app.utils.school_area_type import parse_area_type_body
 
 bp = Blueprint('school', __name__, url_prefix='/school')
 
@@ -54,6 +55,11 @@ def criar_escola():
         if not isinstance(data['city_id'], str) or not data['city_id'].strip():
             return jsonify({"erro": "ID da cidade inválido"}), 400
 
+        try:
+            area_type = parse_area_type_body(data.get('area_type'))
+        except ValueError as ve:
+            return jsonify({"erro": str(ve)}), 400
+
         cidade = get_orm_session().query(City).get(data['city_id'])
         if not cidade:
             return jsonify({"erro": "city_id não encontrado"}), 400
@@ -62,7 +68,8 @@ def criar_escola():
             name=data['name'],
             domain=data.get('domain'),
             address=data.get('address'),
-            city_id=data['city_id']
+            city_id=data['city_id'],
+            area_type=area_type,
         )
 
         try:
@@ -174,6 +181,7 @@ def listar_escolas():
             "name": school.name,
             "domain": school.domain,
             "address": school.address,
+            "area_type": school.area_type,
             "city_id": school.city_id,
             "created_at": school.created_at.isoformat() if school.created_at else None,
             "students_count": students_count,
@@ -222,12 +230,18 @@ def atualizar_escola(escola_id):
         if 'city_id' in data and not isinstance(data['city_id'], str):
             return jsonify({"erro": "ID da cidade inválido"}), 400
 
+        try:
+            area_type = parse_area_type_body(data.get('area_type'))
+        except ValueError as ve:
+            return jsonify({"erro": str(ve)}), 400
+
         # Atualização dos campos
         try:
             escola.name = data.get('name', escola.name)
             escola.domain = data.get('domain', escola.domain)
             escola.address = data.get('address', escola.address)
             escola.city_id = data.get('city_id', escola.city_id)
+            escola.area_type = area_type
 
             get_orm_session().commit()
             return jsonify({
@@ -409,6 +423,7 @@ def buscar_escola(escola_id):
             "name": school.name,
             "domain": school.domain,
             "address": school.address,
+            "area_type": school.area_type,
             "city_id": school.city_id,
             "created_at": school.created_at.isoformat() if school.created_at else None,
             "students_count": students_count,
@@ -503,6 +518,7 @@ def buscar_escolas_por_cidade(city_id):
             "name": school.name,
             "domain": school.domain,
             "address": school.address,
+            "area_type": school.area_type,
             "city_id": school.city_id,
             "created_at": school.created_at.isoformat() if school.created_at else None,
             "students_count": students_count,
@@ -643,6 +659,7 @@ def buscar_escolas_por_serie(grade_id):
                 "name": school.name,
                 "domain": school.domain,
                 "address": school.address,
+            "area_type": school.area_type,
                 "city_id": school.city_id,
                 "created_at": school.created_at.isoformat() if school.created_at else None,
                 "students_count": students_count,

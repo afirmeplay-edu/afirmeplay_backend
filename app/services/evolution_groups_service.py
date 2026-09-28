@@ -121,6 +121,7 @@ class EvolutionGroupsService:
         view_by: str = "turma",
         escopo_calculo: Optional[Dict[str, Any]] = None,
         filtros_aplicados: Optional[Dict[str, Any]] = None,
+        grupos: Optional[List[List[str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         try:
             view_by = _valid_view_by(view_by)
@@ -177,6 +178,18 @@ class EvolutionGroupsService:
 
                     results = EvaluationResult.query.filter_by(test_id=test.id).all()
                 all_results[test.id] = results or []
+
+            if grupos and any(len(group) > 1 for group in grupos):
+                from app.services.evolution_points_service import build_comparison_points
+
+                materialized = build_comparison_points(grupos, escopo_calculo)
+                tests_with_dates = [
+                    {"test": point.as_test(), "application_date": point.application_date}
+                    for point in materialized
+                ]
+                tests_with_dates.sort(key=lambda item: _as_naive_utc(item["application_date"]))
+                ordered_tests = [item["test"] for item in tests_with_dates]
+                all_results = {point.point_id: point.results for point in materialized}
 
             # Prefetch placement maps
             all_flat = [r for rs in all_results.values() for r in rs]
@@ -394,6 +407,8 @@ class EvolutionGroupsService:
                 "summary_by_level": summary_counts,
                 "groups": groups_out,
             }
+        except ValueError:
+            raise
         except Exception as e:
             logging.error("Erro em EvolutionGroupsService.compare_by_groups: %s", e, exc_info=True)
             return None

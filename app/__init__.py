@@ -68,9 +68,9 @@ def create_app():
     # Configuração do banco de dados
     app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    # Aplicar opções de Engine (pool/pre_ping/recycle etc.)
-    # Sem isso, o SQLAlchemy usa defaults (pool_size=5, max_overflow=10), o que pode estourar
-    # com scheduler + tráfego concorrente.
+    # Teto do pool por processo (ver Config.SQLALCHEMY_ENGINE_OPTIONS).
+    # Sem isso o SQLAlchemy usa pool_size=5 e max_overflow=10 por processo,
+    # e vários workers ainda competem pelo max_connections do Postgres.
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = getattr(Config, "SQLALCHEMY_ENGINE_OPTIONS", {})
 
     # Inicialização das extensões
@@ -100,11 +100,13 @@ def create_app():
         Motivação:
         - evitar sessões "idle in transaction" segurando locks indefinidamente
         - evitar statements presos por tempo ilimitado (ex.: locks)
+        - evitar sessões só "idle" (pool, cliente morto) ocupando max_connections
         """
         from sqlalchemy import event, text
 
         # Valores definidos em Config (hardcoded no projeto)
         idle_ms = int(getattr(Config, "PG_IDLE_IN_TX_SESSION_TIMEOUT_MS", 60_000))
+        idle_session_ms = int(getattr(Config, "PG_IDLE_SESSION_TIMEOUT_MS", 600_000))
         stmt_ms = int(getattr(Config, "PG_STATEMENT_TIMEOUT_MS", 300_000))
 
         def _apply(dbapi_conn, _):
@@ -118,6 +120,7 @@ def create_app():
             try:
                 # SET por sessão (não-local), para valer para toda a vida da conexão no pool.
                 cur.execute(f"SET idle_in_transaction_session_timeout = {idle_ms}")
+                cur.execute(f"SET idle_session_timeout = {idle_session_ms}")
                 cur.execute(f"SET statement_timeout = {stmt_ms}")
             finally:
                 try:
@@ -136,8 +139,9 @@ def create_app():
                 event.listen(eng, "connect", _apply)
 
         app.logger.info(
-            "Postgres timeouts ativos: idle_in_transaction_session_timeout=%sms, statement_timeout=%sms",
+            "Postgres timeouts ativos: idle_in_transaction_session_timeout=%sms, idle_session_timeout=%sms, statement_timeout=%sms",
             idle_ms,
+            idle_session_ms,
             stmt_ms,
         )
 
@@ -353,6 +357,8 @@ def create_app():
     app.register_blueprint(student_preferences_routes.bp)
     app.register_blueprint(user_routes.bp)
     app.register_blueprint(class_routes.bp)
+    from .routes import subturma_routes
+    app.register_blueprint(subturma_routes.bp)
     app.register_blueprint(schoolTeacher.school_teacher_bp)
     app.register_blueprint(teacherClass.teacher_class_bp)
     app.register_blueprint(professor_route.bp)
@@ -510,7 +516,7 @@ def create_app():
 
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager, MonitoringAction, MonitoringActionHistory
-    from app.certification.models import CertificateTemplate, Certificate
+    from app.certification.models import CertificateTemplate, Certificate, CertificateArtwork
     from app.models.coverTemplate import CoverTemplate  # noqa: F401
 
     # Rota para servir o arquivo swagger.yaml a partir do diretório raiz do projeto

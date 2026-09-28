@@ -215,6 +215,27 @@ COMMENT ON TABLE "{schema}".monitoring_action_history IS 'Histórico de alteraç
 """
 
 
+def get_school_area_type_column_ddl(schema: str) -> str:
+    """ALTER idempotente: tipo de área (urbana/rural) em school. Sem default."""
+    return f"""
+ALTER TABLE "{schema}".school
+    ADD COLUMN IF NOT EXISTS area_type VARCHAR(20);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_namespace n ON n.oid = c.connamespace
+        WHERE n.nspname = '{schema}' AND c.conname = 'ck_school_area_type'
+    ) THEN
+        ALTER TABLE "{schema}".school
+            ADD CONSTRAINT ck_school_area_type
+            CHECK (area_type IS NULL OR area_type IN ('urbana', 'rural'));
+    END IF;
+END $$;
+COMMENT ON COLUMN "{schema}".school.area_type IS 'Tipo de área da escola: urbana ou rural. NULL = não informado. Usado só para filtrar resultados.';
+"""
+
+
 def get_municipality_availability_column_migrations_ddl(schema: str) -> str:
     """ALTER idempotente: disponibilidade municipal em test e answer_sheet_gabaritos."""
     return f"""
@@ -597,6 +618,39 @@ COMMENT ON TABLE "{schema}".cover_templates IS 'Templates de capa de prova físi
 CREATE INDEX IF NOT EXISTS ix_cover_templates_test_id ON "{schema}".cover_templates(test_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_cover_templates_one_active_per_test
     ON "{schema}".cover_templates(test_id) WHERE status = 'active';
+"""
+
+
+def get_certificate_artworks_table_ddl(schema: str) -> str:
+    """
+    DDL idempotente da tabela certificate_artworks (modelo gráfico de certificado).
+    Associada a "{schema}".test; isolamento via schema tenant.
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".certificate_artworks (
+    id VARCHAR PRIMARY KEY,
+    evaluation_id VARCHAR REFERENCES "{schema}".test(id) ON DELETE CASCADE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'draft',
+    original_filename VARCHAR(255) NOT NULL,
+    mime_type VARCHAR(100) NOT NULL,
+    source_kind VARCHAR(20) NOT NULL,
+    minio_bucket VARCHAR(100) NOT NULL,
+    minio_object_name VARCHAR(500) NOT NULL,
+    normalized_object_name VARCHAR(500),
+    page_count INTEGER NOT NULL DEFAULT 1,
+    page_width_pt FLOAT NOT NULL,
+    page_height_pt FLOAT NOT NULL,
+    rotation INTEGER NOT NULL DEFAULT 0,
+    fields JSON NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by VARCHAR,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_certificate_artworks_evaluation_status
+    ON "{schema}".certificate_artworks(evaluation_id, status);
+COMMENT ON TABLE "{schema}".certificate_artworks IS 'Modelos gráficos opcionais de certificados';
 """
 
 
@@ -1182,6 +1236,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
         cursor.execute(get_class_shift_column_migrations_ddl(schema_name))
         cursor.execute(get_answer_sheet_result_snapshot_columns_ddl(schema_name))
         cursor.execute(get_municipality_availability_column_migrations_ddl(schema_name))
+        cursor.execute(get_school_area_type_column_ddl(schema_name))
 
         mobile_ddl = get_mobile_tables_ddl(schema_name)
         cursor.execute(mobile_ddl)
@@ -1195,6 +1250,64 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
             raw_conn.close()
 
 
+def get_subturma_tables_ddl(schema: str) -> str:
+    """
+    Tabela subturma, coluna anulável student.subturma_id e trava de mesma turma.
+
+    Idempotente. Não atualiza linhas existentes: a coluna nasce NULL.
+    """
+    if not schema or not schema.replace("_", "").isalnum() or not schema.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema}")
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".subturma (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    class_id UUID NOT NULL REFERENCES "{schema}".class(id) ON DELETE CASCADE,
+    support_level SMALLINT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_subturma_class_support_level UNIQUE (class_id, support_level),
+    CONSTRAINT ck_subturma_support_level CHECK (support_level IN (1, 2, 3))
+);
+COMMENT ON TABLE "{schema}".subturma IS 'Subturma ADAP dentro da turma regular. Nome exibido = ADAP + support_level.';
+COMMENT ON COLUMN "{schema}".subturma.support_level IS 'Nível ADAP: 1, 2 ou 3. No máximo um de cada por turma.';
+CREATE INDEX IF NOT EXISTS idx_subturma_class_id ON "{schema}".subturma (class_id);
+
+ALTER TABLE "{schema}".student
+    ADD COLUMN IF NOT EXISTS subturma_id UUID REFERENCES "{schema}".subturma(id) ON DELETE SET NULL;
+COMMENT ON COLUMN "{schema}".student.subturma_id IS 'Subturma ADAP vigente. NULL = aluno sem subturma. Deve ser da mesma turma (class_id).';
+CREATE INDEX IF NOT EXISTS idx_student_subturma_id
+    ON "{schema}".student (subturma_id)
+    WHERE subturma_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION "{schema}".fn_student_subturma_same_class()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $fn_subturma$
+DECLARE
+    sub_class uuid;
+BEGIN
+    IF NEW.subturma_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+    SELECT class_id INTO sub_class
+      FROM "{schema}".subturma
+     WHERE id = NEW.subturma_id;
+    IF sub_class IS NULL OR NEW.class_id IS DISTINCT FROM sub_class THEN
+        RAISE EXCEPTION 'subturma deve pertencer à mesma turma do aluno';
+    END IF;
+    RETURN NEW;
+END;
+$fn_subturma$;
+
+DROP TRIGGER IF EXISTS trg_student_subturma_same_class ON "{schema}".student;
+CREATE TRIGGER trg_student_subturma_same_class
+    BEFORE INSERT OR UPDATE OF subturma_id, class_id
+    ON "{schema}".student
+    FOR EACH ROW
+    EXECUTE PROCEDURE "{schema}".fn_student_subturma_same_class();
+"""
+
+
 def _get_city_tables_ddl(schema: str) -> str:
     """Retorna o SQL de criação das tabelas do schema city (mesmo conteúdo da migração 0001)."""
     play_tv_block = get_play_tv_tables_ddl(schema)
@@ -1205,6 +1318,7 @@ def _get_city_tables_ddl(schema: str) -> str:
     afirme_ler_block = get_afirme_ler_evaluation_tables_ddl(schema)
     subjective_evaluation_block = get_subjective_evaluation_tables_ddl(schema)
     cover_templates_block = get_cover_templates_table_ddl(schema)
+    certificate_artworks_block = get_certificate_artworks_table_ddl(schema)
     content_rewards_block = get_content_rewards_tables_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
@@ -1213,8 +1327,10 @@ CREATE TABLE IF NOT EXISTS "{schema}".school (
     name VARCHAR(100),
     address VARCHAR(200),
     domain VARCHAR(100),
+    area_type VARCHAR(20),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    city_id VARCHAR REFERENCES public.city(id)
+    city_id VARCHAR REFERENCES public.city(id),
+    CONSTRAINT ck_school_area_type CHECK (area_type IS NULL OR area_type IN ('urbana', 'rural'))
 );
 COMMENT ON TABLE "{schema}".school IS 'Escolas do município';
 
@@ -1967,6 +2083,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".certificates (
 );
 COMMENT ON TABLE "{schema}".certificates IS 'Certificados emitidos';
 
+""" + certificate_artworks_block + f"""
 CREATE TABLE IF NOT EXISTS "{schema}".student_coins (
     id VARCHAR PRIMARY KEY,
     student_id VARCHAR REFERENCES "{schema}".student(id) NOT NULL UNIQUE,
@@ -2018,4 +2135,4 @@ CREATE TABLE IF NOT EXISTS "{schema}".student_password_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".student_password_log IS 'Log de senhas de alunos (auditoria)';
-"""
+""" + get_subturma_tables_ddl(schema)

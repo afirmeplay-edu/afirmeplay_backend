@@ -1150,20 +1150,14 @@ class InstitutionalTestWeasyPrintGenerator:
             
             total_questions = len(questions_data)
             
-            # Obter IDs completos
-            student_id = str(student.get('id', ''))
-            test_id = str(test_data.get('id', ''))
-            gabarito_id = str(test_data.get('gabarito_id', ''))
+            # Prova física é a avaliação: só student_id e test_id, 12 primeiros caracteres.
+            student_id = str(student.get('id', ''))[:12]
+            test_id = str(test_data.get('id', ''))[:12]
             
-            # Criar metadados do QR code no formato JSON
-            # ✅ NOVO: Incluir gabarito_id para correção usar gabarito central
             qr_metadata = {
                 "student_id": student_id,
                 "test_id": test_id
             }
-            
-            if gabarito_id:
-                qr_metadata["gabarito_id"] = gabarito_id
             
             # Converter para JSON
             qr_data = json.dumps(qr_metadata)
@@ -1861,15 +1855,10 @@ class InstitutionalTestWeasyPrintGenerator:
             if turma_display:
                 c.drawString(X_TEXT, Y_PDF_TURMA, turma_display.upper())
 
-            # QR code: incluir gabarito_id para correção usar gabarito central
-            student_id = str(student.get('id', ''))
-            test_id = str((test_data or {}).get('id', ''))
-            gabarito_id = str((test_data or {}).get('gabarito_id', ''))
-            
-            # ✅ NOVO: Incluir gabarito_id no QR Code para provas físicas
+            # Prova física é a avaliação: só student_id e test_id, 12 primeiros caracteres.
+            student_id = str(student.get('id', ''))[:12]
+            test_id = str((test_data or {}).get('id', ''))[:12]
             qr_metadata = {"student_id": student_id, "test_id": test_id}
-            if gabarito_id:
-                qr_metadata["gabarito_id"] = gabarito_id
             import qrcode as _qrcode
             qr = _qrcode.QRCode(
                 version=1,

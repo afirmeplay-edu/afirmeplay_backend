@@ -3760,32 +3760,31 @@ def comparar_avaliacoes():
         
         print(f"[COMPARE] Usuário autenticado: {user.get('id')} - Tempo: {time.time() - start_time:.2f}s")
         
-        # Obter test_ids do body JSON
+        # Obter test_ids do body JSON. `grupos` opcional: cada lista é um ponto.
         data = request.get_json()
         if not data:
             return jsonify({"error": "Body JSON é obrigatório"}), 400
-        
-        if 'test_ids' not in data:
-            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
-        
-        test_ids = data['test_ids']
+
+        from app.services.evolution_points_service import (
+            points_need_merge,
+            resolve_request_points,
+            validate_merge_points,
+        )
+
+        try:
+            points, test_ids = resolve_request_points(data)
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
         
         print(f"[COMPARE] Recebidos {len(test_ids)} test_ids: {test_ids} - Tempo: {time.time() - start_time:.2f}s")
         
-        # Validar se test_ids é uma lista
-        if not isinstance(test_ids, list):
-            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
-        
-        # Filtrar IDs vazios e validar formato
-        test_ids = [test_id.strip() for test_id in test_ids if test_id and isinstance(test_id, str) and test_id.strip()]
-        
-        if len(test_ids) < 2:
-            return jsonify({"error": "Mínimo de 2 avaliações necessário para comparação"}), 400
-        
-        if len(test_ids) != len(set(test_ids)):
-            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
-        
         print(f"[COMPARE] Validação de test_ids concluída - Tempo: {time.time() - start_time:.2f}s")
+
+        from app.utils.school_area_type import parse_area_type_filter, restrict_escopo_by_area
+        try:
+            area_type = parse_area_type_filter((data or {}).get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
         
         # Buscar todas as avaliações para verificar se existem
         query_start = time.time()
@@ -3798,6 +3797,10 @@ def comparar_avaliacoes():
         
         if missing_test_ids:
             return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
+
+        merge_error = validate_merge_points(points, tests)
+        if merge_error:
+            return jsonify({"error": merge_error}), 400
         
         # Verificar permissões do usuário para todas as avaliações
         perm_start = time.time()
@@ -3921,12 +3924,14 @@ def comparar_avaliacoes():
             "serie_id": str(serie).strip() if _valid(serie) else None,
             "turma_id": str(turma).strip() if _valid(turma) else None,
         }
+        restrict_escopo_by_area(escopo_calculo, area_type)
         filtros_aplicados = {
             "estado": str(estado).strip() if _valid(estado) else None,
             "municipio": str(municipio_id),
             "escola": escopo_calculo["escola_id"],
             "serie": escopo_calculo["serie_id"],
             "turma": escopo_calculo["turma_id"],
+            "tipo_area": area_type,
         }
 
         # Executar comparação
@@ -3938,6 +3943,7 @@ def comparar_avaliacoes():
             escopo_calculo=escopo_calculo,
             nivel_granularidade=nivel,
             filtros_aplicados=filtros_aplicados,
+            grupos=points if points_need_merge(points) else None,
         )
         
         comparison_time = time.time() - comparison_start
@@ -3952,6 +3958,8 @@ def comparar_avaliacoes():
         
         return jsonify(comparison_result), 200
         
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
     except Exception as e:
         test_ids_for_log = test_ids if 'test_ids' in locals() else 'N/A'
         logging.error(f"Erro ao comparar avaliações {test_ids_for_log}: {str(e)}", exc_info=True)
@@ -3977,18 +3985,17 @@ def comparar_avaliacoes_por_grupos():
         data = request.get_json()
         if not data:
             return jsonify({"error": "Body JSON é obrigatório"}), 400
-        if 'test_ids' not in data:
-            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
 
-        test_ids = data['test_ids']
-        if not isinstance(test_ids, list):
-            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
+        from app.services.evolution_points_service import (
+            points_need_merge,
+            resolve_request_points,
+            validate_merge_points,
+        )
 
-        test_ids = [t.strip() for t in test_ids if t and isinstance(t, str) and t.strip()]
-        if len(test_ids) < 2:
-            return jsonify({"error": "Mínimo de 2 avaliações necessário para comparação"}), 400
-        if len(test_ids) != len(set(test_ids)):
-            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
+        try:
+            points, test_ids = resolve_request_points(data)
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
 
         tests = Test.query.filter(Test.id.in_(test_ids)).all()
         found = {t.id for t in tests}
@@ -4013,6 +4020,11 @@ def comparar_avaliacoes_por_grupos():
         serie = data.get("serie")
         turma = data.get("turma")
         view_by = data.get("visualizar_por") or data.get("view_by") or "turma"
+        from app.utils.school_area_type import parse_area_type_filter, restrict_escopo_by_area
+        try:
+            area_type = parse_area_type_filter(data.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
 
         if _valid(municipio):
             city = City.query.get(str(municipio).strip())
@@ -4041,23 +4053,32 @@ def comparar_avaliacoes_por_grupos():
             "serie_id": str(serie).strip() if _valid(serie) else None,
             "turma_id": str(turma).strip() if _valid(turma) else None,
         }
+        restrict_escopo_by_area(escopo_calculo, area_type)
         filtros_aplicados = {
             "estado": str(estado).strip() if _valid(estado) else None,
             "municipio": str(municipio_id),
             "escola": escopo_calculo["escola_id"],
             "serie": escopo_calculo["serie_id"],
             "turma": escopo_calculo["turma_id"],
+            "tipo_area": area_type,
         }
+
+        merge_error = validate_merge_points(points, tests)
+        if merge_error:
+            return jsonify({"error": merge_error}), 400
 
         result = EvolutionGroupsService.compare_by_groups(
             test_ids,
             view_by=str(view_by),
             escopo_calculo=escopo_calculo,
             filtros_aplicados=filtros_aplicados,
+            grupos=points if points_need_merge(points) else None,
         )
         if not result:
             return jsonify({"error": "Erro ao calcular evolução por grupos"}), 500
         return jsonify(result), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
     except Exception as e:
         logging.error("Erro em /test/compare-groups: %s", e, exc_info=True)
         return jsonify({"error": "Erro ao comparar por grupos", "details": str(e)}), 500
@@ -4080,28 +4101,24 @@ def export_evolution_excel():
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
         
-        # Obter test_ids do body JSON
+        # Obter test_ids do body JSON. `grupos` opcional define os pontos mesclados.
         data = request.get_json()
         if not data:
             return jsonify({"error": "Body JSON é obrigatório"}), 400
-        
-        if 'test_ids' not in data:
-            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
-        
-        test_ids = data['test_ids']
-        
-        # Validar se test_ids é uma lista
-        if not isinstance(test_ids, list):
-            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
-        
-        # Filtrar IDs vazios e validar formato
-        test_ids = [test_id.strip() for test_id in test_ids if test_id and isinstance(test_id, str) and test_id.strip()]
-        
-        if len(test_ids) < 2:
-            return jsonify({"error": "Mínimo de 2 avaliações necessário para exportação"}), 400
-        
-        if len(test_ids) != len(set(test_ids)):
-            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
+
+        from app.services.evolution_points_service import (
+            points_need_merge,
+            resolve_request_points,
+            validate_merge_points,
+        )
+
+        try:
+            points, test_ids = resolve_request_points(
+                data,
+                min_message="Mínimo de 2 avaliações necessário para exportação",
+            )
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
         
         # Buscar todas as avaliações para verificar se existem
         tests = Test.query.filter(Test.id.in_(test_ids)).all()
@@ -4110,6 +4127,10 @@ def export_evolution_excel():
         
         if missing_test_ids:
             return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
+
+        merge_error = validate_merge_points(points, tests)
+        if merge_error:
+            return jsonify({"error": merge_error}), 400
         
         # Verificar permissões do usuário para todas as avaliações
         if user['role'] == 'professor':
@@ -4134,6 +4155,11 @@ def export_evolution_excel():
         serie = data.get("serie")
         turma = data.get("turma")
         estado = data.get("estado") or state
+        from app.utils.school_area_type import parse_area_type_filter, restrict_escopo_by_area
+        try:
+            area_type = parse_area_type_filter(data.get("tipo_area"))
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
 
         if _valid(municipio):
             city = City.query.get(str(municipio).strip())
@@ -4161,12 +4187,14 @@ def export_evolution_excel():
                 "serie_id": str(serie).strip() if _valid(serie) else None,
                 "turma_id": str(turma).strip() if _valid(turma) else None,
             }
+            restrict_escopo_by_area(escopo_calculo, area_type)
             filtros_aplicados = {
                 "estado": str(estado).strip() if _valid(estado) else None,
                 "municipio": str(municipio_id),
                 "escola": escopo_calculo["escola_id"],
                 "serie": escopo_calculo["serie_id"],
                 "turma": escopo_calculo["turma_id"],
+                "tipo_area": area_type,
             }
         
         # Exportar para Excel
@@ -4179,6 +4207,7 @@ def export_evolution_excel():
             escopo_calculo=escopo_calculo,
             nivel_granularidade=nivel,
             filtros_aplicados=filtros_aplicados,
+            grupos=points if points_need_merge(points) else None,
         )
         
         # Gerar nome do arquivo

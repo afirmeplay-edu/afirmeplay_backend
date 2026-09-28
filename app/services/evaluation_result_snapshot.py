@@ -102,6 +102,14 @@ def snapshot_scope_filter_expression(
     elif tipo == "municipio" and escopo_calculo.get("municipio_id"):
         mid = escopo_calculo["municipio_id"]
         schools_in_city = db.session.query(School.id).filter(School.city_id == mid)
+        restrict_school_ids = escopo_calculo.get("_restrict_school_ids")
+        if restrict_school_ids is not None:
+            if not restrict_school_ids:
+                schools_in_city = schools_in_city.filter(School.id.is_(None))
+            else:
+                schools_in_city = schools_in_city.filter(
+                    School.id.in_([str(item) for item in restrict_school_ids])
+                )
         mun_match = EvaluationResult.school_id_snapshot.in_(schools_in_city)
         if class_ids:
             parts.append(and_(mun_match, EvaluationResult.class_id_snapshot.in_(class_ids)))
@@ -276,7 +284,15 @@ def class_ids_for_evaluation_in_scope(
                 cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR),
             ).filter(School.city_id == escopo_calculo["municipio_id"])
 
-    return list({ct.class_id for ct in q.all() if ct.class_id})
+    class_ids = list({ct.class_id for ct in q.all() if ct.class_id})
+    restrict_school_ids = escopo_calculo.get("_restrict_school_ids")
+    if restrict_school_ids is None:
+        return class_ids
+    if not restrict_school_ids or not class_ids:
+        return []
+    allowed = {str(item) for item in restrict_school_ids}
+    rows = Class.query.filter(Class.id.in_(class_ids)).all()
+    return [row.id for row in rows if str(row.school_id) in allowed]
 
 
 def prefetch_placement_from_results(

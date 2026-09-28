@@ -1180,7 +1180,20 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
                         update_item_done(job_id, i, adapted_result)
                         logging.info(f"✅ Job {job_id}: Imagem {i+1} processada com sucesso")
                     else:
-                        update_item_error(job_id, i, result.get('error', 'Erro desconhecido'))
+                        student_name = None
+                        if result.get("student_id"):
+                            student = Student.query.get(result["student_id"])
+                            if student:
+                                student_name = student.name
+                        update_item_error(
+                            job_id,
+                            i,
+                            result.get("error", "Erro desconhecido"),
+                            extra={
+                                "student_id": result.get("student_id"),
+                                "student_name": student_name,
+                            },
+                        )
                         logging.warning(f"❌ Job {job_id}: Imagem {i+1} falhou: {result.get('error')}")
                         
                 except Exception as e:
@@ -1326,9 +1339,14 @@ def process_physical_correction(test_id):
                     "evaluation_result_id": result.get('evaluation_result_id')
                 }), 200
             else:
+                student_name = None
+                if result.get("student_id"):
+                    student = Student.query.get(result["student_id"])
+                    if student:
+                        student_name = student.name
                 return jsonify({
-                    "error": result.get('error', 'Erro desconhecido na correção'),
-                    "system": "new_grid_pipeline"
+                    "student_name": student_name,
+                    "error": result.get("error", "Erro desconhecido na correção"),
                 }), 500
         
         # ==================================================================

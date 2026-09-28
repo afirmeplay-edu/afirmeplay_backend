@@ -1,6 +1,8 @@
 import re
 from typing import Any, Optional, Set
 
+from app.services.special_education import grade_label_is_exact_adap
+
 
 # Exige contexto de série (ano/série/médio) para não confundir "1º AVALIA" com "1º ano".
 _GRADE_NUMBER_WITH_CONTEXT = re.compile(
@@ -36,6 +38,8 @@ def looks_like_grade_label(text: str) -> bool:
         )
     ):
         return True
+    if grade_label_is_exact_adap(grade_lower):
+        return True
     return _extract_grade_number(grade_lower) is not None
 
 
@@ -67,7 +71,7 @@ def infer_course_name_from_grade(grade_name: str) -> str:
     ):
         return "Educação Infantil"
 
-    if "especial" in grade_lower:
+    if "especial" in grade_lower or grade_label_is_exact_adap(grade_lower):
         return "Educação Especial"
 
     if "eja" in grade_lower:

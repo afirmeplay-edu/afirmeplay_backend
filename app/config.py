@@ -7,11 +7,22 @@ load_dotenv('app/.env')
 class Config:
     SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # Postgres em 147.79.87.213 tem max_connections=100, compartilhado por
+    # Gunicorn (4 workers), Celery prefork (concurrency 4), dev e o Flask local.
+    # O pool é por processo: 20+40 abria até 60 sockets num único processo e
+    # estourava o teto ("sorry, too many clients already").
+    # Um request de município segura 2 conexões e o scheduler segura mais 1
+    # (advisory lock). pool 5 + overflow 3 = 8 por processo: o login local cabe.
+    # Um stack (4+4) fica em ~40 paradas e no máximo ~64 no pico.
     SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_size': 20,  # Aumentar conexões disponíveis
-        'pool_recycle': 3600,  # Reciclar conexões a cada 1 hora (evitar timeout)
-        'pool_pre_ping': True,  # Verificar conexões antes de usar
-        'max_overflow': 40  # Permitir até 40 conexões extras
+        'pool_size': 5,
+        'max_overflow': 3,
+        'pool_timeout': 10,  # espera vaga no pool; não abre além do teto
+        'pool_recycle': 3600,
+        'pool_pre_ping': True,
+        'connect_args': {
+            'application_name': os.getenv('PGAPPNAME', 'afirmeplay'),
+        },
     }
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_key")
 
@@ -30,7 +41,14 @@ class Config:
     #     transações "perdidas". Para HTTP, o teardown do request já fecha a
     #     sessão muito antes desse limite.
     # - statement_timeout: 5min
+    # - idle_session_timeout: 10min
+    #     Encerra sessão parada fora de transação (pool ocioso, psql esquecido,
+    #     cliente que caiu sem fechar). Diferente do timeout de "idle in
+    #     transaction", que não cobre o estado "idle" do pool.
+    #     Tasks longas fazem commit antes do trabalho de CPU e devolvem a
+    #     conexão ao pool; o pool_pre_ping abre outra se o Postgres já a encerrou.
     PG_IDLE_IN_TX_SESSION_TIMEOUT_MS = 600_000
+    PG_IDLE_SESSION_TIMEOUT_MS = 600_000
     PG_STATEMENT_TIMEOUT_MS = 300_000
     
     # Configurações do SendGrid

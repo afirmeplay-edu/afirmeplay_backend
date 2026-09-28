@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from app.services.special_education import serie_course_is_special_education
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import joinedload
 
@@ -321,10 +322,8 @@ class ClassPeerRankingService:
 
     @classmethod
     def _student_category(cls, *, serie_name: Any, course_name: Any) -> str:
-        """Rótulo de contexto: Regular vs Educação Especial (séries Suporte N)."""
-        course_n = cls._normalize_text(course_name)
-        serie_n = cls._normalize_text(serie_name)
-        if "educacao especial" in course_n or serie_n.startswith("suporte"):
+        """Rótulo de contexto: Regular vs Educação Especial (Suporte N ou ADAP N)."""
+        if serie_course_is_special_education(serie_name, course_name):
             return "Educação Especial"
         return "Regular"
 

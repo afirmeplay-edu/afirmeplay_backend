@@ -17,13 +17,17 @@ from sqlalchemy import cast
 from sqlalchemy.dialects.postgresql import JSONB
 import logging
 from datetime import datetime
+from app.services.special_education import (
+    ADAP_EDUCATION_STAGE_ID as _ADAP_EDUCATION_STAGE_ID,
+    is_adap_education_stage,
+)
 
 
 class FormService:
     """Serviço para operações CRUD de formulários"""
 
     # Educação Especial (ADAP): aceita aluno-jovem OU aluno-velho (não trava em um tipo).
-    ADAP_EDUCATION_STAGE_ID = '247c4af5-2688-41b0-95fa-443f503a9d87'
+    ADAP_EDUCATION_STAGE_ID = _ADAP_EDUCATION_STAGE_ID
     
     # Mapeamento de education_stage_id para formType (1:1; ADAP NÃO entra aqui — é wildcard)
     EDUCATION_STAGE_TO_FORM_TYPE = {
@@ -53,7 +57,7 @@ class FormService:
 
     @staticmethod
     def _is_adap_education_stage(education_stage_id):
-        return str(education_stage_id) == FormService.ADAP_EDUCATION_STAGE_ID if education_stage_id else False
+        return is_adap_education_stage(education_stage_id)
     
     @staticmethod
     def _get_grade_ids_for_form_type(form_type):

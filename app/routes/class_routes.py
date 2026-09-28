@@ -684,7 +684,10 @@ def delete_class(class_id):
             f"👥 Desvinculando {len(students)} alunos da turma {class_id}. "
             f"IDs dos alunos: {student_ids[:10]}{'...' if len(student_ids) > 10 else ''}"
         )
+        from app.services.subturma_service import clear_subturma_if_class_changes
+
         for student in students:
+            clear_subturma_if_class_changes(student, None)
             student.class_id = None
 
         from app.models.studentSchoolEnrollment import StudentSchoolEnrollment
@@ -948,6 +951,9 @@ def add_student_to_class(class_id):
                     continue
 
                 # Update the student's class_id, school_id and grade_id
+                from app.services.subturma_service import clear_subturma_if_class_changes
+
+                clear_subturma_if_class_changes(student, class_id_uuid)
                 student.class_id = class_id_uuid
                 student.school_id = class_obj.school_id
                 if getattr(class_obj, "grade_id", None) is not None:
@@ -1023,6 +1029,9 @@ def remove_student_from_class(class_id):
 
         # Update the student's class_id to null
         old_school_id = student.school_id
+        from app.services.subturma_service import clear_subturma_if_class_changes
+
+        clear_subturma_if_class_changes(student, None)
         student.class_id = None
         
         # Verificar se o aluno ainda está em outras turmas da mesma escola

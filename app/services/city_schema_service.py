@@ -1250,6 +1250,64 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
             raw_conn.close()
 
 
+def get_subturma_tables_ddl(schema: str) -> str:
+    """
+    Tabela subturma, coluna anulável student.subturma_id e trava de mesma turma.
+
+    Idempotente. Não atualiza linhas existentes: a coluna nasce NULL.
+    """
+    if not schema or not schema.replace("_", "").isalnum() or not schema.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema}")
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".subturma (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    class_id UUID NOT NULL REFERENCES "{schema}".class(id) ON DELETE CASCADE,
+    support_level SMALLINT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_subturma_class_support_level UNIQUE (class_id, support_level),
+    CONSTRAINT ck_subturma_support_level CHECK (support_level IN (1, 2, 3))
+);
+COMMENT ON TABLE "{schema}".subturma IS 'Subturma ADAP dentro da turma regular. Nome exibido = ADAP + support_level.';
+COMMENT ON COLUMN "{schema}".subturma.support_level IS 'Nível ADAP: 1, 2 ou 3. No máximo um de cada por turma.';
+CREATE INDEX IF NOT EXISTS idx_subturma_class_id ON "{schema}".subturma (class_id);
+
+ALTER TABLE "{schema}".student
+    ADD COLUMN IF NOT EXISTS subturma_id UUID REFERENCES "{schema}".subturma(id) ON DELETE SET NULL;
+COMMENT ON COLUMN "{schema}".student.subturma_id IS 'Subturma ADAP vigente. NULL = aluno sem subturma. Deve ser da mesma turma (class_id).';
+CREATE INDEX IF NOT EXISTS idx_student_subturma_id
+    ON "{schema}".student (subturma_id)
+    WHERE subturma_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION "{schema}".fn_student_subturma_same_class()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $fn_subturma$
+DECLARE
+    sub_class uuid;
+BEGIN
+    IF NEW.subturma_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+    SELECT class_id INTO sub_class
+      FROM "{schema}".subturma
+     WHERE id = NEW.subturma_id;
+    IF sub_class IS NULL OR NEW.class_id IS DISTINCT FROM sub_class THEN
+        RAISE EXCEPTION 'subturma deve pertencer à mesma turma do aluno';
+    END IF;
+    RETURN NEW;
+END;
+$fn_subturma$;
+
+DROP TRIGGER IF EXISTS trg_student_subturma_same_class ON "{schema}".student;
+CREATE TRIGGER trg_student_subturma_same_class
+    BEFORE INSERT OR UPDATE OF subturma_id, class_id
+    ON "{schema}".student
+    FOR EACH ROW
+    EXECUTE PROCEDURE "{schema}".fn_student_subturma_same_class();
+"""
+
+
 def _get_city_tables_ddl(schema: str) -> str:
     """Retorna o SQL de criação das tabelas do schema city (mesmo conteúdo da migração 0001)."""
     play_tv_block = get_play_tv_tables_ddl(schema)
@@ -2077,4 +2135,4 @@ CREATE TABLE IF NOT EXISTS "{schema}".student_password_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".student_password_log IS 'Log de senhas de alunos (auditoria)';
-"""
+""" + get_subturma_tables_ddl(schema)

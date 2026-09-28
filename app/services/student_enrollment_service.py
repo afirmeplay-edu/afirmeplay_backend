@@ -136,6 +136,9 @@ def transfer_student_to_class(
             raise ValueError("A turma de destino deve estar no mesmo município (city_id) do cadastro do aluno.")
 
     close_active_enrollment(sess, student.id)
+    from app.services.subturma_service import clear_subturma_if_class_changes
+
+    clear_subturma_if_class_changes(student, new_class.id)
     student.class_id = new_class.id
     student.school_id = new_sid
     if getattr(new_class, "grade_id", None) is not None:

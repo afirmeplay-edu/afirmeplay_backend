@@ -79,14 +79,18 @@ from app.utils.school_equal_weight_means import (
     hierarchical_mean_grade_and_proficiency,
 )
 
+from app.services.special_education import (
+    support_level_from_exact_grade_name,
+    support_series_sort_key,
+)
+
 logger = logging.getLogger(__name__)
 
 GERAL_KEY = "GERAL"
 FAIXAS = ("abaixo_do_basico", "basico", "adequado", "avancado")
 _SUBJECT_NAME_CACHE: Dict[str, str] = {}
 
-# Educação Especial: grade = "Suporte N"; o ano escolar vive em class.name ("- 1º ANO").
-_SUPORTE_GRADE_RE = re.compile(r"^suporte\s*([123])$", re.IGNORECASE)
+# Educação Especial: grade = "Suporte N" ou "ADAP N"; o ano escolar vive em class.name ("- 1º ANO").
 _ANO_IN_CLASS_NAME_RE = re.compile(r"(?P<n>\d+)\s*[ºo°]?\s*ano", re.IGNORECASE)
 
 
@@ -94,15 +98,16 @@ def _series_identity_for_class(co: Class) -> Tuple[str, str]:
     """
     Identidade da coluna série no consolidado.
 
-    Para turmas de Suporte 1/2/3 com ano no nome (ex.: "- 1º ANO"), separa colunas
-    "Suporte 1 1º Ano", "Suporte 1 2º Ano", etc. Demais grades seguem grade.id/name.
+    Para séries cujo nome é só Suporte/ADAP 1/2/3, e a turma traz o ano
+    (ex.: "- 1º ANO"), separa colunas "Suporte 1 1º Ano", etc.
+    O texto da série não é reescrito. Demais grades seguem grade.id/name.
     """
     grade = getattr(co, "grade", None)
     grade_id = str(grade.id) if grade and getattr(grade, "id", None) is not None else "_sem_serie"
     grade_name = (getattr(grade, "name", None) if grade else None) or "Sem série"
 
-    m_sup = _SUPORTE_GRADE_RE.match(str(grade_name).strip())
-    if not m_sup:
+    level = support_level_from_exact_grade_name(grade_name)
+    if level is None:
         return grade_id, grade_name
 
     class_name = (getattr(co, "name", None) or "").strip()
@@ -117,15 +122,8 @@ def _series_identity_for_class(co: Class) -> Tuple[str, str]:
 
 
 def _series_sort_key(serie_nome: str) -> Tuple[Any, ...]:
-    """Ordena colunas Suporte N Mº Ano de forma natural; demais por nome."""
-    text = (serie_nome or "").strip()
-    m = re.match(r"^suporte\s*([123])\s+(\d+)\s*[ºo°]?\s*ano", text, re.IGNORECASE)
-    if m:
-        return (0, int(m.group(1)), int(m.group(2)), text.upper())
-    m2 = re.match(r"^suporte\s*([123])$", text, re.IGNORECASE)
-    if m2:
-        return (0, int(m2.group(1)), 0, text.upper())
-    return (1, 0, 0, text.upper())
+    """Ordena colunas Suporte/ADAP N Mº Ano de forma natural; demais por nome."""
+    return support_series_sort_key(serie_nome)
 
 
 def _order_rows_by_requested_ids(

@@ -1,6 +1,8 @@
 from app import db
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import deferred
 import uuid
+from app.models.subturma import Subturma
 from app.models.user import User
 
 class Student(db.Model):
@@ -18,6 +20,14 @@ class Student(db.Model):
     user = db.relationship('User', back_populates='student')
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'))
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('tenant.class.id'))
+    # Subturma ADAP da mesma turma (class_id). NULL = sem subturma.
+    # deferred: os SELECT atuais de aluno não incluem a coluna até alguém lê-la.
+    subturma_id = deferred(db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey('tenant.subturma.id', ondelete='SET NULL'),
+        nullable=True,
+    ))
+    subturma = db.relationship('Subturma', foreign_keys=[subturma_id], lazy='select')
     # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
     school_id = db.Column(db.String(36), db.ForeignKey('tenant.school.id'))
 

@@ -552,8 +552,10 @@ def atualizar_aluno(student_id, class_id):
         class_changed = False
         school_changed = False
         
-        # Processar mudança de turma
-        if "class_id" in dados and dados["class_id"] != old_class_id:
+        # Processar mudança de turma. O mesmo class_id (edição de nome, por exemplo) mantém a subturma.
+        from app.services.subturma_service import class_ids_differ, clear_subturma_if_class_changes
+
+        if "class_id" in dados and class_ids_differ(old_class_id, dados["class_id"]):
             from app.utils.uuid_helpers import ensure_uuid
             new_class_id = ensure_uuid(dados["class_id"])
             
@@ -571,6 +573,7 @@ def atualizar_aluno(student_id, class_id):
                 school_changed = True
 
             # Atualizar turma e série da turma de destino
+            clear_subturma_if_class_changes(aluno, new_class_id)
             aluno.class_id = new_class_id
             class_changed = True
             if getattr(new_class, "grade_id", None) is not None:

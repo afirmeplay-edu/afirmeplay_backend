@@ -2561,6 +2561,13 @@ class AnswerSheetCorrectionNewGrid:
     # FUNÇÃO PRINCIPAL PÚBLICA
     # =========================================================================
     
+    def _fail_correction(self, error_msg: str, student_id: Optional[str] = None) -> Dict[str, Any]:
+        """Erro da correção. Inclui student_id quando o QR já foi lido."""
+        payload: Dict[str, Any] = {"success": False, "error": error_msg}
+        if student_id:
+            payload["student_id"] = student_id
+        return payload
+
     def corrigir_cartao_resposta(self, image_path: str = None, image_data: bytes = None,
                                  topology_json: Dict = None, gabarito: Dict[int, str] = None,
                                  auto_detect_qr: bool = True) -> Dict[str, Any]:
@@ -2577,6 +2584,7 @@ class AnswerSheetCorrectionNewGrid:
         Returns:
             Resultado completo com estatísticas
         """
+        student_id = None
         try:
             if self.debug:
                 import os
@@ -2609,6 +2617,7 @@ class AnswerSheetCorrectionNewGrid:
             precomputed_anchors = None
             precomputed_img_a4 = None
             qr_data = None
+            student_id = None
             gabarito_obj = None
 
             # Compatibilidade primeiro:
@@ -2628,17 +2637,18 @@ class AnswerSheetCorrectionNewGrid:
 
                 if not qr_data:
                     error_msg = self._format_user_friendly_error("QR Code não encontrado no cartão")
-                    return {"success": False, "error": error_msg}
+                    return self._fail_correction(error_msg)
+
+                student_id = qr_data.get("student_id")
 
                 if precomputed_anchors is None:
                     error_msg = self._format_user_friendly_error("Âncoras A4 não detectadas")
-                    return {"success": False, "error": error_msg}
+                    return self._fail_correction(error_msg, student_id)
 
                 if precomputed_img_a4 is None:
                     precomputed_img_a4 = self._normalize_to_a4(img, precomputed_anchors)
 
                 gabarito_id = qr_data.get('gabarito_id')
-                student_id = qr_data.get('student_id')
                 test_id = qr_data.get('test_id')
                 
                 # Carregar gabarito do banco
@@ -2654,7 +2664,7 @@ class AnswerSheetCorrectionNewGrid:
                     gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
                     if not gabarito_obj:
                         error_msg = self._format_user_friendly_error(f"Gabarito {gabarito_id[:8]}... não encontrado")
-                        return {"success": False, "error": error_msg}
+                        return self._fail_correction(error_msg, student_id)
                 
                 elif test_id:
                     # ✅ MODIFICADO: Buscar PRIMEIRO em AnswerSheetGabarito (fonte central)
@@ -2689,14 +2699,14 @@ class AnswerSheetCorrectionNewGrid:
                             
                             if not gabarito_obj:
                                 error_msg = self._format_user_friendly_error(f"Prova {test_id[:8]}... não encontrada ou sem questões")
-                                return {"success": False, "error": error_msg}
+                                return self._fail_correction(error_msg, student_id)
                 else:
                     error_msg = self._format_user_friendly_error("QR Code sem gabarito_id ou test_id")
-                    return {"success": False, "error": error_msg}
+                    return self._fail_correction(error_msg, student_id)
                 
                 if not gabarito_obj:
                     error_msg = self._format_user_friendly_error("Gabarito não encontrado")
-                    return {"success": False, "error": error_msg}
+                    return self._fail_correction(error_msg, student_id)
                 
                 # Construir topology_json
                 topology_json = {
@@ -2709,10 +2719,7 @@ class AnswerSheetCorrectionNewGrid:
                 # Validar topology
                 if not topology_json.get('topology') or not topology_json['topology'].get('blocks'):
                     error_msg = self._format_user_friendly_error("Gabarito não possui estrutura de topologia. Regenere os cartões.")
-                    return {
-                        "success": False,
-                        "error": error_msg
-                    }
+                    return self._fail_correction(error_msg, student_id)
                 
                 # Usar respostas corretas do gabarito
                 # ⚠️ CRÍTICO: Converter chaves de string para int
@@ -2735,10 +2742,10 @@ class AnswerSheetCorrectionNewGrid:
             # Validar parâmetros
             if not topology_json:
                 error_msg = self._format_user_friendly_error("topology_json é obrigatório")
-                return {"success": False, "error": error_msg}
+                return self._fail_correction(error_msg, student_id)
             if not gabarito:
                 error_msg = self._format_user_friendly_error("gabarito é obrigatório ou está vazio")
-                return {"success": False, "error": error_msg}
+                return self._fail_correction(error_msg, student_id)
             
             # Executar pipeline (reutiliza âncoras/A4 se já calculados para o QR)
             result = self._execute_omr_pipeline(
@@ -2749,6 +2756,8 @@ class AnswerSheetCorrectionNewGrid:
             )
 
             if not result["success"]:
+                if student_id:
+                    result["student_id"] = student_id
                 return result
             
             # Comparar com gabarito
@@ -2814,10 +2823,7 @@ class AnswerSheetCorrectionNewGrid:
         except Exception as e:
             self.logger.error(f"❌ Erro ao corrigir cartão: {str(e)}", exc_info=True)
             error_msg = self._format_user_friendly_error(f"Erro interno: {str(e)}")
-            return {
-                "success": False,
-                "error": error_msg
-            }
+            return self._fail_correction(error_msg, student_id)
     
     # =========================================================================
     # FUNÇÕES AUXILIARES

@@ -1590,7 +1590,20 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None, t
                         update_item_done(job_id, i, adapted)
                         logging.info(f"✅ Job {job_id}: Cartão resposta {i+1} processado com sucesso")
                     else:
-                        update_item_error(job_id, i, result.get('error', 'Erro desconhecido'))
+                        student_name = None
+                        if result.get("student_id"):
+                            student = Student.query.get(result["student_id"])
+                            if student:
+                                student_name = student.name
+                        update_item_error(
+                            job_id,
+                            i,
+                            result.get("error", "Erro desconhecido"),
+                            extra={
+                                "student_id": result.get("student_id"),
+                                "student_name": student_name,
+                            },
+                        )
                         logging.warning(f"❌ Job {job_id}: Cartão resposta {i+1} falhou: {result.get('error')}")
                         
                 except Exception as e:
@@ -3123,9 +3136,14 @@ def correct_answer_sheet_new_pipeline():
                 "answer_key": result['answer_key']               # Dict: {1: "C", 2: "D"}
             }), 200
         else:
+            student_name = None
+            if result.get("student_id"):
+                student = Student.query.get(result["student_id"])
+                if student:
+                    student_name = student.name
             return jsonify({
-                "error": result.get('error', 'Erro desconhecido na correção'),
-                "system": "new_grid_pipeline"
+                "student_name": student_name,
+                "error": result.get("error", "Erro desconhecido na correção"),
             }), 500
         
     except Exception as e:

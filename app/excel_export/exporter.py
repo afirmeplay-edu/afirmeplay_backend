@@ -40,6 +40,7 @@ class ExcelEvolutionExporter:
                escopo_calculo: Optional[Dict[str, Any]] = None,
                nivel_granularidade: str = "municipio",
                filtros_aplicados: Optional[Dict[str, Any]] = None,
+               grupos: Optional[List[List[str]]] = None,
                ) -> BytesIO:
         """
         Exporta relatório de evolução de avaliações online para Excel
@@ -49,6 +50,7 @@ class ExcelEvolutionExporter:
             escopo_calculo=escopo_calculo,
             nivel_granularidade=nivel_granularidade,
             filtros_aplicados=filtros_aplicados,
+            grupos=grupos,
         )
         if not comparison_data:
             raise ValueError("Não foi possível obter dados de comparação")

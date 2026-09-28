@@ -7013,18 +7013,129 @@ def _obter_avaliacoes_evolucao(
     query = query.group_by(Test.id, Test.title, Test.created_at)
 
     rows = query.all()
-    result = []
+    base = []
     for row in rows:
         test_id, title, data_app, created_at = row[0], row[1], row[2], row[3]
         data_exibir = _formatar_data_para_evolucao(data_app)
         if data_exibir is None and created_at is not None:
             data_exibir = _formatar_data_para_evolucao(created_at)
-        result.append({
+        base.append({
             "id": str(test_id),
             "titulo": title or "",
             "data": data_exibir,
         })
-    return result
+    return _enriquecer_avaliacoes_evolucao(
+        base,
+        city_id_str,
+        escola_param,
+        serie_param,
+        turma_param,
+        area_type,
+    )
+
+
+def _enriquecer_avaliacoes_evolucao(
+    avaliacoes: List[Dict[str, Any]],
+    city_id: str,
+    escola_param: str,
+    serie_param: Optional[str],
+    turma_param: Optional[str],
+    area_type: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Acrescenta disciplina, série e turmas reutilizando o formato da lista de Resultados."""
+    if not avaliacoes:
+        return []
+
+    formatted = {
+        item["id"]: item
+        for item in _format_avaliacoes_opcoes_filtro(
+            [(item["id"], item["titulo"], "") for item in avaliacoes]
+        )
+    }
+    turmas_por_teste, serie_por_teste = _turmas_escopo_evolucao(
+        [item["id"] for item in avaliacoes],
+        city_id,
+        escola_param,
+        serie_param,
+        turma_param,
+        area_type,
+    )
+
+    enriched = []
+    for item in avaliacoes:
+        meta = formatted.get(item["id"], {})
+        turmas = turmas_por_teste.get(item["id"], [])
+        serie = serie_por_teste.get(item["id"]) or {}
+        grade_id = meta.get("grade_id") or serie.get("id")
+        grade_nome = meta.get("grade_nome") or serie.get("nome") or ""
+        disciplinas = meta.get("disciplinas") or []
+        enriched.append({
+            **item,
+            "disciplina": meta.get("disciplina") or (disciplinas[0] if disciplinas else ""),
+            "disciplinas": disciplinas,
+            "grade_id": grade_id,
+            "grade_nome": grade_nome,
+            "serie_id": grade_id,
+            "serie_nome": grade_nome,
+            "turmas": turmas,
+        })
+    return enriched
+
+
+def _turmas_escopo_evolucao(
+    test_ids: List[str],
+    city_id: str,
+    escola_param: str,
+    serie_param: Optional[str],
+    turma_param: Optional[str],
+    area_type: Optional[str],
+) -> Tuple[Dict[str, List[Dict[str, str]]], Dict[str, Dict[str, str]]]:
+    """class_id distintos no mesmo recorte da listagem, mais a série dessas turmas."""
+    if not test_ids:
+        return {}, {}
+
+    query = (
+        ClassTest.query.with_entities(
+            ClassTest.test_id,
+            Class.id,
+            Class.name,
+            Grade.id,
+            Grade.name,
+        )
+        .join(Class, ClassTest.class_id == Class.id)
+        .outerjoin(Grade, Class.grade_id == Grade.id)
+        .join(School, School.id == cast(Class.school_id, String))
+        .join(City, School.city_id == City.id)
+        .filter(ClassTest.test_id.in_([str(test_id) for test_id in test_ids]))
+        .filter(City.id == city_id)
+    )
+    if escola_param and str(escola_param).lower() != "all":
+        query = query.filter(School.id == str(escola_param))
+    query = apply_area_type_to_query(query, area_type)
+    if serie_param:
+        query = query.filter(cast(Grade.id, String) == str(serie_param))
+    if turma_param:
+        query = query.filter(cast(Class.id, String) == str(turma_param))
+
+    turmas_por_teste: Dict[str, List[Dict[str, str]]] = {}
+    serie_por_teste: Dict[str, Dict[str, str]] = {}
+    seen = set()
+    for test_id, class_id, class_name, grade_id, grade_name in query.all():
+        key = (str(test_id), str(class_id))
+        if key in seen:
+            continue
+        seen.add(key)
+        turmas_por_teste.setdefault(str(test_id), []).append({
+            "id": str(class_id),
+            "nome": class_name or "",
+            "name": class_name or "",
+        })
+        if grade_id and str(test_id) not in serie_por_teste:
+            serie_por_teste[str(test_id)] = {
+                "id": str(grade_id),
+                "nome": grade_name or "",
+            }
+    return turmas_por_teste, serie_por_teste
 
 
 # ==================== ENDPOINT 6: GET /opcoes-filtros ====================

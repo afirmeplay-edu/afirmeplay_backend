@@ -13,7 +13,7 @@ from app.models.skill import Skill
 from app.services.evaluation_calculator import EvaluationCalculator
 from datetime import datetime, timezone
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import json
 import dateutil.parser
 
@@ -41,9 +41,13 @@ class EvaluationComparisonService:
         escopo_calculo: Optional[Dict[str, Any]] = None,
         nivel_granularidade: str = "municipio",
         filtros_aplicados: Optional[Dict[str, Any]] = None,
+        grupos: Optional[List[List[str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Compara múltiplas avaliações e retorna a evolução sequencial entre elas
+
+        ``grupos`` opcional: cada lista interna é um ponto. Com 2+ IDs, o ponto
+        usa a mescla de Resultados. Sem grupos mesclados, o fluxo atual não muda.
         
         Args:
             test_ids: Lista de IDs das avaliações (mínimo 2)
@@ -55,6 +59,14 @@ class EvaluationComparisonService:
         Returns:
             Dicionário com comparação completa ou None se erro
         """
+        if grupos and any(len(group) > 1 for group in grupos):
+            return EvaluationComparisonService.compare_grouped_points(
+                grupos,
+                escopo_calculo=escopo_calculo,
+                nivel_granularidade=nivel_granularidade,
+                filtros_aplicados=filtros_aplicados,
+            )
+
         import time
         service_start = time.time()
         
@@ -266,6 +278,228 @@ class EvaluationComparisonService:
         except Exception as e:
             logging.error(f"Erro ao comparar avaliações {test_ids}: {str(e)}", exc_info=True)
             return None
+
+    @staticmethod
+    def compare_grouped_points(
+        grupos: List[List[str]],
+        *,
+        escopo_calculo: Optional[Dict[str, Any]] = None,
+        nivel_granularidade: str = "municipio",
+        filtros_aplicados: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Um ponto por grupo. O GERAL do grupo mesclado reutiliza a mescla de Resultados."""
+        from app.utils.school_equal_weight_means import (
+            granularidade_to_hierarchical_target,
+            hierarchical_mean_from_subject_rows,
+        )
+        from app.services.evolution_points_service import build_comparison_points
+
+        aggregation_level = granularidade_to_hierarchical_target(nivel_granularidade)
+        points = build_comparison_points(grupos, escopo_calculo)
+        points.sort(key=lambda point: _as_naive_utc(point.application_date))
+
+        evaluations_data = []
+        for index, point in enumerate(points):
+            application = point.application_date
+            created = point.created_at
+            evaluations_data.append({
+                "order": index + 1,
+                "id": point.point_id,
+                "title": point.title,
+                "created_at": created.isoformat() if hasattr(created, "isoformat") else None,
+                "application_date": application.isoformat() if hasattr(application, "isoformat") else None,
+                "test_ids": point.ids,
+                "agrupado": point.is_group,
+                **(point.grade_info or {}),
+            })
+
+        comparisons = []
+        for index in range(len(points) - 1):
+            left = points[index]
+            right = points[index + 1]
+            if not left.is_group and not right.is_group:
+                subject_comparison = EvaluationComparisonService._get_subject_comparison(
+                    left.representative_test,
+                    right.representative_test,
+                    left.results,
+                    right.results,
+                    aggregation_level=aggregation_level,
+                )
+                skills_comparison = EvaluationComparisonService._get_skills_comparison(
+                    left.representative_test,
+                    right.representative_test,
+                    left.results,
+                    right.results,
+                )
+            else:
+                subject_comparison = EvaluationComparisonService._compare_point_subjects(
+                    left,
+                    right,
+                    aggregation_level,
+                    hierarchical_mean_from_subject_rows,
+                )
+                skills_comparison = {}
+
+            comparisons.append({
+                "from_evaluation": {
+                    "id": left.point_id,
+                    "title": left.title,
+                    "order": index + 1,
+                    **(left.grade_info or {}),
+                },
+                "to_evaluation": {
+                    "id": right.point_id,
+                    "title": right.title,
+                    "order": index + 2,
+                    **(right.grade_info or {}),
+                },
+                "general_comparison": EvaluationComparisonService._get_general_comparison(
+                    left.results,
+                    right.results,
+                    left.representative_test,
+                    right.representative_test,
+                    aggregation_level=aggregation_level,
+                ),
+                "subject_comparison": subject_comparison,
+                "skills_comparison": skills_comparison,
+            })
+
+        participation_data = {"general": {}, "by_school": {}}
+        for index, point in enumerate(points):
+            eval_key = f"evaluation_{index + 1}"
+            general, by_school = EvaluationComparisonService._participation_for_point(point)
+            participation_data["general"][eval_key] = general
+            participation_data["by_school"][eval_key] = by_school
+
+        return {
+            "nivel_granularidade": nivel_granularidade,
+            "filtros_aplicados": filtros_aplicados,
+            "evaluations": evaluations_data,
+            "total_evaluations": len(points),
+            "comparisons": comparisons,
+            "total_comparisons": len(comparisons),
+            "participation": participation_data,
+        }
+
+    @staticmethod
+    def _point_subjects(point) -> Dict[str, str]:
+        if point.is_group:
+            subjects: Dict[str, str] = {}
+            for info in point.tests_info or []:
+                for subject in getattr(info, "subjects", None) or []:
+                    subject_id = str(subject.get("id") or "")
+                    name = subject.get("name") or subject_id
+                    if subject_id and subject_id not in subjects:
+                        subjects[subject_id] = name
+            return subjects
+        return EvaluationComparisonService._extract_subjects_from_test(point.representative_test)
+
+    @staticmethod
+    def _point_subject_rows(point, subject_id: str) -> List[Dict[str, Any]]:
+        if not point.is_group:
+            return EvaluationComparisonService._get_subject_results_for_comparison(
+                point.representative_test.id,
+                subject_id,
+                point.results,
+            )
+        rows = []
+        for result in point.results:
+            stored = getattr(result, "subject_results", None) or {}
+            data = stored.get(subject_id) or stored.get(str(subject_id))
+            if not isinstance(data, dict):
+                continue
+            rows.append({
+                "student_id": result.student_id,
+                "grade": data.get("grade", 0),
+                "proficiency": data.get("proficiency", 0),
+                "classification": data.get("classification"),
+                "score_percentage": data.get("score_percentage", 0),
+                "class_id_snapshot": result.class_id_snapshot,
+                "school_id_snapshot": result.school_id_snapshot,
+                "grade_id_snapshot": result.grade_id_snapshot,
+            })
+        return rows
+
+    @staticmethod
+    def _compare_point_subjects(left, right, aggregation_level: str, hierarchical_mean_from_subject_rows) -> Dict[str, Any]:
+        subjects_left = EvaluationComparisonService._point_subjects(left)
+        subjects_right = EvaluationComparisonService._point_subjects(right)
+        common = set(subjects_left).intersection(subjects_right)
+        if not common:
+            return {}
+        course_left = EvaluationComparisonService._course_name_for_test(left.representative_test)
+        course_right = EvaluationComparisonService._course_name_for_test(right.representative_test)
+        subject_comparison: Dict[str, Any] = {}
+        for subject_id in common:
+            subject_name = subjects_left.get(subject_id) or subjects_right.get(subject_id) or subject_id
+            rows_left = EvaluationComparisonService._point_subject_rows(left, subject_id)
+            rows_right = EvaluationComparisonService._point_subject_rows(right, subject_id)
+            if not rows_left or not rows_right:
+                continue
+            avg_grade_1, avg_prof_1, _ = hierarchical_mean_from_subject_rows(
+                rows_left,
+                aggregation_level,
+                course_name=course_left,
+                subject_name=subject_name or "GERAL",
+            )
+            avg_grade_2, avg_prof_2, _ = hierarchical_mean_from_subject_rows(
+                rows_right,
+                aggregation_level,
+                course_name=course_right,
+                subject_name=subjects_right.get(subject_id) or subject_name or "GERAL",
+            )
+            dist_1: Dict[str, int] = {}
+            for row in rows_left:
+                classification = row.get("classification") or "Não definido"
+                dist_1[classification] = dist_1.get(classification, 0) + 1
+            dist_2: Dict[str, int] = {}
+            for row in rows_right:
+                classification = row.get("classification") or "Não definido"
+                dist_2[classification] = dist_2.get(classification, 0) + 1
+            subject_comparison[subject_name] = {
+                "subject_id": subject_id,
+                "average_grade": {
+                    "evaluation_1": round(avg_grade_1, 2),
+                    "evaluation_2": round(avg_grade_2, 2),
+                    "evolution": EvaluationComparisonService._calculate_evolution_percentage(avg_grade_1, avg_grade_2),
+                },
+                "average_proficiency": {
+                    "evaluation_1": round(avg_prof_1, 2),
+                    "evaluation_2": round(avg_prof_2, 2),
+                    "evolution": EvaluationComparisonService._calculate_evolution_percentage(avg_prof_1, avg_prof_2),
+                },
+                "total_students": {
+                    "evaluation_1": len(rows_left),
+                    "evaluation_2": len(rows_right),
+                },
+                "classification_distribution": {
+                    "evaluation_1": dist_1,
+                    "evaluation_2": dist_2,
+                },
+            }
+        return subject_comparison
+
+    @staticmethod
+    def _participation_for_point(point) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        class_ids = point.class_ids if point.class_ids is not None else []
+        if not point.is_group:
+            general = EvaluationComparisonService._get_general_participation(
+                point.ids[0], class_ids=class_ids
+            )
+            by_school = EvaluationComparisonService._get_participation_by_school(
+                point.ids[0], class_ids=class_ids
+            )
+            return general, by_school
+        from app.models.student import Student
+
+        total = Student.query.filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
+        participating = len(point.results or [])
+        rate = round((participating / total * 100), 2) if total else 0.0
+        return {
+            "total_students": total,
+            "participating_students": participating,
+            "participation_rate": rate,
+        }, {}
     
     @staticmethod
     def _course_name_for_test(test: Optional[Test]) -> str:

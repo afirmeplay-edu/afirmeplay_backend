@@ -68,9 +68,9 @@ def create_app():
     # Configuração do banco de dados
     app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    # Aplicar opções de Engine (pool/pre_ping/recycle etc.).
-    # O pool é pequeno de propósito: cada processo do Gunicorn/Celery tem o seu,
-    # e a soma passa de max_connections se o pool_size for alto.
+    # Teto do pool por processo (ver Config.SQLALCHEMY_ENGINE_OPTIONS).
+    # Sem isso o SQLAlchemy usa pool_size=5 e max_overflow=10 por processo,
+    # e vários workers ainda competem pelo max_connections do Postgres.
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = getattr(Config, "SQLALCHEMY_ENGINE_OPTIONS", {})
 
     # Inicialização das extensões

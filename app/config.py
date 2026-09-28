@@ -7,20 +7,22 @@ load_dotenv('app/.env')
 class Config:
     SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    # Cada processo (worker do Gunicorn ou do Celery) tem o próprio pool.
-    # Um request abre duas sessões (db.session e g.public_session). No mesmo
-    # processo o scheduler ainda segura o advisory lock e, a cada 5 min, a
-    # verificação de avaliações. pool 2 + overflow 2 (4 no total) esgotava
-    # isso no run.py e o login caía com QueuePool timeout.
-    # 4 workers da API + 4 do Celery, com pool 5 + overflow 3: ~40 conexões
-    # paradas e no máximo ~64 num pico por ambiente. max_connections=100,
-    # e dev/prod compartilham esse teto.
-    # pool_size 20 + overflow 40 (até 60 por processo) lotava o Postgres sozinho.
+    # Postgres em 147.79.87.213 tem max_connections=100, compartilhado por
+    # Gunicorn (4 workers), Celery prefork (concurrency 4) e o Flask local.
+    # O pool é por processo: 20+40 abria até 60 sockets em um único processo e
+    # estourava o teto do servidor ("sorry, too many clients already").
+    # Teto por processo = pool_size + max_overflow = 10.
+    # Em idle o pool segura só pool_size (4). Um stack (4+4 processos) fica
+    # em ~32 conexões; no pico, stack + Flask local chegam a ~90, abaixo de 100.
     SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_size': 5,
-        'pool_recycle': 3600,  # Reciclar conexões a cada 1 hora (evitar timeout)
-        'pool_pre_ping': True,  # Verificar conexões antes de usar
-        'max_overflow': 3,
+        'pool_size': 4,
+        'max_overflow': 6,
+        'pool_timeout': 10,  # espera vaga no pool; não abre além do teto
+        'pool_recycle': 3600,
+        'pool_pre_ping': True,
+        'connect_args': {
+            'application_name': os.getenv('PGAPPNAME', 'afirmeplay'),
+        },
     }
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_key")
 

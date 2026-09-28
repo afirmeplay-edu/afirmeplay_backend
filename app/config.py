@@ -7,11 +7,17 @@ load_dotenv('app/.env')
 class Config:
     SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # Cada processo (worker do Gunicorn ou do Celery) tem o próprio pool.
+    # O Gunicorn síncrono atende 1 request por worker, então o pool não precisa
+    # ser grande: 4 workers da API + 4 do Celery, com pool 2 + overflow 2,
+    # ficam em ~16 conexões paradas e no máximo ~32 num pico por ambiente.
+    # O servidor está em max_connections=100 e dev/prod compartilham esse teto.
+    # pool_size 20 + overflow 40 (até 60 por processo) lotava o Postgres sozinho.
     SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_size': 20,  # Aumentar conexões disponíveis
+        'pool_size': 2,
         'pool_recycle': 3600,  # Reciclar conexões a cada 1 hora (evitar timeout)
         'pool_pre_ping': True,  # Verificar conexões antes de usar
-        'max_overflow': 40  # Permitir até 40 conexões extras
+        'max_overflow': 2,
     }
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_key")
 
@@ -30,7 +36,14 @@ class Config:
     #     transações "perdidas". Para HTTP, o teardown do request já fecha a
     #     sessão muito antes desse limite.
     # - statement_timeout: 5min
+    # - idle_session_timeout: 10min
+    #     Encerra sessão parada fora de transação (pool ocioso, psql esquecido,
+    #     cliente que caiu sem fechar). Diferente do timeout de "idle in
+    #     transaction", que não cobre o estado "idle" do pool.
+    #     Tasks longas fazem commit antes do trabalho de CPU e devolvem a
+    #     conexão ao pool; o pool_pre_ping abre outra se o Postgres já a encerrou.
     PG_IDLE_IN_TX_SESSION_TIMEOUT_MS = 600_000
+    PG_IDLE_SESSION_TIMEOUT_MS = 600_000
     PG_STATEMENT_TIMEOUT_MS = 300_000
     
     # Configurações do SendGrid

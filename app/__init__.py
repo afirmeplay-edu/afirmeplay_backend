@@ -68,9 +68,9 @@ def create_app():
     # Configuração do banco de dados
     app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    # Aplicar opções de Engine (pool/pre_ping/recycle etc.)
-    # Sem isso, o SQLAlchemy usa defaults (pool_size=5, max_overflow=10), o que pode estourar
-    # com scheduler + tráfego concorrente.
+    # Aplicar opções de Engine (pool/pre_ping/recycle etc.).
+    # O pool é pequeno de propósito: cada processo do Gunicorn/Celery tem o seu,
+    # e a soma passa de max_connections se o pool_size for alto.
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = getattr(Config, "SQLALCHEMY_ENGINE_OPTIONS", {})
 
     # Inicialização das extensões
@@ -100,11 +100,13 @@ def create_app():
         Motivação:
         - evitar sessões "idle in transaction" segurando locks indefinidamente
         - evitar statements presos por tempo ilimitado (ex.: locks)
+        - evitar sessões só "idle" (pool, cliente morto) ocupando max_connections
         """
         from sqlalchemy import event, text
 
         # Valores definidos em Config (hardcoded no projeto)
         idle_ms = int(getattr(Config, "PG_IDLE_IN_TX_SESSION_TIMEOUT_MS", 60_000))
+        idle_session_ms = int(getattr(Config, "PG_IDLE_SESSION_TIMEOUT_MS", 600_000))
         stmt_ms = int(getattr(Config, "PG_STATEMENT_TIMEOUT_MS", 300_000))
 
         def _apply(dbapi_conn, _):
@@ -118,6 +120,7 @@ def create_app():
             try:
                 # SET por sessão (não-local), para valer para toda a vida da conexão no pool.
                 cur.execute(f"SET idle_in_transaction_session_timeout = {idle_ms}")
+                cur.execute(f"SET idle_session_timeout = {idle_session_ms}")
                 cur.execute(f"SET statement_timeout = {stmt_ms}")
             finally:
                 try:
@@ -136,8 +139,9 @@ def create_app():
                 event.listen(eng, "connect", _apply)
 
         app.logger.info(
-            "Postgres timeouts ativos: idle_in_transaction_session_timeout=%sms, statement_timeout=%sms",
+            "Postgres timeouts ativos: idle_in_transaction_session_timeout=%sms, idle_session_timeout=%sms, statement_timeout=%sms",
             idle_ms,
+            idle_session_ms,
             stmt_ms,
         )
 

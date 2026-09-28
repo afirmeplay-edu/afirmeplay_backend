@@ -9,6 +9,7 @@ import json
 import re
 import unicodedata
 from typing import Dict, Any, Optional, Mapping
+from app.services.special_education import special_education_label_from_course_text
 import google.generativeai as genai
 from app.openai_config.openai_config import (
     OPENROUTER_MAX_TOKENS,
@@ -549,14 +550,10 @@ class AIAnalysisService:
         ) or re.search(r"\bgrupo\s*[123]\b", low) or re.search(r"\bg\s*[123]\b", low):
             return "Educação Infantil"
 
-        # Educação Especial / AEE
-        if re.search(r"suporte\s*[123]", low) or "aee" in low:
-            msup = re.search(r"suporte\s*([123])", low)
-            if msup:
-                return f"Educação Especial (Suporte {msup.group(1)})"
-            return "Educação Especial"
-        if "especial" in low and "ensino medio" not in low:
-            return "Educação Especial"
+        # Educação Especial / AEE. Ano escolar explícito já retornou acima.
+        especial_label = special_education_label_from_course_text(low)
+        if especial_label:
+            return especial_label
 
         # Segmentos amplos (nome de etapa no banco)
         if "anos iniciais" in low:

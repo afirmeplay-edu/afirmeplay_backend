@@ -6,6 +6,7 @@ Implementa as fórmulas específicas conforme os requisitos do sistema
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
+from app.services.special_education import course_name_is_special_education
 from app.utils.decimal_helpers import round_to_two_decimals
 
 
@@ -214,7 +215,7 @@ class EvaluationCalculator:
             return CourseLevel.EDUCACAO_INFANTIL
         elif "iniciais" in course_lower or "fundamental" in course_lower and "i" in course_lower:
             return CourseLevel.ANOS_INICIAIS
-        elif "especial" in course_lower:
+        elif course_name_is_special_education(course_name):
             return CourseLevel.EDUCACAO_ESPECIAL
         elif "eja" in course_lower:
             return CourseLevel.EJA

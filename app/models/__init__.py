@@ -7,6 +7,7 @@ from .student import Student
 from .studentSchoolEnrollment import StudentSchoolEnrollment
 from .subject import Subject
 from .studentClass import Class
+from .subturma import Subturma
 from .classSubject import ClassSubject
 from .classTest import ClassTest
 from .studentTestOlimpics import StudentTestOlimpics

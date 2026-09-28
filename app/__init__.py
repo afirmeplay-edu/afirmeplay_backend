@@ -353,6 +353,8 @@ def create_app():
     app.register_blueprint(student_preferences_routes.bp)
     app.register_blueprint(user_routes.bp)
     app.register_blueprint(class_routes.bp)
+    from .routes import subturma_routes
+    app.register_blueprint(subturma_routes.bp)
     app.register_blueprint(schoolTeacher.school_teacher_bp)
     app.register_blueprint(teacherClass.teacher_class_bp)
     app.register_blueprint(professor_route.bp)

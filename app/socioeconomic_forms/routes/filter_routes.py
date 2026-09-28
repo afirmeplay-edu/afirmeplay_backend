@@ -533,12 +533,17 @@ def _obter_formularios_por_municipio(estado: str, municipio_id: str, user: dict,
         forms = AggregatedResultsService._find_forms_for_scope(filters)
         result = []
         for form in forms:
+            custom_name = (form.custom_title or '').strip() or form.title
             result.append({
                 'id': str(form.id),
                 'titulo': form.title,
-                'name': form.title,
-                'nome': form.title,
+                'customName': custom_name,
+                'custom_name': custom_name,
+                'name': custom_name,
+                'nome': custom_name,
                 'formType': form.form_type or '',
+                'selectedGrades': form.selected_grades or [],
+                'selectedClasses': form.selected_classes or [],
             })
         return result
     except Exception as e:
@@ -669,6 +674,7 @@ def obter_opcoes_filtros():
         escola = request.args.get('escola')
         serie = request.args.get('serie')
         turma = request.args.get('turma')
+        custom_name = request.args.get('customName') or request.args.get('custom_name')
         
         response = {}
         

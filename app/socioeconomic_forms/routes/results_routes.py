@@ -7,12 +7,19 @@ from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
+from app.socioeconomic_forms.services.results_delivery import (
+    STALE_AFTER_SECONDS,
+    decide_report_delivery,
+)
 from app.socioeconomic_forms.services.results_tasks import generate_indices_report, generate_profiles_report, generate_responses_report, generate_pneerq_report
 from app.socioeconomic_forms.services.results_migration_tasks import populate_initial_cache_for_form, populate_all_forms_cache
 from app.socioeconomic_forms.services.inse_saeb_service import InseAvaliacaoService
+from app.socioeconomic_forms.services.results_service import ResultsService
 from celery.result import AsyncResult
 from app.report_analysis.celery_app import celery_app
 import logging
+import threading
+import time
 
 
 def _get_tenant_schema():
@@ -25,6 +32,78 @@ def _get_tenant_schema():
 bp = Blueprint('socioeconomic_results', __name__, url_prefix='/forms')
 
 logger = logging.getLogger(__name__)
+
+# Job em voo por (form, filtros). Evita reenfileirar a mesma task a cada poll de 2,5 s.
+_RESPONSES_INFLIGHT = {}
+_RESPONSES_INFLIGHT_LOCK = threading.Lock()
+_WORKER_PROBE = {"checked_at": 0.0, "alive": False}
+_WORKER_PROBE_TTL = 10.0
+
+
+def _responses_job_key(form_id, filters):
+    from app.socioeconomic_forms.models.form_result_cache import FormResultCache
+
+    return f"respostas:{form_id}:{FormResultCache.generate_filters_hash(filters or {})}"
+
+
+def _responses_inflight_age(key):
+    with _RESPONSES_INFLIGHT_LOCK:
+        started = _RESPONSES_INFLIGHT.get(key)
+    if started is None:
+        return None
+    return time.monotonic() - started
+
+
+def _mark_responses_inflight(key):
+    with _RESPONSES_INFLIGHT_LOCK:
+        _RESPONSES_INFLIGHT[key] = time.monotonic()
+
+
+def _clear_responses_inflight(key):
+    with _RESPONSES_INFLIGHT_LOCK:
+        _RESPONSES_INFLIGHT.pop(key, None)
+
+
+def _celery_workers_alive():
+    """True se algum worker respondeu ao ping. Resultado vale por alguns segundos."""
+    now = time.monotonic()
+    if now - _WORKER_PROBE["checked_at"] < _WORKER_PROBE_TTL:
+        return _WORKER_PROBE["alive"]
+    alive = False
+    try:
+        inspector = celery_app.control.inspect(timeout=0.5)
+        alive = bool(inspector.ping()) if inspector is not None else False
+    except Exception as exc:
+        logger.warning("[RESPOSTAS] Worker Celery indisponível: %s", exc)
+        alive = False
+    _WORKER_PROBE["checked_at"] = now
+    _WORKER_PROBE["alive"] = alive
+    return alive
+
+
+def _compute_responses_now(form_id, filters, page, limit):
+    result = ResultsService.calculate_responses_report(form_id, filters, page, limit)
+    ResultsCacheService.save(
+        form_id=form_id,
+        report_type='respostas',
+        filters=filters,
+        result=result,
+        student_count=result.get('totalRespostas', 0) if isinstance(result, dict) else 0,
+        commit=True,
+    )
+    return result
+
+
+def _processing_respostas_payload(status):
+    return {
+        'status': 'processing',
+        'message': (
+            'Relatório sendo gerado em background. Faça polling neste mesmo '
+            'endpoint (GET respostas) até receber 200 com os dados.'
+        ),
+        'pollSameUrl': True,
+        'cacheStatus': status,
+    }
 
 
 @bp.route('/<form_id>/results/indices', methods=['GET'])
@@ -203,12 +282,24 @@ def get_respostas_report(form_id):
     """
     Obtém relatório "Respostas do socioeconômico": por questão, quantidade de respostas,
     porcentagem sobre o total, contagem por opção e quem respondeu / o que respondeu.
-    
+
     Query params:
     - state, municipio, escola, serie, turma: Filtros
     - page: Página para listas de alunos (default: 1)
     - limit: Limite de alunos por página (default: 20)
+
+    Respostas HTTP:
+    - 200: cache pronto ou relatório calculado nesta requisição
+      (formId, formTitle, totalRespostas, questoes).
+    - 202: há worker Celery e o job deste filtro já foi enfileirado uma vez.
+      O body não traz questoes. status=processing, pollSameUrl=true,
+      cacheStatus.status em not_found | dirty | empty.
+      O próximo GET com a mesma query não enfileira de novo.
+      Se o job não gravar o cache em STALE_AFTER_SECONDS, o GET seguinte
+      calcula na requisição (200) ou devolve 500.
+    - 400/500: erro do cálculo. A tela deve parar o polling.
     """
+    job_key = None
     try:
         filters = {
             'state': request.args.get('state'),
@@ -220,28 +311,68 @@ def get_respostas_report(form_id):
         filters = {k: v for k, v in filters.items() if v}
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
-        
+
         status = ResultsCacheService.get_status(form_id, 'respostas', filters)
-        
+        job_key = _responses_job_key(form_id, filters)
+
         if status['status'] == 'ready':
+            _clear_responses_inflight(job_key)
             result = ResultsCacheService.get_result(form_id, 'respostas', filters)
             return jsonify(result), 200
-        
-        schema = _get_tenant_schema()
-        generate_responses_report.apply_async(
-            (form_id, filters, page, limit, schema),
-            ignore_result=True
+
+        decision = decide_report_delivery(
+            cache_ready=False,
+            workers_alive=_celery_workers_alive(),
+            inflight_age=_responses_inflight_age(job_key),
+            stale_after=STALE_AFTER_SECONDS,
         )
-        return jsonify({
-            'status': 'processing',
-            'message': 'Relatório sendo gerado em background. Faça polling neste mesmo endpoint (GET respostas) até receber 200 com os dados.',
-            'pollSameUrl': True,
-            'cacheStatus': status
-        }), 202  # HTTP 202 Accepted
-        
+
+        if decision == 'compute_sync':
+            logger.info(
+                "[RESPOSTAS] Calculando na requisição form_id=%s filters=%s",
+                form_id,
+                filters,
+            )
+            result = _compute_responses_now(form_id, filters, page, limit)
+            _clear_responses_inflight(job_key)
+            logger.info(
+                "[RESPOSTAS] Relatório pronto form_id=%s totalRespostas=%s",
+                form_id,
+                result.get('totalRespostas') if isinstance(result, dict) else None,
+            )
+            return jsonify(result), 200
+
+        if decision == 'enqueue':
+            _mark_responses_inflight(job_key)
+            try:
+                schema = _get_tenant_schema()
+                generate_responses_report.apply_async(
+                    (form_id, filters, page, limit, schema),
+                    ignore_result=True
+                )
+                logger.info(
+                    "[RESPOSTAS] Task enfileirada uma vez form_id=%s filters=%s",
+                    form_id,
+                    filters,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[RESPOSTAS] Falha ao enfileirar (%s); calculando na requisição",
+                    exc,
+                )
+                result = _compute_responses_now(form_id, filters, page, limit)
+                _clear_responses_inflight(job_key)
+                return jsonify(result), 200
+
+        return jsonify(_processing_respostas_payload(status)), 202
+
     except ValueError as e:
+        if job_key:
+            _clear_responses_inflight(job_key)
         return jsonify({"error": str(e)}), 400
     except Exception as e:
+        if job_key:
+            _clear_responses_inflight(job_key)
         logger.error(f"Erro ao obter relatório de respostas: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao processar solicitação", "details": str(e)}), 500
 

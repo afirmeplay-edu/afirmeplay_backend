@@ -57,6 +57,32 @@ class TestOfflinePackCodeHelpers(unittest.TestCase):
         self.assertNotEqual(svc.registry_lookup_key(norm), svc.hash_code(norm))
 
 
+class TestRedeemStudentKeys(unittest.TestCase):
+    @patch.object(svc, "_enrolled_student_ids", return_value={"fica", "sem-vinculo"})
+    def test_student_without_test_link_stays_when_still_enrolled(self, _enrolled):
+        keys = svc.redeem_student_keys(
+            ["school-1"],
+            [("fica", "prova-1")],
+            [],
+            [],
+            None,
+            None,
+        )
+        self.assertEqual(keys, ["fica", "sem-vinculo"])
+
+    @patch.object(svc, "_enrolled_student_ids", return_value=set())
+    def test_linked_student_stays_even_outside_enrollment_query(self, _enrolled):
+        keys = svc.redeem_student_keys(
+            ["school-1"],
+            [],
+            [("gabarito-aluno", "gab-1")],
+            [],
+            {"turma-1"},
+            None,
+        )
+        self.assertEqual(keys, ["gabarito-aluno"])
+
+
 class TestInvalidatePackBundleCache(unittest.TestCase):
     def test_clears_resolved_versions(self):
         pack = MagicMock()

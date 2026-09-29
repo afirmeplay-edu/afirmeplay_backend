@@ -51,6 +51,36 @@ def _remap_regular_1ano_to_adap_i(
     return None
 
 
+def _is_same_content_replay(stored: Optional[str], incoming: Any) -> bool:
+    """Replay do mesmo hash já gravado. Submissão antiga (NULL) não é replay."""
+    if stored is None or str(stored).strip() == "":
+        return False
+    if incoming is None:
+        return False
+    return str(stored) == str(incoming)
+
+
+def select_answers_for_current_test(
+    answers: List[Any], question_ids: set
+) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """
+    Exige resposta para cada questão que está na prova agora.
+    question_id que saiu da prova é ignorado.
+    """
+    current = {str(qid) for qid in question_ids if qid}
+    chosen: Dict[str, Dict[str, Any]] = {}
+    for ans in answers or []:
+        if not isinstance(ans, dict):
+            continue
+        qid = ans.get("question_id")
+        if qid is None or str(qid) not in current:
+            continue
+        chosen[str(qid)] = ans
+    if current - set(chosen):
+        return "resposta ausente para questão da prova", []
+    return None, list(chosen.values())
+
+
 def get_bundle_generation(
     school_id: str, sync_bundle_version: int
 ) -> Optional[MobileSyncBundleGeneration]:
@@ -112,10 +142,12 @@ def process_one_submission(
             "message": "sync_bundle_version inválido",
         }
 
-    existing = MobileSyncSubmission.query.filter_by(
+    existing_submission = MobileSyncSubmission.query.filter_by(
         submission_id=submission_uuid
     ).first()
-    if existing:
+    if existing_submission and _is_same_content_replay(
+        existing_submission.test_content_version, test_content_version
+    ):
         return {
             "submission_id": str(submission_uuid),
             "status": "duplicate_ignored",
@@ -216,14 +248,13 @@ def process_one_submission(
             }
 
     tq_ids = {tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).all()}
-    for ans in answers:
-        qid = ans.get("question_id")
-        if not qid or qid not in tq_ids:
-            return {
-                "submission_id": str(submission_uuid),
-                "status": "error",
-                "message": f"question_id inválida ou fora da prova: {qid}",
-            }
+    answer_error, answers_to_save = select_answers_for_current_test(answers, tq_ids)
+    if answer_error:
+        return {
+            "submission_id": str(submission_uuid),
+            "status": "error",
+            "message": answer_error,
+        }
 
     session_id_created: Optional[str] = None
     try:
@@ -243,7 +274,7 @@ def process_one_submission(
             db.session.flush()
             session_id_created = session_row.id
 
-            for ans in answers:
+            for ans in answers_to_save:
                 qid = ans.get("question_id")
                 existing_answer = StudentAnswer.query.filter_by(
                     student_id=student_id,
@@ -269,13 +300,30 @@ def process_one_submission(
                 else:
                     sa.answered_at = datetime.utcnow()
 
-            sub_row = MobileSyncSubmission(
-                submission_id=submission_uuid,
-                device_id=device_id,
-                user_id=user_id,
-                status="processed",
+            stored_version = (
+                str(test_content_version) if test_content_version is not None else None
             )
-            db.session.add(sub_row)
+            if existing_submission:
+                print(
+                    f"[mobile/v1/sync/upload] reaplicando submission — "
+                    f"submission_id={submission_uuid} school_id={school_id} "
+                    f"student_id={student_id} test_id={test_id} "
+                    f"test_content_version={stored_version}"
+                )
+                existing_submission.device_id = device_id
+                existing_submission.user_id = user_id
+                existing_submission.status = "processed"
+                existing_submission.test_content_version = stored_version
+                existing_submission.received_at = datetime.utcnow()
+            else:
+                sub_row = MobileSyncSubmission(
+                    submission_id=submission_uuid,
+                    device_id=device_id,
+                    user_id=user_id,
+                    status="processed",
+                    test_content_version=stored_version,
+                )
+                db.session.add(sub_row)
     except Exception as ex:
         return {
             "submission_id": str(submission_uuid),

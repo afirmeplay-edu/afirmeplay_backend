@@ -26,8 +26,13 @@ CREATE TABLE IF NOT EXISTS "{schema}".mobile_sync_submission (
     user_id VARCHAR NOT NULL REFERENCES public.users(id),
     received_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     status VARCHAR(20) NOT NULL,
+    test_content_version VARCHAR(64),
     CONSTRAINT uq_mobile_sync_submission_id UNIQUE (submission_id)
 );
+ALTER TABLE "{schema}".mobile_sync_submission
+    ADD COLUMN IF NOT EXISTS test_content_version VARCHAR(64);
+COMMENT ON COLUMN "{schema}".mobile_sync_submission.test_content_version IS
+    'Hash da prova aplicado nesta submission. NULL em submissões anteriores à coluna.';
 CREATE INDEX IF NOT EXISTS idx_mobile_sync_submission_user ON "{schema}".mobile_sync_submission(user_id);
 
 CREATE TABLE IF NOT EXISTS "{schema}".mobile_sync_bundle_generation (

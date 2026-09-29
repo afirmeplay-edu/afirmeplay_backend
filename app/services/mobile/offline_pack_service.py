@@ -28,6 +28,7 @@ from app.models.mobile_offline_pack_registry import MobileOfflinePackRegistry
 from app.models.school import School
 from app.models.student import Student
 from app.models.test import Test
+from app.utils.uuid_helpers import ensure_uuid
 from app.services.mobile.bundle_service import (
     build_tests_questions_payload,
     collect_school_scope,
@@ -449,6 +450,58 @@ def collect_filtered_scope(
         filtered_student_form_links,
         filtered_user_form_links,
     )
+
+
+def _linked_student_ids(
+    links: List[Tuple[str, str]],
+    gabarito_links: List[Tuple[str, str]],
+    student_form_links: List[Tuple[str, str]],
+) -> Set[str]:
+    return (
+        {sid for sid, _ in links}
+        | {sid for sid, _ in gabarito_links}
+        | {sid for sid, _ in student_form_links}
+    )
+
+
+def _enrolled_student_ids(
+    school_ids: List[str],
+    class_ids: Optional[Set[str]],
+    student_ids: Optional[Set[str]],
+) -> Set[str]:
+    """Alunos que ainda estão nas escolas do pacote, com ou sem vínculo de prova."""
+    if not school_ids:
+        return set()
+    query = db.session.query(Student.id).filter(
+        Student.school_id.in_([str(school_id) for school_id in school_ids])
+    )
+    if student_ids:
+        query = query.filter(Student.id.in_(list(student_ids)))
+    if class_ids:
+        class_uuids = [parsed for parsed in (ensure_uuid(cid) for cid in class_ids) if parsed]
+        if not class_uuids:
+            return set()
+        query = query.filter(Student.class_id.in_(class_uuids))
+    return {row[0] for row in query.all()}
+
+
+def redeem_student_keys(
+    school_ids: List[str],
+    links: List[Tuple[str, str]],
+    gabarito_links: List[Tuple[str, str]],
+    student_form_links: List[Tuple[str, str]],
+    class_ids: Optional[Set[str]],
+    student_ids: Optional[Set[str]],
+) -> List[str]:
+    """
+    Quem entra em students.
+
+    O vínculo (student_test_links) decide quem vê cada prova. O aluno que sai
+    da prova continua aqui se ainda pertence à escola do pacote.
+    """
+    linked = _linked_student_ids(links, gabarito_links, student_form_links)
+    enrolled = _enrolled_student_ids(school_ids, class_ids, student_ids)
+    return sorted(linked | enrolled)
 
 
 def _schools_touched_from_links(
@@ -925,12 +978,17 @@ def redeem_offline_pack_page(
             f"user_form_links={len(user_form_links)}"
         )
 
-        student_keys = sorted(
-            {sid for sid, _ in links}
-            | {sid for sid, _ in gabarito_links}
-            | {sid for sid, _ in student_form_links}
+        student_keys = redeem_student_keys(
+            school_ids,
+            links,
+            gabarito_links,
+            student_form_links,
+            class_ids,
+            student_ids,
         )
-        schools_touched = _schools_touched_from_links(links, school_ids)
+        schools_touched = _schools_touched_from_links(links, school_ids) | {
+            str(school_id) for school_id in school_ids
+        }
 
         _reserve_device_slot(pack, device_id)
         versions, valid_min = _ensure_pack_bundle_versions(pack, schools_touched)
@@ -972,10 +1030,13 @@ def redeem_offline_pack_page(
             ) = collect_filtered_scope(
                 school_ids, test_ids, class_ids, student_ids, gabarito_ids, form_ids
             )
-            student_keys = sorted(
-                {sid for sid, _ in links}
-                | {sid for sid, _ in gabarito_links}
-                | {sid for sid, _ in student_form_links}
+            student_keys = redeem_student_keys(
+                school_ids,
+                links,
+                gabarito_links,
+                student_form_links,
+                class_ids,
+                student_ids,
             )
 
         versions, valid_min = _bundle_versions_from_pack(pack)

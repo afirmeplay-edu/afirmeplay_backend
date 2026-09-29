@@ -28,6 +28,8 @@ class MobileSyncSubmission(db.Model):
     user_id = db.Column(db.String, db.ForeignKey("public.users.id"), nullable=False)
     received_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
     status = db.Column(db.String(20), nullable=False)
+    # Hash aplicado nesta submission_id. NULL = sincronizada antes da coluna existir.
+    test_content_version = db.Column(db.String(64), nullable=True)
 
 
 class MobileSyncBundleGeneration(db.Model):

@@ -1712,11 +1712,13 @@ def listar_avaliacoes_analise_ia():
         estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(
             todas_avaliacoes_escopo, scope_info, nivel_granularidade, user
         )
-        if isinstance(estatisticas_consolidadas, dict) and scope_info.get("grupo"):
-            estatisticas_consolidadas["por_disciplina"] = _calcular_estatisticas_gerais_por_disciplina_escopo(
-                todas_avaliacoes_escopo, scope_info, nivel_granularidade
+        if isinstance(estatisticas_consolidadas, dict):
+            _anexar_cards_e_media_geral(
+                estatisticas_consolidadas,
+                todas_avaliacoes_escopo,
+                scope_info,
+                nivel_granularidade,
             )
-            _aplicar_media_geral_das_disciplinas_grupo(estatisticas_consolidadas, scope_info)
         resultados_por_disciplina = _calcular_estatisticas_por_disciplina(
             todas_avaliacoes_escopo, scope_info, nivel_granularidade
         )
@@ -10430,8 +10432,10 @@ def _media_geral_media_das_disciplinas(
     por_disciplina: Optional[List[Dict[str, Any]]],
 ) -> Optional[Tuple[float, float]]:
     """
-    GERAL do grupo = média aritmética das médias dos cards de disciplina
+    Média aritmética das médias dos cards de disciplina
     (media_PT + media_Mat + …) / N.
+
+    Com uma disciplina, o resultado é o próprio card. Não reaplica calculate_grade.
     """
     if not por_disciplina:
         return None
@@ -10454,14 +10458,35 @@ def _media_geral_media_das_disciplinas(
     )
 
 
+def _anexar_cards_e_media_geral(
+    estatisticas: Optional[Dict[str, Any]],
+    class_tests: list,
+    scope_info: Optional[Dict],
+    nivel_granularidade: str,
+) -> None:
+    """Monta por_disciplina e alinha media_*_geral à média dos cards.
+
+    Prova isolada e grupo na análise de IA usam o mesmo passo do GET /avaliacoes.
+    """
+    if not isinstance(estatisticas, dict):
+        return
+    estatisticas["por_disciplina"] = _calcular_estatisticas_gerais_por_disciplina_escopo(
+        class_tests, scope_info, nivel_granularidade
+    )
+    _aplicar_media_geral_das_disciplinas_grupo(estatisticas, scope_info)
+
+
 def _aplicar_media_geral_das_disciplinas_grupo(
     estatisticas: Optional[Dict[str, Any]],
     scope_info: Optional[Dict] = None,
 ) -> None:
-    """Sobrescreve media_*_geral no consolidado do grupo a partir de por_disciplina."""
+    """Sobrescreve media_*_geral com a média dos cards em por_disciplina.
+
+    Prova isolada e grupo usam a mesma conta. Sem por_disciplina, o valor já
+    calculado permanece. ``scope_info`` segue na assinatura para os chamadores.
+    """
+    del scope_info
     if not isinstance(estatisticas, dict):
-        return
-    if not (scope_info or {}).get("grupo"):
         return
     medias = _media_geral_media_das_disciplinas(estatisticas.get("por_disciplina"))
     if not medias:

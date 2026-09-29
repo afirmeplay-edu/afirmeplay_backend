@@ -2055,8 +2055,8 @@ def _gerar_tabela_detalhada_por_disciplina(
                         if resposta_aluno:
                             total_respondidas += 1
                             acertou = False
-                            if question.question_type == 'multiple_choice':
-                                acertou = EvaluationResultService.check_multiple_choice_answer(resposta_aluno.answer, question.correct_answer)
+                            if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                acertou = EvaluationResultService.check_multiple_choice_answer(resposta_aluno.answer, question.correct_answer, question.alternatives)
                             else:
                                 acertou = str(resposta_aluno.answer).strip().lower() == str(question.correct_answer).strip().lower()
                             if acertou:
@@ -3990,9 +3990,9 @@ def relatorio_detalhado(evaluation_id: str):
             respostas_questao = answers_by_question.get(question.id, [])
             total_respostas = len(respostas_questao)
             acertos = 0
-            if question.question_type == 'multiple_choice':
+            if EvaluationResultService.is_multiple_choice_question(question.question_type):
                 for av in respostas_questao:
-                    if EvaluationResultService.check_multiple_choice_answer(av, question.correct_answer):
+                    if EvaluationResultService.check_multiple_choice_answer(av, question.correct_answer, question.alternatives):
                         acertos += 1
             else:
                 if total_respostas > 0 and question.correct_answer:
@@ -4078,8 +4078,8 @@ def relatorio_detalhado(evaluation_id: str):
             for answer in answers_by_student.get(student.id, []):
                 question = questions_map.get(answer.question_id)
                 if question:
-                    if question.question_type == 'multiple_choice':
-                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                    if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                     else:
                         is_correct = str(answer.answer or "").strip().lower() == str(question.correct_answer or "").strip().lower()
                     respostas.append({
@@ -5097,10 +5097,10 @@ def calculate_test_scores(test_id):
                 results[student_id]["max_possible_score"] += question_value
                 
                 # Verificar tipo de questão
-                if question.question_type == 'multiple_choice':
+                if EvaluationResultService.is_multiple_choice_question(question.question_type):
                     results[student_id]["multiple_choice_questions"] += 1
                     # Questão de múltipla escolha - correção automática
-                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                     if is_correct:
                         results[student_id]["correct_answers"] += 1
                         results[student_id]["total_score"] += question_value
@@ -5365,8 +5365,8 @@ def get_student_test_results(test_id, student_id):
                     "corrected_at": answer.corrected_at.isoformat() if answer.corrected_at else None
                 }
                 
-                if question.question_type == 'multiple_choice':
-                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                     answer_detail["is_correct"] = is_correct
                     answer_detail["score"] = question_value if is_correct else 0
                     
@@ -5726,8 +5726,8 @@ def get_student_answers(test_id, student_id):
                 }
                 
                 # Verificar se a resposta está correta baseado no tipo de questão
-                if question.question_type == 'multiple_choice':
-                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                     answer_detail["is_correct"] = is_correct
                     answer_detail["score"] = question.value if is_correct else 0
                     if is_correct:
@@ -5877,9 +5877,9 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
                 total_respostas = len(respostas_questao)
 
                 acertos = 0
-                if question.question_type == 'multiple_choice':
+                if EvaluationResultService.is_multiple_choice_question(question.question_type):
                     for answer_value in respostas_questao:
-                        if EvaluationResultService.check_multiple_choice_answer(answer_value, question.correct_answer):
+                        if EvaluationResultService.check_multiple_choice_answer(answer_value, question.correct_answer, question.alternatives):
                             acertos += 1
                 else:
                     if total_respostas > 0 and question.correct_answer:
@@ -6014,8 +6014,8 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
                             continue
                         
                         is_correct = False
-                        if question.question_type == 'multiple_choice':
-                            is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                        if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                            is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                         else:
                             is_correct = answer.answer == question.correct_answer
                         
@@ -9874,9 +9874,9 @@ def _calcular_ranking_global_alunos(
                     if question:
                         total_respondidas += 1
                         acertou = False
-                        if question.question_type == "multiple_choice":
+                        if EvaluationResultService.is_multiple_choice_question(question.question_type):
                             acertou = EvaluationResultService.check_multiple_choice_answer(
-                                resposta.answer, question.correct_answer
+                                resposta.answer, question.correct_answer, question.alternatives
                             )
                         else:
                             acertou = (

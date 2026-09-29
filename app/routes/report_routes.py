@@ -4186,8 +4186,8 @@ def _calcular_niveis_aprendizagem(evaluation_id: str, class_tests: List[ClassTes
                     for answer in disciplina_answers:
                         question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
                         if question:
-                            if question.question_type == 'multiple_choice':
-                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                            if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                 if is_correct:
                                     correct_answers_disciplina += 1
                             elif question.correct_answer:
@@ -4244,8 +4244,8 @@ def _calcular_niveis_aprendizagem(evaluation_id: str, class_tests: List[ClassTes
                     for answer in disciplina_answers:
                         question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
                         if question:
-                            if question.question_type == 'multiple_choice':
-                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                            if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                 if is_correct:
                                     correct_answers_disciplina += 1
                             elif question.correct_answer:
@@ -4559,8 +4559,8 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
                             for answer in disciplina_answers:
                                 question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
                                 if question:
-                                    if question.question_type == 'multiple_choice':
-                                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                                    if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                         if is_correct:
                                             correct_answers_disciplina += 1
                                     elif question.correct_answer:
@@ -4790,8 +4790,8 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
                     for answer in disciplina_answers:
                         question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
                         if question:
-                            if question.question_type == 'multiple_choice':
-                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                            if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                 if is_correct:
                                     correct_answers_disciplina += 1
                             elif question.correct_answer:
@@ -4834,8 +4834,8 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
                     for answer in disciplina_answers:
                         question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
                         if question:
-                            if question.question_type == 'multiple_choice':
-                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                            if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                 if is_correct:
                                     correct_answers_disciplina += 1
                             elif question.correct_answer:
@@ -5133,8 +5133,8 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
                             for answer in disciplina_answers:
                                 question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
                                 if question:
-                                    if question.question_type == 'multiple_choice':
-                                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                                    if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                         if is_correct:
                                             correct_answers_disciplina += 1
                                     elif question.correct_answer:
@@ -5373,8 +5373,8 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
                     for answer in disciplina_answers:
                         question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
                         if question:
-                            if question.question_type == 'multiple_choice':
-                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                            if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                 if is_correct:
                                     correct_answers_disciplina += 1
                             elif question.correct_answer:
@@ -5428,8 +5428,8 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
                     for answer in disciplina_answers:
                         question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
                         if question:
-                            if question.question_type == 'multiple_choice':
-                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                            if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                 if is_correct:
                                     correct_answers_disciplina += 1
                             elif question.correct_answer:
@@ -5692,14 +5692,13 @@ def _calcular_acertos_habilidade(
         
         for answer in answers:
             # Verificar se a resposta está correta
-            if question.question_type == 'multiple_choice':
-                # Para múltipla escolha, verificar se a resposta está correta
-                if question.correct_answer and str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
+            if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                if EvaluationResultService.check_multiple_choice_answer(
+                    answer.answer, question.correct_answer, question.alternatives
+                ):
                     acertos += 1
-            else:
-                # Para outros tipos, comparar com correct_answer
-                if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
-                    acertos += 1
+            elif question.correct_answer and str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
+                acertos += 1
         
         percentual = (acertos / total_respostas) * 100 if total_respostas > 0 else 0
         
@@ -5899,8 +5898,8 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
                     for answer in answers:
                         question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
                         if question:
-                            if question.question_type == 'multiple_choice':
-                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                            if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                 if is_correct:
                                     correct_answers_disciplina += 1
                             elif question.correct_answer:
@@ -5994,8 +5993,8 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
                     for answer in answers:
                         question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
                         if question:
-                            if question.question_type == 'multiple_choice':
-                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                            if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                 if is_correct:
                                     correct_answers_disciplina += 1
                             elif question.correct_answer:

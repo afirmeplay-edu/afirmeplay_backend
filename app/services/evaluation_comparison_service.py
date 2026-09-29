@@ -899,9 +899,11 @@ class EvaluationComparisonService:
                     question = next((q for q in questions if q.id == answer.question_id), None)
                     if question:
                         # Verificar se é questão de múltipla escolha (com diferentes variações)
-                        if question.question_type in ['multiple_choice', 'multipleChoice']:
-                            from app.services.evaluation_result_service import EvaluationResultService
-                            is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                        from app.services.evaluation_result_service import EvaluationResultService
+                        if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                            is_correct = EvaluationResultService.check_multiple_choice_answer(
+                                answer.answer, question.correct_answer, question.alternatives
+                            )
                             if is_correct:
                                 correct_answers += 1
                         elif question.correct_answer:
@@ -1049,9 +1051,11 @@ class EvaluationComparisonService:
                 question = next((q for q in skill_questions if q.id == answer.question_id), None)
                 if question:
                     # Verificar se é questão de múltipla escolha (com diferentes variações)
-                    if question.question_type in ['multiple_choice', 'multipleChoice']:
-                        from app.services.evaluation_result_service import EvaluationResultService
-                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                    from app.services.evaluation_result_service import EvaluationResultService
+                    if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                        is_correct = EvaluationResultService.check_multiple_choice_answer(
+                            answer.answer, question.correct_answer, question.alternatives
+                        )
                         if is_correct:
                             correct_answers += 1
                     elif question.correct_answer:
@@ -1762,9 +1766,11 @@ class EvaluationComparisonService:
             for answer in student_answers:
                 question = questions_by_id.get(answer.question_id)
                 if question:
-                    if question.question_type in ['multiple_choice', 'multipleChoice']:
-                        from app.services.evaluation_result_service import EvaluationResultService
-                        if EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer):
+                    from app.services.evaluation_result_service import EvaluationResultService
+                    if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                        if EvaluationResultService.check_multiple_choice_answer(
+                            answer.answer, question.correct_answer, question.alternatives
+                        ):
                             correct_answers += 1
                     elif question.correct_answer and str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
                         correct_answers += 1
@@ -1912,9 +1918,11 @@ class EvaluationComparisonService:
                 question = skill_questions_by_id.get(answer.question_id)
                 if question:
                     # Verificar se é questão de múltipla escolha
-                    if question.question_type in ['multiple_choice', 'multipleChoice']:
-                        from app.services.evaluation_result_service import EvaluationResultService
-                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                    from app.services.evaluation_result_service import EvaluationResultService
+                    if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                        is_correct = EvaluationResultService.check_multiple_choice_answer(
+                            answer.answer, question.correct_answer, question.alternatives
+                        )
                         if is_correct:
                             correct_answers += 1
                     elif question.correct_answer:

@@ -524,6 +524,22 @@ def _build_payload(
     solution = block.get("solution") or {}
     solution_text = (solution.get("text") or "").strip() or None
     formatted_solution = solution.get("html") or None
+    if not solution_text or not re.fullmatch(r"[A-H]", solution_text):
+        errors.append(
+            "Solução deve conter somente a letra da resposta correta, em maiúsculo "
+            "(A, B, C, D, E, F, G ou H). Não escreva Gabarito, ponto nem justificativa."
+        )
+    else:
+        correct_ids = [
+            str(opt.get("id") or "").strip().upper()
+            for opt in options
+            if opt.get("isCorrect")
+        ]
+        if correct_ids and solution_text not in correct_ids:
+            errors.append(
+                f"A letra da solução ({solution_text}) não é a alternativa marcada "
+                f"com [CORRETA] ({', '.join(correct_ids)})."
+            )
 
     number = meta.get("number")
     if number not in (None, ""):

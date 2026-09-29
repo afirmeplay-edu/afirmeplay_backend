@@ -152,8 +152,8 @@ class CompetitionRankingService:
             for answer in answers:
                 question = next((q for q in questions if q.id == answer.question_id), None)
                 if question:
-                    if question.question_type == 'multiple_choice':
-                        if EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer):
+                    if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                        if EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives):
                             correct += 1
                     elif question.correct_answer and str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
                         correct += 1

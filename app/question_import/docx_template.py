@@ -23,6 +23,14 @@ def _add_heading(doc: Document, text: str, size: int = 16) -> None:
     run.font.color.rgb = RGBColor(0x1A, 0x56, 0xDB)
 
 
+def _add_warning(doc: Document, text: str) -> None:
+    p = doc.add_paragraph()
+    run = p.add_run(text)
+    run.bold = True
+    run.font.size = Pt(12)
+    run.font.color.rgb = RGBColor(0xDC, 0x26, 0x26)
+
+
 def _add_muted(doc: Document, text: str) -> None:
     p = doc.add_paragraph()
     run = p.add_run(text)
@@ -180,6 +188,11 @@ def _add_question_block(
         doc.add_paragraph(alt)
     doc.add_paragraph()
     _add_marker(doc, "Solução:")
+    _add_warning(
+        doc,
+        "Escreva somente a letra da resposta correta, em maiúsculo (A, B, C, D, E, F, G ou H). "
+        "Não coloque nada além dessa letra: sem a palavra Gabarito, sem ponto e sem justificativa.",
+    )
     doc.add_paragraph(solucao)
     _add_marker(doc, "=== FIM ===")
 
@@ -262,12 +275,18 @@ def build_questions_import_template(context: Optional[Dict[str, Any]] = None) ->
 
     doc.add_paragraph()
     _add_heading(doc, "O que você preenche em cada questão", size=13)
+    _add_warning(
+        doc,
+        "Na solução, escreva somente a letra da resposta correta, em maiúsculo. "
+        "Não coloque nada além dessa letra.",
+    )
     for line in [
         "SubjectId + Disciplina: já preenchidos (não altere)",
         "Dificuldade: obrigatória (copie e cole um dos quatro textos)",
         "Habilidade: código BNCC/código interno (ex.: EF05MA01) — opcional",
         "Título, Comando, Número, Valor — opcionais",
         "Marque a alternativa correta com [CORRETA] no final da linha",
+        "Solução: somente a letra da resposta correta, em maiúsculo (A, B, C, D, E, F, G ou H)",
         "No preview, desmarque o bloco de exemplo se ele aparecer",
     ]:
         doc.add_paragraph(line, style="List Bullet")
@@ -293,10 +312,7 @@ def build_questions_import_template(context: Optional[Dict[str, Any]] = None) ->
             "(Você pode colar uma imagem aqui, se quiser.)"
         ),
         alternativas=["A) 2/4 [CORRETA]", "B) 1/3", "C) 3/5", "D) 2/5"],
-        solucao=(
-            "Multiplicando numerador e denominador de 1/2 por 2 obtemos 2/4, "
-            "que é uma fração equivalente."
-        ),
+        solucao="A",
         skill="EF05MA01",
     )
 

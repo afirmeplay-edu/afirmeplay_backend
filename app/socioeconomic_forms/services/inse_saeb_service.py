@@ -414,8 +414,8 @@ def _disciplinas_e_proficiencia_por_aluno(
                 q = questions_by_id.get(qid)
                 if not q:
                     continue
-                if getattr(q, "question_type", None) == "multiple_choice":
-                    if EvaluationResultService.check_multiple_choice_answer(answer.answer, q.correct_answer):
+                if EvaluationResultService.is_multiple_choice_question(getattr(q, "question_type", None)):
+                    if EvaluationResultService.check_multiple_choice_answer(answer.answer, q.correct_answer, q.alternatives):
                         correct += 1
                 elif q.correct_answer and str(getattr(answer, "answer", "") or "").strip().lower() == str(q.correct_answer).strip().lower():
                     correct += 1

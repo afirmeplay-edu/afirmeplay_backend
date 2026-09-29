@@ -542,7 +542,15 @@ def create_question():
             scope_type = 'PRIVATE'
             owner_city_id = None
             owner_user_id = current_user.get('user_id')
-        
+
+        solution = data.get('solution')
+        from app.services.evaluation_result_service import EvaluationResultService
+        if EvaluationResultService.is_multiple_choice_question(data.get('type')):
+            from app.mapa_questoes.helpers import gabarito_letter
+            letter = gabarito_letter(solution, data.get('options'))
+            if letter:
+                solution = letter
+
         question = Question(
             number=data.get('number'),
             text=data.get('text'),
@@ -558,7 +566,7 @@ def create_question():
             skill=skill_value,
             grade_level=data.get('grade'),
             difficulty_level=data.get('difficulty'),
-            correct_answer=data.get('solution'),
+            correct_answer=solution,
             formatted_solution=data.get('formattedSolution'),
             question_type=data.get('type'),
             value=data.get('value'),
@@ -879,6 +887,16 @@ def update_question(question_id):
         # 🔥 DETECÇÃO DE MUDANÇA DE GABARITO
         # Armazenar resposta correta antiga antes de atualizar
         old_correct_answer = question.correct_answer
+        if 'solution' in data or 'options' in data or 'type' in data:
+            from app.mapa_questoes.helpers import gabarito_letter
+            from app.services.evaluation_result_service import EvaluationResultService
+            qtype = data.get('type', question.question_type)
+            options = data.get('options', question.alternatives)
+            raw_solution = data.get('solution', question.correct_answer)
+            if EvaluationResultService.is_multiple_choice_question(qtype):
+                letter = gabarito_letter(raw_solution, options)
+                if letter:
+                    data['solution'] = letter
         new_correct_answer = data.get('solution')  # 'solution' mapeia para 'correct_answer'
         
         # Verificar se houve mudança no gabarito

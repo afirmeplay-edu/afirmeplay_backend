@@ -262,9 +262,9 @@ def compute_digital_aggregate(
             resposta = answers_by_student.get(sid, {}).get(q.id)
             acertou = False
             if resposta:
-                if q.question_type == "multiple_choice":
+                if EvaluationResultService.is_multiple_choice_question(q.question_type):
                     acertou = EvaluationResultService.check_multiple_choice_answer(
-                        resposta.answer, q.correct_answer
+                        resposta.answer, q.correct_answer, q.alternatives
                     )
                 else:
                     acertou = (
@@ -947,9 +947,9 @@ def compute_student_critical_skills_digital(
                 answer = student_answers.get(question.id)
                 if not answer:
                     continue
-                if question.question_type == "multiple_choice":
+                if EvaluationResultService.is_multiple_choice_question(question.question_type):
                     if EvaluationResultService.check_multiple_choice_answer(
-                        answer.answer, question.correct_answer
+                        answer.answer, question.correct_answer, question.alternatives
                     ):
                         correct += 1
                 elif question.correct_answer and str(answer.answer).strip().lower() == str(

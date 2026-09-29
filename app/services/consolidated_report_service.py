@@ -1552,9 +1552,9 @@ def _habilidades_por_serie_for_discipline(
 def _answer_is_correct(question: Question, answer: StudentAnswer) -> bool:
     from app.services.evaluation_result_service import EvaluationResultService
 
-    if question.question_type == "multiple_choice":
+    if EvaluationResultService.is_multiple_choice_question(question.question_type):
         return bool(
-            EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+            EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
         )
     if question.question_type in ("essay", "open", "discursive"):
         return bool(answer.manual_score and float(answer.manual_score or 0) > 0)

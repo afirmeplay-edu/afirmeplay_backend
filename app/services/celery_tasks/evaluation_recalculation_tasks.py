@@ -319,3 +319,77 @@ def trigger_recalculation_sync(
             'sync': True,
             'error': str(e)
         }
+
+
+@celery_app.task(
+    bind=True,
+    name='evaluation_recalculation_tasks.recalculate_test_results_for_city',
+    max_retries=1,
+    time_limit=7200,
+    soft_time_limit=7000,
+)
+def recalculate_test_results_for_city(self: Task, city_id: str, test_id: str) -> Dict[str, Any]:
+    """Recalcula os resultados gravados de uma prova no schema do município."""
+    from app.models.evaluationResult import EvaluationResult
+    from app.report_analysis.celery_app import _get_flask_app
+    from app.report_analysis.tasks import rebuild_reports_for_test
+    from app.services.evaluation_result_service import EvaluationResultService
+    from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
+
+    app = _get_flask_app()
+    with app.app_context():
+        set_search_path(city_id_to_schema_name(city_id))
+        rows = (
+            EvaluationResult.query.filter_by(test_id=str(test_id))
+            .with_entities(EvaluationResult.student_id, EvaluationResult.session_id)
+            .all()
+        )
+        logger.info(
+            "[RECALC] prova=%s municipio=%s alunos=%s",
+            test_id,
+            city_id,
+            len(rows),
+        )
+
+        real_delay = rebuild_reports_for_test.delay
+        rebuild_reports_for_test.delay = lambda *args, **kwargs: None
+        ok = 0
+        errors = []
+        try:
+            for student_id, session_id in rows:
+                try:
+                    result = EvaluationResultService.calculate_and_save_result(
+                        test_id=str(test_id),
+                        student_id=str(student_id),
+                        session_id=str(session_id) if session_id else None,
+                    )
+                    if result:
+                        ok += 1
+                    else:
+                        errors.append({"student_id": str(student_id), "error": "retorno vazio"})
+                except Exception as exc:
+                    from app import db
+                    db.session.rollback()
+                    logger.exception(
+                        "[RECALC] falha prova=%s aluno=%s", test_id, student_id
+                    )
+                    errors.append({"student_id": str(student_id), "error": str(exc)})
+        finally:
+            rebuild_reports_for_test.delay = real_delay
+
+        rebuild_task_id = None
+        try:
+            queued = real_delay(str(test_id), str(city_id))
+            rebuild_task_id = getattr(queued, "id", None)
+        except Exception:
+            logger.exception("[RECALC] falha ao agendar rebuild da prova %s", test_id)
+
+        return {
+            "success": len(errors) == 0,
+            "city_id": city_id,
+            "test_id": test_id,
+            "students_total": len(rows),
+            "students_recalculated": ok,
+            "errors": errors,
+            "rebuild_task_id": rebuild_task_id,
+        }

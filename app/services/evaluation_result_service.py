@@ -22,21 +22,45 @@ import json
 class EvaluationResultService:
     
     @staticmethod
-    def check_multiple_choice_answer(student_answer, correct_answer):
+    def is_multiple_choice_question(question_type) -> bool:
+        """multipleChoice e multiple_choice são a mesma questão objetiva."""
+        from app.mapa_questoes.helpers import OBJECTIVE_TYPES, normalize_question_type
+
+        return normalize_question_type(question_type) in OBJECTIVE_TYPES
+
+    @staticmethod
+    def check_multiple_choice_answer(student_answer, correct_answer, alternatives=None):
         """
-        Verifica se a resposta do aluno está correta para questão de múltipla escolha
-        Compara a resposta do aluno com a alternativa correta
+        Acerto de múltipla escolha pela letra da alternativa correta.
+
+        A mesma regra do mapa de questões: resposta e gabarito viram A–H
+        (letra, id, texto da opção, "Gabarito: C." ou isCorrect).
         """
-        if not correct_answer or not student_answer:
-            logging.warning(f"Alternativa correta ou resposta do aluno vazias: correct_answer={correct_answer}, student_answer={student_answer}")
+        from app.mapa_questoes.helpers import answer_to_letter, gabarito_letter
+
+        if student_answer is None or str(student_answer).strip() == "":
             return False
 
-        student_answer = str(student_answer).strip()
-        correct_answer = str(correct_answer).strip()
+        marked = answer_to_letter(student_answer, alternatives)
+        gabarito = gabarito_letter(correct_answer, alternatives)
+        if marked and gabarito:
+            return marked == gabarito
 
-        # Comparação direta (case-insensitive para maior flexibilidade)
-        is_correct = student_answer.lower() == correct_answer.lower()
-        logging.debug("Verificando resposta: '%s' vs '%s' => %s", student_answer, correct_answer, is_correct)
+        if not correct_answer:
+            logging.warning(
+                "Alternativa correta vazia: correct_answer=%s, student_answer=%s",
+                correct_answer,
+                student_answer,
+            )
+            return False
+
+        is_correct = str(student_answer).strip().lower() == str(correct_answer).strip().lower()
+        logging.debug(
+            "Verificando resposta: '%s' vs '%s' => %s",
+            student_answer,
+            correct_answer,
+            is_correct,
+        )
         return is_correct
     
     @staticmethod
@@ -86,8 +110,8 @@ class EvaluationResultService:
             for answer in subject_answers:
                 question = next((q for q in subject_questions if q.id == answer.question_id), None)
                 if question:
-                    if question.question_type == 'multiple_choice':
-                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                    if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                         if is_correct:
                             correct_answers_subject += 1
                     elif question.correct_answer:
@@ -178,9 +202,9 @@ class EvaluationResultService:
             for answer in answers:
                 question = next((q for q in questions if q.id == answer.question_id), None)
                 if question:
-                    if question.question_type == 'multiple_choice':
+                    if EvaluationResultService.is_multiple_choice_question(question.question_type):
                         # Verificar usando correct_answer para questões de múltipla escolha
-                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                         if is_correct:
                             correct_answers += 1
                     elif question.correct_answer:
@@ -714,8 +738,8 @@ class EvaluationResultService:
                         for answer in student_answers:
                             question = next((q for q in questions_with_answer if q.id == answer.question_id), None)
                             if question:
-                                if question.question_type == 'multiple_choice':
-                                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                                if EvaluationResultService.is_multiple_choice_question(question.question_type):
+                                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer, question.alternatives)
                                     if is_correct:
                                         correct_answers_subject += 1
                                 elif question.correct_answer:

@@ -35,6 +35,7 @@ OBJECTIVE_TYPES = {
 }
 
 _OPTION_INDEX_RE = re.compile(r"^option[-_]?(\d+)$", re.IGNORECASE)
+_GABARITO_LABEL_RE = re.compile(r"^gabarito\s*:\s*([A-H])\b", re.IGNORECASE)
 
 
 def normalize_question_type(raw: Any) -> str:
@@ -132,6 +133,10 @@ def gabarito_letter(correct_answer: Any, alternatives: Any = None) -> Optional[s
     letter = answer_to_letter(correct_answer, alternatives)
     if letter:
         return letter
+    if correct_answer is not None:
+        match = _GABARITO_LABEL_RE.match(str(correct_answer).strip())
+        if match:
+            return match.group(1).upper()
     alts = parse_alternatives(alternatives)
     for idx, alt in enumerate(alts):
         if idx >= len(LETTERS):

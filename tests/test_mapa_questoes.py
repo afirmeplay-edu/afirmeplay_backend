@@ -48,6 +48,8 @@ def test_gabarito_letter_from_is_correct_flag():
     ]
     assert gabarito_letter(None, alts) == "B"
     assert gabarito_letter("A", alts) == "A"
+    assert gabarito_letter("Gabarito: C.", alts) == "C"
+    assert gabarito_letter("Gabarito: C.") == "C"
 
 
 def test_letters_for_alternatives_and_answer_sheet():

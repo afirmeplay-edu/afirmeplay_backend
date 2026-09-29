@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import logging
 import re
 import unicodedata
@@ -455,6 +456,48 @@ def _resolve_skill(meta: Dict[str, Any], subject_id: Optional[str]) -> Tuple[Opt
     return str(skill.id), errors
 
 
+def solution_refusal_reason(
+    solution_text: Optional[str],
+    formatted_solution: Optional[str],
+    options: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Recusa a questão se a solução não for só a letra da alternativa correta."""
+    raw = (solution_text or "").strip()
+    if not re.fullmatch(r"[A-H]", raw):
+        return (
+            "Questão recusada: a solução deve ser somente a letra da alternativa "
+            "correta, em maiúsculo (A a H)."
+        )
+
+    html = formatted_solution or ""
+    if re.search(r"<img\b", html, flags=re.IGNORECASE):
+        return (
+            "Questão recusada: a solução não pode ter imagem nem outro conteúdo "
+            "além da letra da alternativa correta."
+        )
+    html_text = re.sub(r"<[^>]+>", " ", html)
+    html_text = html_lib.unescape(html_text)
+    html_text = re.sub(r"\s+", " ", html_text).strip()
+    if html_text and html_text != raw:
+        return (
+            "Questão recusada: a solução não pode ter texto além da letra da "
+            "alternativa correta."
+        )
+
+    correct_ids = [
+        str(opt.get("id") or "").strip().upper()
+        for opt in options
+        if opt.get("isCorrect")
+    ]
+    if raw not in correct_ids:
+        marked = ", ".join(correct_ids) if correct_ids else "nenhuma"
+        return (
+            f"Questão recusada: {raw} não é a letra da alternativa marcada "
+            f"com [CORRETA] ({marked})."
+        )
+    return None
+
+
 def _build_payload(
     block: Dict[str, Any],
     defaults: Dict[str, Any],
@@ -524,6 +567,11 @@ def _build_payload(
     solution = block.get("solution") or {}
     solution_text = (solution.get("text") or "").strip() or None
     formatted_solution = solution.get("html") or None
+    refusal = solution_refusal_reason(solution_text, formatted_solution, options)
+    if refusal:
+        errors.append(refusal)
+        solution_text = None
+        formatted_solution = None
 
     number = meta.get("number")
     if number not in (None, ""):

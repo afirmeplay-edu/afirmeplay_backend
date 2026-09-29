@@ -111,3 +111,62 @@ def test_media_geral_media_das_disciplinas():
     _aplicar_media_geral_das_disciplinas_grupo(payload, {"grupo": {"agrupado": True}})
     assert payload["media_nota_geral"] == 5.6
     assert payload["media_proficiencia_geral"] == round((172.75 + 235.63) / 2, 2)
+
+
+def test_prova_isolada_uma_disciplina_geral_igual_ao_card():
+    from app.routes.evaluation_results_routes import (
+        _aplicar_media_geral_das_disciplinas_grupo,
+    )
+
+    payload = {
+        "media_nota_geral": 5.86,
+        "media_proficiencia_geral": 210.1,
+        "por_disciplina": [
+            {"disciplina": "Português", "media_nota": 5.97, "media_proficiencia": 213.3},
+        ],
+    }
+    _aplicar_media_geral_das_disciplinas_grupo(payload, {})
+    assert payload["media_nota_geral"] == 5.97
+    assert payload["media_proficiencia_geral"] == 213.3
+
+
+def test_prova_isolada_duas_disciplinas_geral_media_dos_cards():
+    from app.routes.evaluation_results_routes import (
+        _aplicar_media_geral_das_disciplinas_grupo,
+    )
+
+    payload = {
+        "media_nota_geral": 6.4,
+        "media_proficiencia_geral": 226.0,
+        "por_disciplina": [
+            {"disciplina": "Português", "media_nota": 4.5, "media_proficiencia": 172.75},
+            {"disciplina": "Matemática", "media_nota": 6.7, "media_proficiencia": 235.63},
+        ],
+    }
+    _aplicar_media_geral_das_disciplinas_grupo(payload, None)
+    assert payload["media_nota_geral"] == 5.6
+    assert payload["media_proficiencia_geral"] == round((172.75 + 235.63) / 2, 2)
+
+
+def test_analise_ia_prova_isolada_geral_igual_ao_card(monkeypatch):
+    from app.routes import evaluation_results_routes as routes
+
+    def _cards(_class_tests, scope_info, _nivel):
+        assert not (scope_info or {}).get("grupo")
+        return [
+            {"disciplina": "Português", "media_nota": 5.97, "media_proficiencia": 213.3},
+        ]
+
+    monkeypatch.setattr(
+        routes,
+        "_calcular_estatisticas_gerais_por_disciplina_escopo",
+        _cards,
+    )
+    payload = {
+        "media_nota_geral": 5.86,
+        "media_proficiencia_geral": 210.1,
+    }
+    routes._anexar_cards_e_media_geral(payload, [], {}, "municipio")
+    assert payload["por_disciplina"][0]["disciplina"] == "Português"
+    assert payload["media_nota_geral"] == 5.97
+    assert payload["media_proficiencia_geral"] == 213.3

@@ -715,7 +715,10 @@ class EvaluationResultService:
                             'proficiency': subject_data.get('proficiency', 0.0),
                             'grade': subject_data.get('grade', 0.0),
                             'classification': subject_data.get('classification', 'Abaixo do Básico'),
-                            'score_percentage': subject_data.get('score_percentage', 0.0)
+                            'score_percentage': subject_data.get('score_percentage', 0.0),
+                            'school_id_snapshot': result.school_id_snapshot,
+                            'class_id_snapshot': result.class_id_snapshot,
+                            'grade_id_snapshot': result.grade_id_snapshot,
                         })
                     else:
                         # Fallback: calcular se não houver dados salvos (não deveria acontecer)
@@ -757,6 +760,9 @@ class EvaluationResultService:
                             'student_id': result.student_id,
                             'correct_answers': correct_answers_subject,
                             'total_questions': total_respondidas,
+                            'school_id_snapshot': result.school_id_snapshot,
+                            'class_id_snapshot': result.class_id_snapshot,
+                            'grade_id_snapshot': result.grade_id_snapshot,
                             'proficiency': evaluation_result['proficiency'],
                             'grade': evaluation_result['grade'],
                             'classification': evaluation_result['classification'],

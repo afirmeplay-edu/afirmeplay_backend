@@ -873,7 +873,17 @@ def _build_proficiencia_nota(
                     p = float(r.proficiency) if r.proficiency is not None else 0.0
                 except (TypeError, ValueError):
                     continue
-                out.append(SimpleNamespace(student_id=r.student_id, grade=g, proficiency=p))
+                out.append(
+                    SimpleNamespace(
+                        student_id=r.student_id,
+                        grade=g,
+                        proficiency=p,
+                        proficiency_by_subject=r.proficiency_by_subject,
+                        school_id_snapshot=r.school_id_snapshot,
+                        class_id_snapshot=r.class_id_snapshot,
+                        grade_id_snapshot=r.grade_id_snapshot,
+                    )
+                )
                 continue
             pbs = r.proficiency_by_subject or {}
             if not isinstance(pbs, dict):

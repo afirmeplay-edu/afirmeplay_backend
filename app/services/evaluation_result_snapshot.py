@@ -127,6 +127,84 @@ def snapshot_scope_filter_expression(
     return or_(*parts)
 
 
+def internal_transfer_ids_outside_class_group(
+    roster_ids: Set[str],
+    class_ids: Set[str],
+    school_ids: Set[str],
+    participations: Sequence[Tuple[Any, Any, Any]],
+) -> Set[str]:
+    """
+    Alunos da matrícula deste grupo que já têm resultado da prova na mesma escola,
+    em turma fora do grupo, e não têm resultado neste grupo.
+
+    Não entram no universo de faltantes da turma de destino.
+    A nota continua na turma de class_id_snapshot.
+    Transferência para outra escola (school_id_snapshot diferente) não é removida.
+    """
+    roster = {str(item) for item in roster_ids if item}
+    classes = {str(item) for item in class_ids if item}
+    schools = {str(item) for item in school_ids if item}
+    if not roster or not classes or not schools:
+        return set()
+
+    has_result_in_group: Set[str] = set()
+    has_result_elsewhere_same_school: Set[str] = set()
+    for student_id, school_snapshot, class_snapshot in participations:
+        sid = str(student_id) if student_id else None
+        if not sid or sid not in roster:
+            continue
+        if school_snapshot is None or str(school_snapshot) not in schools:
+            continue
+        if class_snapshot is None:
+            continue
+        if str(class_snapshot) in classes:
+            has_result_in_group.add(sid)
+        else:
+            has_result_elsewhere_same_school.add(sid)
+    return has_result_elsewhere_same_school - has_result_in_group
+
+
+def load_internal_transfer_ids_to_exclude(
+    test_ids: Sequence[str],
+    class_ids: Sequence[Any],
+    roster_student_ids: Set[str],
+) -> Set[str]:
+    """Consulta os resultados e devolve quem deve sair do universo de faltantes."""
+    class_ids_clean = [item for item in (class_ids or []) if item is not None]
+    roster_list = [str(item) for item in roster_student_ids if item]
+    test_list = [str(item) for item in (test_ids or []) if item]
+    if not class_ids_clean or not roster_list or not test_list:
+        return set()
+
+    school_rows = (
+        db.session.query(Class._school_id)
+        .filter(Class.id.in_(class_ids_clean))
+        .distinct()
+        .all()
+    )
+    school_ids = {str(row[0]) for row in school_rows if row[0]}
+    if not school_ids:
+        return set()
+
+    rows = (
+        db.session.query(
+            EvaluationResult.student_id,
+            EvaluationResult.school_id_snapshot,
+            EvaluationResult.class_id_snapshot,
+        )
+        .filter(EvaluationResult.test_id.in_(test_list))
+        .filter(EvaluationResult.student_id.in_(roster_list))
+        .filter(EvaluationResult.school_id_snapshot.in_(list(school_ids)))
+        .all()
+    )
+    return internal_transfer_ids_outside_class_group(
+        set(roster_list),
+        {str(item) for item in class_ids_clean},
+        school_ids,
+        rows,
+    )
+
+
 def merge_participant_student_ids(
     test_ids: List[str],
     escopo_calculo: Dict[str, Any],
@@ -146,7 +224,18 @@ def merge_participant_student_ids(
         q = q.filter(snap_expr)
     rows = q.distinct().all()
     extra = {str(r[0]) for r in rows if r[0]}
-    return set(base_student_ids) | extra
+    scope_class_ids = list(class_ids or [])
+    if escopo_calculo.get("tipo") == "turma" and escopo_calculo.get("turma_id"):
+        turma_id = ensure_uuid(escopo_calculo["turma_id"])
+        if turma_id is not None:
+            scope_class_ids = [turma_id]
+    removed = load_internal_transfer_ids_to_exclude(
+        test_ids, scope_class_ids, set(base_student_ids)
+    )
+    merged = set(base_student_ids) | extra
+    if not removed:
+        return merged
+    return {item for item in merged if str(item) not in removed}
 
 
 def query_evaluation_results_for_stats(
@@ -431,5 +520,10 @@ def student_ids_for_class_group_with_snapshots(
         .distinct()
         .all()
     )
+    roster = {str(item) for item in base_student_ids if item}
     ids = {str(r[0]) for r in extra if r[0]}
-    return set(base_student_ids) | ids
+    merged = roster | ids
+    removed = load_internal_transfer_ids_to_exclude([evaluation_id], class_ids, roster)
+    if not removed:
+        return merged
+    return {item for item in merged if str(item) not in removed}

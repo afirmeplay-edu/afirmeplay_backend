@@ -744,6 +744,7 @@ class ClassPeerRankingService:
                     student_id=r["student_id"],
                     grade=r["grade"],
                     proficiency=r["proficiency"],
+                    subject_results=r.get("subject_results") or {},
                     class_id_snapshot=r.get("class_id"),
                     school_id_snapshot=r.get("school_id"),
                     grade_id_snapshot=r.get("serie_id"),

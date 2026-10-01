@@ -62,6 +62,7 @@ from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list, normalize_uuid
 from app.utils.decimal_helpers import round_to_two_decimals
 from app.utils.class_label_helpers import normalize_shift, class_filter_option
 from app.utils.school_equal_weight_means import (
+    general_grade_from_subject_proficiencies,
     granularidade_to_hierarchical_target,
     hierarchical_mean_grade_and_proficiency,
 )
@@ -1244,7 +1245,6 @@ def listar_avaliacoes():
             estatisticas_consolidadas["por_disciplina"] = _calcular_estatisticas_gerais_por_disciplina_escopo(
                 todas_avaliacoes_escopo, scope_info, nivel_granularidade
             )
-            _aplicar_media_geral_das_disciplinas_grupo(estatisticas_consolidadas, scope_info)
         
         # Calcular estatísticas por disciplina
         resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo, scope_info, nivel_granularidade)
@@ -9109,13 +9109,19 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
                 first_test = getattr(class_tests[0], "test", None) or Test.query.get(class_tests[0].test_id)
                 if first_test:
                     course_name = _get_curso_nome(getattr(first_test, "course", None))
-            media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
+            fallback_name = "Outras"
+            subject_rel = (
+                getattr(first_test, "subject_rel", None)
+                if class_tests and first_test
+                else None
+            )
+            if subject_rel is not None and getattr(subject_rel, "name", None):
+                fallback_name = subject_rel.name
+            media_nota, media_proficiencia = general_grade_from_subject_proficiencies(
                 resultados_por_aluno_unico,
                 granularidade_to_hierarchical_target(nivel_granularidade),
                 course_name=course_name,
-                has_matematica=_has_matematica_para_geral(
-                    scope_info=scope_info, class_tests=class_tests
-                ),
+                fallback_subject_name=fallback_name,
             )
         else:
             media_nota = 0.0
@@ -10275,15 +10281,15 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
             resultados_media = resultados
 
             if resultados_media:
-                media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
+                fallback_name = "Outras"
+                subject_rel = getattr(evaluation, "subject_rel", None)
+                if subject_rel is not None and getattr(subject_rel, "name", None):
+                    fallback_name = subject_rel.name
+                media_nota, media_proficiencia = general_grade_from_subject_proficiencies(
                     resultados_media,
                     aggregation_level,
                     course_name=_get_curso_nome(getattr(evaluation, "course", None)),
-                    has_matematica=_has_matematica_para_geral(
-                        scope_info=scope_info,
-                        class_tests=class_tests_grupo,
-                        evaluation=evaluation,
-                    ),
+                    fallback_subject_name=fallback_name,
                 )
             else:
                 media_nota = 0.0

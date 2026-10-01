@@ -172,17 +172,25 @@ def _build_school_grade_class_tree(
         for r in results
         if getattr(r, "class_id_snapshot", None) is not None
     ]
+    snapshots_completos = all(
+        getattr(r, "school_id_snapshot", None)
+        and getattr(r, "class_id_snapshot", None)
+        and getattr(r, "grade_id_snapshot", None)
+        for r in results
+    )
     classes_by_snap = {}
-    if snap_class_ids:
+    if snap_class_ids and not snapshots_completos:
         classes_by_snap = {
             c.id: c for c in Class.query.filter(Class.id.in_(snap_class_ids)).all()
         }
 
-    students = (
-        Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
-        .filter(Student.id.in_(ids))
-        .all()
-    )
+    students = []
+    if not snapshots_completos:
+        students = (
+            Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
+            .filter(Student.id.in_(ids))
+            .all()
+        )
     by_stu = {str(s.id): s for s in students}
     for r in results:
         sid = getattr(r, "student_id", None)
@@ -324,6 +332,19 @@ def aggregated_grade_from_proficiency(
     )
 
 
+def _results_have_subject_breakdown(results: Sequence[Any]) -> bool:
+    for result in results or []:
+        raw = getattr(result, "subject_results", None) or getattr(
+            result, "proficiency_by_subject", None
+        )
+        if isinstance(raw, dict) and any(
+            isinstance(item, dict) and item.get("proficiency") is not None
+            for item in raw.values()
+        ):
+            return True
+    return False
+
+
 def hierarchical_mean_grade_and_proficiency(
     results: Sequence[Any],
     target_level: str,
@@ -344,6 +365,14 @@ def hierarchical_mean_grade_and_proficiency(
     """
     if not results:
         return 0.0, 0.0
+    # Nota geral de prova com disciplinas: média das notas de cada uma.
+    # Sem o detalhe por disciplina, mantém a conversão antiga (provas de uma matéria).
+    if str(subject_name or "GERAL").upper() == "GERAL" and _results_have_subject_breakdown(results):
+        return general_grade_from_subject_proficiencies(
+            results,
+            target_level,
+            course_name=course_name,
+        )
     _media_nota_raw, media_prof = _hierarchical_mean_pair_raw(results, target_level)
     if not derive_grade_from_proficiency:
         return float(_media_nota_raw), float(media_prof)
@@ -354,6 +383,81 @@ def hierarchical_mean_grade_and_proficiency(
         has_matematica=has_matematica,
     )
     return float(media_nota), float(media_prof)
+
+
+def _iter_subject_proficiency_rows(results: Sequence[Any], fallback_subject_name: str):
+    """Uma linha sintética por aluno e disciplina, com a proficiência só daquela disciplina."""
+    by_subject: Dict[str, List[Any]] = {}
+    for result in results or []:
+        raw = (
+            getattr(result, "subject_results", None)
+            or getattr(result, "proficiency_by_subject", None)
+            or {}
+        )
+        entries = []
+        if isinstance(raw, dict) and raw:
+            for data in raw.values():
+                if not isinstance(data, dict):
+                    continue
+                name = str(data.get("subject_name") or "").strip() or fallback_subject_name
+                if data.get("proficiency") is None:
+                    continue
+                entries.append((name, float(data.get("proficiency") or 0)))
+        if not entries:
+            name = fallback_subject_name or "Outras"
+            entries.append((name, float(getattr(result, "proficiency", None) or 0)))
+        for name, proficiency in entries:
+            by_subject.setdefault(name, []).append(
+                SimpleNamespace(
+                    student_id=getattr(result, "student_id", None),
+                    proficiency=proficiency,
+                    grade=proficiency,
+                    school_id_snapshot=getattr(result, "school_id_snapshot", None),
+                    class_id_snapshot=getattr(result, "class_id_snapshot", None),
+                    grade_id_snapshot=getattr(result, "grade_id_snapshot", None),
+                )
+            )
+    return by_subject
+
+
+def general_grade_from_subject_proficiencies(
+    results: Sequence[Any],
+    target_level: str,
+    *,
+    course_name: str,
+    fallback_subject_name: str = "Outras",
+) -> Tuple[float, float]:
+    """
+    Nota geral = média das notas das disciplinas do recorte.
+
+    Cada disciplina agrega só a própria proficiência, com o peso hierárquico
+    já usado neste módulo, e vira nota pela faixa do próprio nome
+    (Matemática ou OUTRAS). A proficiência geral misturada não entra na fórmula.
+    """
+    from app.services.evaluation_calculator import EvaluationCalculator
+    from app.utils.decimal_helpers import round_to_two_decimals
+
+    if not results:
+        return 0.0, 0.0
+    by_subject = _iter_subject_proficiency_rows(results, fallback_subject_name or "Outras")
+    if not by_subject:
+        return 0.0, 0.0
+
+    grades: List[float] = []
+    proficiencies: List[float] = []
+    for subject_name, rows in by_subject.items():
+        _ignored_grade, subject_prof = _hierarchical_mean_pair_raw(rows, target_level)
+        subject_grade = EvaluationCalculator.calculate_grade(
+            float(subject_prof),
+            course_name,
+            subject_name,
+        )
+        grades.append(float(subject_grade))
+        proficiencies.append(float(subject_prof))
+
+    general_grade = sum(grades) / len(grades)
+    general_prof = sum(proficiencies) / len(proficiencies)
+    return round_to_two_decimals(general_grade), round_to_two_decimals(general_prof)
 
 
 def mean_grade_and_proficiency_equal_weight_by_school(

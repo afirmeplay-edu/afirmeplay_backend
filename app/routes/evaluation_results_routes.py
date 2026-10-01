@@ -10209,7 +10209,9 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
         if not test_ids_grupo:
             test_ids_grupo = [str(evaluation.id)]
 
-        merged_ids: Set[Any] = set(base_ids_set)
+        # Não semear a matrícula cheia antes do loop: a união recolocaria o
+        # transferido interno que student_ids_for_class_group_with_snapshots tirou.
+        merged_ids: Set[Any] = set()
         for tid in test_ids_grupo:
             merged_ids |= student_ids_for_class_group_with_snapshots(
                 tid, class_ids, base_ids_set

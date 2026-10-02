@@ -5520,7 +5520,39 @@ def _obter_gabaritos_por_municipio_cartao(
         if blocks:
             first_block = blocks[0] if isinstance(blocks[0], dict) else {}
             disciplina = str(first_block.get("subject_name") or "").strip()
-        out.append({"id": gid, "titulo": (getattr(g, "title", None) or "Gabarito"), "disciplina": disciplina})
+        titulo = (getattr(g, "title", None) or "Gabarito")
+        grade_id = str(g.grade_id) if getattr(g, "grade_id", None) else None
+        grade_nome = (getattr(g, "grade_name", None) or "").strip() or None
+        grades_json = getattr(g, "grades", None)
+        if (
+            not grade_id
+            and isinstance(grades_json, list)
+            and len(grades_json) == 1
+            and isinstance(grades_json[0], dict)
+        ):
+            only = grades_json[0]
+            grade_id = str(only.get("id") or "").strip() or None
+            grade_nome = (
+                str(only.get("name") or only.get("nome") or "").strip() or grade_nome
+            )
+        if grade_id and not grade_nome:
+            try:
+                from app.models.grades import Grade
+
+                grade_obj = Grade.query.get(grade_id)
+                if grade_obj and getattr(grade_obj, "name", None):
+                    grade_nome = grade_obj.name
+            except Exception:
+                pass
+        item = {
+            "id": gid,
+            "titulo": titulo,
+            "nome": titulo,
+            "disciplina": disciplina or None,
+            "grade_id": grade_id,
+            "grade_nome": grade_nome,
+        }
+        out.append(item)
     serie_param = str(serie_id).strip() if serie_id and str(serie_id).strip().lower() not in ("all", "") else None
     if serie_param and out:
         from app.routes.answer_sheet_evaluation_listing import _gabarito_aplica_serie
@@ -5802,10 +5834,13 @@ def _obter_turmas_por_serie_cartao(
 def obter_opcoes_filtros_cartao():
     """
     Retorna opções hierárquicas de filtros para resultados de cartões resposta.
-    Mesmo padrão de GET /evaluation-results/opcoes-filtros.
     Hierarquia: Estado → Município → Cartão resposta (gabarito) → Escola → Série → Turma.
     Query params (todos opcionais): estado, municipio, gabarito, escola, serie, turma, periodo (YYYY-MM).
-    Ex.: GET /opcoes-filtros-results → estados; ?estado=SP → estados + municipios; ?estado=SP&municipio=id → + gabaritos; etc.
+
+    Este endpoint é exclusivo de cartão-resposta: não usa report_entity_type e não
+    devolve avaliações de prova online. Com estado+municipio, ``gabaritos`` é array
+    de {id, titulo|nome, disciplina?, grade_id?, grade_nome?}; ``series_disponiveis``
+    segue o mesmo formato das demais telas de cartão ({id, nome, name}).
     """
     try:
         from app.permissions import get_user_permission_scope

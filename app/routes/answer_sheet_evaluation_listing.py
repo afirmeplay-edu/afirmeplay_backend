@@ -85,7 +85,7 @@ def obter_series_com_gabaritos_municipio(
     city = City.query.get(municipio_id)
     if not city:
         return []
-    if permissao.get("scope") != "all" and user.get("city_id") != city.id:
+    if permissao.get("scope") != "all" and str(user.get("city_id") or "") != str(city.id):
         return []
 
     school_ids_city = [s[0] for s in db.session.query(School.id).filter(School.city_id == city.id).all()]
@@ -122,6 +122,13 @@ def obter_series_com_gabaritos_municipio(
         g = AnswerSheetGabarito.query.get(gid)
         if not g:
             continue
+        if getattr(g, "grade_id", None):
+            grade_ids.add(str(g.grade_id))
+        grades_json = getattr(g, "grades", None)
+        if isinstance(grades_json, list):
+            for item in grades_json:
+                if isinstance(item, dict) and item.get("id"):
+                    grade_ids.add(str(item["id"]))
         if getattr(g, "class_id", None):
             cls = Class.query.get(g.class_id)
             if cls and cls.grade_id:
@@ -140,6 +147,7 @@ def obter_series_com_gabaritos_municipio(
     if not grade_ids:
         return []
     rows = Grade.query.filter(Grade.id.in_(list(grade_ids))).order_by(Grade.name.asc()).all()
+    # Mesmo formato das demais telas de cartão: id + nome (+ name para compat).
     return [{"id": str(g.id), "nome": g.name, "name": g.name} for g in rows]
 
 

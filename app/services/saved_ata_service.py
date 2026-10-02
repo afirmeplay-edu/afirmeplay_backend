@@ -18,6 +18,15 @@ class SavedAtaValidationError(Exception):
 
 VALID_MODOS = {"turma", "avaliacao", "cartao_resposta"}
 
+# Primeiro integrante (string). Extras ficam em apoios*Extras.
+_APOIO_STRING_KEYS = (
+    "assinaturaApoioRegular",
+    "cpfApoioRegular",
+    "assinaturaApoioSuporte",
+    "cpfApoioSuporte",
+)
+_APOIO_EXTRAS_KEYS = ("apoiosRegularExtras", "apoiosSuporteExtras")
+
 
 def _user_role(user: Dict[str, Any]) -> str:
     role = user.get("role")
@@ -55,6 +64,66 @@ def _resolve_author_name(user: Dict[str, Any]) -> str:
     return str(name).strip() or "Usuário"
 
 
+def _normalize_apoio_extras(raw: Any, field_name: str) -> List[Dict[str, str]]:
+    """Normaliza arrays de apoios extras: [{assinatura, cpf}, ...]. Aceita []."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise SavedAtaValidationError(
+            f"Campo 'content.options.{field_name}' deve ser um array."
+        )
+    out: List[Dict[str, str]] = []
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise SavedAtaValidationError(
+                f"Item {idx} de 'content.options.{field_name}' deve ser um objeto "
+                "{assinatura, cpf}."
+            )
+        out.append(
+            {
+                "assinatura": str(item.get("assinatura") or ""),
+                "cpf": str(item.get("cpf") or ""),
+            }
+        )
+    return out
+
+
+def _normalize_content(content: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Persiste content integralmente (sem whitelist que remova chaves).
+    Em options: mantém assinatura/cpf do primeiro apoio como string; aceita
+    apoiosRegularExtras / apoiosSuporteExtras como arrays. Atas antigas sem
+    esses arrays continuam válidas (chaves ausentes não são inventadas no GET).
+    """
+    normalized = dict(content)
+    options = normalized.get("options")
+    if options is None:
+        return normalized
+    if not isinstance(options, dict):
+        raise SavedAtaValidationError("Campo 'content.options' deve ser um objeto.")
+
+    # Cópia rasa: não descartar chaves desconhecidas de options.
+    options_out = dict(options)
+
+    for key in _APOIO_STRING_KEYS:
+        if key not in options_out:
+            continue
+        val = options_out[key]
+        if val is None:
+            options_out[key] = ""
+        elif not isinstance(val, str):
+            options_out[key] = str(val)
+
+    for key in _APOIO_EXTRAS_KEYS:
+        if key not in options_out:
+            # Ausência = ata antiga / payload sem extras; não forçar [].
+            continue
+        options_out[key] = _normalize_apoio_extras(options_out[key], key)
+
+    normalized["options"] = options_out
+    return normalized
+
+
 def _validate_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], str, str, str, str]:
     if not isinstance(payload, dict):
         raise SavedAtaValidationError("Corpo da requisição inválido.")
@@ -67,6 +136,8 @@ def _validate_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str
         raise SavedAtaValidationError("Campo 'filters' é obrigatório.")
     if not isinstance(content, dict):
         raise SavedAtaValidationError("Campo 'content' é obrigatório.")
+
+    content = _normalize_content(content)
 
     city_id = str(filters.get("municipio_id") or "").strip()
     school_id = str(filters.get("escola_id") or "").strip()

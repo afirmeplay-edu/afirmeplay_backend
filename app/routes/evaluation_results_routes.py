@@ -652,6 +652,12 @@ def listar_avaliacoes():
             return jsonify({"error": "Usuário não encontrado"}), 401
 
         periodo_raw = request.args.get("periodo")
+        from app.services.alunos_resultado_filtro import AlunosFiltroInvalido, parse_alunos_filtro
+
+        try:
+            alunos_filtro = parse_alunos_filtro(request.args.get("alunos"))
+        except AlunosFiltroInvalido as exc:
+            return jsonify({"error": str(exc)}), 400
         group_id_param = request.args.get("group_id")
         grupo_ctx = None
         if not is_answer_sheet_report_entity():
@@ -770,6 +776,8 @@ def listar_avaliacoes():
 
         scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
         scope_info = apply_area_type_to_scope(scope_info, area_type)
+        if isinstance(scope_info, dict) and alunos_filtro != "todos":
+            scope_info["alunos"] = alunos_filtro
         logging.info(f"scope_info: {scope_info}")
         
         if not scope_info:
@@ -2828,6 +2836,11 @@ def _carregar_dataset_virtual_grupo(
     raw = query_evaluation_results_for_stats(
         test_ids, escopo_calculo, class_ids, base_orig_ids
     ).all()
+    alunos_filtro = (scope_info or {}).get("alunos") if isinstance(scope_info, dict) else None
+    if alunos_filtro and alunos_filtro != "todos":
+        from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+
+        _, raw = aplicar_universo_alunos(todos_alunos, alunos_filtro, raw)
     virtual = build_virtual_multidisciplinary_results(
         raw, tests_info, course_name, only_complete=only_complete
     )
@@ -9043,6 +9056,15 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             test_ids, escopo_calculo, class_ids, base_orig_ids
         ).all()
 
+        alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
+        if alunos_filtro and alunos_filtro != "todos":
+            from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+
+            todos_alunos, resultados_escopo = aplicar_universo_alunos(
+                todos_alunos, alunos_filtro, resultados_escopo
+            )
+            total_alunos = len(todos_alunos)
+
         student_ids_com_resultado = {er.student_id for er in resultados_escopo if getattr(er, "student_id", None)}
         alunos_participantes = len(student_ids_com_resultado)
         alunos_completos = None
@@ -9265,6 +9287,8 @@ def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Di
             escopo['avaliacao_ids'] = avaliacao_ids
 
     copy_area_restriction(scope_info, escopo)
+    if isinstance(scope_info, dict) and scope_info.get("alunos"):
+        escopo["alunos"] = scope_info.get("alunos")
     logging.info(f"Escopo calculado para {nivel_granularidade}: {escopo}")
     return escopo
 
@@ -9295,6 +9319,8 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
     """
     Busca alunos baseado no escopo de cálculo
     """
+    from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+
     try:
         logging.info(f"Buscando alunos por escopo: {escopo_calculo}")
 
@@ -9324,7 +9350,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             
             alunos = query.all()
             logging.info(f"Alunos encontrados para município: {len(alunos)}")
-            return alunos
+            return filtrar_alunos_resultado(alunos, escopo_calculo.get("alunos"))
         
         elif escopo_calculo['tipo'] == "escola":
             if not school_allowed(escopo_calculo.get("escola_id"), restrict_school_ids):
@@ -9346,7 +9372,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             
             alunos = query.all()
             logging.info(f"Alunos encontrados para escola: {len(alunos)}")
-            return alunos
+            return filtrar_alunos_resultado(alunos, escopo_calculo.get("alunos"))
         
         elif escopo_calculo['tipo'] == "serie":
             if escopo_calculo.get("escola_id") and not school_allowed(
@@ -9376,7 +9402,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             
             alunos = query.all()
             logging.info(f"Alunos encontrados para série (escola_id={escopo_calculo.get('escola_id')}): {len(alunos)}")
-            return alunos
+            return filtrar_alunos_resultado(alunos, escopo_calculo.get("alunos"))
         
         elif escopo_calculo['tipo'] == "turma":
             # Todos os alunos da turma (sempre retornar, mesmo se não fez avaliação)
@@ -9409,7 +9435,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             
             alunos = query.all()
             logging.info(f"Alunos encontrados para turma: {len(alunos)}")
-            return alunos
+            return filtrar_alunos_resultado(alunos, escopo_calculo.get("alunos"))
         
         
         else:
@@ -9514,7 +9540,9 @@ def _obter_alunos_base_escopo_relatorio(
             s for s in all_students
             if ensure_uuid(s.class_id) in restrict_uuids
         ]
-    return all_students
+    from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+
+    return filtrar_alunos_resultado(all_students, escopo_calculo.get("alunos"))
 
 
 def _carregar_participantes_avaliacao_escopo(
@@ -9549,6 +9577,14 @@ def _carregar_participantes_avaliacao_escopo(
     if participant_ids:
         for s in Student.query.filter(Student.id.in_(participant_ids)).all():
             students_by_id[s.id] = s
+    alunos_filtro = escopo_calculo.get("alunos") if isinstance(escopo_calculo, dict) else None
+    if alunos_filtro and alunos_filtro != "todos":
+        from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+
+        alunos_lista, resultados = aplicar_universo_alunos(
+            list(students_by_id.values()), alunos_filtro, resultados
+        )
+        students_by_id = {s.id: s for s in alunos_lista}
     return resultados, students_by_id
 
 

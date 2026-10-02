@@ -621,6 +621,7 @@ def resolve_participating_students_answer_sheet(
 def compute_question_percentuals_answer_sheet(
     gabarito_id: str,
     class_ids: List[str],
+    alunos: Optional[str] = None,
 ) -> Dict[int, float]:
     """
     Percentual de acertos por número de questão (independente de habilidade),
@@ -640,6 +641,10 @@ def compute_question_percentuals_answer_sheet(
         return {}
 
     students, result_by_student, _ = resolve_participating_students_answer_sheet(gabarito, class_ids)
+    if alunos and alunos != "todos":
+        from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+
+        students = list(filtrar_alunos_resultado(students, alunos))
     total = len(students)
     if total == 0:
         return {qn: 0.0 for qn in gab_map.keys()}

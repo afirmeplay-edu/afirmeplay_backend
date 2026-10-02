@@ -678,6 +678,13 @@ class EvaluationResultService:
                 results = query_evaluation_results_for_stats(
                     [test_id], escopo_calculo, class_ids_ct, base_ids
                 ).all()
+                alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
+                if alunos_filtro and alunos_filtro != "todos":
+                    from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+
+                    alunos_escopo, results = aplicar_universo_alunos(
+                        alunos_escopo, alunos_filtro, results
+                    )
             else:
                 # Sem filtros de granularidade, buscar todos os resultados
                 results = EvaluationResult.query.filter_by(test_id=test_id).all()

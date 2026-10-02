@@ -3597,6 +3597,7 @@ def _load_cartao_roster_and_results(
     gabarito_id: str,
     class_ids: List[Any],
     periodo_bounds=None,
+    alunos_filtro=None,
 ) -> Tuple[List[AnswerSheetResult], List[Student]]:
     """
     Roster (alunos atuais ∪ snapshots na turma) + resultados do gabarito no escopo.
@@ -3622,6 +3623,10 @@ def _load_cartao_roster_and_results(
     )
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
     results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
+    if alunos_filtro and alunos_filtro != "todos":
+        from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+
+        students, results = aplicar_universo_alunos(students, alunos_filtro, results)
     return results, students
 
 
@@ -4037,12 +4042,18 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
 
         if not gabarito_id:
             todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
+            if alunos_filtro and alunos_filtro != "todos":
+                from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+
+                todos_alunos = filtrar_alunos_resultado(todos_alunos, alunos_filtro)
             total_alunos = len(todos_alunos)
             resultados = []
             alunos_participantes = 0
         else:
+            alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
             resultados, todos_alunos = _load_cartao_roster_and_results(
-                str(gabarito_id), class_ids, periodo_bounds
+                str(gabarito_id), class_ids, periodo_bounds, alunos_filtro
             )
             total_alunos = len(todos_alunos)
             alunos_participantes = len(resultados)
@@ -4160,7 +4171,7 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
 
 
 def _calcular_estatisticas_grupo_cartao(
-    class_ids, gabarito_id, periodo_bounds=None, aggregation_level: str = "escola"
+    class_ids, gabarito_id, periodo_bounds=None, aggregation_level: str = "escola", alunos_filtro=None
 ):
     """Estatísticas para um grupo de turmas (usado em resultados_detalhados).
 
@@ -4170,7 +4181,7 @@ def _calcular_estatisticas_grupo_cartao(
     if not class_ids or not gabarito_id:
         return {'total_alunos': 0, 'alunos_participantes': 0, 'alunos_pendentes': 0, 'media_nota': 0.0, 'media_proficiencia': 0.0, 'distribuicao_classificacao': {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}}
     resultados, alunos = _load_cartao_roster_and_results(
-        str(gabarito_id), class_ids, periodo_bounds
+        str(gabarito_id), class_ids, periodo_bounds, alunos_filtro
     )
     total_alunos = len(alunos)
     participantes = len(resultados)
@@ -4318,6 +4329,7 @@ def _complementar_metricas_escola_municipio_cartao(
     periodo_bounds: Optional[Tuple[datetime, datetime]],
     gabarito: AnswerSheetGabarito,
     aggregation_level: str = "municipio",
+    alunos_filtro=None,
 ) -> Dict[str, Any]:
     """Campos extras para escopo município (comparecimento, nível, médias LP/MAT, ausentes)."""
     total = int(stats.get("total_alunos") or 0)
@@ -4337,6 +4349,10 @@ def _complementar_metricas_escola_municipio_cartao(
             serie_id=serie_id_scope,
         )
     alunos = Student.query.filter(Student.class_id.in_(class_ids)).all() if class_ids else []
+    if alunos_filtro and alunos_filtro != "todos":
+        from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+
+        alunos = filtrar_alunos_resultado(alunos, alunos_filtro)
     sid_list = [a.id for a in alunos]
     results: List[AnswerSheetResult] = []
     if sid_list and gabarito_id:
@@ -4367,11 +4383,12 @@ def _complementar_linha_resultado_detalhado_cartao(
     periodo_bounds: Optional[Tuple[datetime, datetime]],
     gab: Optional[AnswerSheetGabarito],
     aggregation_level: str = "escola",
+    alunos_filtro=None,
 ) -> Dict[str, Any]:
     """Campos extras (comparecimento, LP/MAT, disciplinas, ausentes) para cada linha de resultados_detalhados."""
     if gab:
         return _complementar_metricas_escola_municipio_cartao(
-            stats, class_ids, gabarito_id, periodo_bounds, gab, aggregation_level
+            stats, class_ids, gabarito_id, periodo_bounds, gab, aggregation_level, alunos_filtro
         )
     total = int(stats.get("total_alunos") or 0)
     part = int(stats.get("alunos_participantes") or 0)
@@ -4402,6 +4419,7 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
     municipio_nome = city_data.name if city_data else "N/A"
     estado_nome = scope_info.get('estado', 'N/A')
     resultados_detalhados = []
+    alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
 
     if nivel_granularidade == "municipio":
         by_school = {}
@@ -4413,10 +4431,10 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
         for sid, cids in by_school.items():
             school = School.query.get(sid)
             stats = _calcular_estatisticas_grupo_cartao(
-                cids, gabarito_id, periodo_bounds, aggregation_level="escola"
+                cids, gabarito_id, periodo_bounds, aggregation_level="escola", alunos_filtro=alunos_filtro
             )
             comp = _complementar_linha_resultado_detalhado_cartao(
-                stats, cids, gabarito_id, periodo_bounds, gabarito, aggregation_level="escola"
+                stats, cids, gabarito_id, periodo_bounds, gabarito, aggregation_level="escola", alunos_filtro=alunos_filtro
             )
             row = {
                 "id": f"escola_{sid}",
@@ -4452,10 +4470,10 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
         for gid, cids in by_grade.items():
             grade = Grade.query.get(gid)
             stats = _calcular_estatisticas_grupo_cartao(
-                cids, gabarito_id, periodo_bounds, aggregation_level="serie"
+                cids, gabarito_id, periodo_bounds, aggregation_level="serie", alunos_filtro=alunos_filtro
             )
             comp = _complementar_linha_resultado_detalhado_cartao(
-                stats, cids, gabarito_id, periodo_bounds, gabarito, aggregation_level="serie"
+                stats, cids, gabarito_id, periodo_bounds, gabarito, aggregation_level="serie", alunos_filtro=alunos_filtro
             )
             row = {
                 "id": f"serie_{gid}",
@@ -4483,10 +4501,10 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
             school = School.query.get(c.school_id) if c.school_id else None
             cids_one = [c.id]
             stats = _calcular_estatisticas_grupo_cartao(
-                cids_one, gabarito_id, periodo_bounds, aggregation_level="turma"
+                cids_one, gabarito_id, periodo_bounds, aggregation_level="turma", alunos_filtro=alunos_filtro
             )
             comp = _complementar_linha_resultado_detalhado_cartao(
-                stats, cids_one, gabarito_id, periodo_bounds, gabarito, aggregation_level="turma"
+                stats, cids_one, gabarito_id, periodo_bounds, gabarito, aggregation_level="turma", alunos_filtro=alunos_filtro
             )
             row = {
                 "id": f"turma_{c.id}",
@@ -4626,10 +4644,11 @@ def _load_cartao_results_and_students_for_disciplina(
     gabarito_id: str,
     class_ids: List[Any],
     periodo_bounds=None,
+    alunos_filtro=None,
 ) -> Tuple[List[AnswerSheetResult], List[Student], Dict[Any, Class]]:
     """Resultados deduplicados e alunos do recorte (turmas previstas + snapshots)."""
     results, students = _load_cartao_roster_and_results(
-        gabarito_id, class_ids, periodo_bounds
+        gabarito_id, class_ids, periodo_bounds, alunos_filtro
     )
     classes = {
         c.id: c
@@ -4665,7 +4684,10 @@ def _calcular_estatisticas_gerais_por_disciplina_escopo_cartao(
     if not class_ids:
         return []
     results, students, _classes = _load_cartao_results_and_students_for_disciplina(
-        gabarito_id, class_ids, periodo_bounds
+        gabarito_id,
+        class_ids,
+        periodo_bounds,
+        scope_info.get("alunos") if isinstance(scope_info, dict) else None,
     )
     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
     if not gabarito:
@@ -4694,7 +4716,10 @@ def _calcular_resultados_por_disciplina_cartao(
     if not class_ids:
         return []
     results, students, classes_by_id = _load_cartao_results_and_students_for_disciplina(
-        str(gabarito_id).strip(), class_ids, periodo_bounds
+        str(gabarito_id).strip(),
+        class_ids,
+        periodo_bounds,
+        scope_info.get("alunos") if isinstance(scope_info, dict) else None,
     )
     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
     if not gabarito:
@@ -4909,7 +4934,10 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
     if not disciplinas_config:
         disciplinas_config = [{'id': 'geral', 'nome': 'Geral', 'question_numbers': list(gabarito_dict.keys())}]
     results, students = _load_cartao_roster_and_results(
-        str(gabarito_id), class_ids, periodo_bounds
+        str(gabarito_id),
+        class_ids,
+        periodo_bounds,
+        scope_info.get("alunos") if isinstance(scope_info, dict) else None,
     )
     student_ids = [s.id for s in students]
     result_by_student = {r.student_id: r for r in results}
@@ -4939,7 +4967,11 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
     from app.services.skills_map_service import compute_question_percentuals_answer_sheet
     # Mesma base de participantes do mapa de habilidades (GET /mapa-habilidades), para a
     # coluna "% da turma" nunca mais divergir entre as duas telas.
-    percentuais_por_questao = compute_question_percentuals_answer_sheet(gabarito_id, class_ids)
+    percentuais_por_questao = compute_question_percentuals_answer_sheet(
+        gabarito_id,
+        class_ids,
+        alunos=scope_info.get("alunos") if isinstance(scope_info, dict) else None,
+    )
 
     def build_respostas_por_questao(question_numbers, detected_answers):
         respostas = []
@@ -5152,7 +5184,10 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user,
         return []
 
     results, students = _load_cartao_roster_and_results(
-        str(gabarito_id), class_ids, periodo_bounds
+        str(gabarito_id),
+        class_ids,
+        periodo_bounds,
+        scope_info.get("alunos") if isinstance(scope_info, dict) else None,
     )
     if not students and not results:
         return []
@@ -6991,6 +7026,12 @@ def get_resultados_agregados():
         gabarito = request.args.get('gabarito')
         ai_analises = (request.args.get("ai_analises") or "").strip().lower() in {"1", "true", "yes"}
         periodo_raw = request.args.get('periodo')
+        from app.services.alunos_resultado_filtro import AlunosFiltroInvalido, parse_alunos_filtro
+
+        try:
+            alunos_filtro = parse_alunos_filtro(request.args.get("alunos"))
+        except AlunosFiltroInvalido as exc:
+            return jsonify({"error": str(exc)}), 400
         if periodo_raw and str(periodo_raw).strip():
             try:
                 _parse_cartao_periodo_bounds(str(periodo_raw).strip())
@@ -7012,6 +7053,8 @@ def get_resultados_agregados():
             estado, municipio, escola, serie, turma, gabarito, user, periodo_bounds_dados
         )
         scope_info = apply_area_type_to_scope(scope_info, area_type)
+        if isinstance(scope_info, dict) and alunos_filtro != "todos":
+            scope_info["alunos"] = alunos_filtro
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
 

@@ -1250,6 +1250,36 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
             raw_conn.close()
 
 
+def get_paired_regular_test_id_ddl(schema: str) -> str:
+    """
+    Coluna anulável test.paired_regular_test_id (ADAP → prova regular).
+
+    Idempotente. Sem default, sem índice único. Não preenche valores.
+    """
+    if not schema or not schema.replace("_", "").isalnum() or not schema.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema}")
+    return f"""
+ALTER TABLE "{schema}".test
+    ADD COLUMN IF NOT EXISTS paired_regular_test_id VARCHAR;
+COMMENT ON COLUMN "{schema}".test.paired_regular_test_id IS
+    'Prova regular correspondente (só em provas ADAP). NULL = sem pareamento.';
+DO $paired_fk$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'test_paired_regular_test_id_fkey'
+          AND conrelid = '"{schema}".test'::regclass
+    ) THEN
+        ALTER TABLE "{schema}".test
+            ADD CONSTRAINT test_paired_regular_test_id_fkey
+            FOREIGN KEY (paired_regular_test_id)
+            REFERENCES "{schema}".test(id) ON DELETE SET NULL;
+    END IF;
+END
+$paired_fk$;
+"""
+
+
 def get_subturma_tables_ddl(schema: str) -> str:
     """
     Tabela subturma, coluna anulável student.subturma_id e trava de mesma turma.
@@ -2135,4 +2165,4 @@ CREATE TABLE IF NOT EXISTS "{schema}".student_password_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".student_password_log IS 'Log de senhas de alunos (auditoria)';
-""" + get_subturma_tables_ddl(schema)
+""" + get_subturma_tables_ddl(schema) + get_paired_regular_test_id_ddl(schema)

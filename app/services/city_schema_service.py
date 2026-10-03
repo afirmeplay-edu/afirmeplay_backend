@@ -2326,4 +2326,4 @@ CREATE TABLE IF NOT EXISTS "{schema}".student_password_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".student_password_log IS 'Log de senhas de alunos (auditoria)';
-""" + get_subturma_tables_ddl(schema)
+""" + get_subturma_tables_ddl(schema) + get_paired_regular_test_id_ddl(schema)

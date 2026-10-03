@@ -674,6 +674,16 @@ class EvaluationResultService:
                 merged = merge_participant_student_ids(
                     [test_id], escopo_calculo, class_ids_ct, set(base_ids)
                 )
+                from app.services.adap_resultado_pareado import (
+                    adap_students_level_12,
+                    apply_pareamento_to_universe,
+                    scope_wants_adap_pareamento,
+                )
+
+                if scope_wants_adap_pareamento(scope_info):
+                    merged = set(merged or set()) | set(
+                        adap_students_level_12(alunos_escopo).keys()
+                    )
                 alunos_escopo = Student.query.filter(Student.id.in_(merged)).all() if merged else []
                 results = query_evaluation_results_for_stats(
                     [test_id], escopo_calculo, class_ids_ct, base_ids
@@ -684,6 +694,10 @@ class EvaluationResultService:
 
                     alunos_escopo, results = aplicar_universo_alunos(
                         alunos_escopo, alunos_filtro, results
+                    )
+                if scope_wants_adap_pareamento(scope_info):
+                    alunos_escopo, results, _adap = apply_pareamento_to_universe(
+                        str(test_id), alunos_escopo, results
                     )
             else:
                 # Sem filtros de granularidade, buscar todos os resultados
@@ -726,6 +740,20 @@ class EvaluationResultService:
                             'school_id_snapshot': result.school_id_snapshot,
                             'class_id_snapshot': result.class_id_snapshot,
                             'grade_id_snapshot': result.grade_id_snapshot,
+                        })
+                    elif getattr(result, "_adap_source_test_id", None):
+                        # Resultado válido veio da prova ADAP: usar nota já gravada, sem recalcular.
+                        subject_results.append({
+                            'student_id': result.student_id,
+                            'correct_answers': int(getattr(result, "correct_answers", 0) or 0),
+                            'total_questions': int(getattr(result, "total_questions", 0) or 0),
+                            'proficiency': float(getattr(result, "proficiency", 0) or 0),
+                            'grade': float(getattr(result, "grade", 0) or 0),
+                            'classification': getattr(result, "classification", None) or "Abaixo do Básico",
+                            'score_percentage': float(getattr(result, "score_percentage", 0) or 0),
+                            'school_id_snapshot': getattr(result, "school_id_snapshot", None),
+                            'class_id_snapshot': getattr(result, "class_id_snapshot", None),
+                            'grade_id_snapshot': getattr(result, "grade_id_snapshot", None),
                         })
                     else:
                         # Fallback: calcular se não houver dados salvos (não deveria acontecer)

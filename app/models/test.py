@@ -47,6 +47,9 @@ class Test(db.Model):
         db.Boolean, nullable=False, default=True, server_default=db.text('true')
     )
     available_from = db.Column(db.TIMESTAMP(timezone=True), nullable=True)
+    # Prova regular correspondente (preenchida só em provas ADAP). Anulável, sem default.
+    # FK física fica no DDL do schema municipal; aqui só o campo ORM.
+    paired_regular_test_id = db.Column(db.String, nullable=True)
 
     # Relacionamentos
     creator = db.relationship('User', foreign_keys=[created_by])

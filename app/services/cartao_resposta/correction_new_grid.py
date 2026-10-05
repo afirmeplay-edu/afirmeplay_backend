@@ -62,8 +62,24 @@ class AnswerSheetCorrectionNewGrid:
     A4_WIDTH_PX = 2480   # 21cm × 11.811 px/cm
     A4_HEIGHT_PX = 3508  # 29.7cm × 11.811 px/cm
     
-    # Threshold de detecção de marcação
+    # Threshold de detecção de marcação (legado V1 — NÃO alterar; usado por
+    # _detect_marked_bubbles_legacy e pela bolha "aluno ausente")
     FILL_THRESHOLD = 0.45  # 45% da área preenchida
+
+    # =========================================================================
+    # DETECÇÃO DE MARCAÇÃO V2 (ink-agnostic, decisão relativa)
+    # Valores iniciais CONSERVADORES — não calibrados em um único cartão.
+    # =========================================================================
+    # Região fotométrica interna (centro geométrico inalterado; r geométrico inalterado)
+    BUBBLE_MARK_INNER_RADIUS_RATIO = 0.65
+    # Média de ink_strength (0–255) mínima para considerar evidência de tinta
+    BUBBLE_MARK_SCORE_FLOOR = 28.0
+    # Diferença mínima entre 1º e 2º lugar (mesma escala 0–255)
+    BUBBLE_MARK_SCORE_MARGIN = 14.0
+    # Blur para estimar papel local (iluminação desigual)
+    BUBBLE_MARK_PAPER_BLUR_SIGMA = 14.0
+    # V2 é a única implementação ativa no pipeline (constante documental).
+    USE_BUBBLE_DETECTION_V2 = True
     
     # =========================================================================
     # CONSTANTES CALIBRADAS EMPIRICAMENTE (answer_sheet.html)
@@ -1938,12 +1954,175 @@ class AnswerSheetCorrectionNewGrid:
     # =========================================================================
     # ETAPA 8: DETECTAR MARCAÇÕES
     # =========================================================================
-    
+
     def _detect_marked_bubbles(self, block_roi: np.ndarray, bubbles: List[Dict],
                                block_id: int = None) -> Dict[int, str]:
         """
-        Detecta quais bolhas estão marcadas
-        
+        Detecta quais bolhas estão marcadas.
+
+        Contrato de retorno (inalterado):
+            {q_num: "A"|"B"|...|None|"INVALID", ...}
+
+        Pipeline atual: somente V2 (ink-agnostic + decisão relativa).
+        A V1 (_detect_marked_bubbles_legacy) está preservada mas NÃO é executada.
+        """
+        return self._detect_marked_bubbles_v2(block_roi, bubbles, block_id)
+
+    def _build_ink_strength_map(self, block_roi: np.ndarray) -> np.ndarray:
+        """
+        Mapa ink-agnostic (float32, ~0–255): quanto cada pixel é mais escuro
+        que o papel local estimado.
+
+        Representação escolhida: min(B, G, R).
+        Justificativa: tinta preta/azul/vermelha/verde/lápis reduz pelo menos
+        um canal RGB; papel claro mantém os três altos. Não há regra por matiz
+        (não é "se azul"). Em seguida subtrai-se o fundo local (Gaussian blur
+        do mesmo mapa) para normalizar iluminação/sombra.
+        """
+        if block_roi is None or block_roi.size == 0:
+            return np.zeros((0, 0), dtype=np.float32)
+        if len(block_roi.shape) == 2:
+            channel_min = block_roi.astype(np.float32)
+        else:
+            channel_min = np.min(block_roi.astype(np.float32), axis=2)
+        sigma = float(self.BUBBLE_MARK_PAPER_BLUR_SIGMA)
+        paper = cv2.GaussianBlur(channel_min, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        return np.clip(paper - channel_min, 0.0, 255.0).astype(np.float32)
+
+    def _bubble_ink_score(
+        self, ink_map: np.ndarray, cx: int, cy: int, r: int
+    ) -> float:
+        """Score contínuo = média de ink_strength no disco interno (evita borda impressa)."""
+        if ink_map is None or ink_map.size == 0 or r <= 0:
+            return 0.0
+        h, w = ink_map.shape[:2]
+        cx, cy, r = int(cx), int(cy), int(r)
+        if not (0 <= cx < w and 0 <= cy < h):
+            return 0.0
+        r_inner = max(2, int(round(r * float(self.BUBBLE_MARK_INNER_RADIUS_RATIO))))
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.circle(mask, (cx, cy), r_inner, 255, -1)
+        vals = ink_map[mask > 0]
+        if vals.size == 0:
+            return 0.0
+        return float(np.mean(vals))
+
+    def _decide_question_mark_v2(
+        self, scored: List[Dict[str, Any]]
+    ) -> Optional[str]:
+        """
+        Decisão relativa por questão.
+
+        scored: [{"letter": "A", "score": float}, ...]
+
+        Regras:
+          - top < FLOOR → None (vazio / sem evidência)
+          - segundo >= FLOOR e competição fraca/ambígua → None
+          - segundo >= FLOOR com evidência forte de dupla → INVALID
+          - margem (top − 2º) < MARGIN → None (ambíguo)
+          - senão → letra do top
+        """
+        if not scored:
+            return None
+        ordered = sorted(scored, key=lambda x: x["score"], reverse=True)
+        top = ordered[0]
+        second_score = ordered[1]["score"] if len(ordered) > 1 else 0.0
+        floor = float(self.BUBBLE_MARK_SCORE_FLOOR)
+        margin = float(self.BUBBLE_MARK_SCORE_MARGIN)
+        top_score = float(top["score"])
+
+        if top_score < floor:
+            return None
+        if second_score >= floor:
+            # Duas alternativas com evidência: dupla marcação vs empate fraco
+            if (top_score - second_score) < margin and top_score < (floor + margin * 1.5):
+                return None
+            return "INVALID"
+        if (top_score - second_score) < margin:
+            return None
+        return top["letter"]
+
+    def _detect_marked_bubbles_v2(
+        self, block_roi: np.ndarray, bubbles: List[Dict], block_id: int = None
+    ) -> Dict[int, str]:
+        """
+        V2: ink-agnostic + score contínuo + decisão relativa (piso + margem).
+
+        Não usa Otsu global do bloco nem FILL_THRESHOLD.
+        """
+        ink_map = self._build_ink_strength_map(block_roi)
+
+        if self.debug and block_id is not None and ink_map.size:
+            vis = np.clip(ink_map, 0, 255).astype(np.uint8)
+            self._save_debug_image(f"06_block{block_id}_ink_strength_v2.jpg", vis)
+            debug_img = block_roi.copy() if len(block_roi.shape) == 3 else cv2.cvtColor(
+                block_roi, cv2.COLOR_GRAY2BGR
+            )
+            for bubble in bubbles:
+                cx, cy, r = int(bubble["cx"]), int(bubble["cy"]), int(bubble["r"])
+                r_in = max(2, int(round(r * float(self.BUBBLE_MARK_INNER_RADIUS_RATIO))))
+                cv2.circle(debug_img, (cx, cy), r, (0, 255, 0), 1)
+                cv2.circle(debug_img, (cx, cy), r_in, (0, 255, 255), 1)
+            self._save_debug_image(f"06_block{block_id}_bubbles_mapped_v2.jpg", debug_img)
+
+        questions_dict = defaultdict(list)
+        for bubble in bubbles:
+            questions_dict[bubble["q_num"]].append(bubble)
+
+        answers: Dict[int, str] = {}
+        all_scores: List[float] = []
+
+        for q_num, q_bubbles in questions_dict.items():
+            scored = []
+            for bubble in q_bubbles:
+                score = self._bubble_ink_score(
+                    ink_map, bubble["cx"], bubble["cy"], bubble["r"]
+                )
+                scored.append({"letter": bubble["alternative"], "score": score})
+                all_scores.append(score)
+                if self.debug and q_num <= 13:
+                    self.logger.info(
+                        f"   [V2] Q{q_num}{bubble['alternative']}: "
+                        f"cx={bubble['cx']}, cy={bubble['cy']}, r={bubble['r']} → "
+                        f"score={score:.2f}"
+                    )
+
+            decision = self._decide_question_mark_v2(scored)
+            answers[q_num] = decision
+            if self.debug:
+                ordered = sorted(scored, key=lambda x: x["score"], reverse=True)
+                top = ordered[0]["score"]
+                second = ordered[1]["score"] if len(ordered) > 1 else 0.0
+                self.logger.info(
+                    f"   [V2] Q{q_num}: top={top:.2f} second={second:.2f} "
+                    f"margin={top - second:.2f} → {decision!r}"
+                )
+
+        self.logger.info(
+            f"✅ [V2] {len(answers)} respostas detectadas "
+            f"({sum(1 for a in answers.values() if a and a != 'INVALID')} marcadas, "
+            f"{sum(1 for a in answers.values() if a is None)} em branco, "
+            f"{sum(1 for a in answers.values() if a == 'INVALID')} inválidas)"
+        )
+        if all_scores:
+            arr = np.array(all_scores, dtype=np.float64)
+            self.logger.info(
+                f"📊 [V2] Scores: min={arr.min():.2f}, max={arr.max():.2f}, "
+                f"mean={arr.mean():.2f}, median={np.median(arr):.2f} | "
+                f"floor={self.BUBBLE_MARK_SCORE_FLOOR} margin={self.BUBBLE_MARK_SCORE_MARGIN} "
+                f"inner_r={self.BUBBLE_MARK_INNER_RADIUS_RATIO}"
+            )
+        return answers
+
+    def _detect_marked_bubbles_legacy(self, block_roi: np.ndarray, bubbles: List[Dict],
+                               block_id: int = None) -> Dict[int, str]:
+        """
+        LEGACY / TEMPORARIAMENTE PRESERVADO — NÃO utilizado pelo pipeline atual.
+
+        V1: BGR→GRAY → blur → Otsu global → fill_ratio > FILL_THRESHOLD.
+        Mantido apenas para eventual comparação/rollback durante testes reais.
+        Não alterar FILL_THRESHOLD. Remoção definitiva após validação do chefe.
+
         Para cada bolha:
             1. Criar máscara circular
             2. Contar pixels escuros

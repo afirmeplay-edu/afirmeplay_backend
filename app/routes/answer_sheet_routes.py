@@ -997,6 +997,22 @@ def generate_answer_sheets():
                     if len(allowed) != len(classes_to_generate):
                         return jsonify({"error": "Você não tem acesso a uma ou mais turmas selecionadas"}), 403
 
+            # Bloquear geração se nenhuma turma tiver alunos (evita job Celery em loop de retry)
+            for cls in classes_to_generate:
+                db.session.refresh(cls)
+            total_students_check = sum(
+                len(cls.students) if cls.students else 0 for cls in classes_to_generate
+            )
+            if total_students_check == 0:
+                return jsonify({
+                    "error": "Não há alunos na(s) turma(s) selecionada(s)",
+                    "error_code": "no_students",
+                    "classes": [
+                        {"class_id": str(c.id), "class_name": c.name}
+                        for c in classes_to_generate
+                    ],
+                }), 400
+
             from app.services.cartao_resposta.gabarito_grades import (
                 apply_grades_to_gabarito,
                 merge_grade_sources,
@@ -1162,6 +1178,22 @@ def generate_answer_sheets():
 
         if not classes_to_generate:
             return jsonify({"error": "Nenhuma turma encontrada com os filtros informados"}), 400
+
+        # Bloquear geração se nenhuma turma tiver alunos (evita job Celery em loop de retry)
+        for cls in classes_to_generate:
+            db.session.refresh(cls)
+        total_students_check = sum(
+            len(cls.students) if cls.students else 0 for cls in classes_to_generate
+        )
+        if total_students_check == 0:
+            return jsonify({
+                "error": "Não há alunos na(s) turma(s) selecionada(s)",
+                "error_code": "no_students",
+                "classes": [
+                    {"class_id": str(c.id), "class_name": c.name}
+                    for c in classes_to_generate
+                ],
+            }), 400
 
         # Derivar scope_type para resposta/listagem
         if len(classes_to_generate) == 1 and class_ids:
@@ -8519,10 +8551,18 @@ def get_job_status(job_id):
                         # Task retornou sucesso na execução, mas falhou na geração
                         failed = 1
                         error_msg = result.get('error') if result else 'Erro desconhecido'
+                        message = error_msg or message
                         errors.append({
                             'class_name': 'Batch',
                             'error': error_msg
                         })
+                        # Turmas vazias também vêm em skipped_classes no retorno de falha
+                        skipped = (result or {}).get('skipped_classes', []) or []
+                        for skipped_class in skipped:
+                            errors.append({
+                                'class_name': skipped_class.get('class_name', 'Unknown'),
+                                'error': 'Turma sem alunos registrados'
+                            })
                         logging.warning(f"❌ Task batch {task_id}: {error_msg}")
                             
                 elif task_result.state == 'FAILURE':
@@ -8545,7 +8585,10 @@ def get_job_status(job_id):
         # ✅ DETERMINAR STATUS DO JOB
         job_status = "processing"
         if completed == len(task_ids) and task_ids:
-            job_status = "completed"
+            if failed > 0 and successful == 0:
+                job_status = "failed"
+            else:
+                job_status = "completed"
         
         # ✅ BUSCAR INFORMAÇÕES DO GABARITO
         gabarito = None
@@ -8566,10 +8609,13 @@ def get_job_status(job_id):
             }
         else:
             progress = {
-                'current': total_classes if job_status == "completed" else 0,
+                'current': total_classes if job_status in ("completed", "failed") else 0,
                 'total': total_classes,
-                'percentage': 100 if job_status == "completed" else 0,
-                'message': 'Concluído' if job_status == "completed" else 'Aguardando...'
+                'percentage': 100 if job_status in ("completed", "failed") else 0,
+                'message': (
+                    'Concluído' if job_status == "completed"
+                    else (message if job_status == "failed" else 'Aguardando...')
+                )
             }
         
         # ✅ INFORMAÇÕES DETALHADAS POR TURMA (igual provas físicas)
@@ -8693,7 +8739,7 @@ def get_job_status(job_id):
             'classes_generated': classes_generated
         }
         
-        if job_status == "completed" and "completed_at" not in job:
+        if job_status in ("completed", "failed") and "completed_at" not in job:
             from datetime import datetime
             updates['completed_at'] = datetime.utcnow().isoformat()
         

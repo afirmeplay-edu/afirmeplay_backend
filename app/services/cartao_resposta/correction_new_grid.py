@@ -92,7 +92,6 @@ class AnswerSheetCorrectionNewGrid:
     BUBBLE_HEIGHT_PX = 15          # CSS: height: 15px
     BUBBLE_GAP_PX = 4              # CSS: gap: 4px
     QUESTION_NUM_WIDTH_PX = 25     # CSS: width: 25px
-    BLOCK_BORDER_WIDTH_PX = 2      # CSS: border: 2px
     BLOCK_PADDING_TOP_PX = 8       # CSS: padding-top: 8px
     BLOCK_PADDING_LEFT_PX = 4      # CSS: padding-left: 4px
 
@@ -123,13 +122,34 @@ class AnswerSheetCorrectionNewGrid:
     APPLICATOR_AUSENTE_RADIUS_PX = 31
     APPLICATOR_HOUGH_SKIP_HEADER_PX = int(0.75 * 118.11)  # ~89, título do aplicador
     APPLICATOR_HOUGH_MAX_OFFSET_PX = int(0.45 * 118.11)  # ~53, 1 diâmetro de bolinha
-    
+
+    # =========================================================================
+    # FIDUCIAL LOCAL DO BLOCO (OMR V1) — .omr-block-anchor no template
+    # =========================================================================
+    # HTML/CSS: width/height 0.25cm, margin-bottom 0.2cm, alinhado à esquerda do bloco.
+    # Âncoras A4 no warp: vértices externos inset ~0.2cm da borda da página.
+    A4_ANCHOR_INSET_CM = 0.2
+    BLOCK_FIDUCIAL_SIZE_CM = 0.25
+    BLOCK_FIDUCIAL_GAP_CM = 0.2  # margin-bottom até .answer-block
+    # Centro do fiducial → TL de .answer-block (origem dos BLOCK_OFFSET_* atuais)
+    BLOCK_ANCHOR_OFFSET_X = -int(round(0.5 * BLOCK_FIDUCIAL_SIZE_CM * 118.11))  # ~-15
+    BLOCK_ANCHOR_OFFSET_Y = int(
+        round((0.5 * BLOCK_FIDUCIAL_SIZE_CM + BLOCK_FIDUCIAL_GAP_CM) * 118.11)
+    )  # ~38
+    # ROI de busca ao redor da posição esperada (±)
+    BLOCK_FIDUCIAL_SEARCH_HALF_W_PX = int(0.9 * 118.11)  # ~106
+    BLOCK_FIDUCIAL_SEARCH_HALF_H_PX = int(0.9 * 118.11)
+    # Margem extra no ROI de leitura das bolhas
+    BLOCK_ROI_MARGIN_PX = 80
+
     def __init__(self, debug: bool = False):
         """
         Inicializa o serviço de correção
         
         Args:
             debug: Se True, salva imagens de debug
+
+        Localização de blocos: sempre via fiducial .omr-block-anchor (sem fallback por bordas).
         """
         self.debug = debug
         self.logger = logging.getLogger(__name__)
@@ -143,7 +163,7 @@ class AnswerSheetCorrectionNewGrid:
             abspath = os.path.abspath(self.debug_dir)
             self.logger.info(f"🐛 Debug OMR ativado — imagens em: {abspath}")
         
-        self.logger.info("✅ Pipeline OMR Robusto inicializado")
+        self.logger.info("✅ Pipeline OMR Robusto inicializado (block_fiducials=ON)")
     
     # =========================================================================
     # DETECÇÃO DE QR CODE
@@ -1445,302 +1465,299 @@ class AnswerSheetCorrectionNewGrid:
             "w": (max_x - min_x) + (2 * margin),
             "h": (max_y - min_y) + (2 * margin)
         }
-    
-    def _detect_answer_blocks_in_full_a4(self, img_a4: np.ndarray,
-                                         num_blocks_expected: int) -> Optional[List[Dict]]:
+
+    # =========================================================================
+    # FIDUCIAL LOCAL DO BLOCO (OMR V1)
+    # =========================================================================
+
+    def _expected_block_fiducial_centers(self, num_blocks: int) -> List[Tuple[float, float]]:
         """
-        Detecta blocos com bordas pretas grossas em TODA a imagem A4 normalizada
-        
-        Mais simples e robusto: não precisa calcular área do grid,
-        apenas procura retângulos com bordas de 2px em toda a imagem.
-        
-        Args:
-            img_a4: Imagem A4 normalizada (2480x3508)
-            num_blocks_expected: Número de blocos esperado do JSON
-        
-        Returns:
-            Lista de blocos detectados ou None
+        Centros esperados dos .omr-block-anchor no A4 lógico 2480×3508.
+        Layout: grid CSS repeat(4, 1fr); blocos ocupam as primeiras N colunas.
         """
-        h, w = img_a4.shape[:2]
-        
-        self.logger.info(f"   Procurando blocos na imagem completa: {w}x{h}px")
-        
-        # Converter para grayscale
+        px = self.PX_PER_CM_A4
+        inset = self.A4_ANCHOR_INSET_CM
+        # Origem do warp ≈ canto externo da âncora A4 (inset 0.2cm)
+        grid_x0 = (2.0 - inset + 0.6) * px
+        grid_x1 = self.A4_WIDTH_PX - (2.0 - inset + 0.6) * px
+        grid_w = grid_x1 - grid_x0
+        gap = 0.4 * px
+        col_w = (grid_w - 3 * gap) / 4.0
+
+        # Topo esperado de .answer-block (cm a partir do warp origin)
+        # sheet 1.2 + header 6.4 + instr 3.8 + aplic 2.6 + wrap-pad 0.3
+        # + block-header (~1.0cm: min-height 2.5em + labels A–D) + fiducial 0.25 + gap 0.2
+        # Calibrado vs scans A4: bloco medido y≈1837 → fórmula com header 1.0cm
+        block_top_y = (
+            (1.2 - inset) * px
+            + 6.4 * px
+            + 3.8 * px
+            + 2.6 * px
+            + 0.3 * px
+            + 1.0 * px
+            + self.BLOCK_FIDUCIAL_SIZE_CM * px
+            + self.BLOCK_FIDUCIAL_GAP_CM * px
+        )
+        half = 0.5 * self.BLOCK_FIDUCIAL_SIZE_CM * px
+        fid_cy = block_top_y - self.BLOCK_FIDUCIAL_GAP_CM * px - half
+
+        centers = []
+        n = max(1, min(int(num_blocks), 4))
+        for i in range(n):
+            col_left = grid_x0 + i * (col_w + gap)
+            fid_cx = col_left + half
+            centers.append((float(fid_cx), float(fid_cy)))
+        return centers
+
+    def _block_roi_size_from_config(self, block_config: Dict) -> Tuple[int, int]:
+        """Tamanho do ROI de leitura a partir da topologia (não depende da borda)."""
+        questions = block_config.get("questions", []) or []
+        num_rows = max(len(questions), 1)
+        max_alts = 4
+        for q in questions:
+            alts = q.get("alternatives") or []
+            if len(alts) > max_alts:
+                max_alts = len(alts)
+        w = int(self.BLOCK_OFFSET_X + max_alts * self.BUBBLE_SPACING_PX + self.BLOCK_ROI_MARGIN_PX)
+        h = int(self.BLOCK_OFFSET_Y + num_rows * self.ROW_HEIGHT_PX + self.BLOCK_ROI_MARGIN_PX)
+        # Largura mínima próxima à coluna do grid (~1/4 da área útil)
+        w = max(w, int(0.15 * self.A4_WIDTH_PX))
+        h = max(h, int(self.BLOCK_OFFSET_Y + 3 * self.ROW_HEIGHT_PX + self.BLOCK_ROI_MARGIN_PX))
+        return w, h
+
+    def _detect_single_block_fiducial(
+        self, gray_a4: np.ndarray, expected_cx: float, expected_cy: float, block_idx: int
+    ) -> Optional[Dict]:
+        """Procura um quadrado sólido preto numa ROI centrada na posição esperada."""
+        h, w = gray_a4.shape[:2]
+        half_w = self.BLOCK_FIDUCIAL_SEARCH_HALF_W_PX
+        half_h = self.BLOCK_FIDUCIAL_SEARCH_HALF_H_PX
+        x0 = max(0, int(expected_cx - half_w))
+        y0 = max(0, int(expected_cy - half_h))
+        x1 = min(w, int(expected_cx + half_w))
+        y1 = min(h, int(expected_cy + half_h))
+        if x1 - x0 < 20 or y1 - y0 < 20:
+            return None
+
+        roi = gray_a4[y0:y1, x0:x1]
+        blur = cv2.GaussianBlur(roi, (3, 3), 0)
+        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        kernel = np.ones((3, 3), np.uint8)
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        expected_side = self.BLOCK_FIDUCIAL_SIZE_CM * self.PX_PER_CM_A4
+        min_side = expected_side * 0.45
+        max_side = expected_side * 2.2
+        min_area = (expected_side * 0.4) ** 2
+        max_area = (expected_side * 2.4) ** 2
+
+        best = None
+        best_score = float("inf")
+
+        for cnt in contours:
+            bx, by, bw, bh = cv2.boundingRect(cnt)
+            if bw < min_side or bh < min_side or bw > max_side or bh > max_side:
+                continue
+            bbox_area = float(bw * bh)
+            if bbox_area < min_area or bbox_area > max_area:
+                continue
+            aspect = bw / float(bh) if bh > 0 else 0
+            if not (0.55 < aspect < 1.8):
+                continue
+            contour_area = float(cv2.contourArea(cnt))
+            fill = contour_area / bbox_area if bbox_area > 0 else 0
+            if fill < 0.35:
+                continue
+
+            patch = closed[by:by + bh, bx:bx + bw]
+            density = float(cv2.countNonZero(patch)) / bbox_area if bbox_area > 0 else 0
+            if density < 0.35:
+                continue
+
+            cx = x0 + bx + bw / 2.0
+            cy = y0 + by + bh / 2.0
+            dist = (cx - expected_cx) ** 2 + (cy - expected_cy) ** 2
+            score = dist - 50.0 * fill - 50.0 * density
+            if score < best_score:
+                best_score = score
+                best = {
+                    "anchor_x": float(cx),
+                    "anchor_y": float(cy),
+                    "bbox": (int(x0 + bx), int(y0 + by), int(bw), int(bh)),
+                    "fill": float(fill),
+                    "density": float(density),
+                    "block_idx": block_idx,
+                    "expected_cx": float(expected_cx),
+                    "expected_cy": float(expected_cy),
+                }
+
+        return best
+
+    def _detect_blocks_via_fiducials(
+        self,
+        img_a4: np.ndarray,
+        num_blocks_expected: int,
+        blocks_topology: List[Dict],
+    ) -> Optional[List[Dict]]:
+        """
+        Localiza blocos via .omr-block-anchor (ROI esperada + quadrado sólido).
+        Retorna lista compatível {x,y,w,h,...} ou None se não achar todos.
+        """
+        self.logger.info("[OMR] Block fiducial detection enabled")
+        self.logger.info(f"[OMR] Expected block fiducials: {num_blocks_expected}")
+
+        if num_blocks_expected <= 0:
+            return None
+
         if len(img_a4.shape) == 3:
             gray = cv2.cvtColor(img_a4, cv2.COLOR_BGR2GRAY)
         else:
             gray = img_a4.copy()
-        
-        # Aplicar blur para suavizar
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Threshold binário invertido para destacar bordas pretas
-        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        if self.debug:
-            self._save_debug_image("05a_blocks_threshold.jpg", thresh)
-        
-        # Dilatação mínima para conectar bordas quebradas
-        kernel_small = np.ones((3, 3), np.uint8)
-        dilated = cv2.dilate(thresh, kernel_small, iterations=1)
-        
-        if self.debug:
-            self._save_debug_image("05b_blocks_dilated.jpg", dilated)
-        
-        # Usar RETR_TREE para hierarquia de contornos
-        contours, hierarchy = cv2.findContours(dilated.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        
-        self.logger.info(f"   {len(contours)} contornos detectados")
-        
-        # Filtrar contornos que são blocos
-        # Cada bloco deve ter uma área significativa (pelo menos 3% da imagem)
-        # e uma largura razoável (15% a 30% da largura total para 4 blocos lado a lado)
-        img_area = w * h
-        min_block_area = img_area * 0.02  # 2% da imagem (mais flexível)
-        max_block_area = img_area * 0.15  # 15% da imagem (bloco individual)
-        min_block_width = w * 0.10  # Pelo menos 10% da largura
-        max_block_width = w * 0.30  # No máximo 30% da largura
-        min_block_height = h * 0.10  # Pelo menos 10% da altura
-        
-        self.logger.info(f"   Área: {min_block_area:.0f} - {max_block_area:.0f}px²")
-        self.logger.info(f"   Largura: {min_block_width:.0f} - {max_block_width:.0f}px")
-        self.logger.info(f"   Altura mínima: {min_block_height:.0f}px")
-        
-        candidates = []
-        
-        # Filtrar apenas contornos EXTERNOS usando hierarquia
-        for idx, cnt in enumerate(contours):
-            # Verificar se é contorno externo (sem pai)
-            if hierarchy is not None and len(hierarchy) > 0:
-                if hierarchy[0][idx][3] != -1:  # Tem pai = contorno interno, pular
+
+        expected = self._expected_block_fiducial_centers(num_blocks_expected)
+        if len(expected) != num_blocks_expected:
+            self.logger.error(
+                f"[OMR] Expected centers mismatch: {len(expected)} vs {num_blocks_expected}"
+            )
+            return None
+
+        detected = []
+        for i, (ecx, ecy) in enumerate(expected):
+            hit = self._detect_single_block_fiducial(gray, ecx, ecy, i)
+            if hit is None:
+                self.logger.warning(
+                    f"[OMR] Fiducial {i} NOT found near expected=({ecx:.0f},{ecy:.0f})"
+                )
+                continue
+            self.logger.info(
+                f"[OMR] Fiducial {i} detected at x={hit['anchor_x']:.1f}, y={hit['anchor_y']:.1f}"
+            )
+            detected.append(hit)
+
+        if len(detected) != num_blocks_expected:
+            self.logger.error("[OMR] Block fiducial detection failed")
+            self.logger.error(f"[OMR] Expected: {num_blocks_expected}")
+            self.logger.error(f"[OMR] Detected: {len(detected)}")
+            return None
+
+        used = set()
+        ordered_hits = []
+        for i, (ecx, ecy) in enumerate(expected):
+            best_j = None
+            best_d = float("inf")
+            for j, hit in enumerate(detected):
+                if j in used:
                     continue
-            
-            area = cv2.contourArea(cnt)
-            
-            # Filtrar por área
-            if area < min_block_area or area > max_block_area:
-                continue
-            
-            # Aproximar contorno
-            peri = cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-            
-            # Procurar por retângulos (4 ou mais vértices)
-            if len(approx) < 4:
-                continue
-            
-            bx, by, bw, bh = cv2.boundingRect(approx)
-            
-            # Filtrar por largura
-            if bw < min_block_width or bw > max_block_width:
-                continue
-            
-            # Filtrar por altura
-            if bh < min_block_height:
-                continue
-            
-            aspect_ratio = bw / float(bh) if bh > 0 else 0
-            
-            # Verificar se é um retângulo razoável
-            # Aspect ratio entre 0.3 e 2.0 (mais flexível)
-            if not (0.3 < aspect_ratio < 2.0):
-                continue
-            
-            candidates.append({
-                "contour": approx,
+                d = (hit["anchor_x"] - ecx) ** 2 + (hit["anchor_y"] - ecy) ** 2
+                if d < best_d:
+                    best_d = d
+                    best_j = j
+            if best_j is None:
+                return None
+            used.add(best_j)
+            ordered_hits.append(detected[best_j])
+
+        blocks = []
+        img_h, img_w = gray.shape[:2]
+        for i, hit in enumerate(ordered_hits):
+            ax, ay = hit["anchor_x"], hit["anchor_y"]
+            bx = int(round(ax + self.BLOCK_ANCHOR_OFFSET_X))
+            by = int(round(ay + self.BLOCK_ANCHOR_OFFSET_Y))
+
+            block_config = blocks_topology[i] if i < len(blocks_topology) else {}
+            rw, rh = self._block_roi_size_from_config(block_config)
+
+            bx = max(0, min(bx, img_w - 1))
+            by = max(0, min(by, img_h - 1))
+            rw = min(rw, img_w - bx)
+            rh = min(rh, img_h - by)
+
+            self.logger.info(f"[OMR] Block {i} origin: x={bx}, y={by} (w={rw}, h={rh})")
+
+            blocks.append({
                 "x": bx,
                 "y": by,
-                "w": bw,
-                "h": bh,
-                "area": area,
-                "aspect_ratio": aspect_ratio
+                "w": rw,
+                "h": rh,
+                "anchor_x": ax,
+                "anchor_y": ay,
+                "source": "block_fiducial",
+                "area": float(rw * rh),
+                "aspect_ratio": rw / float(rh) if rh else 0,
             })
-            
-            self.logger.debug(f"   Bloco: x={bx}, y={by}, w={bw}, h={bh}, area={area:.0f}, aspect={aspect_ratio:.2f}")
-        
-        # Ordenar por X (esquerda para direita) - blocos lado a lado
-        candidates.sort(key=lambda b: b["x"])
-        
-        self.logger.info(f"   {len(candidates)} blocos candidatos após filtros")
-        
-        # VALIDAÇÃO
-        if len(candidates) != num_blocks_expected:
-            self.logger.error(
-                f"❌ REJEIÇÃO: Esperava {num_blocks_expected} blocos (JSON), "
-                f"encontrou {len(candidates)}"
+
+        if self.debug:
+            self._debug_draw_block_fiducials(img_a4, blocks, expected)
+
+        return blocks
+
+    def _debug_draw_block_fiducials(
+        self,
+        img_a4: np.ndarray,
+        blocks: List[Dict],
+        expected_centers: List[Tuple[float, float]],
+    ) -> None:
+        """Overlay: fiducial, origem do bloco, ROI e centros das bolhas (cálculo atual)."""
+        img_debug = img_a4.copy()
+        if len(img_debug.shape) == 2:
+            img_debug = cv2.cvtColor(img_debug, cv2.COLOR_GRAY2BGR)
+
+        for ecx, ecy in expected_centers:
+            cv2.circle(img_debug, (int(ecx), int(ecy)), 8, (255, 128, 0), 2)
+
+        for i, block in enumerate(blocks):
+            ax = int(round(block.get("anchor_x", 0)))
+            ay = int(round(block.get("anchor_y", 0)))
+            bx, by = block["x"], block["y"]
+            bw, bh = block["w"], block["h"]
+
+            side = int(round(self.BLOCK_FIDUCIAL_SIZE_CM * self.PX_PER_CM_A4))
+            cv2.rectangle(
+                img_debug,
+                (ax - side // 2, ay - side // 2),
+                (ax + side // 2, ay + side // 2),
+                (0, 255, 255),
+                2,
             )
-            
-            # Debug: mostrar por que falhou
-            if len(candidates) == 0:
-                self.logger.error("   Nenhum bloco detectado! Possíveis causas:")
-                self.logger.error("   - Bordas dos blocos muito finas ou ausentes")
-                self.logger.error("   - Área ou largura fora dos limites esperados")
-                self.logger.error("   - Verifique as imagens de debug (05a, 05b)")
-            elif len(candidates) > num_blocks_expected:
-                self.logger.error(f"   Detectou {len(candidates) - num_blocks_expected} blocos a mais")
-                self.logger.error("   Possível duplicação ou detecção de bordas internas")
-            
-            return None
-        
-        self.logger.info(f"✅ {num_blocks_expected} blocos detectados e ordenados")
-        
-        if self.debug:
-            img_debug = img_a4.copy()
-            if len(img_debug.shape) == 2:
-                img_debug = cv2.cvtColor(img_debug, cv2.COLOR_GRAY2BGR)
-            for i, block in enumerate(candidates):
-                bx, by, bw, bh = block["x"], block["y"], block["w"], block["h"]
-                cv2.rectangle(img_debug, (bx, by), (bx+bw, by+bh), (0, 255, 0), 3)
-                cv2.putText(img_debug, f"B{i+1}", (bx+10, by+30),
-                          cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-            self._save_debug_image("05_blocks_detected.jpg", img_debug)
-        
-        return candidates
-    
-    def _detect_answer_blocks(self, img_a4: np.ndarray, grid_area: Dict,
-                              num_blocks_expected: int) -> Optional[List[Dict]]:
-        """
-        Detecta blocos com bordas pretas grossas
-        
-        Implementação robusta baseada no código testado:
-            - Usa área RELATIVA (não fixa)
-            - Filtra apenas contornos EXTERNOS (usando hierarquia)
-            - Aceita 4 ou mais vértices (não exatamente 4)
-            - Aspect ratio flexível (0.3 a 3.0)
-        
-        VALIDAÇÃO:
-            - Número de blocos DEVE ser == num_blocks_expected
-            - Se diferente → REJEITAR imagem
-        """
-        # Crop área do grid
-        x, y, w, h = grid_area["x"], grid_area["y"], grid_area["w"], grid_area["h"]
-        grid_roi = img_a4[y:y+h, x:x+w]
-        
-        self.logger.info(f"   Área do grid: {w}x{h}px")
-        
-        # Converter para grayscale
-        if len(grid_roi.shape) == 3:
-            gray = cv2.cvtColor(grid_roi, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = grid_roi.copy()
-        
-        # Aplicar blur para suavizar
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Threshold binário invertido para destacar bordas pretas
-        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        if self.debug:
-            self._save_debug_image("05a_blocks_threshold.jpg", thresh)
-        
-        # Dilatação mínima para conectar bordas quebradas SEM conectar blocos adjacentes
-        kernel_small = np.ones((3, 3), np.uint8)
-        dilated = cv2.dilate(thresh, kernel_small, iterations=1)
-        
-        if self.debug:
-            self._save_debug_image("05b_blocks_dilated.jpg", dilated)
-        
-        # ✅ CORREÇÃO: Usar RETR_TREE para hierarquia de contornos
-        contours, hierarchy = cv2.findContours(dilated.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        
-        self.logger.info(f"   {len(contours)} contornos detectados")
-        
-        # Filtrar contornos que são blocos individuais
-        # Cada bloco deve ter ~20-25% da largura total (4 blocos lado a lado)
-        min_block_area = (w * h) * 0.03  # 3% da área (mais flexível)
-        max_block_area = (w * h) * 0.30  # 30% da área (bloco individual)
-        min_block_width = w * 0.15  # Cada bloco tem pelo menos 15% da largura
-        max_block_width = w * 0.30  # Cada bloco tem no máximo 30% da largura
-        
-        self.logger.info(f"   Área: {min_block_area:.0f} - {max_block_area:.0f}px²")
-        self.logger.info(f"   Largura: {min_block_width:.0f} - {max_block_width:.0f}px")
-        
-        candidates = []
-        
-        # ✅ CORREÇÃO CRÍTICA: Filtrar apenas contornos EXTERNOS usando hierarquia
-        for idx, cnt in enumerate(contours):
-            # Verificar se é contorno externo (sem pai)
-            # hierarchy estrutura: [next, previous, first_child, parent]
-            if hierarchy is not None and len(hierarchy) > 0:
-                if hierarchy[0][idx][3] != -1:  # Tem pai = contorno interno, pular
-                    continue
-            
-            area = cv2.contourArea(cnt)
-            
-            # Filtrar por área
-            if area < min_block_area or area > max_block_area:
-                continue
-            
-            # Aproximar contorno
-            peri = cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-            
-            # Procurar por retângulos (4 ou mais vértices - mais flexível)
-            if len(approx) < 4:
-                continue
-            
-            bx, by, bw, bh = cv2.boundingRect(approx)
-            
-            # Filtrar por largura
-            if bw < min_block_width or bw > max_block_width:
-                continue
-            
-            aspect_ratio = bw / float(bh) if bh > 0 else 0
-            
-            # Verificar se é um retângulo razoável (não muito alongado)
-            # Aspect ratio entre 0.3 e 3.0 (mais flexível)
-            if not (0.3 < aspect_ratio < 3.0):
-                continue
-            
-            candidates.append({
-                "contour": approx,
-                "x": x + bx,  # Coordenadas no A4 completo
-                "y": y + by,
-                "w": bw,
-                "h": bh,
-                "area": area,
-                "aspect_ratio": aspect_ratio
-            })
-            
-            self.logger.debug(f"   Bloco externo: x={bx}, y={by}, w={bw}, h={bh}, area={area:.0f}, aspect={aspect_ratio:.2f}")
-        
-        # Ordenar por X (esquerda para direita) - blocos lado a lado  
-        candidates.sort(key=lambda b: b["x"])
-        
-        self.logger.info(f"   {len(candidates)} blocos candidatos após filtros")
-        
-        # VALIDAÇÃO RIGOROSA
-        if len(candidates) != num_blocks_expected:
-            self.logger.error(
-                f"❌ REJEIÇÃO: Esperava {num_blocks_expected} blocos (JSON), "
-                f"encontrou {len(candidates)}"
+            cv2.circle(img_debug, (ax, ay), 3, (0, 255, 255), -1)
+
+            cv2.drawMarker(
+                img_debug, (bx, by), (0, 0, 255), cv2.MARKER_CROSS, 24, 2
             )
-            
-            # Debug: mostrar por que falhou
-            if len(candidates) == 0:
-                self.logger.error("   Nenhum bloco detectado! Possíveis causas:")
-                self.logger.error("   - Bordas dos blocos muito finas ou ausentes")
-                self.logger.error("   - Área ou largura fora dos limites esperados")
-                self.logger.error("   - Verifique as imagens de debug (05a, 05b)")
-            
-            return None
-        
-        self.logger.info(f"✅ {num_blocks_expected} blocos detectados e ordenados")
-        
-        if self.debug:
-            img_debug = grid_roi.copy()
-            if len(img_debug.shape) == 2:
-                img_debug = cv2.cvtColor(img_debug, cv2.COLOR_GRAY2BGR)
-            for i, block in enumerate(candidates):
-                bx, by = block["x"] - x, block["y"] - y  # Converter para coordenadas do ROI
-                bw, bh = block["w"], block["h"]
-                cv2.rectangle(img_debug, (bx, by), (bx+bw, by+bh), (0, 255, 0), 3)
-                cv2.putText(img_debug, f"B{i+1}", (bx+10, by+30),
-                          cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-            self._save_debug_image("05_blocks_detected.jpg", img_debug)
-        
-        return candidates
-    
+            cv2.putText(
+                img_debug, f"B{i} origin", (bx + 8, by - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2,
+            )
+
+            cv2.rectangle(img_debug, (bx, by), (bx + bw, by + bh), (0, 255, 0), 2)
+
+            max_rows = max(1, int((bh - self.BLOCK_OFFSET_Y) / self.ROW_HEIGHT_PX))
+            max_rows = min(max_rows, 26)
+            for row_idx in range(max_rows):
+                cy = int(
+                    self.BLOCK_OFFSET_Y
+                    + (self.ROW_HEIGHT_PX * row_idx)
+                    + (self.ROW_HEIGHT_PX / 2)
+                )
+                if cy >= bh:
+                    break
+                for col_idx in range(4):
+                    cx = int(
+                        self.BLOCK_OFFSET_X
+                        + (col_idx * self.BUBBLE_SPACING_PX)
+                        + (self.BUBBLE_WIDTH_PX / 2)
+                    )
+                    if cx >= bw:
+                        break
+                    cv2.circle(
+                        img_debug, (bx + cx, by + cy), 4, (255, 0, 255), 1
+                    )
+
+        self._save_debug_image("05c_block_fiducials.jpg", img_debug)
+
     # =========================================================================
     # ETAPA 6: MAPEAR JSON → GRID (🔴 CRÍTICA)
     # =========================================================================
@@ -2490,11 +2507,18 @@ class AnswerSheetCorrectionNewGrid:
         else:
             self.logger.info("   (reutilizando imagem A4 já normalizada)")
 
-        # ETAPA 4-5: Detectar blocos diretamente na imagem A4 normalizada
-        # Os blocos têm bordas pretas de 2px, então são facilmente detectáveis
-        self.logger.info("🔄 Etapa 4-5: Detectar blocos na imagem A4 completa")
+        # ETAPA 4-5: Localizar blocos via fiducial (.omr-block-anchor)
+        self.logger.info("🔄 Etapa 4-5: Detectar blocos (fiducial)")
         num_blocks_expected = topology_json.get("num_blocks", 4)
-        blocks = self._detect_answer_blocks_in_full_a4(img_a4, num_blocks_expected)
+        blocks_topology = topology_json.get("topology", {}).get("blocks", [])
+        # Preferir comprimento da topology se divergir
+        if blocks_topology:
+            num_blocks_expected = len(blocks_topology)
+
+        blocks = self._detect_blocks_via_fiducials(
+            img_a4, num_blocks_expected, blocks_topology
+        )
+
         if blocks is None:
             context = {
                 'num_blocks_expected': num_blocks_expected,
@@ -2515,8 +2539,6 @@ class AnswerSheetCorrectionNewGrid:
         # ETAPAS 6-9: Processar cada bloco
         self.logger.info("🔄 Etapas 6-9: Processar blocos")
         all_answers = {}
-        
-        blocks_topology = topology_json.get("topology", {}).get("blocks", [])
         
         for idx, block in enumerate(blocks):
             block_num = idx + 1

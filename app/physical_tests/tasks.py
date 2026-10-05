@@ -445,36 +445,76 @@ def generate_physical_forms_async(
                         if q not in questions_map:
                             questions_map[q] = ['A', 'B', 'C', 'D']
                     subject_ids_ordered = [str(s['id']) for s in subjects_info]
-                    blocks_question_numbers = []
+                    # Cada item: (q_nums, subject_id, subject_name)
+                    blocks_meta = []
                     if len(subjects_info) == 1 and num_blocks == 2:
                         # Uma disciplina com 2 blocos: repartir em até 22 no primeiro, resto no segundo
                         sid = subject_ids_ordered[0]
+                        sname = subjects_info[0].get('name')
                         q_nums = [i + 1 for i in range(num_questions) if (questions_data[i].get('subject_id') or '').strip() == sid]
                         if not q_nums:
                             q_nums = list(range(1, num_questions + 1))
                         n = len(q_nums)
-                        blocks_question_numbers = [q_nums[: min(22, n)], q_nums[min(22, n):]]
+                        first, second = q_nums[: min(22, n)], q_nums[min(22, n):]
+                        blocks_meta.append((first, sid, sname))
+                        if second:
+                            blocks_meta.append((second, sid, sname))
                     else:
                         # Um bloco por disciplina (máx. 4 disciplinas)
                         for subj in subjects_info[:num_blocks]:
                             sid = str(subj['id'])
+                            sname = subj.get('name')
                             q_nums = [i + 1 for i in range(num_questions) if (questions_data[i].get('subject_id') or '').strip() == sid]
-                            blocks_question_numbers.append(q_nums)
+                            if q_nums:
+                                blocks_meta.append((q_nums, sid, sname))
                     topology_blocks = []
-                    for block_idx, q_nums in enumerate(blocks_question_numbers, start=1):
+                    ui_blocks = []
+                    for block_idx, (q_nums, sid, sname) in enumerate(blocks_meta, start=1):
+                        if not q_nums:
+                            continue
                         questions_in_block = [
                             {"q": q_num, "alternatives": questions_map.get(q_num, ['A', 'B', 'C', 'D'])}
                             for q_num in q_nums
                         ]
-                        topology_blocks.append({"block_id": block_idx, "questions": questions_in_block})
+                        topology_blocks.append({
+                            "block_id": block_idx,
+                            "subject_id": sid,
+                            "subject_name": sname,
+                            "questions": questions_in_block,
+                        })
+                        # Espelha a topology em blocks[] (PDF + UI de edição)
+                        ui_blocks.append({
+                            "block_id": block_idx,
+                            "subject_id": sid,
+                            "subject_name": sname,
+                            "start_question": int(min(q_nums)),
+                            "end_question": int(max(q_nums)),
+                            "questions_count": len(q_nums),
+                        })
                     if not topology_blocks and num_questions > 0:
                         topology_blocks = [{
                             "block_id": 1,
                             "questions": [{"q": i, "alternatives": questions_map.get(i, ['A', 'B', 'C', 'D'])} for i in range(1, num_questions + 1)]
                         }]
+                        ui_blocks = [{
+                            "block_id": 1,
+                            "subject_id": subject_ids_ordered[0] if subject_ids_ordered else None,
+                            "subject_name": (subjects_info[0].get('name') if subjects_info else None),
+                            "start_question": 1,
+                            "end_question": num_questions,
+                            "questions_count": num_questions,
+                        }]
                     blocks_config['topology'] = {'blocks': topology_blocks}
                     blocks_config['num_blocks'] = len(topology_blocks)
-                    logger.info(f"[CELERY] ✅ Estrutura por disciplina: {len(topology_blocks)} blocos")
+                    blocks_config['blocks'] = ui_blocks
+                    # Alinha flags: disciplina → separate_by_subject (UI/PDF), não "blocos numerados"
+                    blocks_config['use_blocks'] = False
+                    blocks_config['separate_by_subject'] = True
+                    use_blocks = False
+                    logger.info(
+                        f"[CELERY] ✅ Estrutura por disciplina: {len(topology_blocks)} blocos "
+                        f"(blocks[] espelhado para PDF/UI)"
+                    )
             else:
                 if 'topology' not in blocks_config or not blocks_config.get('topology'):
                     logger.info(f"[CELERY] 🔨 Gerando estrutura completa de blocos...")

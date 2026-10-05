@@ -356,6 +356,38 @@ def ensure_answer_sheet_result_snapshot_columns(schema: str) -> None:
     db.session.commit()
 
 
+def get_evaluation_result_snapshot_columns_ddl(schema: str) -> str:
+    """ALTER idempotente: snapshots de colocação em evaluation_results."""
+    return f"""
+ALTER TABLE "{schema}".evaluation_results
+    ADD COLUMN IF NOT EXISTS school_id_snapshot VARCHAR(36);
+ALTER TABLE "{schema}".evaluation_results
+    ADD COLUMN IF NOT EXISTS class_id_snapshot UUID;
+ALTER TABLE "{schema}".evaluation_results
+    ADD COLUMN IF NOT EXISTS grade_id_snapshot UUID;
+ALTER TABLE "{schema}".evaluation_results
+    ADD COLUMN IF NOT EXISTS enrollment_id_snapshot VARCHAR(36);
+COMMENT ON COLUMN "{schema}".evaluation_results.school_id_snapshot IS 'Escola no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".evaluation_results.class_id_snapshot IS 'Turma no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".evaluation_results.grade_id_snapshot IS 'Série no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".evaluation_results.enrollment_id_snapshot IS 'Matrícula vigente (student_school_enrollment) no momento do resultado.';
+"""
+
+
+def ensure_evaluation_result_snapshot_columns(schema: str) -> None:
+    """Garante colunas de snapshot em evaluation_results (idempotente)."""
+    import re
+
+    from sqlalchemy import text
+
+    from app import db
+
+    if not schema or not re.match(r"^city_[a-zA-Z0-9_]+$", schema):
+        return
+    db.session.execute(text(get_evaluation_result_snapshot_columns_ddl(schema)))
+    db.session.commit()
+
+
 def get_saved_ata_sala_tables_ddl(schema: str) -> str:
     """DDL idempotente de atas de sala salvas no schema city_xxx."""
     return f"""
@@ -1235,6 +1267,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
         cursor.execute(ddl)
         cursor.execute(get_class_shift_column_migrations_ddl(schema_name))
         cursor.execute(get_answer_sheet_result_snapshot_columns_ddl(schema_name))
+        cursor.execute(get_evaluation_result_snapshot_columns_ddl(schema_name))
         cursor.execute(get_municipality_availability_column_migrations_ddl(schema_name))
         cursor.execute(get_school_area_type_column_ddl(schema_name))
 

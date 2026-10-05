@@ -62,9 +62,3 @@ class Config:
     # OMR / cartão-resposta: salva imagens em debug_corrections_new/ quando True
     # export OMR_DEBUG=1  (ou true, yes, on)
     OMR_DEBUG = os.getenv("OMR_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
-
-    # OMR V1: localizar blocos via fiducial impresso (.omr-block-anchor) em vez das bordas.
-    # Default False = comportamento legado (produção inalterada). export OMR_USE_BLOCK_FIDUCIALS=1
-    OMR_USE_BLOCK_FIDUCIALS = os.getenv("OMR_USE_BLOCK_FIDUCIALS", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )

@@ -654,6 +654,7 @@ def listar_avaliacoes():
         periodo_raw = request.args.get("periodo")
         from app.services.alunos_resultado_filtro import AlunosFiltroInvalido, parse_alunos_filtro
 
+        alunos_param_present = "alunos" in request.args
         try:
             alunos_filtro = parse_alunos_filtro(request.args.get("alunos"))
         except AlunosFiltroInvalido as exc:
@@ -776,8 +777,14 @@ def listar_avaliacoes():
 
         scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
         scope_info = apply_area_type_to_scope(scope_info, area_type)
-        if isinstance(scope_info, dict) and alunos_filtro != "todos":
-            scope_info["alunos"] = alunos_filtro
+        if isinstance(scope_info, dict):
+            # Com parâmetro alunos (mesmo "todos"): habilita pareamento ADAP e tabela_adap.
+            # Sem o parâmetro: comportamento legado, sem pareamento (Relatório Escolar etc.).
+            if alunos_param_present:
+                scope_info["alunos"] = alunos_filtro
+                scope_info["adap_pareamento"] = True
+            elif alunos_filtro != "todos":
+                scope_info["alunos"] = alunos_filtro
         logging.info(f"scope_info: {scope_info}")
         
         if not scope_info:
@@ -1368,6 +1375,7 @@ def listar_avaliacoes():
                 professor_allowed_class_ids = set()
             restrict_class_ids = set(professor_allowed_class_ids)
 
+        tabela_adap_payload = None
         if avaliacao and avaliacao.lower() != 'all':
             if grupo_ctx:
                 tabela_detalhada = _gerar_tabela_detalhada_grupo(
@@ -1384,6 +1392,20 @@ def listar_avaliacoes():
                 ranking_alunos = _calcular_ranking_global_alunos(
                     avaliacao, scope_info, nivel_granularidade, user, restrict_class_ids
                 )
+            if isinstance(scope_info, dict) and scope_info.get("adap_pareamento"):
+                tabela_adap_payload = _montar_tabela_adap_para_resposta(
+                    avaliacao_ids[0] if avaliacao_ids else avaliacao,
+                    scope_info,
+                    nivel_granularidade,
+                    user,
+                    restrict_class_ids,
+                    tabela_detalhada,
+                    ranking_alunos,
+                )
+                if isinstance(tabela_adap_payload, dict):
+                    tabela_detalhada = tabela_adap_payload.get("tabela_detalhada", tabela_detalhada)
+                    ranking_alunos = tabela_adap_payload.get("ranking", ranking_alunos)
+                    tabela_adap_payload = tabela_adap_payload.get("tabela_adap", [])
         
         periodo_raw_clean = (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None)
 
@@ -1414,6 +1436,8 @@ def listar_avaliacoes():
             "ranking": ranking_alunos,
             "opcoes_proximos_filtros": opcoes_proximos_filtros
         }
+        if tabela_adap_payload is not None:
+            response_payload["tabela_adap"] = tabela_adap_payload
         if grupo_ctx:
             response_payload["grupo"] = grupo_ctx.payload
 
@@ -8959,6 +8983,109 @@ def _dedupe_evaluation_results_by_student(resultados: List[Any]) -> List[Any]:
     return list(by_sid.values())
 
 
+def _montar_tabela_adap_para_resposta(
+    avaliacao_id: Any,
+    scope_info: Dict,
+    nivel_granularidade: str,
+    user: Dict,
+    restrict_class_ids: Optional[Set[Any]],
+    tabela_detalhada: Dict[str, Any],
+    ranking_alunos: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Monta ``tabela_adap``, remove ADAP 1/2 da tabela detalhada (questões da regular)
+    e do ranking (conforme ADAP_INCLUDED_IN_RANKING). Falhas → log e payload inalterado.
+    """
+    try:
+        from app.services.adap_resultado_pareado import (
+            apply_pareamento_to_universe,
+            build_tabela_adap_rows,
+            filter_ranking_excluding_adap,
+            scope_wants_adap_pareamento,
+        )
+        from app.services.evaluation_result_snapshot import (
+            class_ids_for_evaluation_in_scope,
+            query_evaluation_results_for_stats,
+        )
+
+        if not scope_wants_adap_pareamento(scope_info):
+            return {
+                "tabela_detalhada": tabela_detalhada,
+                "ranking": ranking_alunos,
+                "tabela_adap": [],
+            }
+
+        tid = str(avaliacao_id)
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        base_students = _obter_alunos_base_escopo_relatorio(
+            escopo_calculo, nivel_granularidade, user, restrict_class_ids
+        )
+        alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
+        if alunos_filtro and alunos_filtro != "todos":
+            from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+
+            base_students = list(filtrar_alunos_resultado(base_students, alunos_filtro))
+
+        class_ids = class_ids_for_evaluation_in_scope(
+            tid, escopo_calculo, restrict_class_ids
+        )
+        base_ids = [a.id for a in base_students]
+        results = query_evaluation_results_for_stats(
+            [tid], escopo_calculo, class_ids, base_ids
+        ).all()
+        _, _, adap_valid = apply_pareamento_to_universe(tid, base_students, results)
+        adap_ids = set(adap_valid.keys())
+
+        # Remover ADAP da grade por questão / geral
+        tabela = tabela_detalhada if isinstance(tabela_detalhada, dict) else {}
+        disciplinas = []
+        for disc in tabela.get("disciplinas") or []:
+            alunos = [
+                a
+                for a in (disc.get("alunos") or [])
+                if str(a.get("id") or "") not in adap_ids
+            ]
+            disciplinas.append({**disc, "alunos": alunos})
+        geral = tabela.get("geral") or {}
+        geral_alunos = [
+            a
+            for a in (geral.get("alunos") or [])
+            if str(a.get("id") or "") not in adap_ids
+        ]
+        nova_tabela = {**tabela, "disciplinas": disciplinas, "geral": {"alunos": geral_alunos}}
+
+        students_by_id = {str(s.id): s for s in base_students}
+        # Prefetch class_ para turma na tabela ADAP
+        if adap_ids:
+            loaded = (
+                Student.query.options(joinedload(Student.class_))
+                .filter(Student.id.in_(list(adap_ids)))
+                .all()
+            )
+            for s in loaded:
+                students_by_id[str(s.id)] = s
+
+        tabela_adap = build_tabela_adap_rows(students_by_id, adap_valid)
+        ranking = filter_ranking_excluding_adap(ranking_alunos or [], adap_ids)
+        return {
+            "tabela_detalhada": nova_tabela,
+            "ranking": ranking,
+            "tabela_adap": tabela_adap,
+        }
+    except Exception as exc:
+        logging.warning(
+            "Pareamento ADAP: falha ao montar tabela_adap para %s: %s",
+            avaliacao_id,
+            exc,
+            exc_info=True,
+        )
+        return {
+            "tabela_detalhada": tabela_detalhada,
+            "ranking": ranking_alunos,
+            "tabela_adap": [],
+        }
+
+
 def _detalhe_alunos_sem_evaluation_result(
     todos_alunos: List[Student],
     student_ids_com_resultado: Set[str],
@@ -9044,6 +9171,19 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         merged_ids = merge_participant_student_ids(
             test_ids, escopo_calculo, class_ids, set(base_orig_ids)
         )
+        from app.services.adap_resultado_pareado import (
+            adap_students_level_12,
+            apply_pareamento_to_universe,
+            enrich_pendentes_com_marca_adap,
+            scope_wants_adap_pareamento,
+        )
+
+        adap_valid_consolidados = {}
+        if scope_wants_adap_pareamento(scope_info):
+            # ADAP 1/2 da matrícula atual não saem por transferência interna no test_id regular
+            adap_base = adap_students_level_12(todos_alunos)
+            merged_ids = set(merged_ids or set()) | set(adap_base.keys())
+
         todos_alunos = Student.query.filter(Student.id.in_(merged_ids)).all() if merged_ids else []
         total_alunos = len(todos_alunos)
         logging.info(
@@ -9064,6 +9204,36 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
                 todos_alunos, alunos_filtro, resultados_escopo
             )
             total_alunos = len(todos_alunos)
+
+        if scope_wants_adap_pareamento(scope_info):
+            uniq_tests = list({str(t) for t in test_ids if t})
+            if len(uniq_tests) <= 1:
+                tid = uniq_tests[0] if uniq_tests else None
+                if tid:
+                    todos_alunos, resultados_escopo, adap_valid_consolidados = (
+                        apply_pareamento_to_universe(tid, todos_alunos, resultados_escopo)
+                    )
+            else:
+                accumulated = list(resultados_escopo)
+                for tid in uniq_tests:
+                    subset = [
+                        r
+                        for r in accumulated
+                        if str(getattr(r, "test_id", "") or "") == str(tid)
+                    ]
+                    rest = [
+                        r
+                        for r in accumulated
+                        if str(getattr(r, "test_id", "") or "") != str(tid)
+                    ]
+                    _, subset_new, adap_part = apply_pareamento_to_universe(
+                        tid, todos_alunos, subset
+                    )
+                    adap_valid_consolidados.update(adap_part)
+                    accumulated = rest + subset_new
+                resultados_escopo = accumulated
+            if isinstance(scope_info, dict):
+                scope_info["_adap_valid"] = adap_valid_consolidados
 
         student_ids_com_resultado = {er.student_id for er in resultados_escopo if getattr(er, "student_id", None)}
         alunos_participantes = len(student_ids_com_resultado)
@@ -9193,6 +9363,10 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         alunos_pendentes_detalhe = _detalhe_alunos_sem_evaluation_result(
             todos_alunos, student_ids_com_resultado
         )
+        if adap_valid_consolidados:
+            alunos_pendentes_detalhe = enrich_pendentes_com_marca_adap(
+                alunos_pendentes_detalhe, adap_valid_consolidados
+            )
         alunos_pendentes = len(alunos_pendentes_detalhe)
         logging.info(
             f"Cálculo final: total_alunos={total_alunos}, alunos_participantes={alunos_participantes}, "
@@ -9289,6 +9463,8 @@ def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Di
     copy_area_restriction(scope_info, escopo)
     if isinstance(scope_info, dict) and scope_info.get("alunos"):
         escopo["alunos"] = scope_info.get("alunos")
+    if isinstance(scope_info, dict) and scope_info.get("adap_pareamento"):
+        escopo["adap_pareamento"] = True
     logging.info(f"Escopo calculado para {nivel_granularidade}: {escopo}")
     return escopo
 

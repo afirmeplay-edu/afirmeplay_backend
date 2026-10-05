@@ -1127,15 +1127,18 @@
 				display: grid; /* ✅ Grid fixo */
 				grid-template-columns: repeat(4, 1fr); /* ✅ 4 colunas fixas */
 				gap: 0.4cm; /* ✅ Gap controlado */
-				height: 100%; /* ✅ Altura completa do wrapper */
+				height: auto;
+				max-height: 100%;
+				align-items: stretch;
 			}
 
 		/* Wrapper do bloco com header externo */
 		.block-wrapper {
 			display: flex;
 			flex-direction: column;
-			flex: 1 1 auto;
 			min-width: 0;
+			height: 100%;
+			align-self: stretch;
 		}
 
 		.block-header {
@@ -1173,6 +1176,7 @@
 			display: flex;
 			gap: 4px;
 			align-items: center;
+			padding-left: 6px; /* alinhado ao respiro bolhas ↔ divisória */
 		}
 
 		.column-label {
@@ -1186,16 +1190,32 @@
 		}
 
 		/* PASSO 5: Travar bloco para não estourar */
+		/* Borda roxa = só estética (não usada pelo OMR). Sem fundo zebrado.
+		   Altura igualada ao bloco com mais questões. */
 		.answer-block {
-			border: 2px solid #000;
+			border: 1px solid #7c3aed;
+			box-sizing: border-box;
 			padding: 8px 4px 8px 4px; /* ✅ Padding interno em cima e embaixo para não encostar nas bordas */
-			flex: 1 1 auto; /* Permite que os blocos cresçam e encolham igualmente */
+			flex: 1 1 auto; /* preenche o block-wrapper (= altura do maior bloco) */
 			min-width: 0; /* Permite que encolham abaixo do conteúdo mínimo */
 			position: relative;
 			background: white;
 			overflow: hidden; /* ✅ PROÍBE crescimento */
 			display: flex;
 			flex-direction: column;
+		}
+
+		/* Divisória vertical contínua do bloco (topo→fundo, incl. padding) */
+		.answer-block::before {
+			content: "";
+			position: absolute;
+			left: 29px; /* padding-left 4px + .question-num 25px */
+			top: 0;
+			bottom: 0;
+			width: 1px;
+			background: #7c3aed;
+			z-index: 2;
+			pointer-events: none;
 		}
 
 		/* PASSO 4: Corrigir altura da linha (CRÍTICO para 26 questões) */
@@ -1209,6 +1229,7 @@
 			max-height: 0.44cm; /* ✅ Trava máxima */
 			gap: 0;
 			flex-shrink: 0; /* ✅ Não encolhe */
+			box-sizing: border-box;
 		}
 		
 		/* Eliminar espaço extra após última questão */
@@ -1228,6 +1249,7 @@
 				align-items: center;
 				justify-content: flex-start;
 				gap: 0;
+				box-sizing: border-box;
 			}
 
 			.question-num-text {
@@ -1240,6 +1262,7 @@
 				justify-content: flex-start;
 				flex: 1;
 				align-items: center;
+				padding-left: 6px; /* respiro entre divisória e 1ª bolha */
 			}
 
 			.bubble {
@@ -1778,12 +1801,17 @@
 			
 			<!-- GRID DE RESPOSTAS -->
 				<div class="answer-grid-container">
-					{% if blocks_config and blocks_config.use_blocks %} {% set
-					num_blocks = blocks_config.num_blocks | default(1) %} {% set
-					questions_per_block = blocks_config.questions_per_block |
-					default(12) %} {% if questions_by_block %} {% for block in
+					{# Modo A (blocos) ou B (disciplina): questions_by_block manda no layout #}
+					{% if questions_by_block %}
+					{% set ns_blocks = namespace(max_q=0) %}
+					{% for b in questions_by_block %}
+					{% set _ql = b.questions | length %}
+					{% if _ql > ns_blocks.max_q %}{% set ns_blocks.max_q = _ql %}{% endif %}
+					{% endfor %}
+					{% set block_answer_min_cm = (ns_blocks.max_q * 0.44) + (16 / 96.0 * 2.54) %}
+					{% for block in
 					questions_by_block %} {% set questions_in_block =
-					block.questions | length %} 					{% if questions_in_block > 0 %}
+					block.questions | length %} {% if questions_in_block > 0 %}
 					<div class="block-wrapper">
 						<div class="block-header">
 							<div class="block-title">
@@ -1799,7 +1827,7 @@
 								</div>
 							</div>
 						</div>
-						<div class="answer-block">
+						<div class="answer-block" style="min-height: {{ '%.3f'|format(block_answer_min_cm) }}cm;">
 						<!-- Linhas de resposta -->
 						{% for question in block.questions %}
 						<div class="answer-row">
@@ -1825,7 +1853,13 @@
 						{% endfor %}
 						</div>
 					</div>
-					{% endif %} {% endfor %} {% else %} {% for block_num in
+					{% endif %} {% endfor %} {% elif blocks_config and blocks_config.use_blocks %} {% set
+					num_blocks = blocks_config.num_blocks | default(1) %} {% set
+					questions_per_block = blocks_config.questions_per_block |
+					default(12) %}
+					{% set ns_blocks = namespace(max_q=questions_per_block) %}
+					{% set block_answer_min_cm = (ns_blocks.max_q * 0.44) + (16 / 96.0 * 2.54) %}
+					{% for block_num in
 					range(1, num_blocks + 1) %} {% set start_question =
 					(block_num - 1) * questions_per_block + 1 %} {% set
 					end_question = block_num * questions_per_block %}
@@ -1842,8 +1876,7 @@
 								</div>
 							</div>
 						</div>
-						<div class="answer-block">
-
+						<div class="answer-block" style="min-height: {{ '%.3f'|format(block_answer_min_cm) }}cm;">
 						{% for q_num in range(start_question, end_question + 1)
 						%}
 						<div class="answer-row">
@@ -1866,11 +1899,20 @@
 						{% endfor %}
 						</div>
 					</div>
-					{% endfor %} {% endif %} {% else %} {% set
+					{% endfor %} {% else %} {% set
 					questions_per_block = 12 %} {% set total_questions =
 					total_questions | default(48) %} {% set num_blocks =
 					((total_questions - 1) // questions_per_block) + 1 %} {% if
-					num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %} {% for
+					num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %}
+					{% set ns_blocks = namespace(max_q=0) %}
+					{% for block in range(1, num_blocks + 1) %}
+					{% set _eq = [block * questions_per_block, total_questions] | min %}
+					{% set _sq = (block - 1) * questions_per_block + 1 %}
+					{% set _ql = _eq - _sq + 1 %}
+					{% if _ql > ns_blocks.max_q %}{% set ns_blocks.max_q = _ql %}{% endif %}
+					{% endfor %}
+					{% set block_answer_min_cm = (ns_blocks.max_q * 0.44) + (16 / 96.0 * 2.54) %}
+					{% for
 					block in range(1, num_blocks + 1) %} {% set start_question =
 					(block - 1) * questions_per_block + 1 %} {% set end_question
 					= [block * questions_per_block, total_questions] | min %} {%
@@ -1889,8 +1931,7 @@
 								</div>
 							</div>
 						</div>
-						<div class="answer-block">
-
+						<div class="answer-block" style="min-height: {{ '%.3f'|format(block_answer_min_cm) }}cm;">
 						{% for q in range(1, questions_in_block + 1) %} {% set
 						question_num = start_question + q - 1 %}
 						<div class="answer-row">

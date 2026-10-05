@@ -870,40 +870,65 @@ class AnswerSheetGenerator:
                     'end_question_num': end_q
                 })
         else:
-            # ✅ Fallback: distribuir automaticamente (comportamento original)
-            num_blocks = blocks_config.get('num_blocks', 1)
-            questions_per_block = blocks_config.get('questions_per_block', 12)
-            separate_by_subject = blocks_config.get('separate_by_subject', False)
-            
-            if separate_by_subject:
-                # Se separar por disciplina, precisaríamos de dados de disciplinas
-                # Por enquanto, vamos distribuir sequencialmente
-                # TODO: Implementar separação por disciplina automática se necessário
-                pass
-            
-            # Distribuir questões sequencialmente pelos blocos
-            for block_num in range(1, num_blocks + 1):
-                start_question = (block_num - 1) * questions_per_block + 1
-                end_question = min(block_num * questions_per_block, num_questions)
-                
-                # Criar lista de questões com alternativas
-                questions = []
-                for q_num in range(start_question, end_question + 1):
-                    # Buscar alternativas da questão ou usar padrão
-                    options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
-                    questions.append({
-                        'question_number': q_num,
-                        'options': options
-                    })
-                
-                if questions:
+            # Fallback 1: topology OMR (fonte da verdade quando blocks[] está ausente)
+            topology_blocks = (blocks_config.get('topology') or {}).get('blocks') or []
+            if topology_blocks:
+                for block_def in topology_blocks:
+                    q_list = block_def.get('questions') or []
+                    if not q_list:
+                        continue
+                    questions = []
+                    for q_entry in q_list:
+                        try:
+                            q_num = int(q_entry.get('q'))
+                        except (TypeError, ValueError, AttributeError):
+                            continue
+                        options = q_entry.get('alternatives') or questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                        if not isinstance(options, list) or len(options) < 2:
+                            options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                        questions.append({
+                            'question_number': q_num,
+                            'options': options
+                        })
+                    if not questions:
+                        continue
                     blocks.append({
-                        'block_number': block_num,
-                        'subject_name': None,
+                        'block_number': block_def.get('block_id'),
+                        'subject_id': (
+                            str(block_def['subject_id'])
+                            if block_def.get('subject_id') is not None
+                            else None
+                        ),
+                        'subject_name': block_def.get('subject_name'),
                         'questions': questions,
-                        'start_question_num': start_question,
-                        'end_question_num': end_question
+                        'start_question_num': questions[0]['question_number'],
+                        'end_question_num': questions[-1]['question_number'],
                     })
+            else:
+                # Fallback 2: distribuir automaticamente (comportamento original)
+                num_blocks = blocks_config.get('num_blocks', 1)
+                questions_per_block = blocks_config.get('questions_per_block', 12)
+
+                for block_num in range(1, num_blocks + 1):
+                    start_question = (block_num - 1) * questions_per_block + 1
+                    end_question = min(block_num * questions_per_block, num_questions)
+
+                    questions = []
+                    for q_num in range(start_question, end_question + 1):
+                        options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                        questions.append({
+                            'question_number': q_num,
+                            'options': options
+                        })
+
+                    if questions:
+                        blocks.append({
+                            'block_number': block_num,
+                            'subject_name': None,
+                            'questions': questions,
+                            'start_question_num': start_question,
+                            'end_question_num': end_question
+                        })
         
         # Validar que temos pelo menos um bloco
         if not blocks:

@@ -21,6 +21,62 @@ from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 
 logger = logging.getLogger(__name__)
 
+NO_STUDENTS_ERROR = "Não há alunos na(s) turma(s) selecionada(s)"
+NO_STUDENTS_ERROR_CODE = "no_students"
+
+
+def _finish_no_students(
+    *,
+    batch_id: str = None,
+    scope: str = None,
+    gabarito_ids: List[str] = None,
+    skipped_classes: List[Dict] = None,
+    temp_dir: str = None,
+) -> Dict[str, Any]:
+    """Encerra a geração sem retry quando não há alunos nas turmas."""
+    logger.warning(f"[CELERY-BATCH] ⚠️ {NO_STUDENTS_ERROR}")
+    if temp_dir:
+        try:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+    if batch_id:
+        try:
+            update_answer_sheet_job(batch_id, {
+                'status': 'failed',
+                'completed': 1,
+                'successful': 0,
+                'failed': 1,
+                'progress_current': 0,
+                'progress_percentage': 100,
+            })
+        except Exception as e:
+            logger.warning(f"[CELERY-BATCH] Falha ao atualizar job (no_students): {e}")
+        try:
+            from app.services.progress_store import complete_job, update_job
+            complete_job(batch_id)
+            # complete_job marca stage_message="Concluído"; sobrescrever com o aviso real
+            update_job(batch_id, {
+                'status': 'failed',
+                'stage_message': NO_STUDENTS_ERROR,
+            })
+        except Exception as e:
+            logger.warning(f"[CELERY-BATCH] Falha ao completar progress_store (no_students): {e}")
+    return {
+        'success': False,
+        'error': NO_STUDENTS_ERROR,
+        'error_code': NO_STUDENTS_ERROR_CODE,
+        'message': NO_STUDENTS_ERROR,
+        'scope': scope,
+        'gabarito_ids': gabarito_ids or [],
+        'batch_id': batch_id,
+        'skipped_classes': skipped_classes or [],
+        'total_classes': 0,
+        'total_students': 0,
+        'total_pdfs': 0,
+    }
+
 
 def _mirror_recalc_job_to_db(job_id: str) -> None:
     """
@@ -617,9 +673,34 @@ def generate_answer_sheets_batch_async(
             # ARCHITECTURE 4 OTIMIZADO: 1 Template Base para TODAS as turmas
             # ========================================================================
             from app.models.student import Student
+            from app.models.grades import Grade
             from weasyprint import HTML
             from pypdf import PdfReader, PdfWriter
             import io
+
+            # Validar alunos ANTES do WeasyPrint — evita retry em condição permanente
+            total_alunos_todas_turmas = sum(
+                len(Student.query.filter_by(class_id=c.id).all()) for c in classes
+            )
+            logger.info(f"[CELERY-BATCH] 📊 Total de alunos em todas as turmas: {total_alunos_todas_turmas}")
+            if total_alunos_todas_turmas == 0:
+                for class_obj in classes:
+                    grade_name = ''
+                    if class_obj.grade_id:
+                        grade_obj = Grade.query.get(class_obj.grade_id)
+                        if grade_obj:
+                            grade_name = grade_obj.name
+                    skipped_classes.append({
+                        'class_name': class_obj.name,
+                        'grade_name': grade_name,
+                    })
+                return _finish_no_students(
+                    batch_id=batch_id,
+                    scope=scope,
+                    gabarito_ids=gabarito_ids,
+                    skipped_classes=skipped_classes,
+                    temp_dir=temp_dir,
+                )
             
             # Gerar template base UMA VEZ (compartilhado por todas as turmas)
             logger.info(f"[CELERY-BATCH] 📄 Gerando template base único (1× WeasyPrint)...")
@@ -653,10 +734,6 @@ def generate_answer_sheets_batch_async(
             base_pdf_bytes = HTML(string=base_html).write_pdf()
             
             logger.info(f"[CELERY-BATCH] ✅ Template base gerado ({len(base_pdf_bytes)} bytes) - será reutilizado para TODAS as turmas")
-            
-            # Contar total de alunos e criar job no progress_store
-            total_alunos_todas_turmas = sum(len(Student.query.filter_by(class_id=c.id).all()) for c in classes)
-            logger.info(f"[CELERY-BATCH] 📊 Total de alunos em todas as turmas: {total_alunos_todas_turmas}")
             # Job de progresso (items por aluno) é semeado na API (seed_answer_sheet_progress_job);
             # não recriar aqui para não sobrescrever Redis nem perder metadados de turma.
             
@@ -664,7 +741,6 @@ def generate_answer_sheets_batch_async(
             total_processed = 0
             student_item_idx = 0  # índice sequencial 0..N-1 para progress_store (igual prova física)
             from app.services.progress_store import update_item_processing, update_item_done, update_item_error
-            from app.models.grades import Grade
             
             for idx, class_obj in enumerate(classes, 1):
                 turma_id_log = 'n/d'
@@ -909,6 +985,15 @@ def generate_answer_sheets_batch_async(
                     _ensure_tenant_search_path()
         
         if not generated_pdfs:
+            # Todas as turmas sem alunos: erro de negócio — não retentar
+            if skipped_classes:
+                return _finish_no_students(
+                    batch_id=batch_id,
+                    scope=scope,
+                    gabarito_ids=gabarito_ids,
+                    skipped_classes=skipped_classes,
+                    temp_dir=temp_dir,
+                )
             raise ValueError("Nenhum PDF foi gerado")
         
         logger.info(f"[CELERY-BATCH] ✅ PDFs gerados: {len(generated_pdfs)}, Total de alunos: {total_students}")
@@ -1161,6 +1246,11 @@ def generate_answer_sheets_batch_async(
         # 🔒 NÃO fazer retry por erro de MinIO - apenas por erros críticos de geração
         # Se PDFs foram gerados mas upload falhou, não retryar
         is_minio_error = 'minio' in error_str or 's3' in error_str or 'ssl' in error_str
+        is_no_students = (
+            NO_STUDENTS_ERROR_CODE in error_str
+            or 'não há alunos' in error_str
+            or 'nao ha alunos' in error_str
+        )
         
         if is_minio_error:
             logger.warning(f"[CELERY-BATCH] ⚠️ Erro de MinIO detectado - não retryando task (PDFs podem ter sido gerados)")
@@ -1171,8 +1261,16 @@ def generate_answer_sheets_batch_async(
                 'gabarito_ids': gabarito_ids,
                 'is_minio_error': True
             }
+
+        if is_no_students:
+            return _finish_no_students(
+                batch_id=batch_id,
+                scope=scope,
+                gabarito_ids=gabarito_ids,
+                skipped_classes=locals().get('skipped_classes') or [],
+            )
         
-        # Retry apenas para erros críticos (não relacionados a MinIO ou permissões)
+        # Retry apenas para erros críticos (não relacionados a MinIO, permissões ou turmas vazias)
         if self.request.retries < self.max_retries:
             logger.info(f"[CELERY-BATCH] 🔄 Tentando novamente (retry {self.request.retries + 1}/{self.max_retries})...")
             raise self.retry(exc=e)

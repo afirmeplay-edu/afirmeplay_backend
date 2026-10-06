@@ -1387,6 +1387,105 @@ CREATE TRIGGER trg_student_subturma_same_class
 """
 
 
+def get_logistics_schedule_tables_ddl(schema: str) -> str:
+    """
+    Tabelas do cronograma de logística de aplicação (logistics_schedule e itens).
+
+    Idempotente. Só cria estruturas novas; não altera tabelas existentes.
+    """
+    if not schema or not schema.replace("_", "").isalnum() or not schema.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema}")
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".logistics_schedule (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    test_id VARCHAR NOT NULL REFERENCES "{schema}".test(id) ON DELETE CASCADE,
+    education_stage_id UUID REFERENCES public.education_stage(id) ON DELETE SET NULL,
+    title VARCHAR(200) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'rascunho',
+    notes TEXT,
+    created_by VARCHAR REFERENCES public.users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    published_at TIMESTAMP,
+    cancelled_at TIMESTAMP,
+    CONSTRAINT ck_logistics_schedule_status CHECK (status IN ('rascunho', 'publicado', 'cancelado'))
+);
+COMMENT ON TABLE "{schema}".logistics_schedule IS 'Cronograma de logística de aplicação de uma avaliação.';
+CREATE INDEX IF NOT EXISTS idx_logistics_schedule_test_id ON "{schema}".logistics_schedule (test_id);
+CREATE INDEX IF NOT EXISTS idx_logistics_schedule_status ON "{schema}".logistics_schedule (status);
+
+CREATE TABLE IF NOT EXISTS "{schema}".logistics_schedule_item (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    schedule_id UUID NOT NULL REFERENCES "{schema}".logistics_schedule(id) ON DELETE CASCADE,
+    school_id VARCHAR(36) NOT NULL REFERENCES "{schema}".school(id) ON DELETE CASCADE,
+    grade_id UUID REFERENCES public.grade(id) ON DELETE SET NULL,
+    class_id UUID NOT NULL REFERENCES "{schema}".class(id) ON DELETE CASCADE,
+    scheduled_date DATE,
+    students_count INTEGER NOT NULL DEFAULT 0,
+    tablets_qty INTEGER NOT NULL DEFAULT 0,
+    booklets_qty INTEGER NOT NULL DEFAULT 0,
+    notes TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_logistics_item_schedule_class_date UNIQUE (schedule_id, class_id, scheduled_date),
+    CONSTRAINT ck_logistics_item_non_negative CHECK (
+        students_count >= 0 AND tablets_qty >= 0 AND booklets_qty >= 0
+    )
+);
+COMMENT ON TABLE "{schema}".logistics_schedule_item IS 'Turma e data de aplicação dentro de um cronograma de logística.';
+COMMENT ON COLUMN "{schema}".logistics_schedule_item.students_count IS 'Nº de alunos da turma no momento em que o item foi salvo.';
+COMMENT ON COLUMN "{schema}".logistics_schedule_item.scheduled_date IS 'Data de aplicação. NULL só é aceito em rascunho.';
+CREATE INDEX IF NOT EXISTS idx_logistics_item_schedule_id ON "{schema}".logistics_schedule_item (schedule_id);
+CREATE INDEX IF NOT EXISTS idx_logistics_item_school_id ON "{schema}".logistics_schedule_item (school_id);
+"""
+
+
+def get_notification_tables_ddl(schema: str) -> str:
+    """
+    Tabela central de notificações (notification) e destinatários (notification_recipient).
+
+    Idempotente. Só cria estruturas novas; não altera tabelas existentes.
+    reference_type/reference_id são polimórficos (sem FK): a notificação sobrevive
+    como histórico se o objeto referenciado for removido.
+    """
+    if not schema or not schema.replace("_", "").isalnum() or not schema.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema}")
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".notification (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    type VARCHAR(50) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    message TEXT,
+    payload JSONB,
+    reference_type VARCHAR(50),
+    reference_id VARCHAR(64),
+    action_url VARCHAR(500),
+    created_by VARCHAR REFERENCES public.users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP
+);
+COMMENT ON TABLE "{schema}".notification IS 'Notificações exibidas no sininho. Conteúdo compartilhado por todos os destinatários.';
+COMMENT ON COLUMN "{schema}".notification.reference_id IS 'Id do objeto de origem (polimórfico, sem FK).';
+CREATE INDEX IF NOT EXISTS idx_notification_type ON "{schema}".notification (type);
+CREATE INDEX IF NOT EXISTS idx_notification_reference ON "{schema}".notification (reference_type, reference_id);
+CREATE INDEX IF NOT EXISTS idx_notification_created_at ON "{schema}".notification (created_at);
+
+CREATE TABLE IF NOT EXISTS "{schema}".notification_recipient (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    notification_id UUID NOT NULL REFERENCES "{schema}".notification(id) ON DELETE CASCADE,
+    user_id VARCHAR NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    school_id VARCHAR(36) REFERENCES "{schema}".school(id) ON DELETE CASCADE,
+    role_snapshot VARCHAR(20),
+    read_at TIMESTAMP,
+    dismissed_at TIMESTAMP,
+    CONSTRAINT uq_notification_recipient_user UNIQUE (notification_id, user_id)
+);
+COMMENT ON TABLE "{schema}".notification_recipient IS 'Destinatário de uma notificação, com estado de leitura próprio.';
+COMMENT ON COLUMN "{schema}".notification_recipient.role_snapshot IS 'Perfil do usuário no momento do envio.';
+CREATE INDEX IF NOT EXISTS idx_notification_recipient_user_read ON "{schema}".notification_recipient (user_id, read_at);
+"""
+
+
 def _get_city_tables_ddl(schema: str) -> str:
     """Retorna o SQL de criação das tabelas do schema city (mesmo conteúdo da migração 0001)."""
     play_tv_block = get_play_tv_tables_ddl(schema)
@@ -2216,4 +2315,4 @@ CREATE TABLE IF NOT EXISTS "{schema}".student_password_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".student_password_log IS 'Log de senhas de alunos (auditoria)';
-""" + get_subturma_tables_ddl(schema) + get_paired_regular_test_id_ddl(schema) + get_estimated_time_column_ddl(schema)
+""" + get_subturma_tables_ddl(schema) + get_paired_regular_test_id_ddl(schema) + get_estimated_time_column_ddl(schema) + get_logistics_schedule_tables_ddl(schema) + get_notification_tables_ddl(schema)

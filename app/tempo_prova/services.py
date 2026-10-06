@@ -32,7 +32,6 @@ from app.report_analysis.evaluation_time import (
     ORIGEM_MEDIDA,
     compute_session_time_metrics,
 )
-from app.utils.class_label_helpers import format_grade_class_label
 from app.utils.uuid_helpers import ensure_uuid_list
 
 _MAX_ALUNOS_DETALHE = 400
@@ -72,8 +71,10 @@ def _names_maps(escola_ids, turma_ids, serie_ids, test_ids):
 
     turmas = {}
     if turma_ids:
-        for cls in Class.query.filter(Class.id.in_(list(turma_ids))).all():
-            turmas[str(cls.id)] = format_grade_class_label(cls) or (cls.name or "")
+        for row in Class.query.with_entities(Class.id, Class.name).filter(
+            Class.id.in_(list(turma_ids))
+        ).all():
+            turmas[str(row[0])] = (row[1] or "").strip()
 
     series = {}
     if serie_ids:

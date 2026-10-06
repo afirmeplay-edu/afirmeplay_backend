@@ -144,7 +144,12 @@ class EvaluationResultService:
         return subject_results
     
     @staticmethod
-    def calculate_and_save_result(test_id: str, student_id: str, session_id: str) -> Optional[Dict[str, Any]]:
+    def calculate_and_save_result(
+        test_id: str,
+        student_id: str,
+        session_id: str,
+        schedule_rebuild: bool = True,
+    ) -> Optional[Dict[str, Any]]:
         """
         Calcula e salva o resultado completo de uma avaliação para um aluno
         
@@ -152,6 +157,8 @@ class EvaluationResultService:
             test_id: ID do teste
             student_id: ID do aluno
             session_id: ID da sessão
+            schedule_rebuild: se False, não agenda rebuild_reports_for_test; o chamador
+                agenda uma vez por prova usando 'rebuild_city_id' do retorno.
             
         Returns:
             Dicionário com os resultados calculados ou None se erro
@@ -424,16 +431,17 @@ class EvaluationResultService:
             
             # Disparar task Celery para rebuild (com debounce). Passar city_id para a task
             # setar o schema do tenant (multi-tenant: Celery não tem JWT/request).
-            try:
-                if scope_city_id:
-                    from app.report_analysis.tasks import rebuild_reports_for_test
-                    rebuild_reports_for_test.delay(test_id, str(scope_city_id))
-                    logging.info(f"Task de rebuild agendada para test_id={test_id}, city_id={scope_city_id}")
-                else:
-                    logging.debug("Rebuild não agendado: scope_city_id ausente (sem tenant para report_aggregates)")
-            except Exception as e:
-                logging.warning(f"Erro ao agendar task de rebuild: {str(e)}. Continuando sem rebuild automático.")
-                # Não falhar se Celery não estiver disponível
+            if schedule_rebuild:
+                try:
+                    if scope_city_id:
+                        from app.report_analysis.tasks import rebuild_reports_for_test
+                        rebuild_reports_for_test.delay(test_id, str(scope_city_id))
+                        logging.info(f"Task de rebuild agendada para test_id={test_id}, city_id={scope_city_id}")
+                    else:
+                        logging.debug("Rebuild não agendado: scope_city_id ausente (sem tenant para report_aggregates)")
+                except Exception as e:
+                    logging.warning(f"Erro ao agendar task de rebuild: {str(e)}. Continuando sem rebuild automático.")
+                    # Não falhar se Celery não estiver disponível
             
             # Preparar resposta com informações adicionais se houver múltiplas disciplinas
             response_data = {
@@ -449,6 +457,8 @@ class EvaluationResultService:
                 'classification': result['classification'],
                 'calculated_at': evaluation_result.calculated_at.isoformat() if evaluation_result.calculated_at else None
             }
+            if not schedule_rebuild:
+                response_data['rebuild_city_id'] = str(scope_city_id) if scope_city_id else None
             
             # Adicionar resultados por disciplina se disponível
             if use_subjects_info and 'subject_results' in locals():

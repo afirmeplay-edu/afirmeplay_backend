@@ -53,6 +53,9 @@ from .calendar_event_target import CalendarEventTarget, CalendarTargetType
 from .calendar_event_user import CalendarEventUser
 from .calendar_event_resource import CalendarEventResource
 
+from .logisticsSchedule import LogisticsSchedule, LogisticsScheduleItem
+from .notification import Notification, NotificationRecipient
+
 # Formulários Socioeconômicos, Play TV e Plantão Online
 from app.socioeconomic_forms.models import Form, FormQuestion, FormRecipient, FormResponse
 from app.play_tv.models import PlayTvVideo, PlayTvVideoSchool, PlayTvVideoResource

@@ -581,6 +581,7 @@ def format_test_response(test, questions=None):
         'time_limit': test.time_limit.isoformat() if test.time_limit else None,
         'end_time': test.end_time.isoformat() if test.end_time else None,
         'duration': int(duration) if duration is not None else 90,
+        'estimated_time': int(getattr(test, 'estimated_time', None) or 0) or None,
         'createdBy': {'id': test.creator.id, 'name': test.creator.name} if test.creator else None,
         'createdAt': test.created_at.isoformat() if test.created_at else None,
         'updatedAt': test.updated_at.isoformat() if test.updated_at else None,

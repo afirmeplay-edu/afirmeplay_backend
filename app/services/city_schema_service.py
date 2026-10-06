@@ -1283,6 +1283,22 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
             raw_conn.close()
 
 
+def get_estimated_time_column_ddl(schema: str) -> str:
+    """
+    Coluna anulável test.estimated_time (minutos estimados de aplicação).
+
+    Idempotente. Sem default no DDL; o preenchimento fica na migração / no create da prova.
+    """
+    if not schema or not schema.replace("_", "").isalnum() or not schema.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema}")
+    return f"""
+ALTER TABLE "{schema}".test
+    ADD COLUMN IF NOT EXISTS estimated_time INTEGER;
+COMMENT ON COLUMN "{schema}".test.estimated_time IS
+    'Tempo estimado de aplicação em minutos (1º-2º anos: 90; 3º-9º: 150). Usado no relatório de tempo e em provas mobile.';
+"""
+
+
 def get_paired_regular_test_id_ddl(schema: str) -> str:
     """
     Coluna anulável test.paired_regular_test_id (ADAP → prova regular).
@@ -1522,6 +1538,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".test (
     time_limit TIMESTAMP,
     end_time TIMESTAMP,
     duration INTEGER,
+    estimated_time INTEGER,
     evaluation_mode VARCHAR(20) DEFAULT 'virtual',
     created_by VARCHAR REFERENCES public.users(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1540,6 +1557,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".test (
     available_from TIMESTAMPTZ
 );
 COMMENT ON TABLE "{schema}".test IS 'Avaliações criadas no município';
+COMMENT ON COLUMN "{schema}".test.estimated_time IS 'Tempo estimado de aplicação em minutos (1º-2º anos: 90; 3º-9º: 150). Usado no relatório de tempo e em provas mobile.';
 COMMENT ON COLUMN "{schema}".test.available_to_municipality IS 'Se false, a avaliação não aparece nem pode ser aplicada pelo município (exceto admin/tecadm)';
 COMMENT ON COLUMN "{schema}".test.available_from IS 'Se preenchido, o município só vê/aplica a partir desta data/hora';
 
@@ -2198,4 +2216,4 @@ CREATE TABLE IF NOT EXISTS "{schema}".student_password_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".student_password_log IS 'Log de senhas de alunos (auditoria)';
-""" + get_subturma_tables_ddl(schema) + get_paired_regular_test_id_ddl(schema)
+""" + get_subturma_tables_ddl(schema) + get_paired_regular_test_id_ddl(schema) + get_estimated_time_column_ddl(schema)

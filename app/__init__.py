@@ -336,6 +336,8 @@ def create_app():
     from app.boletim_aluno import bp as boletim_aluno_bp
     from app.unified_report import bp as unified_report_bp
     from app.question_import import bp as question_import_bp
+    from app.logistics import bp as logistics_bp
+    from app.notifications import bp as notifications_bp
 
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
@@ -408,6 +410,8 @@ def create_app():
     app.register_blueprint(boletim_aluno_bp)
     app.register_blueprint(unified_report_bp)
     app.register_blueprint(question_import_bp)
+    app.register_blueprint(logistics_bp)
+    app.register_blueprint(notifications_bp)
 
     from app.routes.mobile import mobile_bp
     app.register_blueprint(mobile_bp)
@@ -518,6 +522,8 @@ def create_app():
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager, MonitoringAction, MonitoringActionHistory
     from app.certification.models import CertificateTemplate, Certificate, CertificateArtwork
     from app.models.coverTemplate import CoverTemplate  # noqa: F401
+    from app.models.logisticsSchedule import LogisticsSchedule, LogisticsScheduleItem  # noqa: F401
+    from app.models.notification import Notification, NotificationRecipient  # noqa: F401
 
     # Rota para servir o arquivo swagger.yaml a partir do diretório raiz do projeto
     @app.route('/swagger.yaml')

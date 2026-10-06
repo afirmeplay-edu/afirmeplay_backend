@@ -132,7 +132,7 @@ class TestProcessOneSubmissionReplay(unittest.TestCase):
         import uuid
         from unittest.mock import MagicMock, patch
 
-        from app.services.mobile.upload_service import process_one_submission
+        from app.services.mobile.upload_service import _BatchCache, process_one_submission
 
         existing = MagicMock()
         existing.test_content_version = "hash-atual"
@@ -149,6 +149,7 @@ class TestProcessOneSubmissionReplay(unittest.TestCase):
                 },
                 user_id="user",
                 school_id="school",
+                cache=_BatchCache(),
             )
         self.assertEqual(result["status"], "duplicate_ignored")
         self.assertTrue(result["already_processed"])
@@ -157,7 +158,7 @@ class TestProcessOneSubmissionReplay(unittest.TestCase):
         import uuid
         from unittest.mock import MagicMock, patch
 
-        from app.services.mobile.upload_service import process_one_submission
+        from app.services.mobile.upload_service import _BatchCache, process_one_submission
 
         existing = MagicMock()
         existing.test_content_version = None
@@ -177,6 +178,7 @@ class TestProcessOneSubmissionReplay(unittest.TestCase):
                 },
                 user_id="user",
                 school_id="school",
+                cache=_BatchCache(),
             )
         self.assertEqual(result["status"], "error")
         self.assertNotEqual(result["status"], "duplicate_ignored")

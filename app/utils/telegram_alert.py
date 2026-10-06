@@ -4,18 +4,107 @@ Envia notificações para um grupo do Telegram quando erros ocorrem.
 """
 
 import os
+import html
 import logging
+import threading
 import traceback
 from datetime import datetime
 from functools import wraps
 from time import time
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import requests
-from flask import request, current_app
+from flask import request, g, has_request_context
 
-# Cache simples para rate limiting (última vez que foi enviado alerta por rota)
+# Cache simples para rate limiting (última vez que foi enviado alerta por chave)
 _last_alert_time: Dict[str, float] = {}
-_ALERT_COOLDOWN = 60  # Segundos entre alertas da mesma rota
+_rate_lock = threading.Lock()
+_ALERT_COOLDOWN = 60  # Segundos entre alertas da mesma chave
+_TELEGRAM_MAX_CHARS = 3900  # Limite da API é 4096 após parsing
+
+
+def _esc(value) -> str:
+    return html.escape(str(value), quote=False)
+
+
+def _pre_section(title: str, raw: str, max_raw: int) -> str:
+    text = raw if len(raw) <= max_raw else raw[:max_raw] + "\n... (truncado)"
+    section = f"<b>{title}</b>\n<pre>{_esc(text)}</pre>"
+    while len(section) > _TELEGRAM_MAX_CHARS and max_raw > 200:
+        max_raw = int(max_raw * 0.7)
+        text = raw[:max_raw] + "\n... (truncado)"
+        section = f"<b>{title}</b>\n<pre>{_esc(text)}</pre>"
+    return section
+
+
+def _pack_chunks(sections: List[str]) -> List[str]:
+    chunks: List[str] = []
+    current = ""
+    for section in sections:
+        if len(section) > _TELEGRAM_MAX_CHARS:
+            section = section[:_TELEGRAM_MAX_CHARS]
+        candidate = f"{current}\n\n{section}" if current else section
+        if len(candidate) > _TELEGRAM_MAX_CHARS:
+            chunks.append(current)
+            current = section
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _reserve_rate_slot(key: str, cooldown: int) -> bool:
+    now = time()
+    with _rate_lock:
+        last = _last_alert_time.get(key)
+        if last is not None and now - last < cooldown:
+            return False
+        _last_alert_time[key] = now
+        if len(_last_alert_time) > 5000:
+            cutoff = now - 3600
+            for k in [k for k, t in _last_alert_time.items() if t < cutoff]:
+                _last_alert_time.pop(k, None)
+        return True
+
+
+def _release_rate_slot(key: str) -> None:
+    with _rate_lock:
+        _last_alert_time.pop(key, None)
+
+
+def _deliver(bot_token: str, group_id: str, chunks: List[str], route_key: str) -> bool:
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    response = None
+    try:
+        total = len(chunks)
+        for i, chunk in enumerate(chunks, start=1):
+            text = chunk if total == 1 else f"<i>({i}/{total})</i>\n{chunk}"
+            response = requests.post(
+                url,
+                json={
+                    "chat_id": group_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+                timeout=5,
+            )
+            response.raise_for_status()
+        logging.info(f"✅ Alerta Telegram enviado com sucesso para: {route_key}")
+        return True
+    except requests.exceptions.RequestException as e:
+        # Não usar logging.error aqui para evitar loop infinito
+        _release_rate_slot(route_key)
+        logging.warning(
+            f"❌ Falha ao enviar alerta Telegram: {e} | "
+            f"Status: {response.status_code if response is not None else 'N/A'} | "
+            f"Resposta: {response.text[:200] if response is not None else 'N/A'}"
+        )
+        return False
+    except Exception as e:
+        _release_rate_slot(route_key)
+        logging.warning(f"❌ Erro inesperado ao enviar alerta Telegram: {e}", exc_info=True)
+        return False
 
 
 def send_telegram_alert(
@@ -27,6 +116,9 @@ def send_telegram_alert(
     additional_info: Optional[Dict] = None,
     source: str = "Backend",
     rate_limit_key: Optional[str] = None,
+    cooldown: Optional[int] = None,
+    background: bool = False,
+    title: Optional[str] = None,
 ) -> bool:
     """
     Envia um alerta para o grupo do Telegram configurado.
@@ -40,10 +132,16 @@ def send_telegram_alert(
         additional_info: Informações adicionais como dict
         source: Origem do alerta (ex.: Backend, Mobile) — aparece no título
         rate_limit_key: Chave customizada de cooldown; padrão method_route
+        cooldown: Segundos de cooldown para a chave; padrão _ALERT_COOLDOWN
+        background: Envia em thread separada (retorna True se foi agendado)
+        title: Tipo do erro exibido no título; padrão inferido da mensagem
     
     Returns:
-        True se o alerta foi enviado com sucesso, False caso contrário
+        True se o alerta foi enviado (ou agendado) com sucesso, False caso contrário
     """
+    if has_request_context():
+        g.telegram_alert_sent = True
+
     # Verificar se alertas estão habilitados
     alert_enabled = os.getenv('TELEGRAM_ALERT_ENABLED', 'false').lower() == 'true'
     logging.debug(f"Telegram alert enabled: {alert_enabled} (valor ENV: {os.getenv('TELEGRAM_ALERT_ENABLED')})")
@@ -69,13 +167,9 @@ def send_telegram_alert(
     
     # Rate limiting: verificar se já foi enviado alerta para esta chave recentemente
     route_key = rate_limit_key or (f"{method}_{route}" if route else "unknown")
-    current_time = time()
-    
-    if route_key in _last_alert_time:
-        time_since_last = current_time - _last_alert_time[route_key]
-        if time_since_last < _ALERT_COOLDOWN:
-            logging.debug(f"Alerta Telegram suprimido por rate limit: {route_key}")
-            return False
+    if not _reserve_rate_slot(route_key, cooldown if cooldown is not None else _ALERT_COOLDOWN):
+        logging.debug(f"Alerta Telegram suprimido por rate limit: {route_key}")
+        return False
     
     # Construir mensagem formatada
     # Usar emoji diferente baseado no tipo de erro
@@ -110,89 +204,50 @@ def send_telegram_alert(
     else:
         emoji = "🚨"  # Emoji padrão para erro crítico (500)
         error_type = "ERRO CRÍTICO"
+    if title:
+        error_type = title
     
     source_label = source.strip() or "Backend"
-    # Montar mensagem principal
-    message_parts = [
-        f"{emoji} *ALERTA - {source_label}* ({error_type})",
-        f"",
-        f"*⏰ Timestamp:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"",
+    header_lines = [
+        f"{emoji} <b>ALERTA - {_esc(source_label)}</b> ({_esc(error_type)})",
+        "",
+        f"<b>⏰ Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
     ]
-    
-    # Adicionar informações da rota
     if method and route:
-        message_parts.append(f"*📍 Rota:* `{method} {route}`")
+        header_lines.append(f"<b>📍 Rota:</b> <code>{_esc(method)} {_esc(route)}</code>")
     elif route:
-        message_parts.append(f"*📍 Rota:* `{route}`")
-    
-    # Adicionar informações do usuário
+        header_lines.append(f"<b>📍 Rota:</b> <code>{_esc(route)}</code>")
     if user_id:
-        message_parts.append(f"*👤 Usuário:* `{user_id}`")
-    
-    # Adicionar mensagem de erro
-    message_parts.append(f"")
-    message_parts.append(f"*❌ Erro:*")
-    message_parts.append(f"```")
-    message_parts.append(error_message[:1000])  # Limitar tamanho
-    message_parts.append(f"```")
-    
-    # Adicionar stack trace (truncado)
+        header_lines.append(f"<b>👤 Usuário:</b> <code>{_esc(user_id)}</code>")
+
+    sections = ["\n".join(header_lines)]
+    sections.append(_pre_section("❌ Erro:", str(error_message), 1500))
     if stack_trace:
-        # Limitar stack trace a 2000 caracteres
-        truncated_trace = stack_trace[:2000]
-        if len(stack_trace) > 2000:
-            truncated_trace += "\n... (truncado)"
-        message_parts.append(f"")
-        message_parts.append(f"*📋 Stack Trace:*")
-        message_parts.append(f"```")
-        message_parts.append(truncated_trace)
-        message_parts.append(f"```")
-    
-    # Adicionar informações adicionais
+        sections.append(_pre_section("📋 Stack Trace:", str(stack_trace), 3000))
     if additional_info:
-        message_parts.append(f"")
-        message_parts.append(f"*ℹ️ Informações Adicionais:*")
+        info_section = "<b>ℹ️ Informações Adicionais:</b>"
         for key, value in additional_info.items():
-            # Limitar valor para evitar mensagens muito longas
             value_str = str(value)
-            if len(value_str) > 500:
-                value_str = value_str[:500] + "... (truncado)"
-            message_parts.append(f"• *{key}:* `{value_str}`")
-    
-    # Juntar todas as partes
-    full_message = "\n".join(message_parts)
-    
-    # URL da API do Telegram
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    
-    # Payload da requisição
-    payload = {
-        "chat_id": group_id,
-        "text": full_message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
-    
-    try:
-        logging.debug(f"Enviando alerta Telegram para rota: {route_key}, URL: {url[:50]}...")
-        response = requests.post(url, json=payload, timeout=5)
-        response.raise_for_status()
-        
-        # Atualizar cache de rate limiting
-        _last_alert_time[route_key] = current_time
-        
-        logging.info(f"✅ Alerta Telegram enviado com sucesso para rota: {route_key}")
+            if len(value_str) > 1500:
+                value_str = value_str[:1500] + "... (truncado)"
+            line = f"• <b>{_esc(key)}:</b> <code>{_esc(value_str)}</code>"
+            if len(info_section) + len(line) + 1 > _TELEGRAM_MAX_CHARS:
+                sections.append(info_section)
+                info_section = line
+            else:
+                info_section = f"{info_section}\n{line}"
+        sections.append(info_section)
+
+    chunks = _pack_chunks(sections)
+
+    if background:
+        threading.Thread(
+            target=_deliver,
+            args=(bot_token, group_id, chunks, route_key),
+            daemon=True,
+        ).start()
         return True
-        
-    except requests.exceptions.RequestException as e:
-        # Não usar logging.error aqui para evitar loop infinito
-        # Se o Telegram falhar, apenas registrar warning
-        logging.warning(f"❌ Falha ao enviar alerta Telegram: {str(e)} | Status: {response.status_code if 'response' in locals() else 'N/A'} | Resposta: {response.text[:200] if 'response' in locals() else 'N/A'}")
-        return False
-    except Exception as e:
-        logging.warning(f"❌ Erro inesperado ao enviar alerta Telegram: {str(e)}", exc_info=True)
-        return False
+    return _deliver(bot_token, group_id, chunks, route_key)
 
 
 def alert_on_error(func):

@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app import db
 from app.routes.mobile.blueprint import mobile_bp
+from app.routes.mobile.error_reporting import remember_exception
 from app.decorators.role_required import role_required
 from app.models.mobile_city_directory import MobileCityDirectory
 from app.models.city import City
@@ -99,6 +100,7 @@ def list_cities_available_for_mobile():
         
     except Exception as e:
         logger.exception("Erro ao listar municípios disponíveis para mobile")
+        remember_exception()
         return jsonify({"erro": "Erro ao listar municípios", "detalhes": str(e)}), 500
 
 
@@ -261,6 +263,7 @@ def create_mobile_city():
     except Exception as e:
         db.session.rollback()
         logger.exception("Erro ao criar município mobile")
+        remember_exception()
         return jsonify({"erro": "Erro interno ao criar município", "detalhes": str(e)}), 500
 
 
@@ -288,6 +291,7 @@ def list_all_mobile_cities():
 
     except Exception as e:
         logger.exception("Erro ao listar municípios mobile")
+        remember_exception()
         return jsonify({"erro": "Erro ao listar municípios", "detalhes": str(e)}), 500
 
 
@@ -307,6 +311,7 @@ def get_mobile_city(city_id: str):
 
     except Exception as e:
         logger.exception("Erro ao buscar município mobile: %s", city_id)
+        remember_exception()
         return jsonify({"erro": "Erro ao buscar município", "detalhes": str(e)}), 500
 
 
@@ -375,6 +380,7 @@ def update_mobile_city(city_id: str):
     except Exception as e:
         db.session.rollback()
         logger.exception("Erro ao atualizar município mobile: %s", city_id)
+        remember_exception()
         return jsonify({"erro": "Erro interno ao atualizar município", "detalhes": str(e)}), 500
 
 
@@ -411,6 +417,7 @@ def deactivate_mobile_city(city_id: str):
     except Exception as e:
         db.session.rollback()
         logger.exception("Erro ao desativar município mobile: %s", city_id)
+        remember_exception()
         return jsonify({"erro": "Erro ao desativar município", "detalhes": str(e)}), 500
 
 
@@ -429,4 +436,5 @@ def get_central_api_url():
         }), 200
     except Exception as e:
         logger.exception("Erro ao obter URL central")
+        remember_exception()
         return jsonify({"erro": "Erro ao obter configuração", "detalhes": str(e)}), 500

@@ -24,7 +24,10 @@ class Test(db.Model):
     max_score = db.Column(db.Float)
     time_limit = db.Column(db.TIMESTAMP)
     end_time = db.Column(db.TIMESTAMP)
-    duration = db.Column(db.Integer)  # Duração em minutos
+    duration = db.Column(db.Integer)  # Duração em minutos (cronômetro / limite)
+    # Tempo estimado de aplicação em minutos (1º-2º: 90; 3º-9º: 150).
+    # Usado no relatório de tempo e como métrica das provas feitas no mobile.
+    estimated_time = db.Column(db.Integer, nullable=True)
     evaluation_mode = db.Column(db.String(20), default='virtual')  # virtual, physical
     created_by = db.Column(db.String, db.ForeignKey('public.users.id'))
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))

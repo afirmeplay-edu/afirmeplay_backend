@@ -73,6 +73,26 @@ def _resolve_grade_id_from_payload(data):
     return str(raw)
 
 
+def _resolve_estimated_time_from_payload(data, grade_id=None):
+    """Tempo estimado (minutos): payload explícito ou convenção por série (1º-2º=90, 3º-9º=150)."""
+    from app.tempo_prova.models import estimated_time_from_grade_name
+
+    if isinstance(data, dict) and data.get("estimated_time") not in (None, ""):
+        try:
+            value = int(data["estimated_time"])
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+
+    gid = grade_id or _resolve_grade_id_from_payload(data)
+    grade_name = None
+    if gid:
+        grade = Grade.query.get(gid)
+        grade_name = grade.name if grade else None
+    return estimated_time_from_grade_name(grade_name)
+
+
 def process_image(image_data, image_type):
     """
     Processa uma imagem em base64 e retorna um dicionário com suas informações
@@ -263,6 +283,7 @@ def criar_avaliacao():
             time_limit=datetime.fromisoformat(data.get('time_limit')) if data.get('time_limit') else None,
             end_time=datetime.fromisoformat(data.get('end_time')) if data.get('end_time') else None,
             duration=data.get('duration'),  # Duração em minutos
+            estimated_time=_resolve_estimated_time_from_payload(data),
             evaluation_mode=evaluation_mode,
             created_by=data.get('created_by'),
             municipalities=data.get('municipalities'),
@@ -1124,6 +1145,9 @@ def atualizar_avaliacao(test_id):
                     setattr(test, campo, data.get('subjects') or data.get('subjects_info'))
                 else:
                     setattr(test, campo, data[campo])
+
+        if "estimated_time" in data or "grade_id" in data or "grade" in data or test.estimated_time is None:
+            test.estimated_time = _resolve_estimated_time_from_payload(data, grade_id=test.grade_id)
 
         _, availability_err = apply_availability_fields(test, data, user)
         if availability_err:

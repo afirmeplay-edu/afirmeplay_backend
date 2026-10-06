@@ -1,5 +1,6 @@
 from datetime import datetime
 import logging
+import traceback
 from typing import Any, Dict, List, Optional, Tuple
 import uuid as uuid_lib
 
@@ -199,15 +200,22 @@ def process_one_submission(
             .order_by(MobileSyncBundleGeneration.sync_bundle_version.asc())
             .all()
         ]
-        print(
-            f"[mobile/v1/sync/upload] bundle não encontrado — school_id={school_id} "
-            f"sync_bundle_version={sbv!r} versões_no_banco={known_versions} "
-            f"submission_id={submission_uuid} student_id={student_id} test_id={test_id}"
+        logging.warning(
+            "[mobile/v1/sync/upload] bundle não encontrado — school_id=%s "
+            "sync_bundle_version=%r versões_no_banco=%s submission_id=%s "
+            "student_id=%s test_id=%s",
+            school_id,
+            sbv,
+            known_versions,
+            submission_uuid,
+            student_id,
+            test_id,
         )
         return {
             "submission_id": str(submission_uuid),
             "status": "error",
             "message": "sync_bundle_version não encontrado para esta escola",
+            "_detail": f"versões no servidor: {known_versions}",
         }
     if datetime.utcnow() > gen.bundle_valid_until:
         return {
@@ -232,11 +240,14 @@ def process_one_submission(
         if remapped:
             remapped_from = incoming_test_id
             test_id = remapped
-            print(
-                f"[mobile/v1/sync/upload] remap regular→ADAP I — "
-                f"from={remapped_from} to={test_id} "
-                f"submission_id={submission_uuid} school_id={school_id} "
-                f"student_id={student_id}"
+            logging.info(
+                "[mobile/v1/sync/upload] remap regular→ADAP I — from=%s to=%s "
+                "submission_id=%s school_id=%s student_id=%s",
+                remapped_from,
+                test_id,
+                submission_uuid,
+                school_id,
+                student_id,
             )
         else:
             return {
@@ -267,12 +278,15 @@ def process_one_submission(
         if _test_version_mismatch_bypassed(test_id) or _test_version_mismatch_bypassed(
             version_test_id
         ):
-            print(
-                f"[mobile/v1/sync/upload] TEST_VERSION_MISMATCH bypass — "
-                f"test_id={test_id} version_test_id={version_test_id} "
-                f"submission_id={submission_uuid} "
-                f"school_id={school_id} student_id={student_id} "
-                f"until={_TEST_VERSION_MISMATCH_BYPASS_UNTIL.isoformat()}"
+            logging.info(
+                "[mobile/v1/sync/upload] TEST_VERSION_MISMATCH bypass — test_id=%s "
+                "version_test_id=%s submission_id=%s school_id=%s student_id=%s until=%s",
+                test_id,
+                version_test_id,
+                submission_uuid,
+                school_id,
+                student_id,
+                _TEST_VERSION_MISMATCH_BYPASS_UNTIL.isoformat(),
             )
         else:
             return {
@@ -280,6 +294,7 @@ def process_one_submission(
                 "status": "error",
                 "message": "test_content_version inválido ou desatualizado",
                 "code": "TEST_VERSION_MISMATCH",
+                "_detail": f"enviado={test_content_version!r} esperado={expected!r}",
             }
 
     tq_ids = {tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).all()}
@@ -339,11 +354,14 @@ def process_one_submission(
                 str(test_content_version) if test_content_version is not None else None
             )
             if existing_submission:
-                print(
-                    f"[mobile/v1/sync/upload] reaplicando submission — "
-                    f"submission_id={submission_uuid} school_id={school_id} "
-                    f"student_id={student_id} test_id={test_id} "
-                    f"test_content_version={stored_version}"
+                logging.info(
+                    "[mobile/v1/sync/upload] reaplicando submission — submission_id=%s "
+                    "school_id=%s student_id=%s test_id=%s test_content_version=%s",
+                    submission_uuid,
+                    school_id,
+                    student_id,
+                    test_id,
+                    stored_version,
                 )
                 existing_submission.device_id = device_id
                 existing_submission.user_id = user_id
@@ -360,10 +378,14 @@ def process_one_submission(
                 )
                 db.session.add(sub_row)
     except Exception as ex:
+        logging.exception(
+            "[mobile/v1/sync/upload] erro ao persistir submission_id=%s", submission_uuid
+        )
         return {
             "submission_id": str(submission_uuid),
             "status": "error",
             "message": f"erro ao persistir: {ex}",
+            "_trace": traceback.format_exc(),
         }
 
     # Gravar sync antes do cálculo: calculate_and_save_result faz commit e, em erro, rollback
@@ -429,11 +451,16 @@ def process_batch(
                 )
             )
         except Exception as ex:
+            logging.exception(
+                "[mobile/v1/sync/upload] exceção ao processar submission_id=%s",
+                item.get("submission_id") if isinstance(item, dict) else None,
+            )
             results.append(
                 {
-                    "submission_id": item.get("submission_id"),
+                    "submission_id": item.get("submission_id") if isinstance(item, dict) else None,
                     "status": "error",
                     "message": str(ex),
+                    "_trace": traceback.format_exc(),
                 }
             )
     _schedule_report_rebuilds(cache.rebuilds)

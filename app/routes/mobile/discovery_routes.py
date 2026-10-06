@@ -3,6 +3,7 @@ import logging
 from flask import jsonify, request
 
 from app.routes.mobile.blueprint import mobile_bp
+from app.routes.mobile.error_reporting import remember_exception
 from app.services.mobile import tenant_discovery_service as discovery_svc
 
 logger = logging.getLogger(__name__)
@@ -22,4 +23,5 @@ def mobile_available_cities():
         return jsonify(payload), 200
     except Exception:
         logger.exception("mobile available-cities failed")
+        remember_exception()
         return jsonify({"error": "Erro ao listar municípios disponíveis"}), 500

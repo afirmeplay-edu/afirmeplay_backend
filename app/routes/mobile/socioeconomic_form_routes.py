@@ -8,6 +8,11 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
 from app.models.user import User, RoleEnum
 from app.routes.mobile.blueprint import mobile_bp
+from app.routes.mobile.error_reporting import (
+    remember_exception,
+    report_submission_errors,
+    strip_internal_fields,
+)
 from app.services.mobile.device_service import is_valid_uuid_v4
 from app.services.mobile.socioeconomic_form_mobile_service import (
     SocioeconomicFormMobileError,
@@ -19,6 +24,7 @@ from app.services.mobile.socioeconomic_form_mobile_service import (
 from app.utils.tenant_middleware import get_current_tenant_context
 
 import logging
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +93,7 @@ def mobile_list_form_students(form_id):
         return jsonify({"error": e.message}), e.status_code
     except Exception as e:
         logger.error(f"Erro ao listar alunos do formulário {form_id}: {e}", exc_info=True)
+        remember_exception()
         return jsonify({"error": "Erro ao listar alunos"}), 500
 
 
@@ -122,6 +129,7 @@ def mobile_list_form_users(form_id):
         return jsonify({"error": e.message}), e.status_code
     except Exception as e:
         logger.error(f"Erro ao listar usuários do formulário {form_id}: {e}", exc_info=True)
+        remember_exception()
         return jsonify({"error": "Erro ao listar usuários"}), 500
 
 
@@ -160,6 +168,7 @@ def mobile_get_form_entry():
         return jsonify({"error": e.message}), e.status_code
     except Exception as e:
         logger.error(f"Erro ao carregar formulário {form_id}: {e}", exc_info=True)
+        remember_exception()
         return jsonify({"error": "Erro ao carregar formulário"}), 500
 
 
@@ -217,6 +226,7 @@ def mobile_submit_form():
     except Exception as e:
         db.session.rollback()
         logger.error(f"Erro ao salvar formulário {form_id}: {e}", exc_info=True)
+        remember_exception()
         return jsonify({"error": "Erro ao salvar respostas"}), 500
 
 
@@ -289,6 +299,7 @@ def mobile_submit_form_batch():
                 "status": "error",
                 "code": "internal_error",
                 "message": str(e),
+                "_trace": traceback.format_exc(),
             })
             error_count += 1
             logger.error(f"Erro em submission {offline_id}: {e}", exc_info=True)
@@ -298,10 +309,26 @@ def mobile_submit_form_batch():
     except Exception as e:
         db.session.rollback()
         logger.error(f"Erro ao commitar lote de formulários: {e}", exc_info=True)
+        remember_exception()
         return jsonify({"error": "Erro ao salvar lote de respostas"}), 500
 
     logger.info(
         f"[mobile/socioeconomic-forms/batch] applied={applied_count} "
         f"errors={error_count} total={len(submissions)}"
     )
+    errors = [r for r in results if r.get("status") == "error"]
+    if errors:
+        try:
+            report_submission_errors(
+                errors=errors,
+                submissions=submissions,
+                applied=applied_count,
+                user_id=str(get_jwt_identity()),
+                device_id=device_id,
+                id_key="offline_submission_id",
+                fields=("form_id", "student_id", "user_id", "form_content_version"),
+            )
+        except Exception:
+            logger.warning("Falha ao reportar erros do lote de formulários", exc_info=True)
+    strip_internal_fields(results)
     return jsonify({"results": results}), 200

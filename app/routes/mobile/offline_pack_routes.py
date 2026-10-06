@@ -5,6 +5,7 @@ from app.decorators.tenant_required import get_current_tenant_context, requires_
 from app.models.mobile_models import MobileOfflinePackCode
 from app.permissions import get_current_user_from_token, role_required
 from app.routes.mobile.blueprint import mobile_bp
+from app.routes.mobile.error_reporting import remember_exception
 from app.services.mobile.device_service import is_valid_uuid_v4
 from app.services.mobile import offline_pack_service as pack_svc
 
@@ -76,6 +77,7 @@ def _offline_pack_register_post():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         db.session.rollback()
+        remember_exception()
         return jsonify({"error": str(e)}), 500
 
     return (
@@ -122,6 +124,7 @@ def _offline_pack_list_get():
         rows = pack_svc.list_offline_packs(include_expired=include_expired)
         items = [pack_svc.pack_to_api_dict(r, user) for r in rows]
     except Exception as e:
+        remember_exception()
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"items": items, "total": len(items)}), 200
@@ -157,6 +160,7 @@ def _offline_pack_bulk_delete_post():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         db.session.rollback()
+        remember_exception()
         return jsonify({"error": str(e)}), 500
 
     return jsonify(result), 200
@@ -185,6 +189,7 @@ def _offline_pack_qrcode_get(pack_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
+        remember_exception()
         return jsonify({"error": str(e)}), 500
 
     return jsonify(payload), 200
@@ -287,6 +292,7 @@ def _offline_pack_patch(pack_id):
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         db.session.rollback()
+        remember_exception()
         return jsonify({"error": str(e)}), 500
 
     return jsonify(payload), 200
@@ -315,6 +321,7 @@ def _offline_pack_delete(pack_id):
         db.session.commit()
     except Exception as e:
         db.session.rollback()
+        remember_exception()
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"deleted": True, "offline_pack_id": deleted_id}), 200
@@ -395,6 +402,7 @@ def offline_pack_redeem():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         db.session.rollback()
+        remember_exception()
         return jsonify({"error": str(e)}), 500
 
     return jsonify(payload), 200

@@ -9,6 +9,11 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
 from app.models.user import User, RoleEnum
 from app.routes.mobile.blueprint import mobile_bp
+from app.routes.mobile.error_reporting import (
+    remember_exception,
+    report_submission_errors,
+    strip_internal_fields,
+)
 from app.services.mobile.device_service import is_valid_uuid_v4
 from app.services.cartao_resposta.manual_answer_sheet_service import (
     ManualAnswerSheetError,
@@ -19,6 +24,7 @@ from app.services.cartao_resposta.manual_answer_sheet_service import (
 from app.utils.tenant_middleware import get_current_tenant_context
 
 import logging
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +109,7 @@ def mobile_list_gabarito_students(gabarito_id):
         return jsonify({"error": e.message}), e.status_code
     except Exception as e:
         logger.error(f"Erro ao listar alunos do gabarito {gabarito_id}: {e}", exc_info=True)
+        remember_exception()
         return jsonify({"error": "Erro ao listar alunos"}), 500
 
 
@@ -147,6 +154,7 @@ def mobile_get_manual_entry_form():
         return jsonify({"error": e.message}), e.status_code
     except Exception as e:
         logger.error(f"Erro ao carregar formulário manual: {e}", exc_info=True)
+        remember_exception()
         return jsonify({"error": "Erro ao carregar formulário"}), 500
 
 
@@ -237,6 +245,7 @@ def mobile_submit_manual_entry():
     except Exception as e:
         db.session.rollback()
         logger.error(f"[mobile/answer-sheets/manual-entry] 500 — {type(e).__name__}: {e}", exc_info=True)
+        remember_exception()
         return jsonify({"error": "Erro ao registrar respostas"}), 500
 
 
@@ -347,6 +356,7 @@ def mobile_submit_manual_batch():
                 "status": "error",
                 "code": "internal_error",
                 "message": str(e),
+                "_trace": traceback.format_exc(),
             })
             error_count += 1
             logger.error(f"Erro em submission {offline_id}: {e}", exc_info=True)
@@ -356,10 +366,26 @@ def mobile_submit_manual_batch():
     except Exception as e:
         db.session.rollback()
         logger.error(f"Erro ao commitar lote: {e}", exc_info=True)
+        remember_exception()
         return jsonify({"error": "Erro ao salvar lote de respostas"}), 500
 
     logger.info(
         f"[mobile/answer-sheets/batch] 200 — applied={applied_count} errors={error_count} total={len(submissions)}"
     )
+    errors = [r for r in results if r.get("status") == "error"]
+    if errors:
+        try:
+            report_submission_errors(
+                errors=errors,
+                submissions=submissions,
+                applied=applied_count,
+                user_id=str(get_jwt_identity()),
+                device_id=device_id,
+                id_key="offline_submission_id",
+                fields=("gabarito_id", "test_id", "student_id"),
+            )
+        except Exception:
+            logger.warning("Falha ao reportar erros do lote de cartões", exc_info=True)
+    strip_internal_fields(results)
 
     return jsonify({"results": results}), 200

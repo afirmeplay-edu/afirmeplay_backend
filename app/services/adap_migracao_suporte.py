@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Migração dos alunos de turmas de Suporte (Educação Especial) para a subturma ADAP da turma regular.
 
-Rodada 1: só casos limpos. O aluno sai da turma "Suporte N" e entra na subturma ADAP N
+Só casos limpos (Rodada 1: escolas escolhidas; Rodada 2: todas, incluindo o Suporte 3).
+O aluno sai da turma "Suporte N" (N = 1, 2 ou 3) e entra na subturma ADAP N
 da turma regular do mesmo ano (turma única ou turma A). Quando existe cadastro regular
 duplicado (mesmo nome normalizado e mesmo ano) sem nota, esse cadastro é desvinculado
 da turma e da escola e recebe a marca ``cadastro_descartado`` em ``users.traits``.
@@ -25,13 +26,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+from sqlalchemy import null as sa_null
+
 logger = logging.getLogger(__name__)
 
 ADAP_EDUCATION_STAGE_ID = "247c4af5-2688-41b0-95fa-443f503a9d87"
 PRODUCTION_HOSTS = {h.strip() for h in os.environ.get("ADAP_PRODUCTION_HOSTS", "").split(",") if h.strip()}
 PRODUCTION_DATABASES = {"afirmeplay_prod"}
 DISCARD_TRAIT_KEY = "cadastro_descartado"
-DISCARD_REASON = "duplicidade_adap_rodada1"
+DISCARD_REASON = "duplicidade_adap_rodada{rodada}"
+RODADAS = (1, 2)
 QUESTIONARIO_OPCOES = ("criar", "nao-criar")
 STUDENT_FORM_TYPES = ("aluno-jovem", "aluno-velho")
 CLOSED_CLASS_TEST_STATUS = {"concluida", "concluído", "concluido", "encerrada", "finalizada", "expirada"}
@@ -43,17 +47,20 @@ _STOPWORDS_RE = re.compile(r"\b(de|da|do|das|dos|e)\b")
 _ACCENTS = str.maketrans("áàâãäéèêëíìîïóòôõöúùûüçñ", "aaaaaeeeeiiiiooooouuuucn")
 
 MOTIVOS = {
-    "suporte_3": "Suporte 3 (fora do escopo)",
     "nivel_indefinido": "Nível de suporte não identificado na série",
-    "sem_destino": "Sem turma de destino clara",
+    "sem_destino": "Sem turma regular de destino na escola",
     "mais_de_uma_turma_suporte": "Aluno em mais de uma turma de suporte",
+    "matricula_ou_edicao_manual": "Matrícula ou edição manual que impede a migração",
     "prova_em_andamento": "Prova em andamento (sessão aberta ou aplicação aberta sem resultado)",
     "homonimo_outro_ano": "Homônimo na turma regular de outro ano (confirmar com a escola)",
     "duplicado_iniciais_ou_login": "Duplicado só por iniciais ou login",
     "mais_de_um_candidato_forte": "Mais de um cadastro regular com o mesmo nome e ano",
     "nota_nos_dois": "Nota nos dois cadastros",
+    "nota_em_cadastro_sem_vinculo": "Nota também em cadastro sem escola com o mesmo nome",
     "nota_so_no_regular": "Nota só no cadastro regular",
     "sem_nota_em_nenhum": "Sem nota em nenhum dos cadastros",
+    "suporte_com_dados": "Cadastro de Suporte (que seria descartado) tem respostas, sessão de prova, folha de prova física ou questionário",
+    "mais_de_dois_cadastros": "Há outro cadastro com o mesmo nome no município (mais de um regular e um de Suporte)",
     "questionario_no_descartado": "Resposta do questionário no cadastro que seria descartado",
     "questionario_nos_dois": "Os dois cadastros responderam (ou começaram) o mesmo formulário do questionário",
     "excluido_manual": "Excluído desta rodada por id (--excluir-aluno)",
@@ -167,11 +174,15 @@ class Candidato:
     regular_id: Optional[str] = None
     regular_nome: Optional[str] = None
     regular_turma: Optional[str] = None
+    regular_turma_id: Optional[str] = None
     criterio: Optional[str] = None
     categoria: str = ""
     notas_suporte: int = 0
     notas_regular: int = 0
+    sem_vinculo_mesmo_nome: List[Dict[str, Any]] = field(default_factory=list)
+    manter: str = "suporte"
     motivo: Optional[str] = None
+    detalhe: Optional[str] = None
 
     @property
     def elegivel(self) -> bool:
@@ -179,6 +190,8 @@ class Candidato:
 
     @property
     def tipo(self) -> str:
+        if self.manter == "regular":
+            return "regular_mantido"
         return "duplicado_forte" if self.regular_id else "so_no_suporte"
 
     def as_dict(self) -> Dict[str, Any]:
@@ -192,6 +205,7 @@ class Candidato:
 class Selecao:
     elegiveis: List[Candidato] = field(default_factory=list)
     excluidos: List[Candidato] = field(default_factory=list)
+    turmas_suporte: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _load_rows():
@@ -204,6 +218,7 @@ def _load_rows():
     from app.models.school import School
     from app.models.student import Student
     from app.models.studentClass import Class
+    from app.models.studentSchoolEnrollment import StudentSchoolEnrollment
     from app.models.testSession import TestSession
     from app.models.user import User
     from app.socioeconomic_forms.models.form import Form
@@ -212,16 +227,45 @@ def _load_rows():
 
     grades = {str(g.id): g for g in Grade.query.all()}
     classes = {str(c.id): c for c in Class.query.all()}
-    schools = {str(s.id): s.name for s in School.query.all()}
+    school_rows = School.query.all()
+    schools = {str(s.id): s.name for s in school_rows}
     students = db.session.query(
-        Student.id, Student.name, Student.class_id, Student.school_id, Student.user_id
+        Student.id, Student.name, Student.class_id, Student.school_id, Student.user_id, Student.subturma_id
     ).all()
     user_ids = [s.user_id for s in students if s.user_id]
     emails = {}
+    cidade_usuario: Dict[str, Optional[str]] = {}
+    descartados: Set[str] = set()
     for chunk_start in range(0, len(user_ids), 1000):
         chunk = user_ids[chunk_start:chunk_start + 1000]
-        for uid, email in db.session.query(User.id, User.email).filter(User.id.in_(chunk)).all():
+        for uid, email, city_id, traits in db.session.query(
+            User.id, User.email, User.city_id, User.traits
+        ).filter(User.id.in_(chunk)).all():
             emails[uid] = email
+            cidade_usuario[uid] = _sid(city_id)
+            if isinstance(traits, dict) and traits.get(DISCARD_TRAIT_KEY):
+                descartados.add(uid)
+    matriculas_abertas: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for sid, school_id, class_id, valid_from in db.session.query(
+        StudentSchoolEnrollment.student_id, StudentSchoolEnrollment.school_id,
+        StudentSchoolEnrollment.class_id, StudentSchoolEnrollment.valid_from,
+    ).filter(StudentSchoolEnrollment.valid_to.is_(None)).all():
+        matriculas_abertas[str(sid)].append(
+            {"school_id": _sid(school_id), "class_id": _sid(class_id), "valid_from": valid_from})
+    from app.models.physicalTestForm import PhysicalTestForm
+    from app.models.studentAnswer import StudentAnswer
+
+    outros_dados: Dict[str, Dict[str, int]] = defaultdict(dict)
+    for model, chave in ((StudentAnswer, "respostas"), (TestSession, "sessoes"), (PhysicalTestForm, "provas_fisicas")):
+        for sid, n in db.session.query(model.student_id, func.count()).group_by(model.student_id).all():
+            outros_dados[str(sid)][chave] = int(n)
+    extras = {
+        "outros_dados": outros_dados,
+        "matriculas_abertas": matriculas_abertas,
+        "cidade_usuario": cidade_usuario,
+        "cidade_escola": {str(s.id): _sid(s.city_id) for s in school_rows},
+        "descartados": descartados,
+    }
     er = dict(db.session.query(EvaluationResult.student_id, func.count()).group_by(EvaluationResult.student_id).all())
     asr = dict(db.session.query(AnswerSheetResult.student_id, func.count()).group_by(AnswerSheetResult.student_id).all())
     respondeu = {
@@ -253,7 +297,7 @@ def _load_rows():
             if atual is None or _ORDEM_ESTADO_FORM[novo] > _ORDEM_ESTADO_FORM[atual]:
                 estado_form[uid][fid] = novo
     return (grades, classes, schools, students, emails, er, asr, respondeu, sessoes_abertas,
-            abertas_por_turma, feitas, estado_form)
+            abertas_por_turma, feitas, estado_form, extras)
 
 
 _ORDEM_ESTADO_FORM = {"pendente": 0, "em_andamento": 1, "respondido": 2}
@@ -282,7 +326,13 @@ def selecionar_rodada1(
 ) -> Selecao:
     """Classifica os alunos das turmas de Suporte do schema atual (regras C2/C3)."""
     (grades, classes, schools, students, emails, er, asr, respondeu,
-     sessoes_abertas, abertas_por_turma, feitas, estado_form) = _load_rows()
+     sessoes_abertas, abertas_por_turma, feitas, estado_form, extras) = _load_rows()
+    matriculas_abertas = extras.get("matriculas_abertas", {})
+    cidade_usuario = extras.get("cidade_usuario", {})
+    cidade_escola = extras.get("cidade_escola", {})
+    descartados = extras.get("descartados", set())
+    outros_dados = extras.get("outros_dados", {})
+    agora = datetime.utcnow()
 
     def grade_of(class_obj):
         return grades.get(str(class_obj.grade_id)) if class_obj is not None and class_obj.grade_id else None
@@ -300,8 +350,6 @@ def selecionar_rodada1(
     def destino(school_id: str, ano: Optional[int], nivel: Optional[int]) -> Tuple[Optional[Any], str]:
         if nivel is None:
             return None, "NIVEL INDEFINIDO"
-        if nivel == 3:
-            return None, "NIVEL FORA DO ESCOPO (3)"
         if ano is None:
             return None, "SEM ANO NO NOME"
         regs = regulares.get((school_id, ano), [])
@@ -315,6 +363,37 @@ def selecionar_rodada1(
         if len(turmas_a) > 1:
             return None, "MAIS DE UMA TURMA A"
         return turmas_a[0], "OK"
+
+    def problema_cadastro(student_id: str, user_id: Optional[str], school_id: str, class_id: str,
+                          subturma_id: Any = None) -> Optional[str]:
+        """Matrícula ou edição manual que faria a gravação falhar ou sair errada."""
+        abertas = matriculas_abertas.get(student_id, [])
+        if len(abertas) > 1:
+            return f"{len(abertas)} matrículas abertas"
+        for m in abertas:
+            if m["school_id"] != school_id or (m["class_id"] and m["class_id"] != class_id):
+                return "matrícula aberta em outra turma ou escola"
+            if m["valid_from"] is not None and m["valid_from"] > agora:
+                return f"matrícula aberta com início no futuro ({_iso(m['valid_from'])})"
+        if subturma_id:
+            return "já vinculado a uma subturma"
+        if user_id and user_id in descartados:
+            return "cadastro marcado como descartado"
+        if user_id and cidade_usuario.get(user_id) and cidade_escola.get(school_id) \
+                and cidade_usuario[user_id] != cidade_escola[school_id]:
+            return "usuário de outro município"
+        return None
+
+    sem_vinculo: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    todos_por_nome: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for s in students:
+        todos_por_nome[nome_normalizado(s.name)].append(
+            {"id": str(s.id), "escola": schools.get(str(s.school_id), str(s.school_id)) if s.school_id else "sem escola"})
+        if not s.school_id:
+            sem_vinculo[nome_normalizado(s.name)].append({
+                "id": str(s.id), "nome": s.name,
+                "notas": int(er.get(str(s.id), 0) or 0) + int(asr.get(str(s.id), 0) or 0),
+            })
 
     rows = []
     for s in students:
@@ -331,6 +410,7 @@ def selecionar_rodada1(
         rows.append({
             "id": str(s.id), "name": s.name, "school_id": str(s.school_id), "class_id": str(s.class_id),
             "class_name": c.name, "user_id": s.user_id, "especial": serie_especial(g),
+            "subturma_id": getattr(s, "subturma_id", None),
             "nivel": nivel_da_serie(g.name),
             "ano": ano_do_texto(g.name) if ano_do_texto(g.name) is not None else ano_do_texto(c.name),
             "ano_turma": ano_do_texto(c.name),
@@ -386,6 +466,7 @@ def selecionar_rodada1(
             crit, r = melhor
             cand.criterio = crit
             cand.regular_id, cand.regular_nome, cand.regular_turma = r["id"], r["name"], r["class_name"]
+            cand.regular_turma_id = r["class_id"]
             cand.notas_regular = r["notas"]
             if s["notas"] > 0 and r["notas"] > 0:
                 cand.categoria = "DUP_nota_nos_dois"
@@ -399,18 +480,28 @@ def selecionar_rodada1(
             cand.criterio = melhor[0] if melhor else None
             cand.categoria = "SO_NO_SUPORTE_com_nota" if s["notas"] > 0 else "SO_NO_SUPORTE_sem_nota"
 
+        cand.sem_vinculo_mesmo_nome = [x for x in sem_vinculo.get(s["nome_norm"], []) if x["id"] != s["id"]]
+        problema = problema_cadastro(s["id"], s["user_id"], s["school_id"], s["class_id"], s["subturma_id"])
+        if problema is None and cand.regular_id:
+            r = melhor[1]
+            problema = problema_cadastro(r["id"], r["user_id"], r["school_id"], r["class_id"], r["subturma_id"])
+            problema = f"cadastro regular: {problema}" if problema else None
+
         # Motivo de exclusão (primeiro que se aplica)
         tem_prova_aberta = s["id"] in sessoes_abertas or bool(
             abertas_por_turma.get(s["class_id"], set()) - feitas.get(s["id"], set())
         )
-        if s["nivel"] == 3:
-            cand.motivo = "suporte_3"
-        elif s["nivel"] is None:
+        if s["nivel"] is None:
             cand.motivo = "nivel_indefinido"
         elif dest is None:
             cand.motivo = "sem_destino"
+            ano_txt = f"{s['ano_turma']}º ano" if s["ano_turma"] is not None else "ano não identificado"
+            cand.detalhe = f"{cand.escola} — {ano_txt}: {situacao}"
         elif multi[(s["school_id"], s["nome_norm"])] > 1:
             cand.motivo = "mais_de_uma_turma_suporte"
+        elif problema:
+            cand.motivo = "matricula_ou_edicao_manual"
+            cand.detalhe = problema
         elif tem_prova_aberta:
             cand.motivo = "prova_em_andamento"
         elif melhor and melhor[0].startswith("D"):
@@ -421,10 +512,26 @@ def selecionar_rodada1(
             cand.motivo = "mais_de_um_candidato_forte"
         elif cand.categoria == "DUP_nota_nos_dois":
             cand.motivo = "nota_nos_dois"
-        elif cand.categoria == "DUP_nota_so_no_regular":
-            cand.motivo = "nota_so_no_regular"
-        elif cand.categoria == "DUP_sem_nota_em_nenhum":
-            cand.motivo = "sem_nota_em_nenhum"
+        elif any(x["notas"] for x in cand.sem_vinculo_mesmo_nome):
+            cand.motivo = "nota_em_cadastro_sem_vinculo"
+            cand.detalhe = ", ".join(f"{x['id']} ({x['notas']} nota(s))"
+                                     for x in cand.sem_vinculo_mesmo_nome if x["notas"])
+        elif cand.categoria in ("DUP_nota_so_no_regular", "DUP_sem_nota_em_nenhum"):
+            # Fica o cadastro regular: ele entra na subturma ADAP da própria turma e o de Suporte é descartado.
+            dados_suporte = dict(outros_dados.get(s["id"], {}))
+            dados_suporte.update({f"questionario_{fid}": 1 for fid, estado in s["formularios"].items()
+                                  if estado in ("respondido", "em_andamento")})
+            outros = [x for x in todos_por_nome.get(s["nome_norm"], []) if x["id"] not in (s["id"], cand.regular_id)]
+            if outros:
+                cand.motivo = "mais_de_dois_cadastros"
+                cand.detalhe = ", ".join(f"{x['id']} ({x['escola']})" for x in outros)
+            elif any(dados_suporte.values()):
+                cand.motivo = "suporte_com_dados"
+                cand.detalhe = ", ".join(f"{k}={v}" for k, v in sorted(dados_suporte.items()) if v)
+            else:
+                cand.manter = "regular"
+                cand.destino_id, cand.destino = cand.regular_turma_id, cand.regular_turma
+                cand.situacao_destino = "TURMA DO CADASTRO REGULAR"
         elif not incluir_questionario_descartado and cand.regular_id and melhor[1]["respondeu"] and not s["respondeu"]:
             cand.motivo = "questionario_no_descartado"
         elif incluir_questionario_descartado and cand.regular_id and conflito_questionario(
@@ -438,6 +545,24 @@ def selecionar_rodada1(
 
     selecao.elegiveis.sort(key=lambda c: (c.escola, c.turma_suporte, c.nivel or 0, c.nome))
     selecao.excluidos.sort(key=lambda c: (c.escola, c.motivo or "", c.nome))
+
+    # Turmas de Suporte: quantos alunos têm hoje e quantos ficariam depois da migração
+    saem = Counter(c.turma_suporte_id for c in selecao.elegiveis)
+    alunos_por_turma = Counter(str(s.class_id) for s in students if s.class_id)
+    for c in classes.values():
+        g = grade_of(c)
+        if g is None or not serie_especial(g) or not c.school_id:
+            continue
+        if escola_ids and str(c.school_id) not in escola_ids:
+            continue
+        cid = str(c.id)
+        selecao.turmas_suporte.append({
+            "turma_id": cid, "turma": c.name, "serie": g.name, "nivel": nivel_da_serie(g.name),
+            "escola_id": str(c.school_id), "escola": schools.get(str(c.school_id), ""),
+            "alunos": alunos_por_turma.get(cid, 0), "migrariam": saem.get(cid, 0),
+            "ficariam": alunos_por_turma.get(cid, 0) - saem.get(cid, 0),
+        })
+    selecao.turmas_suporte.sort(key=lambda t: (t["escola"], t["serie"], t["turma"] or ""))
     return selecao
 
 
@@ -696,19 +821,32 @@ def _get_or_create_subturma(class_obj, nivel: int) -> Tuple[Any, bool]:
     return create_subturma(class_obj, nivel), True
 
 
+def _conferir_estado_selecionado(cand: Candidato, aluno, regular) -> None:
+    """Recusa o aluno se alguém mexeu nos cadastros depois da seleção."""
+    if aluno is None or _sid(aluno.class_id) != cand.turma_suporte_id or _sid(aluno.school_id) != cand.escola_id \
+            or aluno.subturma_id is not None:
+        raise MigracaoError("O cadastro de Suporte mudou depois da seleção (turma, escola ou subturma).")
+    if cand.regular_id and (regular is None or _sid(regular.class_id) != cand.regular_turma_id
+                            or _sid(regular.school_id) != cand.escola_id):
+        raise MigracaoError("O cadastro regular mudou depois da seleção (turma ou escola).")
+
+
 def _migrar_um(
-    cand: Candidato, questionario: str, agora: datetime, mover_questionario: bool = False
+    cand: Candidato, questionario: str, agora: datetime, mover_questionario: bool = False, rodada: int = 2
 ) -> Dict[str, Any]:
     from app import db
     from app.models.student import Student
     from app.models.studentClass import Class
-    from app.services.student_enrollment_service import close_active_enrollment, transfer_student_to_class
+    from app.services.student_enrollment_service import transfer_student_to_class
     from app.services.subturma_service import link_student_to_subturma
     from app.socioeconomic_forms.models.form_recipient import FormRecipient
 
     aluno = Student.query.get(cand.student_id)
     destino = Class.query.get(_uuid(cand.destino_id))
     regular = Student.query.get(cand.regular_id) if cand.regular_id else None
+    _conferir_estado_selecionado(cand, aluno, regular)
+    if cand.manter == "regular":
+        return _migrar_regular_mantido(cand, aluno, regular, agora, rodada)
     entry: Dict[str, Any] = {
         "student_id": cand.student_id, "nome": cand.nome, "escola": cand.escola, "tipo": cand.tipo,
         "nivel": cand.nivel, "turma_suporte": cand.turma_suporte, "destino": cand.destino,
@@ -745,22 +883,55 @@ def _migrar_um(
     }
 
     if regular is not None:
-        regular.subturma_id = None
-        regular.class_id = None
-        regular.school_id = None
-        close_active_enrollment(db.session, regular.id, valid_to=agora)
-        user = regular.user
-        if user is not None:
-            traits = dict(user.traits) if isinstance(user.traits, dict) else {}
-            traits[DISCARD_TRAIT_KEY] = {
-                "motivo": DISCARD_REASON,
-                "mantido_student_id": cand.student_id,
-                "data": agora.isoformat(),
-            }
-            user.traits = traits
-        db.session.flush()
+        _descartar(regular, cand.student_id, agora, rodada)
 
     entry["depois"] = {"aluno": _snapshot(aluno), "regular": _snapshot(regular) if regular else None}
+    return entry
+
+
+def _descartar(student, mantido_id: str, agora: datetime, rodada: int) -> None:
+    """Desvincula o cadastro (sem escola e sem turma), fecha a matrícula e marca o usuário. Não apaga."""
+    from app import db
+    from app.services.student_enrollment_service import close_active_enrollment
+
+    student.subturma_id = None
+    student.class_id = None
+    student.school_id = None
+    close_active_enrollment(db.session, student.id, valid_to=agora)
+    user = student.user
+    if user is not None:
+        traits = dict(user.traits) if isinstance(user.traits, dict) else {}
+        traits[DISCARD_TRAIT_KEY] = {
+            "motivo": DISCARD_REASON.format(rodada=rodada),
+            "mantido_student_id": mantido_id,
+            "data": agora.isoformat(),
+        }
+        user.traits = traits
+    db.session.flush()
+
+
+def _migrar_regular_mantido(cand: Candidato, aluno, regular, agora: datetime, rodada: int) -> Dict[str, Any]:
+    """Fica o cadastro regular: entra na subturma ADAP da própria turma; o de Suporte é descartado."""
+    from app import db
+    from app.models.studentClass import Class
+    from app.services.subturma_service import link_student_to_subturma
+
+    turma = Class.query.get(_uuid(cand.regular_turma_id))
+    entry: Dict[str, Any] = {
+        "student_id": cand.student_id, "nome": cand.nome, "escola": cand.escola, "tipo": cand.tipo,
+        "nivel": cand.nivel, "turma_suporte": cand.turma_suporte, "destino": cand.destino,
+        "destino_id": cand.destino_id, "regular_id": cand.regular_id,
+        "antes": {"aluno": _snapshot(aluno), "regular": _snapshot(regular)},
+        "questionario_movido": None,
+    }
+    subturma, criada = _get_or_create_subturma(turma, int(cand.nivel))
+    entry["subturma_id"] = _sid(subturma.id)
+    entry["subturma_criada"] = criada
+    link_student_to_subturma(regular, subturma)
+    db.session.flush()
+    _descartar(aluno, cand.regular_id, agora, rodada)
+    entry["questionario"] = {"opcao": None, "novos_destinatarios": [], "nao_criados_por_ja_ter_respondido": []}
+    entry["depois"] = {"aluno": _snapshot(aluno), "regular": _snapshot(regular)}
     return entry
 
 
@@ -796,10 +967,25 @@ def _resumo_selecao(selecao: Selecao) -> Dict[str, Any]:
         "por_escola": dict(Counter(c.escola for c in eleg)),
         "subturmas_destino": len({(c.destino_id, c.nivel) for c in eleg}),
         "turmas_destino": len({c.destino_id for c in eleg}),
-        "cadastros_regulares_a_desvincular": sum(1 for c in eleg if c.regular_id),
+        "cadastros_regulares_a_desvincular": sum(1 for c in eleg if c.tipo == "duplicado_forte"),
+        "cadastros_suporte_a_desvincular": sum(1 for c in eleg if c.tipo == "regular_mantido"),
         "excluidos": len(selecao.excluidos),
         "excluidos_por_motivo": dict(Counter(c.motivo for c in selecao.excluidos)),
+        "por_escola_nivel": _tabela_por_escola(selecao),
+        "turmas_suporte_vazias_depois": sum(1 for t in selecao.turmas_suporte if t["ficariam"] == 0),
+        "turmas_suporte_com_alunos_depois": sum(1 for t in selecao.turmas_suporte if t["ficariam"] > 0),
     }
+
+
+def _tabela_por_escola(selecao: Selecao) -> Dict[str, Dict[str, int]]:
+    tabela: Dict[str, Dict[str, int]] = defaultdict(lambda: {
+        "suporte_1": 0, "suporte_2": 0, "suporte_3": 0, "nivel_indefinido": 0, "migrariam": 0, "ficam_de_fora": 0})
+    for lista, chave in ((selecao.elegiveis, "migrariam"), (selecao.excluidos, "ficam_de_fora")):
+        for c in lista:
+            linha = tabela[c.escola]
+            linha[f"suporte_{c.nivel}" if c.nivel in (1, 2, 3) else "nivel_indefinido"] += 1
+            linha[chave] += 1
+    return {escola: dict(v) for escola, v in sorted(tabela.items())}
 
 
 def _affected_ids(entries: Iterable[Dict[str, Any]]) -> Tuple[Set[str], Set[str], Set[str], Set[str]]:
@@ -877,8 +1063,9 @@ def executar(
     confirmar_producao: Optional[str] = None,
     incluir_questionario_descartado: bool = False,
     excluir_alunos: Optional[Set[str]] = None,
+    rodada: int = 2,
 ) -> Dict[str, Any]:
-    """Seleciona a Rodada 1 e, com ``write=True``, migra aluno a aluno (uma transação por aluno).
+    """Seleciona os casos limpos e, com ``write=True``, migra aluno a aluno (uma transação por aluno).
 
     ``incluir_questionario_descartado`` (desligado por padrão): inclui quem respondeu o
     questionário só no cadastro descartado, passando as respostas para o cadastro mantido.
@@ -887,6 +1074,8 @@ def executar(
     from app.models.student import Student
     from app.models.studentClass import Class
 
+    if rodada not in RODADAS:
+        raise MigracaoError(f"--rodada aceita: {', '.join(map(str, RODADAS))}.")
     target = assert_environment(schema, write=write, confirmar_producao=confirmar_producao)
     if write and questionario not in QUESTIONARIO_OPCOES:
         raise MigracaoError("No --write é obrigatório escolher --questionario-quem-respondeu criar|nao-criar.")
@@ -905,6 +1094,8 @@ def executar(
     mover = {"alunos": 0, "destinatarios": 0, "respostas": 0, "removidos_do_mantido": 0,
              "ficam_no_descartado": 0, "por_aluno": []}
     for cand in selecao.elegiveis:
+        if cand.manter == "regular":
+            continue
         aluno = Student.query.get(cand.student_id)
         regular = Student.query.get(cand.regular_id) if cand.regular_id else None
         plano = (
@@ -936,7 +1127,7 @@ def executar(
     db.session.rollback()
 
     payload: Dict[str, Any] = {
-        "tipo": "adap_migracao_suporte_rodada1",
+        "tipo": "adap_migracao_suporte_rodada1", "rodada": rodada,
         "schema": schema, "escola_filtro": escola, "escola_ids": sorted(escola_ids or []),
         "modo": "gravacao" if write else "simulacao", "questionario_quem_respondeu": questionario,
         "incluir_questionario_descartado": incluir_questionario_descartado,
@@ -945,6 +1136,7 @@ def executar(
         "resumo": resumo,
         "elegiveis": [c.as_dict() for c in selecao.elegiveis],
         "excluidos": [c.as_dict() for c in selecao.excluidos],
+        "turmas_suporte": selecao.turmas_suporte,
         "alunos": [], "erros": [],
     }
 
@@ -952,7 +1144,7 @@ def executar(
         agora = datetime.utcnow()
         for cand in selecao.elegiveis:
             try:
-                entry = _migrar_um(cand, questionario, agora, incluir_questionario_descartado)
+                entry = _migrar_um(cand, questionario, agora, incluir_questionario_descartado, rodada)
                 db.session.commit()
                 payload["alunos"].append(entry)
             except Exception as exc:  # um aluno com erro não interrompe os demais
@@ -963,7 +1155,7 @@ def executar(
         payload["caches"] = invalidar_caches(payload["alunos"])
         payload["gravados"] = len(payload["alunos"])
     payload["fim"] = datetime.now().isoformat()
-    payload["log"] = _write_log(log_dir, payload, "adap_rodada1")
+    payload["log"] = _write_log(log_dir, payload, f"adap_rodada{rodada}")
     return payload
 
 
@@ -995,7 +1187,9 @@ def _restaurar(student, antes: Dict[str, Any], depois: Dict[str, Any], conflitos
     user = User.query.get(antes["user"]["id"]) if antes["user"].get("id") else None
     if user is not None:
         user.city_id = antes["user"]["city_id"]
-        user.traits = copy.deepcopy(antes["user"]["traits"])
+        traits = antes["user"]["traits"]
+        # Coluna JSON: None viraria o JSON 'null', não o NULL do banco que havia antes.
+        user.traits = sa_null() if traits is None else copy.deepcopy(traits)
 
     antes_mat = {m["id"]: m for m in antes["matriculas"]}
     matriculas = StudentSchoolEnrollment.query.filter(StudentSchoolEnrollment.student_id == student.id).all()

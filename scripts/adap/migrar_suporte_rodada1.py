@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Rodada 1 da migração dos alunos de Suporte para a subturma ADAP da turma regular.
+Migração dos alunos de Suporte 1, 2 e 3 para a subturma ADAP 1, 2 e 3 da turma regular.
 
 Simulação por padrão (não grava). Lógica em app/services/adap_migracao_suporte.py.
+--rodada (padrão 2) só muda o nome do log e o motivo gravado na marca de descarte.
 
 Uso (a partir de afirmeplay_backend, com venv e app/.env):
 
-  # simulação do município
+  # simulação do município (todas as escolas)
   python scripts/adap/migrar_suporte_rodada1.py --schema city_xxxx
   # simulação de uma escola (id ou parte do nome)
   python scripts/adap/migrar_suporte_rodada1.py --schema city_xxxx --escola "NOME DA ESCOLA"
@@ -44,7 +45,8 @@ def _print_resumo(result: dict) -> None:
         print(f"  elegíveis: {r['elegiveis']} em {r['escolas']} escola(s) | por tipo: {r['por_tipo']}")
         print(f"  por tipo e nível: {r['por_tipo_nivel']}")
         print(f"  subturmas de destino: {r['subturmas_destino']} em {r['turmas_destino']} turma(s) | "
-              f"cadastros regulares a desvincular: {r['cadastros_regulares_a_desvincular']}")
+              f"cadastros regulares a desvincular: {r['cadastros_regulares_a_desvincular']} | "
+              f"cadastros de Suporte a desvincular (fica o regular): {r.get('cadastros_suporte_a_desvincular', 0)}")
         print(f"  excluídos: {r['excluidos']} | por motivo: {r['excluidos_por_motivo']}")
         q = r["questionario_previsto"]
         print(f"  questionário: {q['alunos_com_formulario_novo']} aluno(s) ganhariam formulário novo; "
@@ -55,8 +57,13 @@ def _print_resumo(result: dict) -> None:
               f"{m.get('destinatarios', 0)} destinatário(s) e {m.get('respostas', 0)} resposta(s); "
               f"pendentes do mantido removidos: {m.get('removidos_do_mantido', 0)}; "
               f"ficam no descartado: {m.get('ficam_no_descartado', 0)}")
-        for escola, n in sorted(r["por_escola"].items()):
-            print(f"    - {escola}: {n}")
+        print("  por escola (em Suporte 1/2/3 | migrariam | ficam de fora):")
+        for escola, t in r.get("por_escola_nivel", {}).items():
+            extra = f" +{t['nivel_indefinido']} sem nível" if t.get("nivel_indefinido") else ""
+            print(f"    - {escola}: {t['suporte_1']}/{t['suporte_2']}/{t['suporte_3']}{extra} | "
+                  f"{t['migrariam']} | {t['ficam_de_fora']}")
+        print(f"  turmas de Suporte depois: {r.get('turmas_suporte_vazias_depois', 0)} vazia(s), "
+              f"{r.get('turmas_suporte_com_alunos_depois', 0)} ainda com alunos")
     if result["modo"] == "gravacao":
         if "gravados" in result:
             print(f"  gravados: {result['gravados']} | subturmas criadas: {len(result.get('subturmas_criadas', []))} "
@@ -74,9 +81,11 @@ def _print_resumo(result: dict) -> None:
 
 def main(argv=None) -> int:
     _bootstrap()
-    parser = argparse.ArgumentParser(description="Migra alunos de Suporte para a subturma ADAP (Rodada 1).")
+    parser = argparse.ArgumentParser(description="Migra alunos de Suporte 1, 2 e 3 para a subturma ADAP.")
     parser.add_argument("--schema", help="Schema city_… do município (obrigatório, exceto na reversão).")
-    parser.add_argument("--escola", help="Id ou parte do nome de uma escola (opcional).")
+    parser.add_argument("--escola", help="Id ou parte do nome de uma escola (opcional; sem ela, todas).")
+    parser.add_argument("--rodada", type=int, choices=[1, 2], default=2,
+                        help="Número da rodada (nome do log e motivo da marca de descarte). Padrão: 2.")
     parser.add_argument("--write", action="store_true", help="Grava. Sem esta flag, só simula.")
     parser.add_argument("--questionario-quem-respondeu", choices=["criar", "nao-criar"],
                         help="Obrigatório no --write: criar ou não o destinatário novo para quem já respondeu.")
@@ -112,7 +121,7 @@ def main(argv=None) -> int:
                                   questionario=args.questionario_quem_respondeu, log_dir=args.log_dir,
                                   confirmar_producao=args.confirmar_producao,
                                   incluir_questionario_descartado=args.incluir_questionario_descartado,
-                                  excluir_alunos=set(args.excluir_aluno))
+                                  excluir_alunos=set(args.excluir_aluno), rodada=args.rodada)
         except MigracaoError as exc:
             print(f"Erro: {exc}", file=sys.stderr)
             return 2

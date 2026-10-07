@@ -23,6 +23,7 @@ from app.models.manager import Manager
 from app.models.teacher import Teacher
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.teacherClass import TeacherClass
+from app.services.adap_migracao_suporte import is_cadastro_descartado
 from sqlalchemy.orm import joinedload
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -788,7 +789,8 @@ def deletar_aluno(aluno_id):
 @role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def get_available_students():
     """
-    Lista alunos que não estão vinculados a nenhuma escola (disponíveis para alocação)
+    Lista alunos que não estão vinculados a nenhuma escola (disponíveis para alocação).
+    Cadastros com a marca ``cadastro_descartado`` (duplicidade resolvida) não entram.
     """
     try:
         user = get_current_user_from_token()
@@ -809,6 +811,8 @@ def get_available_students():
         available_students = []
         
         for user_obj in all_users_with_aluno_role:
+            if is_cadastro_descartado(user_obj):
+                continue
             # Verificar se tem registro na tabela Student
             student_record = get_orm_session().query(Student).filter_by(user_id=user_obj.id).first()
             

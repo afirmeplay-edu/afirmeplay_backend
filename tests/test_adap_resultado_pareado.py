@@ -97,6 +97,113 @@ def test_project_keeps_grade_changes_test_id():
     assert projected._adap_source_test_id == "adap-ii"
 
 
+def _snap(er, *, school, grade, klass):
+    er.school_id_snapshot = school
+    er.grade_id_snapshot = grade
+    er.class_id_snapshot = klass
+    er.enrollment_id_snapshot = None
+    return er
+
+
+def test_media_adap_pareado_entra_na_turma_atual(monkeypatch):
+    """Escola com 4º ano em duas turmas: o aluno ADAP da turma A fez só a prova ADAP
+    (snapshot na turma de Suporte). Na prova regular ele conta dentro da turma A,
+    e não como uma série a mais com peso igual ao 4º ano inteiro."""
+    from app.services import adap_resultado_pareado as mod
+    from app.utils.school_equal_weight_means import _hierarchical_mean_pair_raw
+
+    escola, serie_4, serie_suporte = "esc-1", "g-4ano", "g-suporte1"
+    turma_a, turma_b, turma_suporte = "c-4a", "c-4b", "c-suporte"
+
+    regulares = [
+        _snap(
+            _er(grade=5.0, proficiency=200.0, test_id="reg", student_id=f"a{i}"),
+            school=escola, grade=serie_4, klass=turma_a,
+        )
+        for i in range(20)
+    ] + [
+        _snap(
+            _er(grade=5.0, proficiency=200.56, test_id="reg", student_id=f"b{i}"),
+            school=escola, grade=serie_4, klass=turma_b,
+        )
+        for i in range(20)
+    ]
+    adap_er = _snap(
+        _er(grade=7.58, proficiency=340.91, test_id="adap-i", student_id="aluno_adap"),
+        school=escola, grade=serie_suporte, klass=turma_suporte,
+    )
+    aluno_adap = SimpleNamespace(
+        id="aluno_adap",
+        class_id=turma_a,
+        class_=SimpleNamespace(school_id=escola, grade_id=serie_4),
+    )
+    alunos = [SimpleNamespace(id=r.student_id) for r in regulares] + [aluno_adap]
+
+    monkeypatch.setattr(mod, "adap_students_level_12", lambda students: {"aluno_adap": 1})
+    monkeypatch.setattr(
+        mod,
+        "resolve_adap_valid_results",
+        lambda *a, **k: {
+            "aluno_adap": AdapValidResult(
+                student_id="aluno_adap",
+                level=1,
+                source_test_id="adap-i",
+                source_test_title="ADAP I - 4º ANO",
+                result=adap_er,
+                situation="concluida",
+                from_adap_test=True,
+            )
+        },
+    )
+
+    _, efetivos, adap_valid = mod.apply_pareamento_to_universe("reg", alunos, regulares)
+    assert set(adap_valid) == {"aluno_adap"}
+    projetado = next(r for r in efetivos if r.student_id == "aluno_adap")
+    assert projetado.test_id == "reg"
+    assert projetado.grade == 7.58
+    assert projetado.school_id_snapshot == escola
+    assert projetado.grade_id_snapshot == serie_4
+    assert projetado.class_id_snapshot == turma_a
+
+    _, prof = _hierarchical_mean_pair_raw(efetivos, "escola")
+    media_a = (20 * 200.0 + 340.91) / 21
+    assert abs(prof - (media_a + 200.56) / 2) < 1e-6
+
+    _, prof_antigo = _hierarchical_mean_pair_raw(regulares + [adap_er], "escola")
+    assert abs(prof_antigo - (200.28 + 340.91) / 2) < 1e-6
+    assert prof_antigo - prof > 60
+
+
+def test_projecao_sem_turma_atual_mantem_snapshot():
+    adap = _snap(
+        _er(grade=8.0, proficiency=250.0, test_id="adap"),
+        school="esc", grade="g-sup", klass="c-sup",
+    )
+    projected = project_result_onto_regular_test(
+        adap, "reg", SimpleNamespace(id="s1", class_id=None, class_=None)
+    )
+    assert projected.class_id_snapshot == "c-sup"
+    assert projected.grade_id_snapshot == "g-sup"
+
+
+def test_projecao_sem_turma_atual_usa_turma_da_prova_regular():
+    """Aluno que saiu da escola: conta onde fez a prova regular, não na turma de Suporte."""
+    adap = _snap(
+        _er(grade=1.61, proficiency=150.0, test_id="adap"),
+        school="esc", grade="g-sup2", klass="c-sup",
+    )
+    regular = _snap(
+        _er(grade=0.0, proficiency=0.0, test_id="reg"),
+        school="esc", grade="g-2ano", klass="c-2b",
+    )
+    projected = project_result_onto_regular_test(
+        adap, "reg", SimpleNamespace(id="s1", class_id=None, class_=None), regular
+    )
+    assert projected.grade == 1.61
+    assert projected.class_id_snapshot == "c-2b"
+    assert projected.grade_id_snapshot == "g-2ano"
+
+
 def test_adap3_fora_do_mapa_nivel_12():
     serie = SimpleNamespace(name="5º Ano", education_stage_id=None)
     sub3 = SimpleNamespace(id="s3", class_id="c1", support_level=3)

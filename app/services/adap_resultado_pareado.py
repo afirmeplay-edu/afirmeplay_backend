@@ -396,10 +396,42 @@ def scope_wants_adap_pareamento(scope_info: Optional[dict]) -> bool:
     return bool(scope_info.get("adap_pareamento"))
 
 
-def project_result_onto_regular_test(result: Any, regular_test_id: str) -> Any:
+def _placement_from_student(student: Any) -> Optional[Dict[str, Any]]:
+    class_id = getattr(student, "class_id", None) if student is not None else None
+    if class_id is None:
+        return None
+    cls = getattr(student, "class_", None)
+    school_id = getattr(cls, "school_id", None) if cls is not None else None
+    grade_id = getattr(cls, "grade_id", None) if cls is not None else None
+    if not school_id or grade_id is None:
+        return None
+    return {
+        "school_id_snapshot": school_id,
+        "class_id_snapshot": class_id,
+        "grade_id_snapshot": grade_id,
+    }
+
+
+def _placement_from_snapshot(result: Any) -> Optional[Dict[str, Any]]:
+    if result is None or not getattr(result, "school_id_snapshot", None):
+        return None
+    return {
+        "school_id_snapshot": getattr(result, "school_id_snapshot", None),
+        "class_id_snapshot": getattr(result, "class_id_snapshot", None),
+        "grade_id_snapshot": getattr(result, "grade_id_snapshot", None),
+    }
+
+
+def project_result_onto_regular_test(
+    result: Any, regular_test_id: str, student: Any = None, regular_result: Any = None
+) -> Any:
     """
     Mantém nota/proficiência gravadas; se veio da prova ADAP, expõe test_id da regular
     para estatísticas/grupo virtual (sem regravar no banco).
+
+    Escola/turma/série: turma atual do aluno; sem turma atual, a do resultado dele na
+    prova regular; só então o snapshot da prova ADAP. O snapshot ADAP aponta para a
+    turma de Suporte, que viraria uma série à parte na média hierárquica da regular.
     """
     if result is None:
         return None
@@ -407,6 +439,15 @@ def project_result_onto_regular_test(result: Any, regular_test_id: str) -> Any:
         return result
     from types import SimpleNamespace
 
+    placement = (
+        _placement_from_student(student)
+        or _placement_from_snapshot(regular_result)
+        or {
+            "school_id_snapshot": getattr(result, "school_id_snapshot", None),
+            "class_id_snapshot": getattr(result, "class_id_snapshot", None),
+            "grade_id_snapshot": getattr(result, "grade_id_snapshot", None),
+        }
+    )
     return SimpleNamespace(
         id=getattr(result, "id", None),
         test_id=str(regular_test_id),
@@ -418,9 +459,9 @@ def project_result_onto_regular_test(result: Any, regular_test_id: str) -> Any:
         proficiency=getattr(result, "proficiency", 0),
         classification=getattr(result, "classification", None),
         subject_results=getattr(result, "subject_results", None),
-        school_id_snapshot=getattr(result, "school_id_snapshot", None),
-        class_id_snapshot=getattr(result, "class_id_snapshot", None),
-        grade_id_snapshot=getattr(result, "grade_id_snapshot", None),
+        school_id_snapshot=placement["school_id_snapshot"],
+        class_id_snapshot=placement["class_id_snapshot"],
+        grade_id_snapshot=placement["grade_id_snapshot"],
         enrollment_id_snapshot=getattr(result, "enrollment_id_snapshot", None),
         calculated_at=getattr(result, "calculated_at", None),
         _adap_source_test_id=str(getattr(result, "test_id", "") or ""),
@@ -474,10 +515,18 @@ def apply_pareamento_to_universe(
             for row in results_list
             if str(getattr(row, "student_id", "") or "") not in adap_ids
         ]
+        students_by_id = {str(getattr(s, "id", "") or ""): s for s in students_list}
         for sid, info in adap_valid.items():
             if info.result is None:
                 continue
-            kept.append(project_result_onto_regular_test(info.result, regular_test_id))
+            kept.append(
+                project_result_onto_regular_test(
+                    info.result,
+                    regular_test_id,
+                    students_by_id.get(str(sid)),
+                    regular_by.get(str(sid)),
+                )
+            )
         return students_list, kept, adap_valid
     except Exception as exc:
         logger.warning(

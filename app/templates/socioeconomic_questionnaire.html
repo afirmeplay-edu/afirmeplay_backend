@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<!--
+  =============================================================================
+  QUESTIONÁRIO SOCIOECONÔMICO — PDF BASE
+  =============================================================================
+  Usado por: app/socioeconomic_forms/services/questionnaire_pdf_service.py
+
+  Página 1 (capa): área de identificação com a mesma geometria do
+  .answer-sheet-header de institutional_test_hybrid.html (topo 1,2cm, laterais
+  2cm, altura 6,4cm, label min-width 100px, QR 120px) + título + instruções.
+  Alterar o CSS do cabeçalho exige revalidar app/physical_tests/COORDENADAS_OMR_OVERLAY.md.
+
+  Todas as páginas: 4 quadrados de 32px a 0,2cm das bordas (mesmo padrão
+  .a4-anchor-square do cartão OMR), desenhados nas caixas de canto do @page.
+  As questões são preenchidas à caneta nos círculos.
+  =============================================================================
+-->
+<html lang="pt-BR">
+	<head>
+		<meta charset="UTF-8" />
+		<title>{{ form.title }}</title>
+		<style>
+			@page {
+				size: A4 portrait;
+				margin: 1.9cm 2cm 1.5cm 2cm;
+				@top-left-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat left 0.2cm top 0.2cm / 32px 32px;
+				}
+				@top-right-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat right 0.2cm top 0.2cm / 32px 32px;
+				}
+				@bottom-left-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat left 0.2cm bottom 0.2cm / 32px 32px;
+				}
+				@bottom-right-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat right 0.2cm bottom 0.2cm / 32px 32px;
+				}
+				@top-center {
+					content: element(questionnaireHeader);
+					vertical-align: bottom;
+					padding-bottom: 0.25cm;
+				}
+				@bottom-center {
+					content: "Página " counter(page) " de " counter(pages);
+					font-family: "Helvetica", Arial, sans-serif;
+					font-size: 7pt;
+					color: #777;
+				}
+			}
+
+			/* Capa: topo = padding-top do .answer-sheet do cartão OMR; sem cabeçalho corrente */
+			@page :first {
+				margin-top: 1.2cm;
+				@top-center {
+					content: none;
+				}
+			}
+
+			* {
+				margin: 0;
+				padding: 0;
+				box-sizing: border-box;
+			}
+
+			body {
+				font-family: "Helvetica", Arial, sans-serif;
+				font-size: 12pt;
+				color: #374151;
+				line-height: 1.6;
+			}
+
+			/* ===== Capa: área de identificação (cópia do cabeçalho do cartão OMR) ===== */
+			.answer-sheet-header {
+				border: 1px solid #000;
+				padding: 4px;
+				margin: 0;
+				margin-bottom: 2px;
+				display: flex;
+				justify-content: space-between;
+				align-items: stretch;
+				height: 6.4cm;
+				max-height: 6.4cm;
+				overflow: hidden;
+				width: 100%;
+				box-sizing: border-box;
+			}
+
+			.header-left {
+				flex: 1;
+				display: flex;
+				flex-direction: column;
+				justify-content: space-between;
+				min-width: 0;
+				overflow: hidden;
+			}
+
+			.header-info-line {
+				font-size: 7pt;
+				margin: 0.5px 0;
+				text-transform: uppercase;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+
+			.header-info-line .label {
+				font-weight: bold;
+				min-width: 100px;
+				display: inline-block;
+			}
+
+			.header-info-line .value {
+				font-weight: normal;
+			}
+
+			.test-name-section {
+				border-top: 1px solid #000;
+				padding-top: 2px;
+				margin-top: 2px;
+				margin-bottom: 2px;
+			}
+
+			.student-name-grid {
+				margin-top: 4px;
+				margin-bottom: 10px;
+				border-top: 1px solid #000;
+				padding-top: 3px;
+				width: 100%;
+				box-sizing: border-box;
+				overflow: hidden;
+			}
+
+			.student-name-label {
+				font-size: 7pt;
+				font-weight: bold;
+				margin-bottom: 2px;
+				text-transform: uppercase;
+			}
+
+			.name-boxes {
+				display: flex;
+				flex-direction: column;
+				gap: 2px;
+			}
+
+			.name-boxes-row {
+				display: flex;
+				gap: 2px;
+			}
+
+			.name-box {
+				width: 20px;
+				height: 22px;
+				border: 1px solid #000;
+				display: inline-block;
+				background: white;
+			}
+
+			.signature-section {
+				border-top: 1px dashed #000;
+				margin-top: 15px;
+				padding-bottom: 0;
+				text-align: center;
+				font-size: 7pt;
+				font-weight: bold;
+				width: 100%;
+				box-sizing: border-box;
+				overflow: hidden;
+			}
+
+			.header-right {
+				width: 140px;
+				min-width: 140px;
+				max-width: 140px;
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				border-left: 1px solid #000;
+				padding-left: 10px;
+				margin-left: 10px;
+				flex-shrink: 0;
+			}
+
+			.qr-code-box {
+				width: 120px;
+				height: 120px;
+				border: 1px solid #333;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				background: white;
+				margin-bottom: 8px;
+			}
+
+			.qr-label {
+				font-size: 7pt;
+				font-weight: bold;
+				text-align: center;
+			}
+
+			/* ===== Capa: instruções ===== */
+			.cover-instructions {
+				margin-top: 0.3cm;
+				color: #000;
+				font-size: 9.5pt;
+				line-height: 1.25;
+			}
+
+			.cover-instructions p {
+				margin-bottom: 3px;
+				text-align: justify;
+			}
+
+			.institution-bar {
+				margin-top: 6px;
+				padding: 2px 6px;
+				background: #d9d9d9;
+				font-weight: bold;
+				text-align: center;
+			}
+
+			.examples-title {
+				margin-top: 3px;
+				font-weight: bold;
+				text-align: center;
+			}
+
+			.example-title {
+				font-size: 10.5pt;
+				font-weight: bold;
+			}
+
+			.cover-instructions p.example-caption {
+				margin-bottom: 2px;
+			}
+
+			.example-box {
+				border: 1px solid #000;
+				padding: 3px;
+				margin-bottom: 3px;
+				font-size: 9.5pt;
+				line-height: 1.25;
+			}
+
+			.example-box .question-head {
+				margin-bottom: 2px;
+			}
+
+			.example-box table.matrix {
+				font-size: 9pt;
+			}
+
+			.example-box table.matrix th,
+			.example-box table.matrix td {
+				padding: 2px 6px;
+			}
+
+			.example-box .question-text,
+			.example-box .question-statement {
+				font-weight: bold;
+			}
+
+			.example-box .hint {
+				font-weight: normal;
+			}
+
+			.example-box .options {
+				margin-bottom: 0;
+			}
+
+			.cover-rules {
+				margin-top: 6px;
+				font-weight: bold;
+				list-style: none;
+			}
+
+			.cover-rules li {
+				position: relative;
+				padding-left: 0.5cm;
+			}
+
+			.cover-rules li::before {
+				content: "•";
+				position: absolute;
+				left: 0;
+			}
+
+			/* ===== Páginas de questões ===== */
+			.questions-section {
+				break-before: page;
+			}
+
+			.running-header {
+				position: running(questionnaireHeader);
+				text-align: center;
+				color: #000;
+				font-family: "Helvetica", Arial, sans-serif;
+				line-height: 1.2;
+			}
+
+			.running-header-title {
+				font-size: 11pt;
+				font-weight: bold;
+			}
+
+			.running-header-subtitle {
+				font-size: 7.5pt;
+				text-transform: uppercase;
+			}
+
+			.question {
+				margin-bottom: 0.55cm;
+				color: #000;
+				font-size: 10.5pt;
+				line-height: 1.35;
+			}
+
+			.question.keep-together {
+				break-inside: avoid;
+			}
+
+			.question-head {
+				display: flex;
+				align-items: flex-start;
+				margin-bottom: 4px;
+			}
+
+			.question-label {
+				flex-shrink: 0;
+				width: 2.8cm;
+				margin-right: 0.3cm;
+				padding: 1px 6px;
+				background: #d9d9d9;
+				font-weight: bold;
+				white-space: nowrap;
+			}
+
+			.question-statement {
+				flex: 1;
+				min-width: 0;
+				overflow-wrap: break-word;
+			}
+
+			.question-text {
+				font-weight: bold;
+			}
+
+			.hint {
+				font-size: 8.5pt;
+				font-style: italic;
+				font-weight: normal;
+			}
+
+			.dependency-note {
+				font-size: 8.5pt;
+				font-style: italic;
+				color: #333;
+			}
+
+			.options {
+				margin-left: 3.1cm;
+			}
+
+			.options.two-columns {
+				columns: 2;
+				column-gap: 0.8cm;
+			}
+
+			.option {
+				display: flex;
+				align-items: flex-start;
+				gap: 6px;
+				margin-bottom: 2px;
+				break-inside: avoid;
+			}
+
+			.option-text {
+				flex: 1;
+				min-width: 0;
+				overflow-wrap: break-word;
+			}
+
+			.bubble {
+				flex-shrink: 0;
+				display: inline-block;
+				width: 14px;
+				height: 14px;
+				margin-top: 1px;
+				border: 1px solid #000;
+				border-radius: 50%;
+				font-size: 7pt;
+				font-weight: bold;
+				line-height: 12px;
+				text-align: center;
+			}
+
+			/* ===== Matrizes (options × sub_questions) ===== */
+			.matrix-hint {
+				text-align: right;
+				font-size: 8.5pt;
+				font-style: italic;
+				margin-bottom: 2px;
+			}
+
+			table.matrix {
+				width: 100%;
+				table-layout: fixed;
+				border-collapse: collapse;
+				font-size: 9.5pt;
+				line-height: 1.3;
+				color: #000;
+			}
+
+			table.matrix thead {
+				display: table-header-group;
+			}
+
+			table.matrix tr {
+				break-inside: avoid;
+			}
+
+			table.matrix th,
+			table.matrix td {
+				border: 1px solid #bfbfbf;
+				padding: 4px 6px;
+				overflow-wrap: break-word;
+			}
+
+			table.matrix th.option-col {
+				background: #d9d9d9;
+				font-size: 8.5pt;
+				font-weight: bold;
+				text-align: center;
+				vertical-align: middle;
+			}
+
+			table.matrix th.item-col {
+				border: none;
+				background: none;
+			}
+
+			table.matrix td.item {
+				text-align: left;
+				vertical-align: middle;
+			}
+
+			.item-letter {
+				display: inline-block;
+				min-width: 1.4em;
+			}
+
+			table.matrix td.choice {
+				text-align: center;
+				vertical-align: middle;
+			}
+
+			table.matrix td.choice.shaded {
+				background: #ececec;
+			}
+
+			table.matrix td.choice .bubble {
+				background: white;
+			}
+
+			.bubble.filled,
+			table.matrix td.choice .bubble.filled {
+				background: #000;
+			}
+
+			/* Matriz que pode quebrar: enunciado no thead (nunca fica sem linhas e repete na continuação) */
+			table.matrix th.matrix-intro {
+				border: none;
+				background: none;
+				padding: 0 0 2px 0;
+				text-align: left;
+				font-weight: normal;
+				font-size: 10.5pt;
+				line-height: 1.35;
+			}
+
+			/* ===== Número (slider) e texto livre ===== */
+			.number-answer {
+				margin-left: 3.1cm;
+				display: flex;
+				gap: 3px;
+			}
+
+			.digit-box {
+				width: 0.7cm;
+				height: 0.8cm;
+				border: 1px solid #000;
+			}
+
+			.text-answer {
+				margin-left: 3.1cm;
+			}
+
+			.text-answer-line {
+				border-bottom: 1px solid #9ca3af;
+				height: 0.8cm;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="answer-sheet-header">
+			<div class="header-left">
+				<div>
+					<div class="test-name-section">
+						<div class="header-info-line">
+							<span class="label">QUESTIONÁRIO:</span>
+							<span class="value">{{ form.title }}</span>
+						</div>
+					</div>
+					<div class="header-info-line">
+						<span class="label">NOME COMPLETO:</span>
+						<span class="value"></span>
+					</div>
+					<div class="header-info-line">
+						<span class="label">ESTADO:</span>
+						<span class="value">{{ state }}</span>
+					</div>
+					<div class="header-info-line">
+						<span class="label">MUNICÍPIO:</span>
+						<span class="value">{{ municipality }}</span>
+					</div>
+					<div class="header-info-line">
+						<span class="label">ESCOLA:</span>
+						<span class="value"></span>
+					</div>
+					<div class="header-info-line">
+						<span class="label">TURMA:</span>
+						<span class="value"></span>
+					</div>
+				</div>
+				<div class="student-name-grid">
+					<div class="student-name-label">NOME DO ALUNO:</div>
+					<div class="name-boxes">
+						<div class="name-boxes-row">
+							{% for i in range(23) %}<span class="name-box"></span>{% endfor %}
+						</div>
+						<div class="name-boxes-row">
+							{% for i in range(23) %}<span class="name-box"></span>{% endfor %}
+						</div>
+					</div>
+				</div>
+				<div class="signature-section">Assinatura do participante:</div>
+			</div>
+			<div class="header-right">
+				<div class="qr-code-box"></div>
+				<div class="qr-label">QR Code:</div>
+			</div>
+		</div>
+
+		<div class="cover-instructions">
+			<p>Prezado(a) estudante,</p>
+			<p>Sua escola está participando do Saeb 2025, uma avaliação aplicada nas escolas de todo o Brasil. Como parte da avaliação, você responderá a este questionário, com perguntas sobre suas experiências de aprendizagem e sobre diferentes aspectos relacionados ao seu ambiente familiar e escolar.</p>
+			<p>Não há respostas certas ou erradas para essas perguntas. Responda cada questão de acordo com a sua opinião e a realidade da sua família e escola.</p>
+			<p>Suas respostas são muito importantes! Ao preencher o questionário você contribui para a melhoria da sua educação, como também dos(as) demais estudantes brasileiros(as).</p>
+			<p>Garantimos que as suas respostas são confidenciais e que não será possível identificar quem respondeu cada questionário nos resultados da pesquisa.</p>
+
+			<div class="institution-bar">Instituto Nacional de Estudos e Pesquisas Educacionais Anísio Teixeira – Inep</div>
+			<div class="examples-title">EXEMPLOS DE QUESTÕES</div>
+
+			<div class="example-title">Exemplo 1</div>
+			<p class="example-caption"><em>Exemplo 1</em> é um dos tipos de questões que você encontrará neste questionário.</p>
+			<div class="example-box">
+				<div class="question-head">
+					<div class="question-label">Questão X.</div>
+					<div class="question-statement"><span class="question-text">Qual é o seu gênero?</span> <span class="hint">Preencha apenas um círculo.</span></div>
+				</div>
+				<div class="options">
+					<div class="option"><span class="bubble filled"></span><span class="option-text">Feminino.</span></div>
+				</div>
+			</div>
+
+			<div class="example-title">Exemplo 2</div>
+			<p class="example-caption"><em>Exemplo 2</em> é um dos tipos de questões que você encontrará neste questionário.</p>
+			<div class="example-box">
+				<div class="question-head">
+					<div class="question-label">Questão X.</div>
+					<div class="question-statement">Na rua em que você mora tem:</div>
+				</div>
+				<div class="matrix-hint">Preencha apenas um círculo em cada linha.</div>
+				<table class="matrix">
+					<colgroup><col style="width: 60%" /><col style="width: 20%" /><col style="width: 20%" /></colgroup>
+					<thead>
+						<tr><th class="item-col"></th><th class="option-col">Não</th><th class="option-col">Sim</th></tr>
+					</thead>
+					<tbody>
+						<tr>
+							<td class="item"><span class="item-letter">a)</span>Água tratada?</td>
+							<td class="choice shaded"><span class="bubble"></span></td>
+							<td class="choice"><span class="bubble filled"></span></td>
+						</tr>
+					</tbody>
+				</table>
+			</div>
+
+			<div class="example-title">Exemplo 3</div>
+			<p class="example-caption"><em>Exemplo 3</em> é um dos tipos de questões que você encontrará neste questionário.</p>
+			<div class="example-box">
+				<div class="question-head">
+					<div class="question-label">Questão X.</div>
+					<div class="question-statement">Indique com que frequência seus pais ou responsáveis costumam:</div>
+				</div>
+				<div class="matrix-hint">Preencha apenas um círculo em cada linha.</div>
+				<table class="matrix">
+					<colgroup><col style="width: 44%" /><col style="width: 14%" /><col style="width: 14%" /><col style="width: 14%" /><col style="width: 14%" /></colgroup>
+					<thead>
+						<tr><th class="item-col"></th><th class="option-col">Nunca</th><th class="option-col">Poucas vezes</th><th class="option-col">Algumas vezes</th><th class="option-col">Sempre</th></tr>
+					</thead>
+					<tbody>
+						<tr>
+							<td class="item"><span class="item-letter">a)</span>Incentivar você a estudar.</td>
+							<td class="choice shaded"><span class="bubble"></span></td>
+							<td class="choice"><span class="bubble"></span></td>
+							<td class="choice shaded"><span class="bubble filled"></span></td>
+							<td class="choice"><span class="bubble"></span></td>
+						</tr>
+						<tr>
+							<td class="item"><span class="item-letter">b)</span>Incentivar você a fazer a tarefa de casa.</td>
+							<td class="choice shaded"><span class="bubble"></span></td>
+							<td class="choice"><span class="bubble filled"></span></td>
+							<td class="choice shaded"><span class="bubble"></span></td>
+							<td class="choice"><span class="bubble"></span></td>
+						</tr>
+					</tbody>
+				</table>
+			</div>
+
+			<ul class="cover-rules">
+				<li>Leia cada questão com atenção e escolha a resposta que achar melhor.</li>
+				<li>Preencha completamente o círculo que está ao lado ou abaixo de sua resposta.</li>
+				<li>Não se esqueça de preencher o círculo para todas as respostas, mesmo que seja “NÃO”.</li>
+				<li>Peça ajuda se não entender alguma coisa ou não tiver certeza de como responder.</li>
+			</ul>
+		</div>
+
+		{% macro question_head(question, hint) %}
+		<div class="question-head">
+			<div class="question-label">Questão {{ question.number }}.</div>
+			<div class="question-statement">
+				<span class="question-text">{{ question.text }}</span>{% if hint %} <span class="hint">{{ hint }}</span>{% endif %}
+				{% if question.dependency %}
+				<div class="dependency-note">
+					Responda somente se, na {{ question.dependency.reference }}, você marcou
+					{% for value in question.dependency['values'] %}“{{ value }}”{% if loop.revindex == 2 %} ou {% elif not loop.last %}, {% endif %}{% endfor %}.
+				</div>
+				{% endif %}
+			</div>
+		</div>
+		{% endmacro %}
+
+		<div class="questions-section">
+			<div class="running-header">
+				<div class="running-header-title">{{ form.title }}</div>
+				{% if form.description %}<div class="running-header-subtitle">{{ form.description }}</div>{% endif %}
+			</div>
+
+			{% for question in questions %}
+			<div class="question{% if question.keep_together %} keep-together{% endif %}">
+				{% if question.layout == 'matrix' %}
+				{% set option_width = [16, 60 / question.options|length]|min %}
+				{% set intro_in_table = not question.keep_together %}
+				{% if not intro_in_table %}
+				{{ question_head(question, None) }}
+				<div class="matrix-hint">Preencha apenas um círculo em cada linha.</div>
+				{% endif %}
+				<table class="matrix">
+					<colgroup>
+						<col style="width: {{ 100 - option_width * question.options|length }}%" />
+						{% for option in question.options %}<col style="width: {{ option_width }}%" />{% endfor %}
+					</colgroup>
+					<thead>
+						{% if intro_in_table %}
+						<tr>
+							<th class="matrix-intro" colspan="{{ question.options|length + 1 }}">
+								{{ question_head(question, None) }}
+								<div class="matrix-hint">Preencha apenas um círculo em cada linha.</div>
+							</th>
+						</tr>
+						{% endif %}
+						<tr>
+							<th class="item-col"></th>
+							{% for option in question.options %}<th class="option-col">{{ option.text }}</th>{% endfor %}
+						</tr>
+					</thead>
+					<tbody>
+						{% for sub in question.sub_questions %}
+						<tr>
+							<td class="item"><span class="item-letter">{{ sub.letter }})</span>{{ sub.text }}</td>
+							{% for option in question.options %}<td class="choice{% if loop.index is odd %} shaded{% endif %}"><span class="bubble"></span></td>{% endfor %}
+						</tr>
+						{% endfor %}
+					</tbody>
+				</table>
+
+				{% elif question.layout == 'options' %}
+				{{ question_head(question, 'Preencha apenas um círculo.') }}
+				<div class="options{% if question.options_two_columns %} two-columns{% endif %}">
+					{% for option in question.options %}
+					<div class="option"><span class="bubble">{{ option.letter }}</span><span class="option-text">{{ option.text }}</span></div>
+					{% endfor %}
+				</div>
+
+				{% elif question.layout == 'number' %}
+				{% set number_hint = 'Escreva um número' ~ ((' de ' ~ question.min_value ~ ' a ' ~ question.max_value) if question.min_value is not none and question.max_value is not none else '') ~ ', um algarismo em cada quadrado.' %}
+				{{ question_head(question, number_hint) }}
+				<div class="number-answer">
+					{% for i in question.number_boxes %}<span class="digit-box"></span>{% endfor %}
+				</div>
+
+				{% else %}
+				{{ question_head(question, None) }}
+				<div class="text-answer">
+					{% for i in range(4) %}<div class="text-answer-line"></div>{% endfor %}
+				</div>
+				{% endif %}
+			</div>
+			{% endfor %}
+		</div>
+	</body>
+</html>

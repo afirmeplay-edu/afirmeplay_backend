@@ -10516,6 +10516,67 @@ paths:
           $ref: '#/responses/NotFoundError'
         '500':
           $ref: '#/responses/InternalServerError'
+  /documentos/termo-compromisso/lote:
+    get:
+      tags:
+        - Documentos
+      summary: Dados comuns do termo de compromisso e lista de turmas do recorte
+      description: "Retorna os dados comuns do termo (município, período, aplicação) e as turmas do recorte. Escola, série e turma são opcionais; no modo avaliação, apenas turmas em que a avaliação foi aplicada."
+      parameters:
+        - name: municipio
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: escola
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: serie
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: turma
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: modo
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [manual, avaliacao, cartao_resposta]
+        - name: evaluation_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: answer_sheet_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
   /education_stages/all:
     get:
       tags:

@@ -28,3 +28,17 @@ def get_termo_compromisso_dados():
         return jsonify(data), 200
     except Exception as error:
         return _error_response(error, "Erro ao carregar dados do termo de compromisso")
+
+
+@bp.route("/lote", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_termo_compromisso_lote():
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        data = TermoCompromissoService.get_lote(user, request.args.to_dict())
+        return jsonify(data), 200
+    except Exception as error:
+        return _error_response(error, "Erro ao carregar turmas do termo de compromisso")

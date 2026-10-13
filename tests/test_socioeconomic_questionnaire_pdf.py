@@ -5,8 +5,10 @@ import importlib.util
 import io
 import re
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from pypdf import PdfReader
 
@@ -24,7 +26,9 @@ def _load_service_module():
     return mod
 
 
-SocioeconomicQuestionnairePdfService = _load_service_module().SocioeconomicQuestionnairePdfService
+_pdf_module = _load_service_module()
+SocioeconomicQuestionnairePdfService = _pdf_module.SocioeconomicQuestionnairePdfService
+civil_cover_year = _pdf_module.civil_cover_year
 
 
 def _question(question_id, order, text, qtype, options=None, sub_questions=None,
@@ -111,14 +115,29 @@ class TestBuildQuestions(unittest.TestCase):
         self.assertTrue(self.questions[2]["keep_together"])
 
 
+class TestCivilCoverYear(unittest.TestCase):
+    def test_year_follows_sao_paulo_not_utc_at_the_turn_of_the_year(self):
+        still_previous = datetime(2026, 1, 1, 2, 30, tzinfo=ZoneInfo("UTC"))
+        already_new = datetime(2026, 1, 1, 3, 30, tzinfo=ZoneInfo("UTC"))
+        self.assertEqual(civil_cover_year(still_previous), 2025)
+        self.assertEqual(civil_cover_year(already_new), 2026)
+
+    def test_naive_moment_is_read_as_sao_paulo(self):
+        self.assertEqual(civil_cover_year(datetime(2026, 10, 13, 23, 0)), 2026)
+
+
 class TestRenderHtml(unittest.TestCase):
     def test_template_renders_form_data_without_student_data(self):
-        html = SocioeconomicQuestionnairePdfService().render_html(_sample_form())
+        form = _sample_form()
+        form.custom_title = "Avaliação Municipal"
+        html = SocioeconomicQuestionnairePdfService().render_html(form, cover_year=2026)
         for expected in ("Qual é o seu gênero?", "Não quero declarar", "Transtorno do espectro autista",
                          "Livro didático.", "Questão 7", "de 0 a 30", "Prezado(a) estudante,",
                          "EXEMPLOS DE QUESTÕES", "Incentivar você a fazer a tarefa de casa.",
-                         "Responda somente se, na Questão 3, item a)", "answer-sheet-header"):
+                         "Responda somente se, na Questão 3, item a)", "answer-sheet-header",
+                         "Avaliação Municipal 2026"):
             self.assertIn(expected, html)
+        self.assertNotIn("Saeb", html)
         self.assertIn('<div class="qr-code-box"></div>', html)
 
 

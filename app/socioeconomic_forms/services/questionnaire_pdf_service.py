@@ -4,19 +4,40 @@ PDF BASE do questionário socioeconômico (documento de leitura humana).
 
 Form → form.questions → contexto Jinja → socioeconomic_questionnaire.html → WeasyPrint.
 
-O PDF BASE não tem dados de aluno: a área de identificação da 1ª página
-reproduz a geometria do cabeçalho do cartão OMR da prova física
-(institutional_test_hybrid.html) para receber, futuramente, o mesmo overlay.
+O PDF BASE não tem dados de aluno. A capa traz o título do formulário e o
+ano civil da execução (cover_year). Nome, escola, turma e QR ficam em branco
+para o overlay de questionnaire_individual_pdf.py.
 """
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from app.services.institutional_test_weasyprint_generator import (
     InstitutionalTestWeasyPrintGenerator,
 )
 
 TEMPLATE_NAME = "socioeconomic_questionnaire.html"
+
+# Ano civil da capa. O fuso do processo (muitas vezes UTC) não vale:
+# na virada do ano, UTC já pode estar no ano seguinte enquanto São Paulo não.
+COVER_YEAR_TZ = ZoneInfo("America/Sao_Paulo")
+
+
+def civil_cover_year(moment: Optional[datetime] = None) -> int:
+    """Ano civil em America/Sao_Paulo. Calculado uma vez por PDF base.
+
+    Não é a data de criação do formulário nem o carimbo de geração.
+    Quem monta um pacote deve passar o mesmo valor para o único base
+    da execução, em vez de recalcular por aluno.
+    """
+    if moment is None:
+        current = datetime.now(COVER_YEAR_TZ)
+    elif moment.tzinfo is None:
+        current = moment.replace(tzinfo=COVER_YEAR_TZ)
+    else:
+        current = moment.astimezone(COVER_YEAR_TZ)
+    return current.year
 
 # Matrizes com mais linhas que isso podem quebrar entre páginas (entre linhas,
 # nunca dentro de uma linha) para evitar grandes espaços em branco.
@@ -127,8 +148,9 @@ class SocioeconomicQuestionnairePdfService:
             })
         return questions
 
-    def build_context(self, form: Any, city: Any = None) -> Dict[str, Any]:
+    def build_context(self, form: Any, city: Any = None, cover_year: Optional[int] = None) -> Dict[str, Any]:
         title = (form.custom_title or form.title or "").strip()
+        year = civil_cover_year() if cover_year is None else int(cover_year)
         return {
             "form": {
                 "id": form.id,
@@ -138,13 +160,17 @@ class SocioeconomicQuestionnairePdfService:
             },
             "state": (getattr(city, "state", None) or "").strip(),
             "municipality": (getattr(city, "name", None) or "").strip(),
+            "cover_year": year,
             "questions": self.build_questions(list(form.questions)),
             "default_logo": self._generator._load_default_logo(),
+            # Metadado de auditoria. A frase da capa usa cover_year, não esta data.
             "generated_date": datetime.now().strftime("%d/%m/%Y %H:%M"),
         }
 
-    def render_html(self, form: Any, city: Any = None) -> str:
-        return self._generator._render_template(TEMPLATE_NAME, self.build_context(form, city))
+    def render_html(self, form: Any, city: Any = None, cover_year: Optional[int] = None) -> str:
+        return self._generator._render_template(
+            TEMPLATE_NAME, self.build_context(form, city, cover_year)
+        )
 
-    def generate_base_pdf(self, form: Any, city: Any = None) -> bytes:
-        return self._generator._html_to_pdf_bytes(self.render_html(form, city))
+    def generate_base_pdf(self, form: Any, city: Any = None, cover_year: Optional[int] = None) -> bytes:
+        return self._generator._html_to_pdf_bytes(self.render_html(form, city, cover_year))

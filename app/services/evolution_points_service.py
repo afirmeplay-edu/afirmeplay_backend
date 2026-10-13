@@ -46,6 +46,18 @@ def resolve_request_points(
     return points, flat
 
 
+def resolve_point_names(data: Dict[str, Any], total_points: int) -> List[Optional[str]]:
+    """`nomes` opcional, alinhado aos pontos. Item vazio mantém o nome automático."""
+    raw = data.get("nomes") if isinstance(data, dict) else None
+    names: List[Optional[str]] = [None] * total_points
+    if not isinstance(raw, list):
+        return names
+    for index, value in enumerate(raw[:total_points]):
+        if isinstance(value, str) and value.strip():
+            names[index] = value.strip()[:120]
+    return names
+
+
 def points_need_merge(points: Sequence[Sequence[str]]) -> bool:
     return any(len(group) > 1 for group in points)
 

@@ -33,6 +33,11 @@ class ExcelEvolutionExporter:
         self.workbook = None
         self.transformed_data = None
         self.temp_files = []  # Lista para rastrear arquivos temporários
+        self.series_diferentes = False
+
+    def _variation_header(self, index: int) -> str:
+        prefix = "Dif" if self.series_diferentes else "Var"
+        return f"{prefix} {index}→{index + 1} (%)"
     
     def export(self, test_ids: List[str], municipality: Optional[str] = None, 
                state: Optional[str] = None, department: Optional[str] = None,
@@ -41,6 +46,7 @@ class ExcelEvolutionExporter:
                nivel_granularidade: str = "municipio",
                filtros_aplicados: Optional[Dict[str, Any]] = None,
                grupos: Optional[List[List[str]]] = None,
+               nomes: Optional[List[Optional[str]]] = None,
                ) -> BytesIO:
         """
         Exporta relatório de evolução de avaliações online para Excel
@@ -51,6 +57,7 @@ class ExcelEvolutionExporter:
             nivel_granularidade=nivel_granularidade,
             filtros_aplicados=filtros_aplicados,
             grupos=grupos,
+            nomes=nomes,
         )
         if not comparison_data:
             raise ValueError("Não foi possível obter dados de comparação")
@@ -113,6 +120,9 @@ class ExcelEvolutionExporter:
         cover_title: str = "RELATÓRIO DE EVOLUÇÃO DAS AVALIAÇÕES",
     ) -> BytesIO:
         try:
+            self.series_diferentes = bool(comparison_data.get('series_diferentes'))
+            if self.series_diferentes:
+                cover_title = "RELATÓRIO DE COMPARAÇÃO ENTRE SÉRIES"
             self.transformed_data = DataTransformer.transform_comparison_data(comparison_data)
             if not self.transformed_data:
                 raise ValueError("Não foi possível transformar dados")
@@ -133,6 +143,7 @@ class ExcelEvolutionExporter:
                 cover_title=cover_title,
             )
             self._create_general_sheet()
+            self._append_comparison_notes(comparison_data)
             self._create_participation_sheet()
 
             subjects = self.transformed_data.get('subjects', {})
@@ -344,6 +355,54 @@ class ExcelEvolutionExporter:
         
         ExcelFormatter.auto_adjust_column_width(sheet)
     
+    def _append_comparison_notes(self, comparison_data: Dict[str, Any]):
+        """Aba de observações: disciplinas sem par e aviso de habilidades entre séries."""
+        evaluations = comparison_data.get('evaluations', []) or []
+        missing_rows = []
+        for index, comp in enumerate(comparison_data.get('comparisons', []) or []):
+            for item in comp.get('subjects_without_comparison') or []:
+                present_in = item.get('present_in') or []
+                present = ""
+                if len(present_in) == 1:
+                    position = index if present_in[0] == 'evaluation_1' else index + 1
+                    evaluation = evaluations[position] if position < len(evaluations) else {}
+                    present = (evaluation or {}).get('title') or present_in[0]
+                missing_rows.append((f"{index + 1}→{index + 2}", item.get('subject', ''), present))
+
+        if not missing_rows and not self.series_diferentes:
+            return
+
+        sheet = self.workbook.create_sheet("Observações")
+        row = 1
+        if self.series_diferentes:
+            sheet.cell(row, 1).value = "COMPARAÇÃO ENTRE SÉRIES"
+            ExcelFormatter.format_subtitle_cell(sheet.cell(row, 1))
+            row += 1
+            sheet.cell(row, 1).value = (
+                "Os pontos são de séries diferentes: os valores mostram a diferença entre as séries, "
+                "não a evolução dos mesmos alunos."
+            )
+            ExcelFormatter.format_data_cell(sheet.cell(row, 1))
+            row += 1
+            sheet.cell(row, 1).value = "Habilidades só são comparáveis dentro da mesma série."
+            ExcelFormatter.format_data_cell(sheet.cell(row, 1))
+            row += 2
+
+        if missing_rows:
+            sheet.cell(row, 1).value = "DISCIPLINAS SEM COMPARAÇÃO"
+            ExcelFormatter.format_subtitle_cell(sheet.cell(row, 1))
+            row += 1
+            for col, header in enumerate(("Comparação", "Disciplina", "Presente em"), start=1):
+                sheet.cell(row, col).value = header
+                ExcelFormatter.format_header_cell(sheet.cell(row, col))
+            for pair, subject, present in missing_rows:
+                row += 1
+                for col, value in enumerate((pair, subject, f"Sem comparação (só em {present})" if present else "Sem comparação"), start=1):
+                    sheet.cell(row, col).value = value
+                    ExcelFormatter.format_data_cell(sheet.cell(row, col))
+
+        ExcelFormatter.auto_adjust_column_width(sheet)
+
     def _create_subject_sheet(self, subject_name: str):
         """Cria aba para uma disciplina - sempre 3 avaliações"""
         # Limitar nome da aba (Excel tem limite de 31 caracteres)
@@ -498,7 +557,7 @@ class ExcelEvolutionExporter:
         var_start_col = col + 1
         for i in range(2):
             col += 1
-            sheet.cell(row, col).value = f"Var {i+1}→{i+2} (%)"
+            sheet.cell(row, col).value = self._variation_header(i + 1)
             ExcelFormatter.format_header_cell(sheet.cell(row, col))
         
         col += 1
@@ -685,7 +744,7 @@ class ExcelEvolutionExporter:
         var_start_col = col + 1
         for i in range(2):
             col += 1
-            sheet.cell(row, col).value = f"Var {i+1}→{i+2} (%)"
+            sheet.cell(row, col).value = self._variation_header(i + 1)
             ExcelFormatter.format_header_cell(sheet.cell(row, col))
         
         # Dados
@@ -915,7 +974,7 @@ class ExcelEvolutionExporter:
         var_start_col = col + 1
         for i in range(2):
             col += 1
-            sheet.cell(row, col).value = f"Var {i+1}→{i+2} (%)"
+            sheet.cell(row, col).value = self._variation_header(i + 1)
             ExcelFormatter.format_header_cell(sheet.cell(row, col))
         
         col += 1

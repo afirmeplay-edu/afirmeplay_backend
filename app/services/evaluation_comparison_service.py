@@ -42,12 +42,17 @@ class EvaluationComparisonService:
         nivel_granularidade: str = "municipio",
         filtros_aplicados: Optional[Dict[str, Any]] = None,
         grupos: Optional[List[List[str]]] = None,
+        nomes: Optional[List[Optional[str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Compara múltiplas avaliações e retorna a evolução sequencial entre elas
 
         ``grupos`` opcional: cada lista interna é um ponto. Com 2+ IDs, o ponto
         usa a mescla de Resultados. Sem grupos mesclados, o fluxo atual não muda.
+
+        Pontos de séries diferentes ficam na ordem enviada (não por data), sem
+        comparação de habilidades, e a resposta traz ``series_diferentes: true``.
+        ``nomes`` opcional substitui o título de cada ponto (mesma posição).
         
         Args:
             test_ids: Lista de IDs das avaliações (mínimo 2)
@@ -65,6 +70,7 @@ class EvaluationComparisonService:
                 escopo_calculo=escopo_calculo,
                 nivel_granularidade=nivel_granularidade,
                 filtros_aplicados=filtros_aplicados,
+                nomes=nomes,
             )
 
         import time
@@ -120,9 +126,22 @@ class EvaluationComparisonService:
                 })
             
             dates_time = time.time() - dates_start
-            
-            # Ordenar por data de aplicação (primeira aplicada primeiro)
-            tests_with_dates.sort(key=lambda x: _as_naive_utc(x['application_date']))
+
+            grade_info_by_test = {
+                test.id: EvaluationComparisonService._resolve_test_grade_info(test)
+                for test in tests
+            }
+            series_diferentes = EvaluationComparisonService._series_diferentes(
+                grade_info_by_test.values()
+            )
+
+            if series_diferentes:
+                # Séries diferentes: ordem escolhida pelo usuário.
+                user_order = {str(test_id): index for index, test_id in enumerate(test_ids)}
+                tests_with_dates.sort(key=lambda x: user_order.get(str(x['test'].id), len(user_order)))
+            else:
+                # Ordenar por data de aplicação (primeira aplicada primeiro)
+                tests_with_dates.sort(key=lambda x: _as_naive_utc(x['application_date']))
             ordered_tests = [item['test'] for item in tests_with_dates]
             
             # Verificar se todas têm resultados (respeitando escopo quando informado)
@@ -163,10 +182,11 @@ class EvaluationComparisonService:
                 all_results[test.id] = results
             
             results_time = time.time() - results_start
-            
-            grade_info_by_test = {
-                test.id: EvaluationComparisonService._resolve_test_grade_info(test)
-                for test in ordered_tests
+
+            custom_titles = {
+                str(test_id): name
+                for test_id, name in zip(test_ids, nomes or [])
+                if name
             }
 
             # Preparar dados básicos das avaliações ordenadas
@@ -181,6 +201,8 @@ class EvaluationComparisonService:
                         grade_info_by_test.get(test.id),
                     )
                 )
+                if str(test.id) in custom_titles:
+                    evaluations_data[-1]["title"] = custom_titles[str(test.id)]
             
             # Fazer comparações sequenciais (1→2, 2→3, 3→4, etc.)
             comparisons_start = time.time()
@@ -217,12 +239,15 @@ class EvaluationComparisonService:
                 )
                 subj_time = time.time() - subj_start
                 
-                # Comparação por habilidade
+                # Comparação por habilidade (só dentro da mesma série)
                 skills_start = time.time()
-                skills_comparison = EvaluationComparisonService._get_skills_comparison(test_from, test_to, results_from, results_to)
+                if series_diferentes:
+                    skills_comparison = {}
+                else:
+                    skills_comparison = EvaluationComparisonService._get_skills_comparison(test_from, test_to, results_from, results_to)
                 skills_time = time.time() - skills_start
                 
-                comparisons.append({
+                comparison_entry = {
                     "from_evaluation": EvaluationComparisonService._build_test_evaluation_ref(
                         test_from, i + 1, grade_info_by_test.get(test_from.id)
                     ),
@@ -232,7 +257,19 @@ class EvaluationComparisonService:
                     "general_comparison": general_comparison,
                     "subject_comparison": subject_comparison,
                     "skills_comparison": skills_comparison
-                })
+                }
+                for ref_key, ref_test in (("from_evaluation", test_from), ("to_evaluation", test_to)):
+                    if str(ref_test.id) in custom_titles:
+                        comparison_entry[ref_key]["title"] = custom_titles[str(ref_test.id)]
+                if series_diferentes:
+                    comparison_entry["subjects_without_comparison"] = (
+                        EvaluationComparisonService._subjects_without_comparison(
+                            EvaluationComparisonService._extract_subjects_from_test(test_from),
+                            EvaluationComparisonService._extract_subjects_from_test(test_to),
+                            subject_comparison,
+                        )
+                    )
+                comparisons.append(comparison_entry)
                 
                 comp_time = time.time() - comp_start
             
@@ -265,7 +302,7 @@ class EvaluationComparisonService:
             participation_time = time.time() - participation_start
             total_service_time = time.time() - service_start
             
-            return {
+            response = {
                 "nivel_granularidade": nivel_granularidade,
                 "filtros_aplicados": filtros_aplicados,
                 "evaluations": evaluations_data,
@@ -274,6 +311,9 @@ class EvaluationComparisonService:
                 "total_comparisons": len(comparisons),
                 "participation": participation_data
             }
+            if series_diferentes:
+                response["series_diferentes"] = True
+            return response
             
         except Exception as e:
             logging.error(f"Erro ao comparar avaliações {test_ids}: {str(e)}", exc_info=True)
@@ -286,6 +326,7 @@ class EvaluationComparisonService:
         escopo_calculo: Optional[Dict[str, Any]] = None,
         nivel_granularidade: str = "municipio",
         filtros_aplicados: Optional[Dict[str, Any]] = None,
+        nomes: Optional[List[Optional[str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Um ponto por grupo. O GERAL do grupo mesclado reutiliza a mescla de Resultados."""
         from app.utils.school_equal_weight_means import (
@@ -296,7 +337,19 @@ class EvaluationComparisonService:
 
         aggregation_level = granularidade_to_hierarchical_target(nivel_granularidade)
         points = build_comparison_points(grupos, escopo_calculo)
-        points.sort(key=lambda point: _as_naive_utc(point.application_date))
+        series_diferentes = EvaluationComparisonService._series_diferentes(
+            point.grade_info for point in points
+        )
+        for index, point in enumerate(points):
+            name = nomes[index] if nomes and index < len(nomes) else None
+            if name:
+                point.title = name
+            elif series_diferentes and point.is_group:
+                grade_name = (point.grade_info or {}).get("grade_name")
+                if grade_name and grade_name not in point.title:
+                    point.title = f"{point.title} ({grade_name})"
+        if not series_diferentes:
+            points.sort(key=lambda point: _as_naive_utc(point.application_date))
 
         evaluations_data = []
         for index, point in enumerate(points):
@@ -325,7 +378,7 @@ class EvaluationComparisonService:
                     right.results,
                     aggregation_level=aggregation_level,
                 )
-                skills_comparison = EvaluationComparisonService._get_skills_comparison(
+                skills_comparison = {} if series_diferentes else EvaluationComparisonService._get_skills_comparison(
                     left.representative_test,
                     right.representative_test,
                     left.results,
@@ -362,6 +415,11 @@ class EvaluationComparisonService:
                 ),
                 "subject_comparison": subject_comparison,
                 "skills_comparison": skills_comparison,
+                "subjects_without_comparison": EvaluationComparisonService._subjects_without_comparison(
+                    EvaluationComparisonService._point_subjects(left),
+                    EvaluationComparisonService._point_subjects(right),
+                    subject_comparison,
+                ),
             })
 
         participation_data = {"general": {}, "by_school": {}}
@@ -372,6 +430,7 @@ class EvaluationComparisonService:
             participation_data["by_school"][eval_key] = by_school
 
         return {
+            "series_diferentes": series_diferentes,
             "nivel_granularidade": nivel_granularidade,
             "filtros_aplicados": filtros_aplicados,
             "evaluations": evaluations_data,
@@ -380,6 +439,45 @@ class EvaluationComparisonService:
             "total_comparisons": len(comparisons),
             "participation": participation_data,
         }
+
+    @staticmethod
+    def _series_diferentes(grade_infos) -> bool:
+        grade_ids = {
+            str(info.get("grade_id"))
+            for info in grade_infos
+            if info and info.get("grade_id")
+        }
+        return len(grade_ids) > 1
+
+    @staticmethod
+    def _subjects_without_comparison(
+        subjects_left: Dict[str, str],
+        subjects_right: Dict[str, str],
+        subject_comparison: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Disciplinas de um dos pontos que ficaram fora de `subject_comparison`."""
+        compared = {
+            str(item.get("subject_id"))
+            for item in (subject_comparison or {}).values()
+            if isinstance(item, dict) and item.get("subject_id") is not None
+        }
+        left_ids = {str(subject_id) for subject_id in subjects_left}
+        right_ids = {str(subject_id) for subject_id in subjects_right}
+        missing: List[Dict[str, Any]] = []
+        seen = set()
+        for subjects in (subjects_left, subjects_right):
+            for subject_id, name in subjects.items():
+                key = str(subject_id)
+                if key in compared or key in seen:
+                    continue
+                seen.add(key)
+                present_in = [
+                    eval_key
+                    for eval_key, ids in (("evaluation_1", left_ids), ("evaluation_2", right_ids))
+                    if key in ids
+                ]
+                missing.append({"subject_id": key, "subject": name or key, "present_in": present_in})
+        return missing
 
     @staticmethod
     def _point_subjects(point) -> Dict[str, str]:

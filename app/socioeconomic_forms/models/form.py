@@ -46,6 +46,21 @@ class Form(db.Model):
     # Status e prazos
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     deadline = db.Column(db.TIMESTAMP, nullable=True)
+
+    # Último pacote impresso. A URL só muda depois do upload do ZIP.
+    print_status = db.Column(db.String(20), nullable=True)  # processing, completed, failed
+    print_task_id = db.Column(db.String(64), nullable=True)
+    print_run_id = db.Column(db.String(36), nullable=True)
+    print_zip_bucket = db.Column(db.String(100), nullable=True)
+    print_zip_object_name = db.Column(db.String(500), nullable=True)
+    print_zip_url = db.Column(db.Text, nullable=True)
+    print_student_count = db.Column(db.Integer, nullable=True)
+    print_generated_count = db.Column(db.Integer, nullable=True)
+    print_failed_count = db.Column(db.Integer, nullable=True)
+    print_cover_year = db.Column(db.Integer, nullable=True)
+    print_error = db.Column(db.Text, nullable=True)
+    print_started_at = db.Column(db.TIMESTAMP, nullable=True)
+    print_finished_at = db.Column(db.TIMESTAMP, nullable=True)
     
     # Metadados
     created_by = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=False)
@@ -77,7 +92,8 @@ class Form(db.Model):
             'instructions': self.instructions,
             'createdAt': self.created_at.isoformat() if self.created_at else None,
             'updatedAt': self.updated_at.isoformat() if self.updated_at else None,
-            'createdBy': self.created_by
+            'createdBy': self.created_by,
+            'printPackage': self.print_package_dict(),
         }
         
         # Adicionar informações de envio se houver recipients
@@ -107,6 +123,22 @@ class Form(db.Model):
             }
         
         return data
+
+    def print_package_dict(self):
+        """Estado do último ZIP impresso. A URL anterior permanece durante uma geração nova."""
+        return {
+            'status': self.print_status,
+            'taskId': self.print_task_id,
+            'runId': self.print_run_id,
+            'zipAvailable': bool(self.print_zip_object_name),
+            'studentCount': self.print_student_count,
+            'generatedCount': self.print_generated_count,
+            'failedCount': self.print_failed_count,
+            'coverYear': self.print_cover_year,
+            'error': self.print_error,
+            'startedAt': self.print_started_at.isoformat() if self.print_started_at else None,
+            'finishedAt': self.print_finished_at.isoformat() if self.print_finished_at else None,
+        }
     
     def __repr__(self):
         return f'<Form {self.id}: {self.title} ({self.form_type})>'

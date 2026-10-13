@@ -33,6 +33,8 @@ MESES_PT = {
     12: "dezembro",
 }
 
+MAX_TURMAS_LOTE = 2000
+
 
 class TermoCompromissoValidationError(Exception):
     def __init__(self, message: str):
@@ -260,98 +262,171 @@ def _parse_filters(args: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def _get_city_or_raise(municipio_id: str) -> City:
+    city = City.query.get(municipio_id)
+    if not city:
+        raise TermoCompromissoValidationError("Município não encontrado.")
+    return city
+
+
+def _resolve_selection(
+    filters: Dict[str, str],
+    allowed: Optional[Set[str]],
+) -> Tuple[Optional[School], Optional[Grade], Optional[Class]]:
+    selected_school: Optional[School] = None
+    selected_grade: Optional[Grade] = None
+    selected_class: Optional[Class] = None
+
+    if filters["escola"]:
+        selected_school = School.query.filter(
+            School.id == filters["escola"], School.city_id == filters["municipio"]
+        ).first()
+        if not selected_school:
+            raise TermoCompromissoValidationError("Escola não encontrada para o município selecionado.")
+        if allowed is not None and str(selected_school.id) not in allowed:
+            raise TermoCompromissoValidationError("Você não tem permissão para acessar esta escola.")
+
+    if filters["serie"]:
+        selected_grade = Grade.query.get(filters["serie"])
+        if not selected_grade:
+            raise TermoCompromissoValidationError("Série não encontrada.")
+
+    if filters["turma"]:
+        class_query = Class.query.join(School, Class._school_id == School.id).filter(
+            Class.id == filters["turma"],
+            School.city_id == filters["municipio"],
+        )
+        if selected_school:
+            class_query = class_query.filter(School.id == selected_school.id)
+        if selected_grade:
+            class_query = class_query.filter(Class.grade_id == selected_grade.id)
+        selected_class = class_query.first()
+        if not selected_class:
+            raise TermoCompromissoValidationError("Turma não encontrada para os filtros selecionados.")
+        if allowed is not None and str(selected_class.school_id) not in allowed:
+            raise TermoCompromissoValidationError("Você não tem permissão para acessar esta turma.")
+
+    return selected_school, selected_grade, selected_class
+
+
+def _build_common_payload(city: City, filters: Dict[str, str]) -> Dict[str, Any]:
+    """Dados do termo que não variam por turma (município, período, aplicação, documento)."""
+    modo = filters["modo"]
+    evaluation_id = filters["evaluation_id"]
+    answer_sheet_id = filters["answer_sheet_id"]
+
+    mes_avaliacao, ano_avaliacao = _resolve_periodo_avaliacao(modo, evaluation_id, answer_sheet_id)
+    city_name = str(city.name or "").strip().upper()
+
+    return {
+        "municipio": {
+            "id": str(city.id),
+            "name": str(city.name or ""),
+            "state": str(city.state or ""),
+            "prefeitura_label": f"PREFEITURA MUNICIPAL DE {city_name}",
+            "secretaria_label": "SECRETARIA MUNICIPAL DE EDUCAÇÃO",
+        },
+        "contexto": {
+            "mes_avaliacao": mes_avaliacao,
+            "ano": ano_avaliacao,
+            "municipio_corpo": _municipio_corpo(city),
+            "periodo_texto": f"no período de {mes_avaliacao} de {ano_avaliacao}",
+            "nome_aplicacao_referencia": _resolve_nome_aplicacao_referencia(
+                modo, evaluation_id, answer_sheet_id
+            ),
+            "data_documento": _format_data_documento(city, modo, evaluation_id, answer_sheet_id),
+        },
+        "documento": {
+            "titulo": "TERMO DE COMPROMISSO E CONFIDENCIALIDADE",
+        },
+    }
+
+
 class TermoCompromissoService:
     @staticmethod
     def get_dados(user: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
         filters = _parse_filters(args)
         allowed = _allowed_school_ids(user)
+        city = _get_city_or_raise(filters["municipio"])
+        selected_school, selected_grade, selected_class = _resolve_selection(filters, allowed)
 
-        city = City.query.get(filters["municipio"])
-        if not city:
-            raise TermoCompromissoValidationError("Município não encontrado.")
-
-        selected_school: Optional[School] = None
-        selected_grade: Optional[Grade] = None
-        selected_class: Optional[Class] = None
-
-        if filters["escola"]:
-            selected_school = School.query.filter(
-                School.id == filters["escola"], School.city_id == filters["municipio"]
-            ).first()
-            if not selected_school:
-                raise TermoCompromissoValidationError("Escola não encontrada para o município selecionado.")
-            if allowed is not None and str(selected_school.id) not in allowed:
-                raise TermoCompromissoValidationError("Você não tem permissão para acessar esta escola.")
-
-        if filters["serie"]:
-            selected_grade = Grade.query.get(filters["serie"])
-            if not selected_grade:
-                raise TermoCompromissoValidationError("Série não encontrada.")
-
-        if filters["turma"]:
-            class_query = Class.query.join(School, Class._school_id == School.id).filter(
-                Class.id == filters["turma"],
-                School.city_id == filters["municipio"],
-            )
-            if selected_school:
-                class_query = class_query.filter(School.id == selected_school.id)
-            if selected_grade:
-                class_query = class_query.filter(Class.grade_id == selected_grade.id)
-            selected_class = class_query.first()
-            if not selected_class:
-                raise TermoCompromissoValidationError("Turma não encontrada para os filtros selecionados.")
-            if allowed is not None and str(selected_class.school_id) not in allowed:
-                raise TermoCompromissoValidationError("Você não tem permissão para acessar esta turma.")
-
-        city_name = str(city.name or "").strip().upper()
-        prefeitura_label = f"PREFEITURA MUNICIPAL DE {city_name}"
-
-        escola_nome = str(selected_school.name or "").strip() if selected_school else "Todas as escolas"
-        serie_nome = str(selected_grade.name or "").strip() if selected_grade else "Todas as séries"
-        turma_nome = str(selected_class.name or "").strip() if selected_class else "Todas as turmas"
-        shift = str(selected_class.shift or "").strip() if selected_class else ""
-        mes_avaliacao, ano_avaliacao = _resolve_periodo_avaliacao(
-            filters["modo"],
-            filters["evaluation_id"],
-            filters["answer_sheet_id"],
-        )
-        nome_aplicacao_referencia = _resolve_nome_aplicacao_referencia(
-            filters["modo"],
-            filters["evaluation_id"],
-            filters["answer_sheet_id"],
-        )
-        municipio_corpo = _municipio_corpo(city)
-        periodo_texto = f"no período de {mes_avaliacao} de {ano_avaliacao}"
-        data_documento = _format_data_documento(
-            city,
-            filters["modo"],
-            filters["evaluation_id"],
-            filters["answer_sheet_id"],
-        )
-        secretaria_label = "SECRETARIA MUNICIPAL DE EDUCAÇÃO"
-
-        return {
-            "municipio": {
-                "id": str(city.id),
-                "name": str(city.name or ""),
-                "state": str(city.state or ""),
-                "prefeitura_label": prefeitura_label,
-                "secretaria_label": secretaria_label,
-            },
-            "contexto": {
-                "escola": escola_nome,
-                "serie": serie_nome,
-                "turma": turma_nome,
-                "shift": shift,
-                "mes_avaliacao": mes_avaliacao,
-                "ano": ano_avaliacao,
-                "municipio_corpo": municipio_corpo,
-                "periodo_texto": periodo_texto,
-                "nome_aplicacao_referencia": nome_aplicacao_referencia,
-                "data_documento": data_documento,
-            },
-            "documento": {
-                "titulo": "TERMO DE COMPROMISSO E CONFIDENCIALIDADE",
-            },
-            "filters": filters,
+        payload = _build_common_payload(city, filters)
+        payload["contexto"] = {
+            "escola": str(selected_school.name or "").strip() if selected_school else "Todas as escolas",
+            "serie": str(selected_grade.name or "").strip() if selected_grade else "Todas as séries",
+            "turma": str(selected_class.name or "").strip() if selected_class else "Todas as turmas",
+            "shift": str(selected_class.shift or "").strip() if selected_class else "",
+            **payload["contexto"],
         }
+        payload["filters"] = filters
+        return payload
+
+    @staticmethod
+    def get_lote(user: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Dados comuns do termo + lista de turmas do recorte (escola/série/turma opcionais).
+        No modo avaliação, restringe às turmas em que a avaliação foi aplicada.
+        """
+        filters = _parse_filters(args)
+        allowed = _allowed_school_ids(user)
+        city = _get_city_or_raise(filters["municipio"])
+        selected_school, selected_grade, selected_class = _resolve_selection(filters, allowed)
+
+        payload = _build_common_payload(city, filters)
+        payload["filters"] = filters
+        payload["turmas"] = []
+
+        if allowed is not None and not allowed:
+            return payload
+
+        query = (
+            db.session.query(
+                Class.id,
+                Class.name,
+                Class.shift,
+                School.id,
+                School.name,
+                Grade.id,
+                Grade.name,
+            )
+            .join(School, Class._school_id == School.id)
+            .outerjoin(Grade, Class.grade_id == Grade.id)
+            .filter(School.city_id == filters["municipio"])
+        )
+        if allowed is not None:
+            query = query.filter(School.id.in_(list(allowed)))
+        if selected_school:
+            query = query.filter(School.id == selected_school.id)
+        if selected_grade:
+            query = query.filter(Class.grade_id == selected_grade.id)
+        if selected_class:
+            query = query.filter(Class.id == selected_class.id)
+        if filters["modo"] == "avaliacao" and filters["evaluation_id"]:
+            applied_class_ids = db.session.query(ClassTest.class_id).filter(
+                ClassTest.test_id == filters["evaluation_id"]
+            )
+            query = query.filter(Class.id.in_(applied_class_ids))
+
+        rows = (
+            query.order_by(School.name, Grade.name, Class.name)
+            .limit(MAX_TURMAS_LOTE + 1)
+            .all()
+        )
+        if len(rows) > MAX_TURMAS_LOTE:
+            raise TermoCompromissoValidationError(
+                f"O recorte selecionado excede {MAX_TURMAS_LOTE} turmas. Refine os filtros."
+            )
+
+        payload["turmas"] = [
+            {
+                "turma_id": str(class_id),
+                "turma": str(class_name or "").strip(),
+                "shift": str(shift or "").strip(),
+                "escola_id": str(school_id),
+                "escola": str(school_name or "").strip(),
+                "serie_id": str(grade_id) if grade_id else "",
+                "serie": str(grade_name or "").strip(),
+            }
+            for class_id, class_name, shift, school_id, school_name, grade_id, grade_name in rows
+        ]
+        return payload

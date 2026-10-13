@@ -9377,6 +9377,22 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             round(100.0 * alunos_participantes / total_alunos, 2) if total_alunos else 0.0
         )
 
+        media_proficiencia_geral_fmt = format_decimal_two_places(media_proficiencia)
+        course_name_nivel = "Anos Iniciais"
+        first_test_nivel = (
+            getattr(class_tests[0], "test", None) or Test.query.get(class_tests[0].test_id)
+            if class_tests
+            else None
+        )
+        if first_test_nivel:
+            course_name_nivel = _get_curso_nome(getattr(first_test_nivel, "course", None))
+        nivel_classificacao_geral = _nivel_classificacao_por_media_proficiencia(
+            media_proficiencia_geral_fmt,
+            course_name_nivel,
+            alunos_participantes,
+            _has_matematica_para_geral(scope_info=scope_info, class_tests=class_tests),
+        )
+
         return {
             "tipo": nivel_granularidade,
             "nome": _get_nome_granularidade(nivel_granularidade, scope_info, escola_info, serie_info),
@@ -9397,8 +9413,9 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             "alunos_ausentes": alunos_ausentes,
             "percentual_comparecimento": percentual_comparecimento,
             "media_nota_geral": round(media_nota, 2),
-            "media_proficiencia_geral": format_decimal_two_places(media_proficiencia),
-            "distribuicao_classificacao_geral": distribuicao_geral
+            "media_proficiencia_geral": media_proficiencia_geral_fmt,
+            "distribuicao_classificacao_geral": distribuicao_geral,
+            "nivel_classificacao": nivel_classificacao_geral,
         }
         
     except Exception as e:
@@ -10297,7 +10314,8 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "percentual_comparecimento": stats_grupo['percentual_comparecimento'],
                     "media_nota": stats_grupo['media_nota'],
                     "media_proficiencia": stats_grupo['media_proficiencia'],
-                    "distribuicao_classificacao": stats_grupo['distribuicao_classificacao']
+                    "distribuicao_classificacao": stats_grupo['distribuicao_classificacao'],
+                    "nivel_classificacao": stats_grupo.get('nivel_classificacao'),
                 }
                 
             elif nivel_granularidade == "escola":
@@ -10329,7 +10347,8 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "percentual_comparecimento": stats_grupo['percentual_comparecimento'],
                     "media_nota": stats_grupo['media_nota'],
                     "media_proficiencia": stats_grupo['media_proficiencia'],
-                    "distribuicao_classificacao": stats_grupo['distribuicao_classificacao']
+                    "distribuicao_classificacao": stats_grupo['distribuicao_classificacao'],
+                    "nivel_classificacao": stats_grupo.get('nivel_classificacao'),
                 }
                 
             elif nivel_granularidade in ["serie", "turma"]:
@@ -10357,7 +10376,8 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "percentual_comparecimento": stats_grupo['percentual_comparecimento'],
                     "media_nota": stats_grupo['media_nota'],
                     "media_proficiencia": stats_grupo['media_proficiencia'],
-                    "distribuicao_classificacao": stats_grupo['distribuicao_classificacao']
+                    "distribuicao_classificacao": stats_grupo['distribuicao_classificacao'],
+                    "nivel_classificacao": stats_grupo.get('nivel_classificacao'),
                 }
             
             resultados_detalhados.append(result)
@@ -10530,6 +10550,18 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
             round(100.0 * alunos_participantes / total_alunos, 2) if total_alunos else 0.0
         )
 
+        media_proficiencia_fmt = format_decimal_two_places(media_proficiencia)
+        nivel_classificacao = _nivel_classificacao_por_media_proficiencia(
+            media_proficiencia_fmt,
+            _get_curso_nome(getattr(evaluation, "course", None)),
+            alunos_participantes,
+            _has_matematica_para_geral(
+                scope_info=scope_info,
+                class_tests=class_tests_grupo,
+                evaluation=evaluation,
+            ),
+        )
+
         return {
             'total_alunos': total_alunos,
             'alunos_participantes': alunos_participantes,
@@ -10537,8 +10569,9 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
             'alunos_ausentes': alunos_ausentes,
             'percentual_comparecimento': percentual_comparecimento,
             'media_nota': format_decimal_two_places(media_nota),
-            'media_proficiencia': format_decimal_two_places(media_proficiencia),
-            'distribuicao_classificacao': distribuicao
+            'media_proficiencia': media_proficiencia_fmt,
+            'distribuicao_classificacao': distribuicao,
+            'nivel_classificacao': nivel_classificacao,
         }
         
     except Exception as e:
@@ -10646,6 +10679,26 @@ def _has_matematica_para_geral(
         if seen_false:
             return False
     return None
+
+
+def _nivel_classificacao_por_media_proficiencia(
+    media_proficiencia: Optional[float],
+    course_name: Optional[str],
+    alunos_participantes: int,
+    has_matematica: Optional[bool],
+) -> Optional[str]:
+    """Nível agregado (turma/escola/município) = faixa da média de proficiência, não a moda dos alunos."""
+    if not alunos_participantes or media_proficiencia is None:
+        return None
+    try:
+        return EvaluationCalculator.determine_classification(
+            float(media_proficiencia),
+            course_name or "Anos Iniciais",
+            "GERAL",
+            has_matematica=has_matematica,
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _media_geral_media_das_disciplinas(

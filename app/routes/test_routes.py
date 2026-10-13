@@ -3791,6 +3791,7 @@ def comparar_avaliacoes():
 
         from app.services.evolution_points_service import (
             points_need_merge,
+            resolve_point_names,
             resolve_request_points,
             validate_merge_points,
         )
@@ -3799,6 +3800,7 @@ def comparar_avaliacoes():
             points, test_ids = resolve_request_points(data)
         except ValueError as ve:
             return jsonify({"error": str(ve)}), 400
+        point_names = resolve_point_names(data, len(points))
         
         print(f"[COMPARE] Recebidos {len(test_ids)} test_ids: {test_ids} - Tempo: {time.time() - start_time:.2f}s")
         
@@ -3968,6 +3970,7 @@ def comparar_avaliacoes():
             nivel_granularidade=nivel,
             filtros_aplicados=filtros_aplicados,
             grupos=points if points_need_merge(points) else None,
+            nomes=point_names,
         )
         
         comparison_time = time.time() - comparison_start
@@ -4132,6 +4135,7 @@ def export_evolution_excel():
 
         from app.services.evolution_points_service import (
             points_need_merge,
+            resolve_point_names,
             resolve_request_points,
             validate_merge_points,
         )
@@ -4143,6 +4147,7 @@ def export_evolution_excel():
             )
         except ValueError as ve:
             return jsonify({"error": str(ve)}), 400
+        point_names = resolve_point_names(data, len(points))
         
         # Buscar todas as avaliações para verificar se existem
         tests = Test.query.filter(Test.id.in_(test_ids)).all()
@@ -4232,6 +4237,7 @@ def export_evolution_excel():
             nivel_granularidade=nivel,
             filtros_aplicados=filtros_aplicados,
             grupos=points if points_need_merge(points) else None,
+            nomes=point_names,
         )
         
         # Gerar nome do arquivo

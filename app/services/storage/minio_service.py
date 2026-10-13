@@ -39,6 +39,7 @@ class MinIOService:
     BUCKETS = {
         'ANSWER_SHEETS': 'answer-sheets',
         'PHYSICAL_TESTS': 'physical-tests',
+        'SOCIOECONOMIC_FORMS': 'socioeconomic-forms',
         'MUNICIPALITY_LOGOS': 'municipality-logos',
         'SCHOOL_LOGOS': 'school-logos',
         'QUESTION_IMAGES': 'question-images',

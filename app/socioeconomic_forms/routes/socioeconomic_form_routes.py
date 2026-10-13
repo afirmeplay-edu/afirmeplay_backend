@@ -20,6 +20,7 @@ from app.multitenant.physical_schema_binding import get_effective_tenant_physica
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 import logging
+import uuid
 
 bp = Blueprint('socioeconomic_forms', __name__, url_prefix='/forms')
 
@@ -460,6 +461,200 @@ def apply_form(form_id):
     except Exception as e:
         logging.error(f"Erro ao aplicar formulário: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao aplicar formulário", "details": str(e)}), 500
+
+
+def _print_tenant_schema():
+    try:
+        schema = get_effective_tenant_physical_schema()
+    except Exception:
+        schema = None
+    if schema:
+        return schema
+    ctx = get_current_tenant_context()
+    if ctx and getattr(ctx, "schema", None):
+        return ctx.schema
+    return "public"
+
+
+def _authorize_print_form(form_id):
+    user = get_current_user_from_token()
+    if not user:
+        return None, None, (jsonify({"error": "Usuário não encontrado"}), 404)
+    form = Form.query.get(form_id)
+    if not form:
+        return None, None, (jsonify({"error": "Questionário não encontrado"}), 404)
+    if str(form.created_by) != str(user["id"]):
+        return None, None, (jsonify({
+            "error": "Apenas o usuário que criou o questionário pode gerar ou baixar a impressão"
+        }), 403)
+    return user, form, None
+
+
+def _celery_task_state(task_id):
+    if not task_id:
+        return None
+    try:
+        from celery.result import AsyncResult
+        from app.report_analysis.celery_app import celery_app
+        return AsyncResult(task_id, app=celery_app).state
+    except Exception as exc:
+        logging.warning("Não foi possível ler o estado da task %s: %s", task_id, exc)
+        return None
+
+
+@bp.route('/<form_id>/print-packages', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def create_print_package(form_id):
+    """Dispara o ZIP impresso de todos os alunos do escopo. Resposta 202."""
+    try:
+        from app.socioeconomic_forms.services.print_package import (
+            list_print_students,
+            print_generation_in_progress,
+            resolve_print_scope,
+            scope_rejection_message,
+        )
+        from app.socioeconomic_forms.services.print_tasks import generate_print_package
+        from app.socioeconomic_forms.services.questionnaire_pdf_service import civil_cover_year
+
+        _user, form, error = _authorize_print_form(form_id)
+        if error:
+            return error
+
+        if print_generation_in_progress(
+            form.print_status,
+            form.print_started_at,
+            _celery_task_state(form.print_task_id),
+            datetime.utcnow(),
+        ):
+            return jsonify({
+                "error": "Já existe uma geração em andamento para este questionário",
+                "status": "processing",
+                "taskId": form.print_task_id,
+                "runId": form.print_run_id,
+                "formId": form.id,
+                "pollingUrl": f"/forms/{form.id}/print-packages",
+            }), 409
+
+        scope = resolve_print_scope(form)
+        rejection = scope_rejection_message(scope)
+        if rejection:
+            return jsonify({"error": rejection, "formId": form.id}), 400
+
+        students = list_print_students(form)
+        if not students:
+            return jsonify({
+                "error": "Nenhum aluno encontrado no escopo deste questionário.",
+                "formId": form.id,
+            }), 400
+
+        run_id = str(uuid.uuid4())
+        cover_year = civil_cover_year()
+        form.print_status = "processing"
+        form.print_run_id = run_id
+        form.print_task_id = None
+        form.print_started_at = datetime.utcnow()
+        form.print_finished_at = None
+        form.print_error = None
+        form.print_student_count = len(students)
+        form.print_generated_count = 0
+        form.print_failed_count = 0
+        form.print_cover_year = cover_year
+        db.session.commit()
+
+        schema = _print_tenant_schema()
+        try:
+            task = generate_print_package.delay(str(form.id), schema, run_id)
+        except Exception:
+            form.print_status = "failed"
+            form.print_error = "Não foi possível enfileirar a geração."
+            form.print_finished_at = datetime.utcnow()
+            db.session.commit()
+            raise
+        form.print_task_id = task.id
+        db.session.commit()
+
+        return jsonify({
+            "status": "processing",
+            "taskId": task.id,
+            "runId": run_id,
+            "formId": form.id,
+            "pollingUrl": f"/forms/{form.id}/print-packages",
+            "downloadUrl": f"/forms/{form.id}/print-packages/download",
+            "studentCount": len(students),
+            "coverYear": cover_year,
+        }), 202
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao disparar impressão do questionário: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao disparar a impressão", "details": str(e)}), 500
+
+
+@bp.route('/<form_id>/print-packages', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def get_print_package(form_id):
+    """Estado do último pacote. Sem nenhuma geração, 404 para o card mostrar o estado inicial."""
+    try:
+        from app.socioeconomic_forms.services.print_package import print_package_was_started
+
+        _user, form, error = _authorize_print_form(form_id)
+        if error:
+            return error
+        if not print_package_was_started(form.print_status, form.print_run_id, form.print_started_at):
+            return jsonify({
+                "error": "Nenhum pacote gerado ainda",
+                "formId": form.id,
+                "status": None,
+                "zipAvailable": False,
+            }), 404
+        payload = form.print_package_dict()
+        payload["formId"] = form.id
+        payload["pollingUrl"] = f"/forms/{form.id}/print-packages"
+        payload["downloadUrl"] = f"/forms/{form.id}/print-packages/download"
+        return jsonify(payload), 200
+    except Exception as e:
+        logging.error(f"Erro ao consultar impressão do questionário: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao consultar a impressão", "details": str(e)}), 500
+
+
+@bp.route('/<form_id>/print-packages/download', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def download_print_package(form_id):
+    """Baixa o ZIP pelo backend. Enquanto uma geração nova roda, entrega o pacote anterior."""
+    try:
+        from io import BytesIO
+
+        from flask import send_file
+
+        from app.services.storage.minio_service import MinIOService
+        from app.socioeconomic_forms.services.print_package import sanitize_filename
+
+        _user, form, error = _authorize_print_form(form_id)
+        if error:
+            return error
+        if not form.print_zip_object_name:
+            return jsonify({
+                "error": "ZIP ainda não foi gerado",
+                "formId": form.id,
+                "status": form.print_status,
+            }), 404
+
+        minio = MinIOService()
+        bucket_name = form.print_zip_bucket or minio.BUCKETS["SOCIOECONOMIC_FORMS"]
+        zip_bytes = minio.download_file(bucket_name, form.print_zip_object_name)
+        title = sanitize_filename(form.custom_title or form.title or "", 60, "formulario")
+        return send_file(
+            BytesIO(zip_bytes),
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=f"questionarios_{title}.zip",
+            max_age=0,
+        )
+    except Exception as e:
+        logging.error(f"Erro ao baixar impressão do questionário: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao baixar o ZIP", "details": str(e)}), 500
 
 
 @bp.route('/<form_id>/recipients', methods=['GET'])

@@ -71,6 +71,7 @@ celery_app = Celery(
         'app.services.celery_tasks.evaluation_recalculation_tasks',  # Tasks de recálculo de resultados
         'app.services.celery_tasks.ai_analysis_cache_tasks',  # Tasks de cache de IA (Redis)
         'app.socioeconomic_forms.services.results_tasks',  # Tasks de resultados socioeconômicos
+        'app.socioeconomic_forms.services.print_tasks',  # ZIP impresso dos questionários
         'app.socioeconomic_forms.services.results_migration_tasks',  # Tasks de migração/população inicial
         'app.services.celery_tasks.competition_tasks',  # Tasks de finalização de competições
         'app.afirme_ler.tasks',  # Leitura Guiada Automática (STT + avaliação)

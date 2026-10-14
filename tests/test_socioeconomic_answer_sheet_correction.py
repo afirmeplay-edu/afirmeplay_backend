@@ -82,6 +82,13 @@ class TestCardQrAndMerge(unittest.TestCase):
         untouched = correction.merge_marked_answers(existing, {})
         self.assertEqual(untouched["q2b"], "Sim")
 
+    def test_student_name_comes_from_the_student_record(self):
+        self.assertEqual(
+            correction.student_display_name(SimpleNamespace(name="  Maria Souza  ", user_id=None)),
+            "Maria Souza",
+        )
+        self.assertIsNone(correction.student_display_name(SimpleNamespace(name="  ", user_id=None)))
+
     def test_payload_accepts_several_cards(self):
         documents = correction.payload_documents({
             "pdfs": ["pdf-a", "pdf-b"],

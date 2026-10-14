@@ -89,6 +89,13 @@ def merge_marked_answers(existing: Optional[Dict[str, Any]], marked: Dict[str, A
     return merged
 
 
+def student_display_name(student: Any) -> Optional[str]:
+    """Nome do cadastro do aluno. Não depende de user_id."""
+    name = getattr(student, "name", None)
+    text = str(name or "").strip()
+    return text or None
+
+
 def prefix_matches(full_id: str, prefix: str) -> bool:
     full = str(full_id or "")
     text = str(prefix or "").strip()
@@ -326,6 +333,7 @@ def save_marked_answers(form, student_prefix: str, answers: Dict[str, str]) -> D
     result = {
         "studentPrefix": student_prefix,
         "studentId": None,
+        "studentName": None,
         "userId": None,
         "saved": False,
         "reason": None,
@@ -340,6 +348,7 @@ def save_marked_answers(form, student_prefix: str, answers: Dict[str, str]) -> D
     if not prefix_matches(student.id, student_prefix):
         result["reason"] = "prefixo de aluno ambíguo ou inexistente"
         return result
+    result["studentName"] = student_display_name(student)
     if not student.user_id:
         result["reason"] = "aluno sem usuário vinculado"
         return result

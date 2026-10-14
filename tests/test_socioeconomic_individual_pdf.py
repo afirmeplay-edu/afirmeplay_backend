@@ -76,6 +76,19 @@ class TestQrPayload(unittest.TestCase):
         symbol = individual.build_qr_code(encoded)
         self.assertEqual(symbol.version, 4)
 
+    def test_card_payload_carries_the_page_fraction(self):
+        payload = individual.build_qr_payload(STUDENT_ID, FORM_ID, page=2, page_count=3)
+        self.assertEqual(payload["p"], "2/3")
+        self.assertEqual(payload["student_id"], STUDENT_ID[:12])
+        encoded = individual.qr_payload_text(payload)
+        self.assertIn('"p":"2/3"', encoded)
+        symbol = individual.build_qr_code(encoded)
+        self.assertGreaterEqual(symbol.version, 4)
+        with self.assertRaises(ValueError):
+            individual.build_qr_payload(STUDENT_ID, FORM_ID, page=4, page_count=3)
+        with self.assertRaises(ValueError):
+            individual.build_qr_payload(STUDENT_ID, FORM_ID, page=1)
+
     def test_payload_rejects_blank_ids(self):
         with self.assertRaises(ValueError):
             individual.build_qr_payload("", FORM_ID)

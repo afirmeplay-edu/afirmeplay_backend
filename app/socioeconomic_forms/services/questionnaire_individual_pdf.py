@@ -11,24 +11,17 @@ mesmo corte da prova física (12 primeiros caracteres de cada id):
 
     {"v": 1, "student_id": "<Student.id[:12]>", "form_id": "<Form.id[:12]>"}
 
-Não chama o gerador de cartão nem o leitor existente. O leitor desta folha,
-quando existir, precisa achar o Student.id e o Form.id do tenant cujo início
-é exatamente esse prefixo. Zero ou mais de um resultado: recusar a gravação.
-Não entregar este JSON ao leitor da prova física: ele procura test_id e usa
-student_id como chave inteira.
+No cartão, cada folha acrescenta a página: "p": "2/3". A capa não leva "p".
 
-Persistência das respostas — lacuna consciente, fora desta etapa
------------------------------------------------------------------
-FormResponse exige user_id e recipient_id, ambos NOT NULL, e é único em
-(form_id, user_id). FormRecipient também exige user_id. Um aluno sem usuário
-pode ser impresso e identificado pelo QR (Student.id + Form.id), mas o modelo
-atual não tem onde gravar as marcas OMR dele.
+Não chama o gerador de cartão nem o leitor da prova física. O leitor deste
+cartão está em answer_sheet_correction.py. Ele acha o Student.id e o Form.id
+do tenant cujo início é exatamente esse prefixo. Zero ou mais de um
+resultado: recusar a gravação. Não entregar este JSON ao leitor da prova
+física: ele procura test_id e usa student_id como chave inteira.
 
-Quando o leitor for implementado, a gravação precisa de um destino que aceite
-Student.id sem user_id. Não criar FormRecipient artificial na geração do PDF.
-Não alterar FormResponse nesta etapa. O leitor deve recusar a gravação se o
-aluno estiver fora do escopo do formulário, em vez de cair no destinatário
-virtual de outra pessoa.
+A gravação usa o FormResponse que já existe, na conta Student.user_id.
+Aluno sem usuário pode ser impresso e lido, mas não há linha para gravar.
+Não se cria FormRecipient na geração do PDF.
 """
 
 import io
@@ -84,17 +77,34 @@ def qr_id_prefix(value: str) -> str:
     return str(value or "").strip()[:QR_ID_PREFIX_LENGTH]
 
 
-def build_qr_payload(student_id: str, form_id: str) -> Dict[str, Any]:
-    """Identidade da folha. Prefixos de 12 caracteres, sem user_id."""
+def build_qr_payload(
+    student_id: str,
+    form_id: str,
+    page: Optional[int] = None,
+    page_count: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Identidade da folha. Prefixos de 12 caracteres, sem user_id.
+
+    A capa não leva página. Cada folha do cartão leva ``p`` no formato ``2/3``:
+    página atual e total. O total não é fixo.
+    """
     student = qr_id_prefix(student_id)
     form = qr_id_prefix(form_id)
     if not student or not form:
         raise ValueError("student_id e form_id são obrigatórios no QR Code")
-    return {
+    payload: Dict[str, Any] = {
         "v": QR_PAYLOAD_VERSION,
         "student_id": student,
         "form_id": form,
     }
+    if page is None and page_count is None:
+        return payload
+    if page is None or page_count is None:
+        raise ValueError("página e total do cartão vêm juntos no QR")
+    if page_count < 1 or page < 1 or page > page_count:
+        raise ValueError("página do cartão fora do intervalo")
+    payload["p"] = f"{int(page)}/{int(page_count)}"
+    return payload
 
 
 def qr_payload_text(payload: Mapping[str, Any]) -> str:
@@ -262,18 +272,14 @@ def render_card_overlay_pdf(
     state: str = "",
     page_count: int = 1,
 ) -> bytes:
-    """Um PDF com uma página de overlay por página do cartão. O QR é o mesmo em todas."""
+    """Um PDF com uma página de overlay por página do cartão.
+
+    Aluno e formulário se repetem. O campo p muda: 1/N, 2/N, ...
+    """
     from reportlab.lib.colors import HexColor, black
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.utils import ImageReader
     from reportlab.pdfgen.canvas import Canvas
-
-    payload_text = qr_payload_text(build_qr_payload(student_id, form_id))
-    qr = build_qr_code(payload_text)
-    qr_image = qr.make_image(fill_color="black", back_color="white")
-    qr_buffer = io.BytesIO()
-    qr_image.save(qr_buffer, format="PNG")
-    qr_png = qr_buffer.getvalue()
 
     name = (student_name or "").strip().upper()
     school = (school_name or "").strip().upper()
@@ -310,8 +316,16 @@ def render_card_overlay_pdf(
         canvas.drawCentredString(
             _CARD_BADGE_X, _CARD_BADGE_Y, _card_page_label(page_number, page_count)
         )
+        page_payload = qr_payload_text(build_qr_payload(
+            student_id, form_id, page=page_number, page_count=max(page_count, 1),
+        ))
+        page_qr = build_qr_code(page_payload)
+        page_image = page_qr.make_image(fill_color="black", back_color="white")
+        page_buffer = io.BytesIO()
+        page_image.save(page_buffer, format="PNG")
+        page_buffer.seek(0)
         canvas.drawImage(
-            ImageReader(io.BytesIO(qr_png)),
+            ImageReader(page_buffer),
             _CARD_QR_X,
             _CARD_QR_Y,
             width=_CARD_QR_SIZE,

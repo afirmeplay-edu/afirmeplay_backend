@@ -83,6 +83,42 @@ class TestQrPayload(unittest.TestCase):
             individual.build_qr_payload(STUDENT_ID, "  ")
 
 
+class TestCardHeaderFit(unittest.TestCase):
+    def test_long_name_and_school_stay_in_their_columns(self):
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+
+        overlay = individual.render_card_overlay_pdf(
+            student_id=STUDENT_ID,
+            form_id=FORM_ID,
+            student_name="Adryann Luciano de Oliveira da Silva",
+            school_name="Colégio Municipal Esther Soares Torres",
+            grade_name="4º Ano",
+            class_name="Turma A",
+            birth_date="29/05/2016",
+            municipality="São Miguel dos Campos",
+            state="AL",
+        )
+        placed = []
+
+        def visitor(text, _cm, tm, font_dict, font_size):
+            if text and text.strip():
+                placed.append((text, tm[4], font_size, font_dict.get("/BaseFont", "")))
+
+        PdfReader(io.BytesIO(overlay)).pages[0].extract_text(visitor_text=visitor)
+        name = next(item for item in placed if item[0].startswith("ADRYANN"))
+        school = next(item for item in placed if item[0].startswith("COL"))
+        self.assertLessEqual(
+            name[1] + stringWidth(name[0], "Helvetica-Bold", name[2]),
+            individual._CARD_X_SCHOOL - 4,
+        )
+        self.assertLessEqual(
+            school[1] + stringWidth(school[0], "Helvetica-Bold", school[2]),
+            individual._CARD_X_CLASS - 4,
+        )
+        self.assertIn("ADRYANN LUCIANO DE OLIVEIRA DA SILVA", name[0])
+        self.assertIn("COLÉGIO MUNICIPAL ESTHER SOARES TORRES", school[0])
+
+
 class TestIndividualPdf(unittest.TestCase):
     def test_cover_is_personal_and_inner_pages_match_the_base(self):
         try:
@@ -114,11 +150,19 @@ class TestIndividualPdf(unittest.TestCase):
         self.assertIn("Avaliação Municipal 2026", cover)
         self.assertNotIn("MARIA DA SILVA", base_reader.pages[0].extract_text() or "")
 
-        for index in range(1, len(reader.pages)):
+        start = individual.answer_sheet_start_page(base)
+        self.assertIsNotNone(start)
+        self.assertGreater(start, 0)
+        for index in range(1, start):
             self.assertEqual(
                 reader.pages[index].extract_text(),
                 base_reader.pages[index].extract_text(),
             )
+        card = "\n".join(reader.pages[i].extract_text() or "" for i in range(start, len(reader.pages)))
+        self.assertIn("MARIA DA SILVA", card)
+        self.assertIn("Preencha completamente a bolha", card)
+        self.assertIn("PÁGINA 1 DE", card)
+        self.assertIn("01", card)
 
         self.assertGreater(len(reader.pages[0].images), len(base_reader.pages[0].images))
 

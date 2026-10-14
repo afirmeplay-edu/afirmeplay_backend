@@ -9,15 +9,24 @@ ano civil da execução (cover_year). Nome, escola, turma e QR ficam em branco
 para o overlay de questionnaire_individual_pdf.py.
 """
 
+import io
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
+
+from pypdf import PdfReader, PdfWriter
 
 from app.services.institutional_test_weasyprint_generator import (
     InstitutionalTestWeasyPrintGenerator,
 )
 
 TEMPLATE_NAME = "socioeconomic_questionnaire.html"
+ANSWER_SHEET_TEMPLATE = "socioeconomic_answer_sheet.html"
+ANSWER_SHEET_START_KEY = "/SocioAnswerSheetStart"
+
+# Só palavras bem curtas, sem espaço, substituem a letra na bolha (Não, Sim).
+_SHORT_LABEL_MAX_CHARS = 4
+_SHORT_LABEL_MAX_OPTIONS = 3
 
 # Ano civil da capa. O fuso do processo (muitas vezes UTC) não vale:
 # na virada do ano, UTC já pode estar no ano seguinte enquanto São Paulo não.
@@ -148,9 +157,40 @@ class SocioeconomicQuestionnairePdfService:
             })
         return questions
 
+    @staticmethod
+    def build_card_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Blocos do cartão. Só entram perguntas de bolha; texto e número ficam no questionário."""
+        cards = []
+        for question in questions:
+            if question.get("layout") not in ("options", "matrix"):
+                continue
+            options = question.get("options") or []
+            short = (
+                question.get("layout") == "matrix"
+                and 0 < len(options) <= _SHORT_LABEL_MAX_OPTIONS
+                and all(
+                    " " not in option["text"] and len(option["text"]) <= _SHORT_LABEL_MAX_CHARS
+                    for option in options
+                )
+            )
+            cards.append({
+                **question,
+                "code": f"{int(question['number']):02d}",
+                "short_labels": short,
+                "legend": " | ".join(
+                    f"{option['letter']}={option['text']}" for option in options
+                ),
+                "card_sub_questions": [
+                    {**sub, "code": f"{question['number']}.{index}"}
+                    for index, sub in enumerate(question.get("sub_questions") or [], 1)
+                ],
+            })
+        return cards
+
     def build_context(self, form: Any, city: Any = None, cover_year: Optional[int] = None) -> Dict[str, Any]:
         title = (form.custom_title or form.title or "").strip()
         year = civil_cover_year() if cover_year is None else int(cover_year)
+        questions = self.build_questions(list(form.questions))
         return {
             "form": {
                 "id": form.id,
@@ -161,7 +201,8 @@ class SocioeconomicQuestionnairePdfService:
             "state": (getattr(city, "state", None) or "").strip(),
             "municipality": (getattr(city, "name", None) or "").strip(),
             "cover_year": year,
-            "questions": self.build_questions(list(form.questions)),
+            "questions": questions,
+            "card_questions": self.build_card_questions(questions),
             "default_logo": self._generator._load_default_logo(),
             # Metadado de auditoria. A frase da capa usa cover_year, não esta data.
             "generated_date": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -172,5 +213,34 @@ class SocioeconomicQuestionnairePdfService:
             TEMPLATE_NAME, self.build_context(form, city, cover_year)
         )
 
+    def render_answer_sheet_html(self, form: Any, city: Any = None, cover_year: Optional[int] = None) -> str:
+        return self._generator._render_template(
+            ANSWER_SHEET_TEMPLATE, self.build_context(form, city, cover_year)
+        )
+
     def generate_base_pdf(self, form: Any, city: Any = None, cover_year: Optional[int] = None) -> bytes:
-        return self._generator._html_to_pdf_bytes(self.render_html(form, city, cover_year))
+        """Questionário de leitura e, no final, o cartão-resposta das bolhas."""
+        context = self.build_context(form, city, cover_year)
+        questionnaire = self._generator._html_to_pdf_bytes(
+            self._generator._render_template(TEMPLATE_NAME, context)
+        )
+        if not context["card_questions"]:
+            return questionnaire
+        answer_sheet = self._generator._html_to_pdf_bytes(
+            self._generator._render_template(ANSWER_SHEET_TEMPLATE, context)
+        )
+        return _append_pdf(questionnaire, answer_sheet)
+
+
+def _append_pdf(first: bytes, second: bytes) -> bytes:
+    first_reader = PdfReader(io.BytesIO(first))
+    second_reader = PdfReader(io.BytesIO(second))
+    writer = PdfWriter()
+    for page in first_reader.pages:
+        writer.add_page(page)
+    for page in second_reader.pages:
+        writer.add_page(page)
+    writer.add_metadata({ANSWER_SHEET_START_KEY: str(len(first_reader.pages))})
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()

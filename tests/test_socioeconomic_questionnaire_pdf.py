@@ -107,6 +107,17 @@ class TestBuildQuestions(unittest.TestCase):
             {"reference": "Questão 3, item a)", "values": ["Sim"]},
         )
 
+    def test_card_keeps_bubble_questions_and_short_labels(self):
+        cards = SocioeconomicQuestionnairePdfService.build_card_questions(self.questions)
+        self.assertEqual([q["id"] for q in cards], ["q1", "q2", "q3", "q4", "q5"])
+        binary = next(q for q in cards if q["id"] == "q4")
+        self.assertTrue(binary["short_labels"])
+        self.assertEqual(binary["card_sub_questions"][0]["code"], "4.1")
+        three = next(q for q in cards if q["id"] == "q3")
+        self.assertFalse(three["short_labels"])
+        self.assertEqual(three["code"], "03")
+        self.assertIn("C=Não sei", three["legend"])
+
     def test_large_matrix_is_allowed_to_break(self):
         rows = [{"id": f"q8{i}", "text": f"Item {i}"} for i in range(16)]
         big = _question("q8", 8, "Matriz grande", "matriz_selecao", options=["Não", "Sim"], sub_questions=rows)
@@ -175,21 +186,28 @@ class TestGenerateBasePdf(unittest.TestCase):
         self.assertNotIn("Questão 1.", cover_text)
         self.assertIn("Questão 1.", reader.pages[1].extract_text() or "")
 
-    def test_corner_anchors_on_every_page(self):
+    def test_corner_anchors_only_on_the_answer_sheet(self):
         try:
             from pdf2image import convert_from_bytes
         except ImportError:
             self.skipTest("pdf2image não disponível")
 
         pdf_bytes = SocioeconomicQuestionnairePdfService().generate_base_pdf(_sample_form())
+        start = int(PdfReader(io.BytesIO(pdf_bytes)).metadata[_pdf_module.ANSWER_SHEET_START_KEY])
         pages = convert_from_bytes(pdf_bytes, dpi=72, grayscale=True)
-        self.assertGreater(len(pages), 1)
+        self.assertGreater(start, 0)
+        self.assertLess(start, len(pages))
         # Âncora de 32px a 0,2cm da borda: o centro fica a ~0,2cm + 16px de cada borda.
         offset = round(0.2 / 2.54 * 72 + 16 * 0.75)
-        for page in pages:
+        for index, page in enumerate(pages):
             w, h = page.size
-            for x, y in ((offset, offset), (w - offset, offset), (offset, h - offset), (w - offset, h - offset)):
-                self.assertLess(page.getpixel((x, y)), 60)
+            corners = ((offset, offset), (w - offset, offset), (offset, h - offset), (w - offset, h - offset))
+            for x, y in corners:
+                pixel = page.getpixel((x, y))
+                if index >= start:
+                    self.assertLess(pixel, 60)
+                else:
+                    self.assertGreater(pixel, 200)
 
 
 if __name__ == "__main__":

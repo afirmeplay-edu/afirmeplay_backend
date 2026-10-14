@@ -231,6 +231,9 @@ def write_print_zip(
                     school_name=student.get("school_name") or "",
                     grade_name=student.get("grade_name") or "",
                     class_name=student.get("class_name") or "",
+                    birth_date=student.get("birth_date") or "",
+                    municipality=student.get("municipality") or "",
+                    state=student.get("state") or "",
                 )
                 archive.writestr(pdf_arcname(student), pdf_bytes)
                 generated += 1
@@ -283,6 +286,7 @@ def list_print_students(form: Any) -> List[Dict[str, Any]]:
         db.session.query(
             Student.id,
             Student.name,
+            Student.birth_date,
             Student.user_id,
             Class.name,
             Grade.name,
@@ -320,10 +324,11 @@ def list_print_students(form: Any) -> List[Dict[str, Any]]:
         Student.name,
     )
     students = []
-    for student_id, name, user_id, class_name, grade_name, school_name, city_name, state in query.all():
+    for student_id, name, birth_date, user_id, class_name, grade_name, school_name, city_name, state in query.all():
         students.append({
             "student_id": str(student_id),
             "name": name or "",
+            "birth_date": birth_date.strftime("%d/%m/%Y") if birth_date else "",
             "user_id": user_id,
             "class_name": class_name or "",
             "grade_name": grade_name or "",

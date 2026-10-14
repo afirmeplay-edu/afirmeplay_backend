@@ -476,7 +476,7 @@ def _print_tenant_schema():
     return "public"
 
 
-def _authorize_print_form(form_id):
+def _authorize_print_form(form_id, forbidden_message=None):
     user = get_current_user_from_token()
     if not user:
         return None, None, (jsonify({"error": "Usuário não encontrado"}), 404)
@@ -485,7 +485,7 @@ def _authorize_print_form(form_id):
         return None, None, (jsonify({"error": "Questionário não encontrado"}), 404)
     if str(form.created_by) != str(user["id"]):
         return None, None, (jsonify({
-            "error": "Apenas o usuário que criou o questionário pode gerar ou baixar a impressão"
+            "error": forbidden_message or "Apenas o usuário que criou o questionário pode gerar ou baixar a impressão"
         }), 403)
     return user, form, None
 
@@ -1151,4 +1151,100 @@ def get_template_questions(form_type):
     except Exception as e:
         logging.error(f"Erro ao carregar perguntas do template: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao carregar perguntas do template", "details": str(e)}), 500
+
+
+def _correction_batch():
+    """Vários PDFs ou imagens na mesma chamada. Um arquivo inválido não cancela os outros."""
+    from app.socioeconomic_forms.services.answer_sheet_correction import (
+        pages_from_upload,
+        payload_documents,
+    )
+
+    images = []
+    sources = []
+    load_errors = []
+    file_index = 0
+
+    def take_file(filename, raw, decode_error=None):
+        nonlocal file_index
+        current = file_index
+        file_index += 1
+        if decode_error:
+            load_errors.append({
+                "fileIndex": current,
+                "filename": filename,
+                "reason": decode_error,
+            })
+            return
+        try:
+            pages = pages_from_upload(filename, raw)
+        except ValueError as exc:
+            load_errors.append({
+                "fileIndex": current,
+                "filename": filename,
+                "reason": str(exc),
+            })
+            return
+        for page_index, image in enumerate(pages):
+            images.append(image)
+            sources.append({
+                "fileIndex": current,
+                "pageIndex": page_index,
+                "filename": filename,
+            })
+
+    for field in request.files:
+        for storage in request.files.getlist(field):
+            take_file(storage.filename or "", storage.read())
+
+    payload = request.get_json(silent=True) or {}
+    for document in payload_documents(payload):
+        filename = document["filename"]
+        try:
+            raw = _decode_base64(document["content"])
+        except Exception:
+            take_file(filename, b"", "conteúdo do arquivo inválido")
+            continue
+        take_file(filename, raw)
+
+    return images, sources, load_errors, file_index
+
+
+def _decode_base64(value: str) -> bytes:
+    import base64
+    text = value.strip()
+    if "," in text and text.startswith("data:"):
+        text = text.split(",", 1)[1]
+    return base64.b64decode(text)
+
+
+@bp.route('/<form_id>/answer-sheet-corrections', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def correct_answer_sheets(form_id):
+    """Lê vários cartões na mesma chamada e grava uma correção por aluno."""
+    try:
+        from app.socioeconomic_forms.services.answer_sheet_correction import correct_uploaded_sheets
+
+        _user, form, error = _authorize_print_form(
+            form_id,
+            "Apenas o usuário que criou o questionário pode corrigir o cartão",
+        )
+        if error:
+            return error
+        images, sources, load_errors, file_count = _correction_batch()
+        if file_count == 0:
+            return jsonify({"error": "Envie um ou mais PDFs ou imagens do cartão"}), 400
+        return jsonify(correct_uploaded_sheets(
+            form,
+            images,
+            sources=sources,
+            load_errors=load_errors,
+            file_count=file_count,
+        )), 200
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logging.error("Erro ao corrigir cartão socioeconômico: %s", exc, exc_info=True)
+        return jsonify({"error": "Erro ao corrigir o cartão", "details": str(exc)}), 500
 

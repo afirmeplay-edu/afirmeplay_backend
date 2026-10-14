@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<!--
+  Cartão-resposta do questionário socioeconômico.
+  Anexado ao final do PDF de leitura. O aluno marca as bolhas aqui;
+  o questionário em si não é lido no OMR.
+
+  Cabeçalho repetido em cada página, com os campos do aluno em branco
+  para o overlay (nome, nascimento, escola, município, turma e QR).
+  Quadrados de 32px nos cantos, no mesmo padrão do questionário.
+-->
+<html lang="pt-BR">
+	<head>
+		<meta charset="UTF-8" />
+		<title>Cartão-resposta — {{ form.title }}</title>
+		<style>
+			@page {
+				size: A4 portrait;
+				margin: 4.55cm 1.15cm 1.15cm 1.15cm;
+				@top-left-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat left 0.2cm top 0.2cm / 32px 32px;
+				}
+				@top-right-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat right 0.2cm top 0.2cm / 32px 32px;
+				}
+				@bottom-left-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat left 0.2cm bottom 0.2cm / 32px 32px;
+				}
+				@bottom-right-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat right 0.2cm bottom 0.2cm / 32px 32px;
+				}
+				@top-center {
+					content: element(cardHeader);
+					width: 100%;
+					vertical-align: top;
+				}
+			}
+
+			* {
+				margin: 0;
+				padding: 0;
+				box-sizing: border-box;
+			}
+
+			body {
+				font-family: "Helvetica", Arial, sans-serif;
+				color: #111;
+			}
+
+			.card-header {
+				position: running(cardHeader);
+				width: 100%;
+				padding-top: 1.05cm;
+			}
+
+			.id-row {
+				display: flex;
+				align-items: stretch;
+				height: 1.85cm;
+				border-bottom: 1px solid #000;
+			}
+
+			.id-col {
+				flex: 1;
+				min-width: 0;
+				padding: 1px 6px 2px 0;
+			}
+
+			.id-col + .id-col {
+				padding-left: 6px;
+				border-left: 1px solid #d0d0d0;
+			}
+
+			.kicker {
+				font-size: 7pt;
+				line-height: 1.1;
+				color: #222;
+			}
+
+			.value {
+				height: 0.72cm;
+				font-size: 8pt;
+				font-weight: bold;
+				line-height: 1.15;
+				overflow: hidden;
+				white-space: nowrap;
+			}
+
+			.meta {
+				height: 0.42cm;
+				font-size: 7pt;
+				line-height: 1.15;
+				overflow: hidden;
+			}
+
+			.meta .tag {
+				color: #333;
+			}
+
+			.qr-slot {
+				flex: 0 0 1.7cm;
+				width: 1.7cm;
+				height: 1.7cm;
+				margin-left: 4px;
+			}
+
+			.edition {
+				margin-top: 3px;
+				text-align: center;
+				font-size: 9pt;
+				font-weight: bold;
+				line-height: 1.15;
+			}
+
+			.hint {
+				text-align: center;
+				font-size: 7.5pt;
+				line-height: 1.15;
+			}
+
+			.page-badge {
+				width: 5.6cm;
+				height: 0.42cm;
+				margin: 2px auto 0;
+				border: 1px solid #000;
+				text-align: center;
+			}
+
+			.block {
+				border: 1px solid #000;
+				border-bottom: none;
+				break-inside: auto;
+			}
+
+			.sheet .block:last-child {
+				border-bottom: 1px solid #000;
+			}
+
+			table.grid {
+				width: 100%;
+				border-collapse: collapse;
+				table-layout: fixed;
+			}
+
+			table.grid td {
+				vertical-align: middle;
+				border-bottom: 1px solid #d4d4d4;
+			}
+
+			table.grid tr {
+				break-inside: avoid;
+			}
+
+			table.grid tr.head td {
+				border-bottom: 1px solid #000;
+			}
+
+			table.grid tr:last-child td {
+				border-bottom: none;
+			}
+
+			td.num {
+				width: 0.9cm;
+				background: #f2f2f2;
+				border-right: 1px solid #000;
+				border-bottom-color: #000;
+				text-align: center;
+				font-size: 8pt;
+				font-weight: bold;
+			}
+
+			td.prompt,
+			td.sub-text {
+				padding: 1px 4px;
+				text-transform: uppercase;
+			}
+
+			td.prompt {
+				font-size: 6.6pt;
+				font-weight: bold;
+				line-height: 1.05;
+			}
+
+			td.legend {
+				padding: 1px 4px 2px;
+				font-size: 7pt;
+				line-height: 1.2;
+				text-align: right;
+				text-transform: uppercase;
+				border-bottom: 1px solid #000;
+			}
+
+			td.sub-code {
+				width: 0.85cm;
+				font-size: 6.5pt;
+				font-weight: bold;
+				text-align: center;
+			}
+
+			td.sub-code.split {
+				border-left: 1px solid #d4d4d4;
+			}
+
+			td.sub-text {
+				font-size: 6.6pt;
+				line-height: 1.15;
+			}
+
+			td.marks {
+				white-space: nowrap;
+				text-align: right;
+				padding: 1px 4px;
+				line-height: 1;
+			}
+
+			td.marks.below {
+				text-align: right;
+				padding-top: 1px;
+				padding-bottom: 3px;
+			}
+
+			.tick {
+				display: inline-block;
+				width: 7px;
+				height: 7px;
+				margin-right: 3px;
+				background: #6d28d9;
+				vertical-align: middle;
+			}
+
+			.choice {
+				display: inline-block;
+				white-space: nowrap;
+				vertical-align: middle;
+				margin-left: 4px;
+			}
+
+			.bubble {
+				display: inline-block;
+				width: 12px;
+				height: 12px;
+				background: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAABIklEQVR4nO2ZSQ7DIAxFQ+9/Z7JKxOARgg2Ut+si9vsYIRWu63DoIgyoGS17flGMEx7q0PNxr3hJk0trAFQ+RjpXCGRLtY/2A9COk0ab42HEXpoAlWWreCUBBxG5SQNkpl+JlwBBWL+foK6JPFKbbcYFMJMnepBNJRPACg9D04sK8FaxlEd6ogJYAHtjHtCJ3UIeq6/pDQWYcfUfKjdyAp6rL3UQn0Kzsl0A16MTgzpSt5vAcpwA3pwA3mwX4P0Lx9wemFK4ZD+2m8BykAFm2EacAxTA3xqncmO3kOcUJL2xADNOAXSiJuB6pFJHZ4r4FLIMoenFBciXwSCE9n5UMgGzEC2Xu39zvf6w9ANHyrJPTClLP/KlLPvMimH60H04dHIDaVhYSMr0sDoAAAAASUVORK5CYII=") center / 12px 12px no-repeat;
+				vertical-align: middle;
+			}
+
+			.lbl {
+				display: inline-block;
+				margin-left: 1px;
+				font-size: 7.5pt;
+				font-weight: bold;
+				line-height: 1;
+				vertical-align: middle;
+			}
+		</style>
+	</head>
+	<body>
+		<header class="card-header">
+			<div class="id-row">
+				<div class="id-col">
+					<div class="kicker">Aluno</div>
+					<div class="value value-name">&nbsp;</div>
+					<div class="meta"><span class="tag">Nascimento:</span> <span class="value-birth">&nbsp;</span></div>
+				</div>
+				<div class="id-col">
+					<div class="kicker">Escola / Município</div>
+					<div class="value value-school">&nbsp;</div>
+					<div class="meta value-city">&nbsp;</div>
+				</div>
+				<div class="id-col">
+					<div class="kicker">Aplicação / Turma</div>
+					<div class="value value-title">{{ form.title }}</div>
+					<div class="meta value-class">&nbsp;</div>
+				</div>
+				<div class="qr-slot"></div>
+			</div>
+			<div class="edition">{{ form.title }} {{ cover_year }}</div>
+			<div class="hint">Preencha completamente a bolha</div>
+			<div class="page-badge"></div>
+		</header>
+
+		{% macro marks(options, short) -%}
+		<span class="tick"></span>{% for option in options %}<span class="choice"><span class="bubble"></span><span class="lbl">{% if short %}{{ option.text }}{% else %}{{ option.letter }}{% endif %}</span></span>{% endfor %}
+		{%- endmacro %}
+
+		<div class="sheet">
+			{% for question in card_questions %}
+			{% if question.layout == 'matrix' %}
+			{% set wide = (not question.short_labels) and (question.options|length) > 6 %}
+			{% set mark_width = ((question.options|length) * (1.05 if question.short_labels else 0.70) + 0.40) ~ 'cm' %}
+			<section class="block">
+				<table class="grid">
+					<colgroup>
+						<col style="width: 0.9cm" />
+						<col />
+						<col style="width: {{ mark_width }}" />
+						{% if not wide %}
+						<col style="width: 0.85cm" />
+						<col />
+						<col style="width: {{ mark_width }}" />
+						{% endif %}
+					</colgroup>
+					<tr class="head">
+						<td class="num">{{ question.code }}</td>
+						<td class="prompt" colspan="{{ 5 if not wide else 2 }}">{{ question.text }}</td>
+					</tr>
+					{% if question.legend %}
+					<tr>
+						<td class="legend" colspan="{{ 6 if not wide else 3 }}">{{ question.legend }}</td>
+					</tr>
+					{% endif %}
+					{% if wide %}
+					{% for sub in question.card_sub_questions %}
+					<tr>
+						<td class="sub-code">{{ sub.code }}</td>
+						<td class="sub-text">{{ sub.text }}</td>
+						<td class="marks">{{ marks(question.options, false) }}</td>
+					</tr>
+					{% endfor %}
+					{% else %}
+					{% for sub in question.card_sub_questions %}
+					{% if loop.index0 % 2 == 0 %}
+					<tr>
+					{% endif %}
+						<td class="sub-code{% if loop.index0 % 2 == 1 %} split{% endif %}">{{ sub.code }}</td>
+						<td class="sub-text">{{ sub.text }}</td>
+						<td class="marks">{{ marks(question.options, question.short_labels) }}</td>
+					{% if loop.index % 2 == 1 and loop.last %}
+						<td class="sub-code split"></td>
+						<td class="sub-text"></td>
+						<td class="marks"></td>
+					{% endif %}
+					{% if loop.index % 2 == 0 or loop.last %}
+					</tr>
+					{% endif %}
+					{% endfor %}
+					{% endif %}
+				</table>
+			</section>
+			{% else %}
+			{% set many = (question.options|length) > 10 %}
+			{% set mark_width = ((question.options|length) * 0.70 + 0.40) ~ 'cm' %}
+			<section class="block">
+				<table class="grid">
+					{% if many %}
+					<tr class="head">
+						<td class="num">{{ question.code }}</td>
+						<td class="prompt">{{ question.text }}</td>
+					</tr>
+					<tr>
+						<td class="marks below" colspan="2">{{ marks(question.options, false) }}</td>
+					</tr>
+					{% else %}
+					<colgroup>
+						<col style="width: 0.9cm" />
+						<col />
+						<col style="width: {{ mark_width }}" />
+					</colgroup>
+					<tr class="head">
+						<td class="num">{{ question.code }}</td>
+						<td class="prompt">{{ question.text }}</td>
+						<td class="marks">{{ marks(question.options, false) }}</td>
+					</tr>
+					{% endif %}
+				</table>
+			</section>
+			{% endif %}
+			{% endfor %}
+		</div>
+	</body>
+</html>

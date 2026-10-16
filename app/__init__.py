@@ -332,6 +332,7 @@ def create_app():
     from app.store.routes import bp as store_bp
     from app.afirme_ler.routes import bp as afirme_ler_bp
     from app.participation_report import bp as participation_report_bp
+    from app.routes.comparative_report_routes import bp as comparative_report_bp
     from app.tempo_prova import bp as tempo_prova_bp
     from app.mapa_questoes import bp as mapa_questoes_bp
     from app.boletim_aluno import bp as boletim_aluno_bp
@@ -407,6 +408,7 @@ def create_app():
     app.register_blueprint(store_bp)
     app.register_blueprint(afirme_ler_bp)
     app.register_blueprint(participation_report_bp)
+    app.register_blueprint(comparative_report_bp)
     app.register_blueprint(tempo_prova_bp)
     app.register_blueprint(mapa_questoes_bp)
     app.register_blueprint(boletim_aluno_bp)

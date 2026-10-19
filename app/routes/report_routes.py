@@ -44,7 +44,11 @@ from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.classTest import ClassTest
 from app.models.evaluationResult import EvaluationResult
-from app.services.evaluation_result_snapshot import municipal_evaluation_results_query
+from app.services.evaluation_result_snapshot import (
+    group_results_by_placement_class,
+    municipal_evaluation_results_query,
+    student_ids_for_class_group_with_snapshots,
+)
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.decimal_helpers import round_to_two_decimals
 from app.utils.class_label_helpers import normalize_shift
@@ -3560,168 +3564,151 @@ def _calcular_totais_alunos_por_escopo(evaluation_id: str, class_tests: List[Cla
         return _calcular_totais_alunos(evaluation_id, class_tests)
 
 
+def _unique_class_ids(class_tests: List[ClassTest]) -> List[Any]:
+    return list(dict.fromkeys(ct.class_id for ct in class_tests if getattr(ct, "class_id", None)))
+
+
+def _carregar_turmas(class_ids: List[Any]) -> Dict[Any, Class]:
+    if not class_ids:
+        return {}
+    return {cls.id: cls for cls in Class.query.filter(Class.id.in_(class_ids)).all()}
+
+
+def _mapa_nomes_escolas(school_ids: Any) -> Dict[str, str]:
+    ids = [str(item) for item in (school_ids or []) if item]
+    if not ids:
+        return {}
+    return {str(s.id): s.name for s in School.query.filter(School.id.in_(ids)).all()}
+
+
+def _agrupar_resultados_por_colocacao(
+    evaluation_results: List[EvaluationResult],
+    class_tests: List[ClassTest],
+):
+    """
+    Agrupa resultados pela turma/escola de aplicação (snapshot), mesma regra de
+    ``/evaluation-results``. Retorna (results_by_class, results_by_school, turmas).
+    """
+    class_ids = _unique_class_ids(class_tests)
+    turmas = _carregar_turmas(class_ids)
+    results_by_class = defaultdict(list, group_results_by_placement_class(evaluation_results, class_ids))
+    results_by_school = defaultdict(list)
+    for class_id, rows in results_by_class.items():
+        turma = turmas.get(class_id)
+        if turma is not None and turma.school_id:
+            results_by_school[str(turma.school_id)].extend(rows)
+    return results_by_class, results_by_school, turmas
+
+
+def _participacao_grupo_turmas(
+    evaluation_id: str,
+    class_ids_grupo: List[Any],
+    base_por_turma: Dict[str, set],
+    results_by_class: Dict[Any, List[EvaluationResult]],
+):
+    """(universo, avaliados) de um grupo de turmas, como ``_calcular_estatisticas_grupo`` em Resultados."""
+    base = set()
+    for class_id in class_ids_grupo:
+        base |= base_por_turma.get(str(class_id), set())
+    universo = student_ids_for_class_group_with_snapshots(str(evaluation_id), class_ids_grupo, base)
+    avaliados = {
+        str(r.student_id) for class_id in class_ids_grupo for r in results_by_class.get(class_id, [])
+    }
+    return universo | avaliados, avaliados
+
+
+def _contexto_participacao(evaluation_id: str, class_tests: List[ClassTest]):
+    class_ids = _unique_class_ids(class_tests)
+    base_por_turma: Dict[str, set] = defaultdict(set)
+    if class_ids:
+        for student_id, class_id in (
+            db.session.query(Student.id, Student.class_id).filter(Student.class_id.in_(class_ids)).all()
+        ):
+            base_por_turma[str(class_id)].add(str(student_id))
+    evaluation_results = EvaluationResult.query.options(
+        joinedload(EvaluationResult.student)
+    ).filter_by(test_id=str(evaluation_id)).all()
+    results_by_class, _, turmas = _agrupar_resultados_por_colocacao(evaluation_results, class_tests)
+    return class_ids, base_por_turma, results_by_class, turmas
+
+
+def _linha_participacao(matriculados: int, avaliados: int) -> Dict[str, Any]:
+    percentual = (avaliados / matriculados * 100) if matriculados > 0 else 0
+    return {
+        "matriculados": matriculados,
+        "avaliados": avaliados,
+        "percentual": round_to_two_decimals(percentual),
+        "faltosos": matriculados - avaliados,
+    }
+
+
 def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[ClassTest]) -> Dict[str, Any]:
     """
-    Calcula totais de alunos agrupados por escola (para relatório por município)
-    
-    Args:
-        evaluation_id: ID da avaliação
-        class_tests: Lista de turmas onde a avaliação foi aplicada
-    
-    Returns:
-        Dict com totais agrupados por escola
-    """
-    class_ids = [ct.class_id for ct in class_tests]
-    
-    # Buscar todos os alunos das turmas onde a avaliação foi aplicada
-    from sqlalchemy.orm import joinedload as jl
-    students = Student.query.options(
-        jl(Student.class_)
-        # ❌ REMOVIDO: jl(Student.class_, Class.school) - Class.school é property, não relationship
-    ).filter(Student.class_id.in_(class_ids)).all()
-    
-    # Buscar resultados da avaliação (alunos que realizaram)
-    evaluation_results = EvaluationResult.query.filter_by(test_id=evaluation_id).all()
+    Totais de alunos por escola (relatório municipal).
 
-    # Avaliados por escola: prioridade school_id_snapshot; legado usa escola atual do aluno
-    avaliados_ids_por_escola = defaultdict(set)
-    for er in evaluation_results:
-        if er.school_id_snapshot:
-            avaliados_ids_por_escola[str(er.school_id_snapshot)].add(er.student_id)
-        else:
-            st = Student.query.get(er.student_id)
-            if st and st.class_ and st.class_.school:
-                avaliados_ids_por_escola[str(st.class_.school.id)].add(er.student_id)
-    
-    # Agrupar alunos por escola
-    students_by_school = defaultdict(list)
-    for student in students:
-        if student.class_ and student.class_.school:
-            students_by_school[student.class_.school.id].append(student)
-    
-    # Calcular estatísticas por escola
+    Matriculados = alunos atuais das turmas ∪ alunos com resultado nessas turmas
+    (snapshot), sem o transferido interno; avaliados = resultados cuja turma de
+    aplicação está nas turmas da escola. Total geral sem duplicar aluno.
+    """
+    class_ids, base_por_turma, results_by_class, turmas = _contexto_participacao(evaluation_id, class_tests)
+
+    class_ids_por_escola: Dict[str, List[Any]] = OrderedDict()
+    for class_id in class_ids:
+        turma = turmas.get(class_id)
+        if turma is None or not turma.school_id:
+            continue
+        class_ids_por_escola.setdefault(str(turma.school_id), []).append(class_id)
+    nomes_escolas = _mapa_nomes_escolas(class_ids_por_escola.keys())
+
     por_escola = []
-    total_matriculados = 0
-    total_avaliados = 0
-    
-    for school_id, school_students in students_by_school.items():
-        # Matriculados = Alunos da escola onde a avaliação foi aplicada (turmas atuais)
-        matriculados = len(school_students)
-        av_ids = set(avaliados_ids_por_escola.get(str(school_id), set()))
-        avaliados = len(av_ids)
-        percentual = (avaliados / matriculados * 100) if matriculados > 0 else 0
-        # Faltosos = Matriculados que não realizaram (no recorte atual)
-        faltosos = sum(1 for s in school_students if s.id not in av_ids)
-        
-        # Obter nome da escola
-        escola_nome = "Escola Desconhecida"
-        if school_students and school_students[0].class_ and school_students[0].class_.school:
-            escola_nome = school_students[0].class_.school.name
-        
+    universo_total: set = set()
+    avaliados_total: set = set()
+    for school_id, class_ids_escola in class_ids_por_escola.items():
+        universo, avaliados = _participacao_grupo_turmas(
+            evaluation_id, class_ids_escola, base_por_turma, results_by_class
+        )
+        if not universo:
+            continue
+        universo_total |= universo
+        avaliados_total |= avaliados
         por_escola.append({
-            "escola": escola_nome,
-            "matriculados": matriculados,
-            "avaliados": avaliados,
-            "percentual": round_to_two_decimals(percentual),
-            "faltosos": faltosos
+            "escola": nomes_escolas.get(school_id, "Escola Desconhecida"),
+            **_linha_participacao(len(universo), len(avaliados)),
         })
-        
-        total_matriculados += matriculados
-        total_avaliados += avaliados
-    
-    # Calcular totais gerais
-    total_percentual = (total_avaliados / total_matriculados * 100) if total_matriculados > 0 else 0
-    total_faltosos = total_matriculados - total_avaliados
-    
+
     return {
         "por_escola": por_escola,
-        "total_geral": {
-            "matriculados": total_matriculados,
-            "avaliados": total_avaliados,
-            "percentual": round_to_two_decimals(total_percentual),
-            "faltosos": total_faltosos
-        }
+        "total_geral": _linha_participacao(len(universo_total), len(avaliados_total)),
     }
 
 
 def _calcular_totais_alunos(evaluation_id: str, class_tests: List[ClassTest]) -> Dict[str, Any]:
-    """Calcula totais de alunos por turma e geral"""
-    class_ids = [ct.class_id for ct in class_tests]
+    """
+    Totais de alunos por turma e geral, com a mesma regra de Resultados
+    (turma de aplicação via snapshot; transferido interno conta só na turma onde fez a prova).
+    """
+    class_ids, base_por_turma, results_by_class, turmas = _contexto_participacao(evaluation_id, class_tests)
 
-    # Buscar todos os alunos das turmas onde a avaliação foi aplicada
-    students = Student.query.options(
-        joinedload(Student.class_).joinedload(Class.grade)
-    ).filter(Student.class_id.in_(class_ids)).all()
-    
-    # Buscar resultados da avaliação (alunos que realizaram)
-    evaluation_results = EvaluationResult.query.filter_by(test_id=evaluation_id).all()
-    results_by_student = {er.student_id: er for er in evaluation_results}
-    
-    # Agrupar alunos por turma
-    students_by_class = defaultdict(list)
-    for student in students:
-        students_by_class[student.class_id].append(student)
-    
-    # Calcular estatísticas por turma (agrupando por nome de turma)
-    dados_por_nome_turma = defaultdict(lambda: {"matriculados": 0, "avaliados": 0})
-    total_matriculados = 0
-    total_avaliados = 0
+    # Agregar por nome de turma (pode haver múltiplas turmas com mesmo nome)
+    class_ids_por_nome: Dict[str, List[Any]] = defaultdict(list)
+    for class_id in class_ids:
+        turma = turmas.get(class_id)
+        turma_nome = turma.name if turma is not None and turma.name else "Turma Desconhecida"
+        class_ids_por_nome[turma_nome].append(class_id)
 
-    for class_test in class_tests:
-        class_id = class_test.class_id
-        class_students = students_by_class[class_id]
-
-        # Obter nome da turma
-        turma_nome = "Turma Desconhecida"
-        if class_students and class_students[0].class_:
-            turma_nome = class_students[0].class_.name
-        else:
-            # Se não há alunos, buscar nome da turma diretamente
-            turma_obj = Class.query.get(class_id)
-            if turma_obj:
-                turma_nome = turma_obj.name
-
-        # Matriculados = Alunos da turma onde a avaliação foi aplicada
-        matriculados = len(class_students)
-        # Avaliados = Alunos que realmente realizaram a avaliação (têm resultado)
-        avaliados = sum(1 for s in class_students if s.id in results_by_student)
-
-        # Agregar por nome de turma (pode haver múltiplas turmas com mesmo nome)
-        dados_por_nome_turma[turma_nome]["matriculados"] += matriculados
-        dados_por_nome_turma[turma_nome]["avaliados"] += avaliados
-
-        total_matriculados += matriculados
-        total_avaliados += avaliados
-
-    # Criar lista final agrupada por nome de turma
     por_turma = []
-    for turma_nome in sorted(dados_por_nome_turma.keys()):
-        dados = dados_por_nome_turma[turma_nome]
-        matriculados = dados["matriculados"]
-        avaliados = dados["avaliados"]
-        percentual = (avaliados / matriculados * 100) if matriculados > 0 else 0
-        faltosos = matriculados - avaliados
+    for turma_nome in sorted(class_ids_por_nome.keys()):
+        universo, avaliados = _participacao_grupo_turmas(
+            evaluation_id, class_ids_por_nome[turma_nome], base_por_turma, results_by_class
+        )
+        por_turma.append({"turma": turma_nome, **_linha_participacao(len(universo), len(avaliados))})
 
-        por_turma.append({
-            "turma": turma_nome,
-            "matriculados": matriculados,
-            "avaliados": avaliados,
-            "percentual": round_to_two_decimals(percentual),
-            "faltosos": faltosos
-        })
-    
-    # Calcular totais gerais
-    total_percentual = (total_avaliados / total_matriculados * 100) if total_matriculados > 0 else 0
-    total_faltosos = total_matriculados - total_avaliados
-    
+    universo_total, avaliados_total = _participacao_grupo_turmas(
+        evaluation_id, class_ids, base_por_turma, results_by_class
+    )
     return {
         "por_turma": por_turma,
-        "total_geral": {
-            "matriculados": total_matriculados,
-            "avaliados": total_avaliados,
-            "percentual": round_to_two_decimals(total_percentual),
-            "faltosos": total_faltosos
-        }
+        "total_geral": _linha_participacao(len(universo_total), len(avaliados_total)),
     }
 
 
@@ -3815,14 +3802,9 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
         # ❌ REMOVIDO: jl(EvaluationResult.student, Student.class_, Class.school) - Class.school é property
     ).filter_by(test_id=evaluation_id).all()
     
-    # Agrupar por escola e disciplina
-    class_ids = [ct.class_id for ct in class_tests]
-    results_by_school = defaultdict(list)
-    
-    for result in evaluation_results:
-        if result.student.class_id in class_ids and result.student.class_ and result.student.class_.school:
-            school_id = result.student.class_.school.id
-            results_by_school[school_id].append(result)
+    # Agrupar por escola de aplicação (snapshot)
+    _, results_by_school, _ = _agrupar_resultados_por_colocacao(evaluation_results, class_tests)
+    nomes_escolas = _mapa_nomes_escolas(results_by_school.keys())
     
     # Calcular níveis por escola e disciplina
     # Obter ordem das disciplinas conforme aparecem na avaliação
@@ -3850,9 +3832,7 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
         total_geral = 0
         
         for school_id, school_results in results_by_school.items():
-            escola_nome = "Escola Desconhecida"
-            if school_results and school_results[0].student.class_ and school_results[0].student.class_.school:
-                escola_nome = school_results[0].student.class_.school.name
+            escola_nome = nomes_escolas.get(school_id, "Escola Desconhecida")
             
             # ✅ CORRIGIDO: Usar classificação específica da disciplina do campo subject_results
             abaixo = 0
@@ -3968,9 +3948,7 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
     # Caso não haja escolas identificadas (por segurança), construir a partir dos resultados disponíveis
     if not dados_gerais_por_escola_lista and results_by_school:
         for school_id, school_results in results_by_school.items():
-            escola_nome = "Escola Desconhecida"
-            if school_results and school_results[0].student and school_results[0].student.class_ and school_results[0].student.class_.school:
-                escola_nome = school_results[0].student.class_.school.name
+            escola_nome = nomes_escolas.get(school_id, "Escola Desconhecida")
 
             contagem_escola = {
                 "escola": escola_nome,
@@ -4118,12 +4096,8 @@ def _calcular_niveis_aprendizagem(evaluation_id: str, class_tests: List[ClassTes
     
     logging.info(f"Total de resultados de avaliação: {len(evaluation_results)}")
     
-    # Agrupar por turma e disciplina
-    class_ids = [ct.class_id for ct in class_tests]
-    results_by_class = defaultdict(list)
-    for result in evaluation_results:
-        if result.student and result.student.class_id in class_ids:
-            results_by_class[result.student.class_id].append(result)
+    # Agrupar por turma de aplicação (snapshot)
+    results_by_class, _, turmas = _agrupar_resultados_por_colocacao(evaluation_results, class_tests)
     
     logging.info(f"Turmas com resultados: {list(results_by_class.keys())}")
     
@@ -4141,17 +4115,8 @@ def _calcular_niveis_aprendizagem(evaluation_id: str, class_tests: List[ClassTes
         class_id = class_test.class_id
         class_results = results_by_class[class_id]
         
-        # Obter nome da turma (mesmo se não houver resultados)
-        turma_nome = "Turma Desconhecida"
-        
-        # Tentar obter nome da turma de diferentes formas
-        if class_results and class_results[0].student and class_results[0].student.class_:
-            turma_nome = class_results[0].student.class_.name
-        else:
-            # Se não há resultados, buscar nome da turma diretamente
-            turma_obj = Class.query.get(class_id)
-            if turma_obj:
-                turma_nome = turma_obj.name
+        turma_obj = turmas.get(class_id)
+        turma_nome = turma_obj.name if turma_obj is not None and turma_obj.name else "Turma Desconhecida"
         
         logging.info(f"Processando turma: {turma_nome}")
         
@@ -4489,20 +4454,14 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
             disciplina = question_disciplines[answer.question_id]
             student_discipline_results[answer.student_id][disciplina].append(answer)
 
-    # Agrupar por escola
-    class_ids = [ct.class_id for ct in class_tests]
-    results_by_school = defaultdict(list)
-
-    for result in evaluation_results:
-        if result.student.class_id in class_ids and result.student.class_ and result.student.class_.school:
-            school_id = result.student.class_.school.id
-            results_by_school[school_id].append(result)
-
-    # Agrupar resultados por turma dentro de cada escola
-    results_by_class = defaultdict(list)
-    for result in evaluation_results:
-        if result.student.class_id in class_ids:
-            results_by_class[result.student.class_id].append(result)
+    # Agrupar por escola e turma de aplicação (snapshot)
+    results_by_class, results_by_school, turmas = _agrupar_resultados_por_colocacao(evaluation_results, class_tests)
+    nomes_escolas = _mapa_nomes_escolas(results_by_school.keys())
+    turmas_por_escola = defaultdict(list)
+    for class_id in results_by_class:
+        turma = turmas.get(class_id)
+        if turma is not None and turma.school_id:
+            turmas_por_escola[str(turma.school_id)].append(class_id)
 
     # Obter nome do curso
     course_name = _obter_nome_curso(test)
@@ -4527,16 +4486,8 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
             if not school_results:
                 continue
             
-            # Obter nome da escola
-            escola_nome = "Escola Desconhecida"
-            if school_results and school_results[0].student.class_ and school_results[0].student.class_.school:
-                escola_nome = school_results[0].student.class_.school.name
-            
-            # Buscar turmas desta escola
-            turmas_da_escola = []
-            for result in school_results:
-                if result.student.class_id not in turmas_da_escola:
-                    turmas_da_escola.append(result.student.class_id)
+            escola_nome = nomes_escolas.get(school_id, "Escola Desconhecida")
+            turmas_da_escola = turmas_por_escola.get(school_id, [])
             
             # Calcular proficiência por turma e depois média das turmas
             proficiencias_turmas = []
@@ -4723,12 +4674,8 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
         joinedload(EvaluationResult.student).joinedload(Student.class_)
     ).filter_by(test_id=evaluation_id).all()
     
-    # Agrupar por turma
-    class_ids = [ct.class_id for ct in class_tests]
-    results_by_class = defaultdict(list)
-    for result in evaluation_results:
-        if result.student and result.student.class_id in class_ids:
-            results_by_class[result.student.class_id].append(result)
+    # Agrupar por turma de aplicação (snapshot)
+    results_by_class, _, turmas = _agrupar_resultados_por_colocacao(evaluation_results, class_tests)
     
     # Calcular por turma e disciplina
     disciplinas_proficiencia = defaultdict(lambda: {
@@ -4749,17 +4696,8 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
         class_id = class_test.class_id
         class_results = results_by_class[class_id]
         
-        # Obter nome da turma (mesmo se não houver resultados)
-        turma_nome = "Turma Desconhecida"
-        
-        # Tentar obter nome da turma de diferentes formas
-        if class_results and class_results[0].student and class_results[0].student.class_:
-            turma_nome = class_results[0].student.class_.name
-        else:
-            # Se não há resultados, buscar nome da turma diretamente
-            turma_obj = Class.query.get(class_id)
-            if turma_obj:
-                turma_nome = turma_obj.name
+        turma_obj = turmas.get(class_id)
+        turma_nome = turma_obj.name if turma_obj is not None and turma_obj.name else "Turma Desconhecida"
         
         # Para cada disciplina, calcular proficiência específica
         disciplinas_turma = set()
@@ -5062,20 +5000,14 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
             disciplina = question_disciplines[answer.question_id]
             student_discipline_results[answer.student_id][disciplina].append(answer)
 
-    # Agrupar por escola
-    class_ids = [ct.class_id for ct in class_tests]
-    results_by_school = defaultdict(list)
-
-    for result in evaluation_results:
-        if result.student.class_id in class_ids and result.student.class_ and result.student.class_.school:
-            school_id = result.student.class_.school.id
-            results_by_school[school_id].append(result)
-
-    # Agrupar resultados por turma dentro de cada escola
-    results_by_class = defaultdict(list)
-    for result in evaluation_results:
-        if result.student.class_id in class_ids:
-            results_by_class[result.student.class_id].append(result)
+    # Agrupar por escola e turma de aplicação (snapshot)
+    results_by_class, results_by_school, turmas = _agrupar_resultados_por_colocacao(evaluation_results, class_tests)
+    nomes_escolas = _mapa_nomes_escolas(results_by_school.keys())
+    turmas_por_escola = defaultdict(list)
+    for class_id in results_by_class:
+        turma = turmas.get(class_id)
+        if turma is not None and turma.school_id:
+            turmas_por_escola[str(turma.school_id)].append(class_id)
 
     # Obter informações para cálculo
     course_name = _obter_nome_curso(test)
@@ -5101,16 +5033,8 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
             if not school_results:
                 continue
             
-            # Obter nome da escola
-            escola_nome = "Escola Desconhecida"
-            if school_results and school_results[0].student.class_ and school_results[0].student.class_.school:
-                escola_nome = school_results[0].student.class_.school.name
-            
-            # Buscar turmas desta escola
-            turmas_da_escola = []
-            for result in school_results:
-                if result.student.class_id not in turmas_da_escola:
-                    turmas_da_escola.append(result.student.class_id)
+            escola_nome = nomes_escolas.get(school_id, "Escola Desconhecida")
+            turmas_da_escola = turmas_por_escola.get(school_id, [])
             
             # Calcular nota por turma e depois SOMAR as turmas
             soma_notas_turmas = 0.0
@@ -5305,12 +5229,8 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
         joinedload(EvaluationResult.student).joinedload(Student.class_)
     ).filter_by(test_id=evaluation_id).all()
     
-    # Agrupar por turma
-    class_ids = [ct.class_id for ct in class_tests]
-    results_by_class = defaultdict(list)
-    for result in evaluation_results:
-        if result.student and result.student.class_id in class_ids:
-            results_by_class[result.student.class_id].append(result)
+    # Agrupar por turma de aplicação (snapshot)
+    results_by_class, _, turmas = _agrupar_resultados_por_colocacao(evaluation_results, class_tests)
     
     # Calcular por turma e disciplina
     disciplinas_notas = defaultdict(lambda: {
@@ -5332,17 +5252,8 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
         class_id = class_test.class_id
         class_results = results_by_class[class_id]
         
-        # Obter nome da turma (mesmo se não houver resultados)
-        turma_nome = "Turma Desconhecida"
-        
-        # Tentar obter nome da turma de diferentes formas
-        if class_results and class_results[0].student and class_results[0].student.class_:
-            turma_nome = class_results[0].student.class_.name
-        else:
-            # Se não há resultados, buscar nome da turma diretamente
-            turma_obj = Class.query.get(class_id)
-            if turma_obj:
-                turma_nome = turma_obj.name
+        turma_obj = turmas.get(class_id)
+        turma_nome = turma_obj.name if turma_obj is not None and turma_obj.name else "Turma Desconhecida"
         
         # Para cada disciplina, calcular nota específica
         disciplinas_turma = set()
@@ -5593,9 +5504,9 @@ def _calcular_acertos_habilidade(
 ) -> Dict[str, Any]:
     """Calcula acertos por habilidade e ranking organizados por disciplina.
 
-    Se `class_tests` for informado, conta apenas respostas de alunos cuja turma
-    atual está nesse conjunto. Sem filtro, usa todas as respostas da prova
-    (compatibilidade com chamadas antigas).
+    Se `class_tests` for informado, conta apenas respostas de alunos cujo
+    resultado foi aplicado (snapshot) nesse conjunto de turmas. Sem filtro, usa
+    todas as respostas da prova (compatibilidade com chamadas antigas).
     """
     from app.models.skill import Skill
     
@@ -5606,10 +5517,14 @@ def _calcular_acertos_habilidade(
     
     answers_query = StudentAnswer.query.filter_by(test_id=evaluation_id)
     if class_tests is not None:
-        class_ids = [ct.class_id for ct in class_tests if getattr(ct, "class_id", None)]
-        if not class_ids:
+        if not _unique_class_ids(class_tests):
             return {}
-        answers_query = answers_query.join(Student).filter(Student.class_id.in_(class_ids))
+        evaluation_results = EvaluationResult.query.options(
+            joinedload(EvaluationResult.student)
+        ).filter_by(test_id=str(evaluation_id)).all()
+        results_by_class, _, _ = _agrupar_resultados_por_colocacao(evaluation_results, class_tests)
+        participantes = {str(r.student_id) for rows in results_by_class.values() for r in rows}
+        answers_query = answers_query.filter(StudentAnswer.student_id.in_(list(participantes)))
     student_answers = answers_query.all()
     
     # Agrupar respostas por questão

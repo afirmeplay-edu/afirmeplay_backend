@@ -168,8 +168,8 @@ app/services/cartao_resposta/
 - Cria pasta da turma com **`_build_class_folder_path`** (nomes: municipio_*, escola_*, serie_*, turma_*).
 - Para cada aluno:
   - **`_generate_individual_answer_sheet(...)`** → bytes do PDF.
-  - Nome do arquivo: **`{sanitize_filename(nome)}_{serie}_{turma}.pdf`**.
-  - Salva na pasta da turma.
+  - Nome do arquivo: **`student_pdf_filename(...)`** → `{sanitize_filename(nome)}_{serie}_{turma}_{8 primeiros do student_id}.pdf`.
+  - Salva na pasta da turma via **`reserve_pdf_path`**: se o arquivo já existir, registra aviso no log e grava com sufixo `-2`, `-3`… em vez de sobrescrever.
 
 ### 5.4 Chord: `build_zip_and_upload_answer_sheets`
 

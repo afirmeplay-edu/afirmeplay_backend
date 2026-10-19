@@ -10452,6 +10452,51 @@ paths:
       tags:
         - Documentos
       summary: Get etiquetas dados
+      parameters:
+        - name: modo
+          in: query
+          schema:
+            type: string
+            enum: [manual, avaliacao, cartao_resposta, provas]
+            default: manual
+          description: >-
+            Tipo de etiqueta. "provas" (etiqueta de envelope) funciona como "manual" e,
+            com turma informada, inclui contexto.quantidade_alunos e contexto.adap.
+        - name: municipio
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: escola
+          in: query
+          schema:
+            type: string
+        - name: nivel
+          in: query
+          schema:
+            type: string
+        - name: serie
+          in: query
+          schema:
+            type: string
+        - name: turma
+          in: query
+          schema:
+            type: string
+        - name: turno
+          in: query
+          schema:
+            type: string
+        - name: evaluation_id
+          in: query
+          schema:
+            type: string
+          description: Obrigatório com modo=avaliacao
+        - name: answer_sheet_id
+          in: query
+          schema:
+            type: string
+          description: Obrigatório com modo=cartao_resposta
       responses:
         '200':
           description: Success
@@ -10460,6 +10505,24 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+                properties:
+                  contexto:
+                    type: object
+                    additionalProperties: true
+                    properties:
+                      quantidade_alunos:
+                        type: integer
+                        description: Só com modo=provas e turma. Alunos da turma (student.class_id).
+                      adap:
+                        type: object
+                        description: Só com modo=provas e turma. Alunos por nível de subturma ADAP.
+                        properties:
+                          '1':
+                            type: integer
+                          '2':
+                            type: integer
+                          '3':
+                            type: integer
         '400':
           $ref: '#/responses/BadRequestError'
         '401':

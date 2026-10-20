@@ -44,6 +44,30 @@ def sanitize_filename(name: str, max_length: int = 80) -> str:
     return n[:max_length] if max_length else n
 
 
+def student_pdf_filename(student_name: str, grade_safe: str, class_safe: str, student_id: Any) -> str:
+    """{nome}_{serie}_{turma}_{8 primeiros do student_id}.pdf: homônimos não dividem o mesmo arquivo."""
+    name_safe = sanitize_filename(student_name, max_length=60)
+    id_safe = sanitize_filename(str(student_id or "")[:8], max_length=8)
+    return f"{name_safe}_{grade_safe}_{class_safe}_{id_safe}.pdf"
+
+
+def reserve_pdf_path(path: str) -> str:
+    """Caminho livre para gravar: se o arquivo já existir, registra aviso e usa sufixo em vez de sobrescrever."""
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(f"{base}-{n}{ext}"):
+        n += 1
+    free_path = f"{base}-{n}{ext}"
+    logging.warning(
+        "[ANSWER-SHEET] Arquivo de cartão já existe; gravando como %s para não sobrescrever %s",
+        os.path.basename(free_path),
+        path,
+    )
+    return free_path
+
+
 class AnswerSheetGenerator:
     """
     Gerador de PDFs para cartões resposta usando WeasyPrint + Jinja2
@@ -699,10 +723,10 @@ class AnswerSheetGenerator:
                         pdf_buffer.seek(0)
                         pdf_bytes = pdf_buffer.read()
                         
-                        student_name = student_data.get('name', 'aluno')
-                        name_safe = sanitize_filename(student_name, max_length=60)
-                        filename = f"{name_safe}_{grade_safe}_{class_safe}.pdf"
-                        filepath = os.path.join(folder, filename)
+                        filename = student_pdf_filename(
+                            student_data.get('name', 'aluno'), grade_safe, class_safe, student.id
+                        )
+                        filepath = reserve_pdf_path(os.path.join(folder, filename))
                         
                         with open(filepath, 'wb') as f:
                             f.write(pdf_bytes)
@@ -745,10 +769,13 @@ class AnswerSheetGenerator:
                     )
                     if not pdf_bytes:
                         continue
-                    student_name = self._get_complete_student_data(student).get('name', 'aluno')
-                    name_safe = sanitize_filename(student_name, max_length=60)
-                    filename = f"{name_safe}_{grade_safe}_{class_safe}.pdf"
-                    filepath = os.path.join(folder, filename)
+                    filename = student_pdf_filename(
+                        self._get_complete_student_data(student).get('name', 'aluno'),
+                        grade_safe,
+                        class_safe,
+                        student.id,
+                    )
+                    filepath = reserve_pdf_path(os.path.join(folder, filename))
                     with open(filepath, 'wb') as f:
                         f.write(pdf_bytes)
                     generated_count += 1

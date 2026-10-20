@@ -4,17 +4,25 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, Optional, Set
 
+from sqlalchemy import and_, func
+
+from app import db
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.city import City
 from app.models.educationStage import EducationStage
 from app.models.grades import Grade
 from app.models.school import School
+from app.models.student import Student
 from app.models.studentClass import Class
+from app.models.subturma import Subturma
 from app.models.test import Test
 from app.permissions.utils import get_manager_school, get_teacher_schools
 from app.utils.uuid_helpers import ensure_uuid
 
-VALID_MODOS = frozenset({"manual", "avaliacao", "cartao_resposta"})
+VALID_MODOS = frozenset({"manual", "avaliacao", "cartao_resposta", "provas"})
+NIVEIS_ADAP = (1, 2, 3)
+# Níveis de subturma ADAP cujos alunos não entram em quantidade_alunos (seguem contados em "adap").
+NIVEIS_ADAP_EXCLUIDOS: Set[int] = set()
 
 
 class EtiquetasValidationError(Exception):
@@ -96,6 +104,36 @@ def _parse_filters(args: Dict[str, Any]) -> Dict[str, str]:
         "evaluation_id": evaluation_id,
         "answer_sheet_id": answer_sheet_id,
     }
+
+
+def contar_alunos_para_etiqueta(class_id: Any) -> Dict[str, Any]:
+    """
+    Alunos da turma (student.class_id) e quantos estão em cada subturma ADAP.
+    Subturma só conta se pertencer à mesma turma do aluno.
+    """
+    rows = (
+        db.session.query(Subturma.support_level, func.count(Student.id))
+        .select_from(Student)
+        .outerjoin(
+            Subturma,
+            and_(Subturma.id == Student.subturma_id, Subturma.class_id == Student.class_id),
+        )
+        .filter(Student.class_id == class_id)
+        .group_by(Subturma.support_level)
+        .all()
+    )
+
+    adap = {str(nivel): 0 for nivel in NIVEIS_ADAP}
+    quantidade = 0
+    for support_level, total in rows:
+        nivel = int(support_level) if support_level is not None else None
+        if nivel in NIVEIS_ADAP:
+            adap[str(nivel)] += int(total)
+            if nivel in NIVEIS_ADAP_EXCLUIDOS:
+                continue
+        quantidade += int(total)
+
+    return {"quantidade_alunos": quantidade, "adap": adap}
 
 
 class EtiquetasService:
@@ -190,6 +228,18 @@ class EtiquetasService:
                 or turma_label
             )
 
+        contexto = {
+            "escola": str(selected_school.name or "").strip() if selected_school else "Todas as escolas",
+            "nivel": str(selected_stage.name or "").strip() if selected_stage else "Todos os níveis",
+            "serie": serie_label,
+            "turma": turma_label,
+            "shift": shift,
+            "turno": turno,
+            "ano": datetime.now().year,
+        }
+        if filters["modo"] == "provas" and selected_class:
+            contexto.update(contar_alunos_para_etiqueta(selected_class.id))
+
         return {
             "municipio": {
                 "id": str(city.id),
@@ -197,15 +247,7 @@ class EtiquetasService:
                 "state": str(city.state or ""),
                 "prefeitura_label": prefeitura_label,
             },
-            "contexto": {
-                "escola": str(selected_school.name or "").strip() if selected_school else "Todas as escolas",
-                "nivel": str(selected_stage.name or "").strip() if selected_stage else "Todos os níveis",
-                "serie": serie_label,
-                "turma": turma_label,
-                "shift": shift,
-                "turno": turno,
-                "ano": datetime.now().year,
-            },
+            "contexto": contexto,
             "modo": filters["modo"],
             "title_reference": title_reference or None,
             "filters": filters,

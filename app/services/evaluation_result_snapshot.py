@@ -508,6 +508,57 @@ def resolve_participant_display_context(
     }
 
 
+def placement_class_id(result: Any) -> Optional[Any]:
+    """
+    Turma em que o resultado conta: ``class_id_snapshot``; linha legada
+    (sem snapshot algum) usa a turma atual do aluno.
+    """
+    class_snapshot = getattr(result, "class_id_snapshot", None)
+    if class_snapshot is not None:
+        return class_snapshot
+    if getattr(result, "school_id_snapshot", None) is None:
+        student = getattr(result, "student", None)
+        return getattr(student, "class_id", None) if student is not None else None
+    return None
+
+
+def dedupe_results_latest_per_student(results: Sequence[Any]) -> List[Any]:
+    """Uma entrada por aluno; em duplicidade, prefere o ``calculated_at`` mais recente."""
+    by_sid: Dict[str, Any] = {}
+    for row in results or []:
+        sid = getattr(row, "student_id", None)
+        if not sid:
+            continue
+        prev = by_sid.get(sid)
+        if prev is None:
+            by_sid[sid] = row
+            continue
+        r_ca = getattr(row, "calculated_at", None)
+        p_ca = getattr(prev, "calculated_at", None)
+        if r_ca and (p_ca is None or r_ca > p_ca):
+            by_sid[sid] = row
+    return list(by_sid.values())
+
+
+def group_results_by_placement_class(
+    results: Sequence[Any],
+    class_ids: Sequence[Any],
+) -> Dict[Any, List[Any]]:
+    """
+    Resultados (um por aluno) agrupados pela turma de aplicação.
+    As chaves são os objetos de ``class_ids`` (mesmo tipo usado em ClassTest).
+    """
+    key_by_str = {str(item): item for item in (class_ids or []) if item is not None}
+    grouped: Dict[Any, List[Any]] = {}
+    for row in dedupe_results_latest_per_student(results):
+        cid = placement_class_id(row)
+        key = key_by_str.get(str(cid)) if cid is not None else None
+        if key is None:
+            continue
+        grouped.setdefault(key, []).append(row)
+    return grouped
+
+
 def student_ids_for_class_group_with_snapshots(
     evaluation_id: str,
     class_ids: List[Any],

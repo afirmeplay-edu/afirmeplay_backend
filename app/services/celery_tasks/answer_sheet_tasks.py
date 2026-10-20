@@ -15,7 +15,11 @@ from celery import Task, group, chord
 from app.report_analysis.celery_app import celery_app
 from app.services.progress_store import get_job
 from app.services.answer_sheet_job_store import update_answer_sheet_job
-from app.services.cartao_resposta.answer_sheet_generator import sanitize_filename
+from app.services.cartao_resposta.answer_sheet_generator import (
+    reserve_pdf_path,
+    sanitize_filename,
+    student_pdf_filename,
+)
 from app import db
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 
@@ -776,7 +780,11 @@ def generate_answer_sheets_batch_async(
                     grade_safe = sanitize_filename(grade_name, max_length=40)
                     class_name_raw = (class_obj.name or 'turma').strip()
                     class_safe = sanitize_filename(class_name_raw, max_length=40)
-                    class_folder = os.path.join(output_dir, f"{grade_safe}_{class_safe}")
+                    # Pasta em disco por escola + turma: turmas homônimas de escolas diferentes não se misturam.
+                    # O caminho dentro do ZIP continua sendo {serie}_{turma}/arquivo.
+                    class_folder = os.path.join(
+                        output_dir, f"{grade_safe}_{class_safe}_{class_obj.school_id}_{class_obj.id}"
+                    )
                     os.makedirs(class_folder, exist_ok=True)
                     
                     # Gerar overlay e PDF individual para cada aluno
@@ -832,10 +840,11 @@ def generate_answer_sheets_batch_async(
                             pdf_buffer.seek(0)
                             pdf_bytes = pdf_buffer.read()
                             
-                            student_name = student_data.get('name', 'aluno')
-                            name_safe = sanitize_filename(student_name, max_length=60)
-                            filename = f"{name_safe}_{grade_safe}_{class_safe}.pdf"
-                            filepath = os.path.join(class_folder, filename)
+                            filepath = reserve_pdf_path(os.path.join(
+                                class_folder,
+                                student_pdf_filename(student_data.get('name', 'aluno'), grade_safe, class_safe, student.id),
+                            ))
+                            filename = os.path.basename(filepath)
                             
                             with open(filepath, 'wb') as f:
                                 f.write(pdf_bytes)

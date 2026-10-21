@@ -51,6 +51,82 @@ def student_pdf_filename(student_name: str, grade_safe: str, class_safe: str, st
     return f"{name_safe}_{grade_safe}_{class_safe}_{id_safe}.pdf"
 
 
+_ZIP_FORBIDDEN_CHARS = set('\\/:*?"<>|')
+
+
+def zip_entry_name(name: str) -> str:
+    """Nome legível de pasta/arquivo no ZIP: mantém acentos e espaços."""
+    if not name or not isinstance(name, str):
+        return ''
+    cleaned = ''.join(ch for ch in name if ch not in _ZIP_FORBIDDEN_CHARS)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip().rstrip('.')
+    return cleaned
+
+
+def join_zip_path(*parts: str) -> str:
+    cleaned = []
+    for part in parts:
+        if part is None:
+            continue
+        text = str(part).strip().strip('/')
+        if text:
+            cleaned.append(text)
+    return '/'.join(cleaned)
+
+
+def class_pdf_basename(grade_name: str, class_name: str) -> str:
+    """Nome do PDF da turma, ex.: '9º ANO - A'."""
+    grade = zip_entry_name(grade_name)
+    turma = zip_entry_name(class_name)
+    if grade and turma:
+        return f"{grade} - {turma}"
+    return grade or turma or 'turma'
+
+
+def allocate_class_pdf_basename(base: str, class_id: Any, used: set) -> str:
+    """Evita dois PDFs com o mesmo nome na mesma pasta do ZIP."""
+    candidate = base or 'turma'
+    if candidate.casefold() not in used:
+        used.add(candidate.casefold())
+        return candidate
+    suffix = re.sub(r'[^0-9A-Za-z]', '', str(class_id or ''))[:8] or 'id'
+    unique = f"{candidate} ({suffix})"
+    n = 2
+    while unique.casefold() in used:
+        unique = f"{candidate} ({suffix}-{n})"
+        n += 1
+    used.add(unique.casefold())
+    return unique
+
+
+def class_pdf_zip_prefix(scope: str, school_name: str) -> str:
+    """Pasta da escola só no escopo município. Escola, série e turma ficam na raiz."""
+    if scope == 'city':
+        return zip_entry_name(school_name) or 'Sem Escola'
+    return ''
+
+
+def legacy_student_zip_path(scope: str, school_name: str, grade_name: str, rel_zip_name: str) -> str:
+    """Caminho interno do ZIP no modo um PDF por aluno (formato anterior)."""
+    rel = (rel_zip_name or '').lstrip('/')
+    if scope == 'city':
+        school = school_name or 'Sem Escola'
+        grade = grade_name or 'Sem Serie'
+        return f"{school}/{grade}/{rel}"
+    if scope == 'school':
+        grade = grade_name or 'Sem Serie'
+        return f"{grade}/{rel}"
+    return rel
+
+
+def school_name_is_missing(name: str) -> bool:
+    raw = (name or '').strip()
+    if not raw:
+        return True
+    folded = unicodedata.normalize('NFKD', raw).encode('ascii', 'ignore').decode('ascii').upper()
+    return 'NAO INFORMADO' in folded
+
+
 def reserve_pdf_path(path: str) -> str:
     """Caminho livre para gravar: se o arquivo já existir, registra aviso e usa sufixo em vez de sobrescrever."""
     if not os.path.exists(path):
@@ -1007,6 +1083,7 @@ class AnswerSheetGenerator:
             school_name = ''
             grade_name = ''
             shift = ''
+            class_obj = None
             
             if student_obj.class_id:
                 class_obj = Class.query.get(student_obj.class_id)
@@ -1019,7 +1096,13 @@ class AnswerSheetGenerator:
             if student_obj.school_id:
                 school_obj = School.query.get(student_obj.school_id)
                 if school_obj:
-                    school_name = school_obj.name or ''
+                    school_name = (school_obj.name or '').strip()
+
+            # Escola do aluno vazia ou "Não informado": usa a escola da turma.
+            if school_name_is_missing(school_name) and class_obj is not None and class_obj.school:
+                fallback_school = (class_obj.school.name or '').strip()
+                if not school_name_is_missing(fallback_school):
+                    school_name = fallback_school
             
             return {
                 'id': str(student_obj.id),
@@ -1122,68 +1205,111 @@ class AnswerSheetGenerator:
             # ========================================================================
             # IMPORTANTE: NÃO ALTERAR sem validar alinhamento visual!
             # Template: padding 1.2cm top, 2cm sides; header 6.4cm height
-            # Linhas: font-size 7pt, margin 0.5px, label min-width 100px
+            # Linhas: font-size 7pt. O X do valor é a largura real do rótulo em negrito.
             # ========================================================================
             
-            # COORDENADAS X: Cada campo tem X diferente baseado no tamanho do label
-            # Template cartão resposta NÃO tem min-width no label (diferente das provas físicas)
-            # Cálculo: padding(56.69) + border(0.75) + padding_header(3) = 60.44pt (base)
-            # Labels têm tamanhos diferentes:
-            #   - "NOME COMPLETO:" ≈ 85pt (label mais largo)
-            #   - "ESCOLA:" ≈ 45pt (label médio)
-            #   - "TURMA:" ≈ 40pt (label menor)
+            # X do valor = início do rótulo + largura real do rótulo em negrito + um espaço.
+            # O rótulo no HTML é Helvetica 7pt bold. O valor fica colado, como ESTADO e MUNICÍPIO.
+            # Base: padding(56.69) + border(0.75) + padding_header(3) = 60.44pt
+            from reportlab.pdfbase.pdfmetrics import stringWidth
+
             X_BASE = 60.44
-            X_NOME = X_BASE + 90     # 150.44pt - após "NOME COMPLETO:" (label mais largo)
-            X_ESCOLA = X_BASE + 50   # 110.44pt - após "ESCOLA:"
-            X_TURMA = X_BASE + 45    # 105.44pt - após "TURMA:"
+            FONT_NAME = 'Helvetica'
+            LABEL_FONT = 'Helvetica-Bold'
+            FONT_SIZE = 7            # 7pt (mesmo do CSS)
+            SCHOOL_MIN_SIZE = 5.5
+            FONT_COLOR = HexColor('#374151')
+
+            def _x_after_label(label: str) -> float:
+                gap = stringWidth(' ', FONT_NAME, FONT_SIZE)
+                return X_BASE + stringWidth(label, LABEL_FONT, FONT_SIZE) + gap
+
+            X_NOME = _x_after_label('NOME COMPLETO:')
+            X_ESCOLA = _x_after_label('ESCOLA:')
+            X_TURMA = _x_after_label('TURMA:')
+            X_TURNO = _x_after_label('TURNO:')
             
             # COORDENADAS Y (validadas das provas físicas)
             Y_PDF_NAME = 780.16      # Baseline do NOME COMPLETO (linha 2)
             Y_PDF_SCHOOL = 744.31    # Baseline da ESCOLA (linha 5, após ESTADO e MUNICÍPIO)
             Y_PDF_TURMA = 732.36     # Baseline da TURMA (linha 6, 1 linha abaixo de ESCOLA)
+            # TURNO é a linha seguinte: mesmo intervalo ESCOLA → TURMA
+            Y_PDF_TURNO = Y_PDF_TURMA - (Y_PDF_SCHOOL - Y_PDF_TURMA)
             
             QR_X = 441.46            # Posição X do QR code (canto inferior esquerdo)
             QR_Y = 680.77            # Posição Y do QR code (canto inferior esquerdo)
             QR_SIZE = 90             # Tamanho do QR code (90pt = 120px do CSS)
-            
-            FONT_NAME = 'Helvetica'
-            FONT_SIZE = 7            # 7pt (mesmo do CSS)
-            FONT_COLOR = HexColor('#374151')
-            MAX_TEXT_WIDTH_CHARS = 50  # ~268pt para não invadir QR
+            TEXT_RIGHT = QR_X - 6    # texto para antes do QR
 
-            def _truncate(s: str, max_chars: int = MAX_TEXT_WIDTH_CHARS) -> str:
-                """Trunca texto com ellipsis se exceder limite"""
-                s = (s or '').strip()
-                if len(s) <= max_chars:
-                    return s
-                return s[:max_chars - 1] + '…'
+            def _clip_to_width(text: str, font: str, size: float, max_width: float) -> str:
+                text = (text or '').strip()
+                if not text or max_width <= 0:
+                    return ''
+                if stringWidth(text, font, size) <= max_width:
+                    return text
+                ell = '...'
+                if stringWidth(ell, font, size) > max_width:
+                    return ''
+                trimmed = text
+                while trimmed and stringWidth(trimmed + ell, font, size) > max_width:
+                    trimmed = trimmed[:-1]
+                return (trimmed.rstrip() + ell) if trimmed else ell
+
+            def _fit_school_line(text: str, max_width: float):
+                """Uma linha só: reduz a fonte até 5,5 pt e só então corta."""
+                text = (text or '').strip()
+                if not text:
+                    return '', FONT_SIZE
+                size = float(FONT_SIZE)
+                while True:
+                    if max_width > 0 and stringWidth(text, FONT_NAME, size) <= max_width:
+                        return text, size
+                    if size <= SCHOOL_MIN_SIZE:
+                        return _clip_to_width(text, FONT_NAME, SCHOOL_MIN_SIZE, max_width), SCHOOL_MIN_SIZE
+                    size = round(size - 0.25, 2)
+                    if size < SCHOOL_MIN_SIZE:
+                        size = SCHOOL_MIN_SIZE
 
             # ========================================================================
             # EXTRAIR E FORMATAR DADOS DO ALUNO
             # ========================================================================
             
-            # Nome do aluno (NOME COMPLETO)
-            student_name = _truncate(student.get('name') or student.get('nome') or '')
+            # Nome do aluno (NOME COMPLETO) — 7 pt, corta só se for invadir o QR
+            student_name = _clip_to_width(
+                (student.get('name') or student.get('nome') or '').upper(),
+                FONT_NAME,
+                FONT_SIZE,
+                TEXT_RIGHT - X_NOME,
+            )
             
-            # Escola (ESCOLA) - filtrar "Não informado"
+            # Escola: já vem com fallback da turma em _get_complete_student_data
             raw_school = (student.get('school_name') or '').strip()
-            upper_school = raw_school.upper()
-            if raw_school and 'NÃO INFORMADO' not in upper_school:
-                school_name = _truncate(raw_school)
+            if school_name_is_missing(raw_school):
+                school_text, school_size = '', FONT_SIZE
             else:
-                school_name = ''
+                school_text, school_size = _fit_school_line(
+                    raw_school.upper(),
+                    TEXT_RIGHT - X_ESCOLA,
+                )
             
-            # Turma (TURMA) - formato: "SÉRIE - TURMA"
+            # Turma (TURMA) - formato: "SÉRIE - TURMA". O PDF base só tem o rótulo.
             class_name = (student.get('class_name') or student.get('turma') or '').strip()
-            grade_name = ((test_data or {}).get('grade_name') or '').strip()
+            grade_name = (student.get('grade_name') or (test_data or {}).get('grade_name') or '').strip()
             
-            # Montar display de turma (igual ao template)
             if grade_name and class_name:
-                turma_display = _truncate(f"{grade_name} - {class_name}")
+                turma_raw = f"{grade_name} - {class_name}"
             elif grade_name:
-                turma_display = _truncate(grade_name)
+                turma_raw = grade_name
             else:
-                turma_display = _truncate(class_name)
+                turma_raw = class_name
+            turma_display = _clip_to_width(
+                turma_raw.upper(),
+                FONT_NAME,
+                FONT_SIZE,
+                TEXT_RIGHT - X_TURMA,
+            )
+            # Texto do cadastro (Manhã, Tarde, Integral, Noturno). Vazio = não desenha.
+            shift_display = (student.get('shift') or '').strip()
 
             # ========================================================================
             # DESENHAR TEXTOS NO OVERLAY
@@ -1192,15 +1318,21 @@ class AnswerSheetGenerator:
             c.setFont(FONT_NAME, FONT_SIZE)
             c.setFillColor(FONT_COLOR)
             
-            # Usar coordenada X específica para cada campo (labels têm tamanhos diferentes)
             if student_name:
-                c.drawString(X_NOME, Y_PDF_NAME, student_name.upper())
+                c.setFont(FONT_NAME, FONT_SIZE)
+                c.drawString(X_NOME, Y_PDF_NAME, student_name)
             
-            if school_name:
-                c.drawString(X_ESCOLA, Y_PDF_SCHOOL, school_name.upper())
+            if school_text:
+                c.setFont(FONT_NAME, school_size)
+                c.drawString(X_ESCOLA, Y_PDF_SCHOOL, school_text)
             
             if turma_display:
-                c.drawString(X_TURMA, Y_PDF_TURMA, turma_display.upper())
+                c.setFont(FONT_NAME, FONT_SIZE)
+                c.drawString(X_TURMA, Y_PDF_TURMA, turma_display)
+
+            if shift_display:
+                c.setFont(FONT_NAME, FONT_SIZE)
+                c.drawString(X_TURNO, Y_PDF_TURNO, shift_display)
 
             # ========================================================================
             # GERAR E DESENHAR QR CODE

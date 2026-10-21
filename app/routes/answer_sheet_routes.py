@@ -921,6 +921,17 @@ def generate_answer_sheets():
         if not data:
             return jsonify({"error": "Dados não fornecidos"}), 400
 
+        allowed_pdf_modes = ('per_student', 'per_class', 'both')
+        if 'pdf_mode' not in data or data.get('pdf_mode') is None:
+            pdf_mode = 'per_student'
+        else:
+            pdf_mode = data.get('pdf_mode')
+            if not isinstance(pdf_mode, str) or pdf_mode.strip() not in allowed_pdf_modes:
+                return jsonify({
+                    "error": "pdf_mode inválido. Use per_student, per_class ou both.",
+                }), 400
+            pdf_mode = pdf_mode.strip()
+
         from app.decorators.tenant_required import get_current_tenant_context
         context_scope = get_current_tenant_context()
         city_id_scope = context_scope.city_id if context_scope else None
@@ -1093,7 +1104,8 @@ def generate_answer_sheets():
                 questions_options=questions_options_from_gabarito,
                 batch_id=job_id,
                 scope=scope_type,
-                class_ids=class_ids  # Lista de turmas para processar
+                class_ids=class_ids,  # Lista de turmas para processar
+                pdf_mode=pdf_mode,
             )
             task_id = task.id
             create_answer_sheet_job(
@@ -1411,6 +1423,7 @@ def generate_answer_sheets():
             batch_id=job_id,
             scope=scope_type,
             class_ids=class_ids_for_batch,
+            pdf_mode=pdf_mode,
         )
         task_id = task.id
 

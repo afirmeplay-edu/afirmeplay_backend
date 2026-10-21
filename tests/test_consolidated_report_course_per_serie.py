@@ -8,6 +8,41 @@ from app.services.consolidated_report_service import (
     _unique_course_names_from_series_colunas,
 )
 from app.services.evaluation_calculator import EvaluationCalculator
+from app.services.participation_census import (
+    AlunoEntradaCenso,
+    ClassTestEntrada,
+    DisciplinaCenso,
+    ParticipationCensusRequest,
+    ProvaCenso,
+    ResultadoEntradaCenso,
+    build_participation_census,
+    contagens_celula,
+)
+
+
+def test_frequencia_com_provas_de_series_diferentes_fica_por_coluna():
+    lp = DisciplinaCenso("lp", "Língua Portuguesa")
+    censo = build_participation_census(
+        ParticipationCensusRequest(
+            municipio_id="cidade",
+            provas=(ProvaCenso("lp-5", (lp,)), ProvaCenso("lp-9", (lp,))),
+            universo="todos",
+            alunos=(
+                AlunoEntradaCenso("a5", "esc", "5ano", "t5"),
+                AlunoEntradaCenso("b5", "esc", "5ano", "t5"),
+                AlunoEntradaCenso("a9", "esc", "9ano", "t9"),
+            ),
+            class_tests=(ClassTestEntrada("t5", "lp-5"), ClassTestEntrada("t9", "lp-9")),
+            resultados=(
+                ResultadoEntradaCenso("a5", "lp-5"),
+                ResultadoEntradaCenso("a9", "lp-9"),
+            ),
+        )
+    )
+    assert contagens_celula(censo, "esc", "5ano") == (2, 1)
+    assert contagens_celula(censo, "esc", "9ano") == (1, 1)
+    assert censo.geral.matriculados == 3
+    assert censo.geral.presentes_completos == 2
 
 
 def test_course_name_for_serie_iniciais_vs_finais():

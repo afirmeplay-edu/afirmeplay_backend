@@ -43,6 +43,8 @@ class EvaluationComparisonService:
         filtros_aplicados: Optional[Dict[str, Any]] = None,
         grupos: Optional[List[List[str]]] = None,
         nomes: Optional[List[Optional[str]]] = None,
+        alunos_filtro: str = "todos",
+        parear: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Compara múltiplas avaliações e retorna a evolução sequencial entre elas
@@ -71,6 +73,8 @@ class EvaluationComparisonService:
                 nivel_granularidade=nivel_granularidade,
                 filtros_aplicados=filtros_aplicados,
                 nomes=nomes,
+                alunos_filtro=alunos_filtro,
+                parear=parear,
             )
 
         import time
@@ -174,6 +178,13 @@ class EvaluationComparisonService:
                 else:
                     class_ids_by_test[test.id] = []
                     results = EvaluationResult.query.filter_by(test_id=test.id).all()
+                results = EvaluationComparisonService._notas_do_ponto(
+                    test.id,
+                    class_ids_by_test.get(test.id) or [],
+                    results,
+                    alunos_filtro,
+                    parear,
+                )
                 if not results:
                     logging.warning(
                         f"Avaliação {test.id} não possui resultados no escopo ({nivel_granularidade})"
@@ -282,19 +293,30 @@ class EvaluationComparisonService:
                 "by_school": {}
             }
             
+            municipio_id = (escopo_calculo or {}).get("municipio_id")
             for i, test in enumerate(ordered_tests):
                 eval_key = f"evaluation_{i+1}"
                 scoped_ids = class_ids_by_test.get(test.id)
                 if escopo_calculo is not None:
                     general_participation = EvaluationComparisonService._get_general_participation(
-                        test.id, class_ids=scoped_ids if scoped_ids is not None else []
+                        test.id,
+                        class_ids=scoped_ids if scoped_ids is not None else [],
+                        alunos_filtro=alunos_filtro,
+                        municipio_id=municipio_id,
                     )
                     school_participation = EvaluationComparisonService._get_participation_by_school(
-                        test.id, class_ids=scoped_ids if scoped_ids is not None else []
+                        test.id,
+                        class_ids=scoped_ids if scoped_ids is not None else [],
+                        alunos_filtro=alunos_filtro,
+                        municipio_id=municipio_id,
                     )
                 else:
-                    general_participation = EvaluationComparisonService._get_general_participation(test.id)
-                    school_participation = EvaluationComparisonService._get_participation_by_school(test.id)
+                    general_participation = EvaluationComparisonService._get_general_participation(
+                        test.id, alunos_filtro=alunos_filtro, municipio_id=municipio_id
+                    )
+                    school_participation = EvaluationComparisonService._get_participation_by_school(
+                        test.id, alunos_filtro=alunos_filtro, municipio_id=municipio_id
+                    )
                 participation_data["general"][eval_key] = general_participation
                 participation_data["by_school"][eval_key] = school_participation
                 
@@ -327,6 +349,8 @@ class EvaluationComparisonService:
         nivel_granularidade: str = "municipio",
         filtros_aplicados: Optional[Dict[str, Any]] = None,
         nomes: Optional[List[Optional[str]]] = None,
+        alunos_filtro: str = "todos",
+        parear: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Um ponto por grupo. O GERAL do grupo mesclado reutiliza a mescla de Resultados."""
         from app.utils.school_equal_weight_means import (
@@ -336,7 +360,12 @@ class EvaluationComparisonService:
         from app.services.evolution_points_service import build_comparison_points
 
         aggregation_level = granularidade_to_hierarchical_target(nivel_granularidade)
-        points = build_comparison_points(grupos, escopo_calculo)
+        points = build_comparison_points(
+            grupos,
+            escopo_calculo,
+            alunos_filtro=alunos_filtro,
+            parear=parear,
+        )
         series_diferentes = EvaluationComparisonService._series_diferentes(
             point.grade_info for point in points
         )
@@ -425,7 +454,11 @@ class EvaluationComparisonService:
         participation_data = {"general": {}, "by_school": {}}
         for index, point in enumerate(points):
             eval_key = f"evaluation_{index + 1}"
-            general, by_school = EvaluationComparisonService._participation_for_point(point)
+            general, by_school = EvaluationComparisonService._participation_for_point(
+                point,
+                alunos_filtro=alunos_filtro,
+                municipio_id=(escopo_calculo or {}).get("municipio_id"),
+            )
             participation_data["general"][eval_key] = general
             participation_data["by_school"][eval_key] = by_school
 
@@ -578,18 +611,66 @@ class EvaluationComparisonService:
         return subject_comparison
 
     @staticmethod
-    def _participation_for_point(point) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _notas_do_ponto(test_id, class_ids, results, alunos_filtro, parear):
+        """Mantém a nota antiga quando o recorte não foi pedido."""
+        from app.services.alunos_resultado_filtro import filtro_restringe
+        from app.services.resultado_universo import resultados_para_notas
+
+        if not parear and not filtro_restringe(alunos_filtro):
+            return results
+        from app.models.classTest import ClassTest
+        from app.models.student import Student
+
+        turmas = list(class_ids or [])
+        if not turmas:
+            turmas = [
+                item.class_id
+                for item in ClassTest.query.filter_by(test_id=str(test_id)).all()
+                if item.class_id
+            ]
+        students = (
+            Student.query.filter(Student.class_id.in_(turmas)).all() if turmas else []
+        )
+        return resultados_para_notas(
+            [test_id], students, results, alunos_filtro, parear=bool(parear)
+        )
+
+    def _participation_for_point(
+        point,
+        alunos_filtro: str = "todos",
+        municipio_id: Any = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         class_ids = point.class_ids if point.class_ids is not None else []
         if not point.is_group:
             general = EvaluationComparisonService._get_general_participation(
-                point.ids[0], class_ids=class_ids
+                point.ids[0],
+                class_ids=class_ids,
+                alunos_filtro=alunos_filtro,
+                municipio_id=municipio_id,
             )
             by_school = EvaluationComparisonService._get_participation_by_school(
-                point.ids[0], class_ids=class_ids
+                point.ids[0],
+                class_ids=class_ids,
+                alunos_filtro=alunos_filtro,
+                municipio_id=municipio_id,
             )
             return general, by_school
         from app.models.student import Student
 
+        censo_grupo = EvaluationComparisonService._censo_participacao(
+            point.ids,
+            class_ids,
+            alunos_filtro,
+            municipio_id,
+            grupo=True,
+        )
+        if censo_grupo is not None:
+            campos, by_school = censo_grupo
+            return {
+                "total_students": campos["total_alunos"],
+                "participating_students": campos["alunos_participantes"],
+                "participation_rate": campos["percentual_comparecimento"],
+            }, by_school
         total = Student.query.filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
         participating = len(point.results or [])
         rate = round((participating / total * 100), 2) if total else 0.0
@@ -2042,8 +2123,92 @@ class EvaluationComparisonService:
             return None
     
     @staticmethod
+    @staticmethod
+    def _censo_participacao(
+        test_ids,
+        class_ids,
+        alunos_filtro,
+        municipio_id,
+        *,
+        grupo: bool,
+    ):
+        """(campos, por_escola) do censo. None se o censo não fechar."""
+        try:
+            from app.models.classTest import ClassTest
+            from app.models.evaluationResult import EvaluationResult
+            from app.models.school import School
+            from app.models.student import Student
+            from app.services.participation_census import campos_participacao
+            from app.services.participation_census_shadow import montar_censo_carregado
+
+            ids = [str(item) for item in test_ids if item]
+            if not ids:
+                return None
+            if class_ids is None:
+                class_tests = ClassTest.query.filter(ClassTest.test_id.in_(ids)).all()
+                class_ids = [item.class_id for item in class_tests if item.class_id]
+            else:
+                class_tests = (
+                    ClassTest.query.filter(
+                        ClassTest.test_id.in_(ids),
+                        ClassTest.class_id.in_(list(class_ids)),
+                    ).all()
+                    if class_ids
+                    else []
+                )
+            students = (
+                Student.query.filter(Student.class_id.in_(list(class_ids))).all()
+                if class_ids
+                else []
+            )
+            student_ids = [student.id for student in students]
+            results = (
+                EvaluationResult.query.filter(
+                    EvaluationResult.test_id.in_(ids),
+                    EvaluationResult.student_id.in_(student_ids),
+                ).all()
+                if student_ids
+                else []
+            )
+            censo = montar_censo_carregado(
+                municipio_id=municipio_id,
+                universo=alunos_filtro or "todos",
+                test_ids=ids,
+                alunos=students,
+                class_tests=class_tests,
+                resultados=results,
+            )
+            if censo is None:
+                return None
+            campos = campos_participacao(censo, grupo=grupo)
+            nomes = {}
+            escola_ids = [item.escola_id for item in censo.por_escola if item.escola_id]
+            if escola_ids:
+                for school in School.query.filter(School.id.in_(escola_ids)).all():
+                    nomes[str(school.id)] = school.name
+            por_escola = {}
+            for item in censo.por_escola:
+                escola_id = str(item.escola_id or "")
+                if not escola_id:
+                    continue
+                presentes = item.presentes_completos if grupo else item.presentes_pelo_menos_uma
+                percentual = item.percentual_completa if grupo else item.percentual_pelo_menos_uma
+                por_escola[escola_id] = {
+                    "school_name": nomes.get(escola_id) or escola_id,
+                    "total_students": item.matriculados,
+                    "participating_students": presentes,
+                    "participation_rate": percentual,
+                }
+            return campos, por_escola
+        except Exception:
+            logging.warning("Censo de participação falhou na evolução", exc_info=True)
+            return None
+
     def _get_general_participation(
-        test_id: str, class_ids: Optional[List[Any]] = None
+        test_id: str,
+        class_ids: Optional[List[Any]] = None,
+        alunos_filtro: str = "todos",
+        municipio_id: Any = None,
     ) -> Dict[str, Any]:
         """
         Calcula taxa de participação geral para uma avaliação
@@ -2069,7 +2234,22 @@ class EvaluationComparisonService:
             from app.routes.evaluation_results_routes import (
                 _dedupe_evaluation_results_by_student,
             )
-            
+
+            censo = EvaluationComparisonService._censo_participacao(
+                [test_id],
+                class_ids,
+                alunos_filtro,
+                municipio_id,
+                grupo=False,
+            )
+            if censo is not None:
+                campos, _por_escola = censo
+                return {
+                    "total_students": campos["total_alunos"],
+                    "participating_students": campos["alunos_participantes"],
+                    "participation_rate": campos["percentual_comparecimento"],
+                }
+
             if class_ids is None:
                 class_tests = ClassTest.query.filter_by(test_id=test_id).all()
                 class_ids = [ct.class_id for ct in class_tests if ct.class_id]
@@ -2111,7 +2291,10 @@ class EvaluationComparisonService:
     
     @staticmethod
     def _get_participation_by_school(
-        test_id: str, class_ids: Optional[List[Any]] = None
+        test_id: str,
+        class_ids: Optional[List[Any]] = None,
+        alunos_filtro: str = "todos",
+        municipio_id: Any = None,
     ) -> Dict[str, Dict[str, Any]]:
         """
         Calcula taxa de participação por escola para uma avaliação
@@ -2127,7 +2310,18 @@ class EvaluationComparisonService:
             from app.routes.evaluation_results_routes import (
                 _dedupe_evaluation_results_by_student,
             )
-            
+
+            censo = EvaluationComparisonService._censo_participacao(
+                [test_id],
+                class_ids,
+                alunos_filtro,
+                municipio_id,
+                grupo=False,
+            )
+            if censo is not None:
+                _campos, por_escola = censo
+                return por_escola
+
             if class_ids is None:
                 class_tests = ClassTest.query.filter_by(test_id=test_id).all()
                 class_ids = [ct.class_id for ct in class_tests if ct.class_id]

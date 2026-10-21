@@ -6,6 +6,7 @@ from app.services.adap_resultado_pareado import (
     ADAP_INCLUDED_IN_RANKING,
     adap_students_level_12,
     choose_valid_evaluation_result,
+    classificar_resultado_modalidade,
     enrich_pendentes_com_marca_adap,
     filter_ranking_excluding_adap,
     merge_results_with_adap_valid,
@@ -40,24 +41,61 @@ def test_escolhe_nota_da_prova_pareada_quando_so_adap():
     assert chosen.total_questions == 11
 
 
-def test_maior_nota_vence_entre_regular_e_adap():
+def test_duas_modalidades_nao_escolhe_a_maior_nota():
     regular = _er(grade=6.0, proficiency=200.0, test_id="reg")
     adap = _er(grade=9.0, proficiency=180.0, test_id="adap")
-    assert choose_valid_evaluation_result(regular, [adap]) is adap
+    assert choose_valid_evaluation_result(regular, [adap]) is None
 
-    regular2 = _er(grade=9.5, proficiency=100.0, test_id="reg")
-    adap2 = _er(grade=9.0, proficiency=300.0, test_id="adap")
-    assert choose_valid_evaluation_result(regular2, [adap2]) is regular2
+    regular_maior = _er(grade=9.5, proficiency=300.0, test_id="reg")
+    adap_menor = _er(grade=1.0, proficiency=100.0, test_id="adap")
+    assert choose_valid_evaluation_result(regular_maior, [adap_menor]) is None
 
 
-def test_empate_nota_decide_por_proficiencia_depois_adap():
-    regular = _er(grade=8.0, proficiency=250.0, test_id="reg")
-    adap = _er(grade=8.0, proficiency=260.0, test_id="adap")
-    assert choose_valid_evaluation_result(regular, [adap]) is adap
+def test_modalidade_do_aluno_define_presenca_e_nota():
+    regular = _er(grade=9.0, proficiency=300.0, test_id="reg")
+    adap = _er(grade=4.0, proficiency=150.0, test_id="adap")
 
-    regular2 = _er(grade=8.0, proficiency=260.0, test_id="reg")
-    adap2 = _er(grade=8.0, proficiency=260.0, test_id="adap")
-    assert choose_valid_evaluation_result(regular2, [adap2]) is adap2
+    so_adap, situacao_adap = classificar_resultado_modalidade(None, [adap], aluno_e_adap=True)
+    assert so_adap is adap
+    assert situacao_adap == "participou"
+    assert so_adap.grade == 4.0
+
+    so_regular_no_adap, situacao_errada = classificar_resultado_modalidade(
+        regular, [], aluno_e_adap=True
+    )
+    assert so_regular_no_adap is None
+    assert situacao_errada == "inconsistente"
+
+    ambas, situacao_ambas = classificar_resultado_modalidade(
+        regular, [adap], aluno_e_adap=True
+    )
+    assert ambas is None
+    assert situacao_ambas == "inconsistente"
+
+    regular_ok, situacao_regular = classificar_resultado_modalidade(
+        regular, [], aluno_e_adap=False
+    )
+    assert regular_ok is regular
+    assert situacao_regular == "participou"
+
+    regular_com_adap, situacao_regular_adap = classificar_resultado_modalidade(
+        regular, [adap], aluno_e_adap=False
+    )
+    assert regular_com_adap is None
+    assert situacao_regular_adap == "inconsistente"
+
+
+def test_duas_provas_adap_usam_a_mais_recente_e_nao_a_maior_nota():
+    antiga = _er(grade=9.0, proficiency=300.0, test_id="adap-1")
+    antiga.calculated_at = 1
+    recente = _er(grade=3.0, proficiency=100.0, test_id="adap-2")
+    recente.calculated_at = 2
+    escolhido, situacao = classificar_resultado_modalidade(
+        None, [antiga, recente], aluno_e_adap=True
+    )
+    assert situacao == "participou"
+    assert escolhido is recente
+    assert escolhido.grade == 3.0
 
 
 def test_sem_nenhum_resultado_retorna_none():
@@ -150,7 +188,7 @@ def test_media_adap_pareado_entra_na_turma_atual(monkeypatch):
                 source_test_id="adap-i",
                 source_test_title="ADAP I - 4º ANO",
                 result=adap_er,
-                situation="concluida",
+                    situation="participou",
                 from_adap_test=True,
             )
         },
@@ -204,7 +242,7 @@ def test_projecao_sem_turma_atual_usa_turma_da_prova_regular():
     assert projected.grade_id_snapshot == "g-2ano"
 
 
-def test_adap3_fora_do_mapa_nivel_12():
+def test_adap3_entra_no_mapa_adap():
     serie = SimpleNamespace(name="5º Ano", education_stage_id=None)
     sub3 = SimpleNamespace(id="s3", class_id="c1", support_level=3)
     sub1 = SimpleNamespace(id="s1", class_id="c1", support_level=1)
@@ -218,7 +256,8 @@ def test_adap3_fora_do_mapa_nivel_12():
     ]
     mapped = adap_students_level_12(alunos)
     assert "a1" in mapped
-    assert "a3" not in mapped
+    assert "a3" in mapped
+    assert mapped["a3"].level == 3
 
 
 def test_ranking_exclui_adap_por_constante():

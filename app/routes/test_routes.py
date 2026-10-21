@@ -3951,6 +3951,16 @@ def comparar_avaliacoes():
             "turma_id": str(turma).strip() if _valid(turma) else None,
         }
         restrict_escopo_by_area(escopo_calculo, area_type)
+        from app.services.alunos_resultado_filtro import (
+            AlunosFiltroInvalido,
+            parse_alunos_filtro,
+        )
+
+        try:
+            alunos_filtro = parse_alunos_filtro(data.get("alunos"))
+        except AlunosFiltroInvalido as exc:
+            return jsonify({"error": str(exc)}), 400
+        alunos_informado = "alunos" in data
         filtros_aplicados = {
             "estado": str(estado).strip() if _valid(estado) else None,
             "municipio": str(municipio_id),
@@ -3958,6 +3968,7 @@ def comparar_avaliacoes():
             "serie": escopo_calculo["serie_id"],
             "turma": escopo_calculo["turma_id"],
             "tipo_area": area_type,
+            "alunos": alunos_filtro if alunos_informado else None,
         }
 
         # Executar comparação
@@ -3971,6 +3982,8 @@ def comparar_avaliacoes():
             filtros_aplicados=filtros_aplicados,
             grupos=points if points_need_merge(points) else None,
             nomes=point_names,
+            alunos_filtro=alunos_filtro,
+            parear=alunos_informado,
         )
         
         comparison_time = time.time() - comparison_start
@@ -4081,6 +4094,16 @@ def comparar_avaliacoes_por_grupos():
             "turma_id": str(turma).strip() if _valid(turma) else None,
         }
         restrict_escopo_by_area(escopo_calculo, area_type)
+        from app.services.alunos_resultado_filtro import (
+            AlunosFiltroInvalido,
+            parse_alunos_filtro,
+        )
+
+        try:
+            alunos_filtro = parse_alunos_filtro(data.get("alunos"))
+        except AlunosFiltroInvalido as exc:
+            return jsonify({"error": str(exc)}), 400
+        alunos_informado = "alunos" in data
         filtros_aplicados = {
             "estado": str(estado).strip() if _valid(estado) else None,
             "municipio": str(municipio_id),
@@ -4088,6 +4111,7 @@ def comparar_avaliacoes_por_grupos():
             "serie": escopo_calculo["serie_id"],
             "turma": escopo_calculo["turma_id"],
             "tipo_area": area_type,
+            "alunos": alunos_filtro if alunos_informado else None,
         }
 
         merge_error = validate_merge_points(points, tests)
@@ -4100,6 +4124,8 @@ def comparar_avaliacoes_por_grupos():
             escopo_calculo=escopo_calculo,
             filtros_aplicados=filtros_aplicados,
             grupos=points if points_need_merge(points) else None,
+            alunos_filtro=alunos_filtro,
+            parear=alunos_informado,
         )
         if not result:
             return jsonify({"error": "Erro ao calcular evolução por grupos"}), 500

@@ -1613,6 +1613,13 @@ def listar_avaliacoes_analise_ia():
         avaliacao = request.args.get("avaliacao")
         group_id_param = request.args.get("group_id")
         periodo_raw = request.args.get("periodo")
+        from app.services.alunos_resultado_filtro import AlunosFiltroInvalido, parse_alunos_filtro
+
+        alunos_param_present = "alunos" in request.args
+        try:
+            alunos_filtro = parse_alunos_filtro(request.args.get("alunos"))
+        except AlunosFiltroInvalido as exc:
+            return jsonify({"error": str(exc)}), 400
         grupo_ctx, grupo_err = resolve_evaluation_group(avaliacao, group_id_param)
         if grupo_err:
             return jsonify({"error": grupo_err[0]}), grupo_err[1]
@@ -1665,6 +1672,7 @@ def listar_avaliacoes_analise_ia():
                 "periodo": periodo_raw_clean,
                 "group_id": group_id_param,
                 "tipo_area": request.args.get("tipo_area"),
+                "alunos": alunos_filtro if alunos_param_present else None,
             },
         )
 
@@ -1701,6 +1709,9 @@ def listar_avaliacoes_analise_ia():
         scope_info = apply_area_type_to_scope(scope_info, area_type)
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+        if isinstance(scope_info, dict) and alunos_param_present:
+            scope_info["alunos"] = alunos_filtro
+            scope_info["adap_pareamento"] = True
         if avaliacao_ids:
             scope_info["avaliacao_ids"] = avaliacao_ids
         if grupo_ctx:
@@ -7874,6 +7885,29 @@ def mapa_habilidades_avaliacao_online():
         return jsonify({"error": "Erro ao obter mapa de habilidades", "details": str(e)}), 500
 
 
+def _alunos_niveis_no_recorte(avaliacao_id, alunos_raw, alunos_filtro, municipio_id):
+    """Nota e classificação dos níveis saem da modalidade válida do recorte."""
+    try:
+        from app.services.resultado_universo import (
+            carregar_universo_da_prova,
+            linhas_com_nota_valida,
+        )
+
+        students, notas, _censo = carregar_universo_da_prova(
+            avaliacao_id,
+            municipio_id=municipio_id,
+            alunos_filtro=alunos_filtro,
+            parear=True,
+        )
+        return linhas_com_nota_valida(alunos_raw, notas, students, alunos_filtro)
+    except Exception:
+        logging.warning(
+            "Recorte de alunos falhou nos níveis de proficiência",
+            exc_info=True,
+        )
+        return alunos_raw
+
+
 @bp.route("/niveis-proficiencia", methods=["GET"])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
@@ -7907,6 +7941,13 @@ def niveis_proficiencia_avaliacao_online():
         disciplina = request.args.get("disciplina") or "all"
         turno = request.args.get("turno")
         nivel = request.args.get("nivel")
+        from app.services.alunos_resultado_filtro import AlunosFiltroInvalido, parse_alunos_filtro
+
+        alunos_informado = "alunos" in request.args
+        try:
+            alunos_filtro = parse_alunos_filtro(request.args.get("alunos"))
+        except AlunosFiltroInvalido as exc:
+            return jsonify({"error": str(exc)}), 400
         periodo_raw = request.args.get("periodo")
         if periodo_raw is not None and str(periodo_raw).strip():
             try:
@@ -8084,8 +8125,13 @@ def niveis_proficiencia_avaliacao_online():
                     else None
                 ),
                 "disciplina": disciplina,
+                "alunos": alunos_filtro if alunos_informado else None,
             },
-            alunos_raw=alunos_raw,
+            alunos_raw=(
+                _alunos_niveis_no_recorte(str(avaliacao), alunos_raw, alunos_filtro, municipio_str)
+                if alunos_informado
+                else alunos_raw
+            ),
             habilidades_raw=skills_data.get("habilidades") or [],
             turno_por_aluno_id=turno_map,
             turno_filtro=turno,
@@ -9205,6 +9251,9 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             )
             total_alunos = len(todos_alunos)
 
+        sombra_alunos = list(todos_alunos)
+        sombra_resultados = list(resultados_escopo)
+
         if scope_wants_adap_pareamento(scope_info):
             uniq_tests = list({str(t) for t in test_ids if t})
             if len(uniq_tests) <= 1:
@@ -9377,6 +9426,52 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             round(100.0 * alunos_participantes / total_alunos, 2) if total_alunos else 0.0
         )
 
+        participacao_censo = None
+        try:
+            from app.services.participation_census import campos_participacao
+            from app.services.participation_census_shadow import (
+                log_censo_calculado,
+                montar_censo_carregado,
+            )
+
+            city_shadow = scope_info.get("city_data")
+            municipio_censo = getattr(city_shadow, "id", None) or scope_info.get("municipio")
+            universo_censo = scope_info.get("alunos") or "todos"
+            censo_card = montar_censo_carregado(
+                municipio_id=municipio_censo,
+                universo=universo_censo,
+                test_ids=test_ids,
+                alunos=sombra_alunos,
+                class_tests=class_tests,
+                resultados=sombra_resultados,
+                class_ids_permitidos=scope_info.get("_restrict_class_ids"),
+            )
+            log_censo_calculado(
+                censo_card,
+                superficie="resultados",
+                municipio_id=municipio_censo,
+                universo=universo_censo,
+                test_ids=test_ids,
+                antigo_matriculados=total_alunos,
+                antigo_participantes=alunos_participantes,
+            )
+            if censo_card is not None:
+                participacao_censo = campos_participacao(
+                    censo_card, grupo=bool(scope_info.get("grupo"))
+                )
+                total_alunos = participacao_censo["total_alunos"]
+                alunos_participantes = participacao_censo["alunos_participantes"]
+                alunos_completos = participacao_censo["alunos_completos"]
+                alunos_parciais = participacao_censo["alunos_parciais"]
+                alunos_ausentes = participacao_censo["alunos_ausentes"]
+                alunos_pendentes = participacao_censo["alunos_pendentes"]
+                percentual_comparecimento = participacao_censo["percentual_comparecimento"]
+        except Exception:
+            logging.warning(
+                "Censo de participação falhou no card de resultados",
+                exc_info=True,
+            )
+
         media_proficiencia_geral_fmt = format_decimal_two_places(media_proficiencia)
         course_name_nivel = "Anos Iniciais"
         first_test_nivel = (
@@ -9412,6 +9507,9 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             "alunos_pendentes_detalhe": alunos_pendentes_detalhe,
             "alunos_ausentes": alunos_ausentes,
             "percentual_comparecimento": percentual_comparecimento,
+            "participacao_completa": (participacao_censo or {}).get("participacao_completa"),
+            "participacao_pelo_menos_uma": (participacao_censo or {}).get("participacao_pelo_menos_uma"),
+            "por_disciplina_participacao": (participacao_censo or {}).get("por_disciplina_participacao") or [],
             "media_nota_geral": round(media_nota, 2),
             "media_proficiencia_geral": media_proficiencia_geral_fmt,
             "distribuicao_classificacao_geral": distribuicao_geral,
@@ -10465,6 +10563,7 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
                     tid, class_ids, base_orig_list
                 ).all()
             )
+        resultados_brutos = list(resultados)
 
         if (scope_info or {}).get("grupo") and tests_info:
             course_name = _get_curso_nome(getattr(evaluation, "course", None))
@@ -10549,6 +10648,33 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
         percentual_comparecimento = (
             round(100.0 * alunos_participantes / total_alunos, 2) if total_alunos else 0.0
         )
+
+        try:
+            from app.services.participation_census import campos_participacao
+            from app.services.participation_census_shadow import montar_censo_carregado
+
+            censo_linha = montar_censo_carregado(
+                municipio_id=(scope_info or {}).get("municipio"),
+                universo=(scope_info or {}).get("alunos") or "todos",
+                test_ids=test_ids_grupo,
+                alunos=todos_alunos,
+                class_tests=class_tests_grupo,
+                resultados=resultados_brutos,
+            )
+            if censo_linha is not None:
+                campos_linha = campos_participacao(
+                    censo_linha, grupo=bool((scope_info or {}).get("grupo"))
+                )
+                total_alunos = campos_linha["total_alunos"]
+                alunos_participantes = campos_linha["alunos_participantes"]
+                alunos_pendentes = campos_linha["alunos_pendentes"]
+                alunos_ausentes = campos_linha["alunos_ausentes"]
+                percentual_comparecimento = campos_linha["percentual_comparecimento"]
+        except Exception:
+            logging.warning(
+                "Censo de participação falhou na linha de resultados",
+                exc_info=True,
+            )
 
         media_proficiencia_fmt = format_decimal_two_places(media_proficiencia)
         nivel_classificacao = _nivel_classificacao_por_media_proficiencia(
@@ -11201,6 +11327,17 @@ def relatorio_consolidado():
         except ValueError as ve:
             return jsonify({"error": str(ve)}), 400
 
+        from app.services.alunos_resultado_filtro import AlunosFiltroInvalido, parse_alunos_filtro
+
+        bruto_alunos = request.args.get("alunos")
+        try:
+            if bruto_alunos is None or str(bruto_alunos).strip() == "":
+                alunos_filtro = "regular"
+            else:
+                alunos_filtro = parse_alunos_filtro(bruto_alunos)
+        except AlunosFiltroInvalido as exc:
+            return jsonify({"error": str(exc)}), 400
+
         try:
             payload = build_digital_consolidated_report(
                 str(municipio).strip(),
@@ -11209,6 +11346,7 @@ def relatorio_consolidado():
                 user,
                 permissao,
                 area_type=area_type,
+                alunos_filtro=alunos_filtro,
             )
         except PermissionError as pe:
             return jsonify({"error": str(pe)}), 403

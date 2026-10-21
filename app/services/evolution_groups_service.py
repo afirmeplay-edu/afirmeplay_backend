@@ -122,6 +122,8 @@ class EvolutionGroupsService:
         escopo_calculo: Optional[Dict[str, Any]] = None,
         filtros_aplicados: Optional[Dict[str, Any]] = None,
         grupos: Optional[List[List[str]]] = None,
+        alunos_filtro: str = "todos",
+        parear: bool = False,
     ) -> Optional[Dict[str, Any]]:
         try:
             view_by = _valid_view_by(view_by)
@@ -177,12 +179,27 @@ class EvolutionGroupsService:
                     from app.models.evaluationResult import EvaluationResult
 
                     results = EvaluationResult.query.filter_by(test_id=test.id).all()
+                    class_ids = [
+                        item.class_id
+                        for item in ClassTest.query.filter_by(test_id=test.id).all()
+                        if item.class_id
+                    ]
+                from app.services.evolution_points_service import _aplicar_recorte
+
+                results, _ = _aplicar_recorte(
+                    test.id, class_ids, results, alunos_filtro, parear
+                )
                 all_results[test.id] = results or []
 
             if grupos and any(len(group) > 1 for group in grupos):
                 from app.services.evolution_points_service import build_comparison_points
 
-                materialized = build_comparison_points(grupos, escopo_calculo)
+                materialized = build_comparison_points(
+                    grupos,
+                    escopo_calculo,
+                    alunos_filtro=alunos_filtro,
+                    parear=parear,
+                )
                 tests_with_dates = [
                     {"test": point.as_test(), "application_date": point.application_date}
                     for point in materialized

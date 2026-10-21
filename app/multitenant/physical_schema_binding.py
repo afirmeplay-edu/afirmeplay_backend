@@ -37,14 +37,21 @@ def set_physical_schema_override(schema: str | None) -> None:
     """
     Força o schema físico para tabelas com ``schema=\"tenant\"`` no modelo.
     ``schema`` em ``None`` ou ``\"public\"`` limpa o override (usa só o request context).
+
+    O cache de Engine só é descartado quando o schema efetivo muda. Recriar o
+    engine para o mesmo ``city_*`` abre outra conexão na mesma sessão; um
+    ``UPDATE`` pendente na conexão antiga então espera a própria trava.
     """
     if not _g_active():
         return
     if not schema or str(schema).strip().lower() in ("", "public"):
         clear_physical_schema_override()
         return
-    setattr(g, _G_OVERRIDE, str(schema).strip())
-    invalidate_tenant_bind_cache()
+    new_schema = str(schema).strip()
+    already = get_effective_tenant_physical_schema()
+    setattr(g, _G_OVERRIDE, new_schema)
+    if already != new_schema:
+        invalidate_tenant_bind_cache()
 
 
 def get_effective_tenant_physical_schema() -> str:

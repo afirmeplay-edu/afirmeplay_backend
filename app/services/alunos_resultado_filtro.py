@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Recorte de alunos do menu Resultados (regular / ADAP 1 e 2).
+"""Recorte de alunos do menu Resultados (regular / ADAP 1, 2 e 3).
 
 Parâmetro ausente ou ``todos`` devolve as mesmas listas, sem reordenar.
-ADAP 3 fica de fora de regular, regular_adap e adap. Vale o vínculo atual
-(subturma ou série antiga de Educação Especial), via special_education.
+Educação especial sem nível fica de fora de regular, regular_adap e adap.
+Vale o vínculo atual (subturma ou série antiga de Educação Especial), via special_education.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from app.services.special_education import (
 
 ALUNOS_FILTRO_TODOS = "todos"
 ALUNOS_FILTROS = ("regular", "regular_adap", "adap", ALUNOS_FILTRO_TODOS)
-_ADAP_OBJETIVO = (1, 2)
+_ADAP_OBJETIVO = (1, 2, 3)
 
 
 class AlunosFiltroInvalido(ValueError):
@@ -44,9 +44,9 @@ def filtro_restringe(filtro: Optional[str]) -> bool:
 def aluno_entra_no_filtro(status: SpecialEducationStatus, filtro: str) -> bool:
     """
     regular: quem não é educação especial.
-    adap: só nível 1 ou 2 (subturma ou série antiga).
-    regular_adap: os dois grupos acima.
-    Nível 3 e educação especial sem nível ficam de fora dessas três opções.
+    adap: nível 1, 2 ou 3 (subturma ou série antiga).
+    regular_adap: regulares e esses três níveis.
+    Educação especial sem nível fica de fora dessas três opções.
     """
     if not filtro_restringe(filtro):
         return True

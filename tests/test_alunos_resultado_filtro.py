@@ -60,11 +60,16 @@ def test_parametro_invalido():
         raise AssertionError("valor inválido deveria falhar")
 
 
-def test_opcoes_excluem_adap_3():
+def test_opcoes_incluem_adap_3():
     alunos = _turma_mista()
     assert _ids(filtrar_alunos_resultado(alunos, "regular")) == ["regular"]
-    assert _ids(filtrar_alunos_resultado(alunos, "regular_adap")) == ["regular", "adap1", "adap2"]
-    assert _ids(filtrar_alunos_resultado(alunos, "adap")) == ["adap1", "adap2"]
+    assert _ids(filtrar_alunos_resultado(alunos, "regular_adap")) == [
+        "regular",
+        "adap1",
+        "adap2",
+        "adap3",
+    ]
+    assert _ids(filtrar_alunos_resultado(alunos, "adap")) == ["adap1", "adap2", "adap3"]
     mesmo = filtrar_alunos_resultado(alunos, "todos")
     assert mesmo is alunos
     assert _ids(filtrar_alunos_resultado(alunos, None)) == _ids(alunos)
@@ -84,9 +89,13 @@ def test_serie_antiga_conta_como_adap_pelo_nivel():
     )
     regular = _aluno("regular", grade=serie_regular)
     grupo = [regular, antigo_1, antigo_3]
-    assert _ids(filtrar_alunos_resultado(grupo, "adap")) == ["antigo1"]
+    assert _ids(filtrar_alunos_resultado(grupo, "adap")) == ["antigo1", "antigo3"]
     assert _ids(filtrar_alunos_resultado(grupo, "regular")) == ["regular"]
-    assert _ids(filtrar_alunos_resultado(grupo, "regular_adap")) == ["regular", "antigo1"]
+    assert _ids(filtrar_alunos_resultado(grupo, "regular_adap")) == [
+        "regular",
+        "antigo1",
+        "antigo3",
+    ]
 
 
 def test_transferido_sem_subturma_conta_como_regular():

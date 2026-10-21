@@ -552,11 +552,17 @@ def ensure_tenant_schema_for_user(user_id):
         (ex.: User sem city_id) - a rota deve retornar 400.
     """
     from flask import g
+    from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
+
     ctx = getattr(g, "tenant_context", None)
     if ctx and getattr(ctx, "has_tenant_context", False):
         schema = getattr(ctx, "schema", "public")
         if schema and schema != "public":
-            set_search_path(schema)  # garantir path mesmo quando contexto já existe (path pode ter sido trocado)
+            # O contexto do request já resolve o município. Só reaplica o bind se
+            # outra rota trocou o schema efetivo (ex.: competição). Chamar
+            # set_search_path de novo no mesmo city_* descarta o engine em uso.
+            if get_effective_tenant_physical_schema() != schema:
+                set_search_path(schema)
             return True
     user_obj = User.query.get(user_id)
     if user_obj and getattr(user_obj, "city_id", None):

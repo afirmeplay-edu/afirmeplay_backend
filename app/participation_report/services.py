@@ -162,6 +162,44 @@ def _placement_for_student(
     return school_id, class_id, grade_id
 
 
+def _preencher_linha_censo(row: Dict[str, Any], agregado: Any, *, grupo: bool) -> None:
+    if agregado is None:
+        row["matriculados"] = 0
+        row["avaliados"] = 0
+        row["percentual_participacao"] = 0.0
+        return
+    if grupo:
+        presentes = agregado.presentes_completos
+        percentual = agregado.percentual_completa
+    else:
+        presentes = agregado.presentes_pelo_menos_uma
+        percentual = agregado.percentual_pelo_menos_uma
+    row["matriculados"] = agregado.matriculados
+    row["avaliados"] = presentes
+    row["percentual_participacao"] = percentual
+
+
+def aplicar_censo_no_resumo(payload: Dict[str, Any], censo: Any) -> Dict[str, Any]:
+    """Troca matriculados e avaliados pelo censo. Nomes de escola e turma ficam."""
+    from app.services.participation_census import campos_participacao
+
+    grupo = len(getattr(censo.geral, "por_disciplina", ()) or ()) > 1
+    campos = campos_participacao(censo, grupo=grupo)
+    metricas = payload.setdefault("metricas", {})
+    metricas["matriculados"] = campos["total_alunos"]
+    metricas["avaliados"] = campos["alunos_participantes"]
+    metricas["percentual_participacao"] = campos["percentual_comparecimento"]
+    metricas["participacao_completa"] = campos["participacao_completa"]
+    metricas["participacao_pelo_menos_uma"] = campos["participacao_pelo_menos_uma"]
+    por_escola = {str(item.escola_id or ""): item for item in censo.por_escola}
+    for row in payload.get("por_escola") or []:
+        _preencher_linha_censo(row, por_escola.get(str(row.get("escola_id") or "")), grupo=grupo)
+    por_turma = {str(item.turma_id or ""): item for item in censo.por_turma}
+    for row in payload.get("por_turma") or []:
+        _preencher_linha_censo(row, por_turma.get(str(row.get("turma_id") or "")), grupo=grupo)
+    return payload
+
+
 def build_participation_report(
     user: dict,
     estado: str,
@@ -170,6 +208,7 @@ def build_participation_report(
     escola_ids: Optional[List[str]] = None,
     serie_ids: Optional[List[str]] = None,
     turma_ids: Optional[List[str]] = None,
+    alunos_filtro: str = "todos",
 ) -> Dict[str, Any]:
     permissao = get_user_permission_scope(user)
     if not permissao.get("permitted"):
@@ -192,6 +231,7 @@ def build_participation_report(
         "escolas": list(escola_ids or []),
         "series": list(serie_ids or []),
         "turmas": [str(t) for t in (turma_ids or [])],
+        "alunos": alunos_filtro or "todos",
     }
 
     empty = {
@@ -444,7 +484,7 @@ def build_participation_report(
         avaliados,
     )
 
-    return {
+    payload = {
         "escopo": escopo,
         "metricas": {
             "matriculados": matriculados,
@@ -455,3 +495,34 @@ def build_participation_report(
         "por_escola": por_escola,
         "por_turma": por_turma,
     }
+    try:
+        from app.services.participation_census_shadow import (
+            log_censo_calculado,
+            montar_censo_carregado,
+        )
+
+        censo = montar_censo_carregado(
+            municipio_id=municipio_id,
+            universo=alunos_filtro or "todos",
+            test_ids=test_ids,
+            alunos=base_students,
+            class_tests=class_tests,
+            resultados=resultados,
+        )
+        log_censo_calculado(
+            censo,
+            superficie="participacao",
+            municipio_id=municipio_id,
+            universo=alunos_filtro or "todos",
+            test_ids=test_ids,
+            antigo_matriculados=matriculados,
+            antigo_participantes=avaliados,
+        )
+        if censo is not None:
+            aplicar_censo_no_resumo(payload, censo)
+    except Exception:
+        logging.warning(
+            "Censo de participação falhou no relatório de participação",
+            exc_info=True,
+        )
+    return payload

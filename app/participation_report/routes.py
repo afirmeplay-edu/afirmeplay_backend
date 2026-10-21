@@ -105,6 +105,15 @@ def resumo_participacao():
                 turma_ids=turmas or None,
             )
         else:
+            from app.services.alunos_resultado_filtro import (
+                AlunosFiltroInvalido,
+                parse_alunos_filtro,
+            )
+
+            try:
+                alunos_filtro = parse_alunos_filtro(request.args.get("alunos"))
+            except AlunosFiltroInvalido as exc:
+                return jsonify({"error": str(exc)}), 400
             avaliacoes = _parse_multi_from_request("avaliacoes", "avaliacao")
             data = build_participation_report(
                 user=user,
@@ -114,6 +123,7 @@ def resumo_participacao():
                 escola_ids=escolas or None,
                 serie_ids=series or None,
                 turma_ids=turmas or None,
+                alunos_filtro=alunos_filtro,
             )
         return jsonify(data), 200
     except PermissionError as pe:

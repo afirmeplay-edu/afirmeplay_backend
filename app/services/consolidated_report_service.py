@@ -978,8 +978,12 @@ def _build_frequencia_section_digital(
     results_rede: List[EvaluationResult],
     tests_by_id: Dict[str, Test],
     all_disciplines: Set[str],
+    censo_linhas=None,
+    censo_rede=None,
 ) -> Dict[str, Any]:
     """Participação digital: ratio canônico avaliados/matriculados em todos os níveis."""
+    from app.services.participation_census import contagens_celula
+
     subject_has_disc: Dict[str, Set[str]] = {tid: _disciplinas_from_test(t) for tid, t in tests_by_id.items()}
     mk = _matriz_kwargs(ctx)
 
@@ -992,6 +996,11 @@ def _build_frequencia_section_digital(
     ) -> Optional[Tuple[int, int]]:
         if (escola_id, serie_id) not in scope.classes_by_cell:
             return None
+        censo = censo_linhas if scope is ctx.scope_linhas else censo_rede
+        if censo is None and scope is ctx.scope_rede:
+            censo = censo_linhas
+        if censo is not None:
+            return contagens_celula(censo, escola_id, serie_id, discipline)
         mat = len(_students_in_cell(scope, escola_id, serie_id))
         part = len(
             _digital_participants_in_cell(
@@ -2262,6 +2271,61 @@ def _digital_results_for_scope(
     )
 
 
+def _censo_da_frequencia(
+    municipio_id: str,
+    alunos_filtro: str,
+    test_ids: List[str],
+    tests: List[Test],
+    class_tests: List[Any],
+    students_by_class: Dict[str, List[Student]],
+    results: List[EvaluationResult],
+    restrict: Optional[Set[Any]],
+):
+    """Censo da matrícula atual. Falha devolve None e a frequência antiga permanece."""
+    roster = [aluno for grupo in (students_by_class or {}).values() for aluno in grupo]
+    try:
+        from app.services.participation_census_shadow import montar_censo_carregado
+
+        return montar_censo_carregado(
+            municipio_id=municipio_id,
+            universo=alunos_filtro or "regular",
+            test_ids=test_ids,
+            testes=tests,
+            alunos=roster,
+            class_tests=class_tests,
+            resultados=results,
+            class_ids_permitidos=restrict,
+        )
+    except Exception:
+        logging.warning(
+            "Censo de participação falhou no relatório geral",
+            exc_info=True,
+        )
+        return None
+
+
+def _notas_do_recorte(
+    test_ids: List[str],
+    students_by_class: Dict[str, List[Student]],
+    results: List[EvaluationResult],
+    alunos_filtro: str,
+) -> List[Any]:
+    """Nota e proficiência do mesmo recorte. A frequência continua no resultado cru."""
+    roster = [aluno for grupo in (students_by_class or {}).values() for aluno in grupo]
+    try:
+        from app.services.resultado_universo import resultados_para_notas
+
+        return resultados_para_notas(
+            test_ids, roster, results, alunos_filtro, parear=True
+        )
+    except Exception:
+        logging.warning(
+            "Pareamento de nota falhou no relatório geral",
+            exc_info=True,
+        )
+        return list(results or [])
+
+
 def build_digital_consolidated_report(
     municipio_id: str,
     escola_param: Optional[str],
@@ -2269,6 +2333,7 @@ def build_digital_consolidated_report(
     user: dict,
     permissao: dict,
     area_type: Optional[str] = None,
+    alunos_filtro: str = "regular",
 ) -> Dict[str, Any]:
     city = City.query.get(municipio_id)
     if not city:
@@ -2294,6 +2359,10 @@ def build_digital_consolidated_report(
         raise ValueError(f"Avaliações não encontradas: {', '.join(missing)}")
     # Ordem estável = ordem dos IDs na requisição (evita flip de tests[0] entre gerações).
     tests = _order_rows_by_requested_ids(tests, [str(t) for t in test_ids], lambda t: t.id)
+    if len(tests) >= 2:
+        series_das_provas = {str(t.grade_id) for t in tests if getattr(t, "grade_id", None)}
+        if len(series_das_provas) > 1:
+            raise ValueError("As avaliações do relatório geral devem ser da mesma série")
     tests_by_id = {str(t.id): t for t in tests}
     itens = [_digital_item_selecionado(t) for t in tests]
 
@@ -2342,6 +2411,68 @@ def build_digital_consolidated_report(
     discipline_list = sorted(all_disciplines) + [GERAL_KEY]
     has_mat = any("matem" in d.lower() for d in all_disciplines)
 
+    censo_linhas = _censo_da_frequencia(
+        municipio_id,
+        alunos_filtro,
+        test_ids,
+        tests,
+        class_tests_linhas,
+        students_linhas,
+        results_linhas,
+        restrict,
+    )
+    censo_rede = censo_linhas
+    if escola_id:
+        censo_rede = _censo_da_frequencia(
+            municipio_id,
+            alunos_filtro,
+            test_ids,
+            tests,
+            class_tests_rede,
+            students_rede,
+            results_rede,
+            restrict,
+        )
+
+    roster_sombra = [aluno for grupo in students_linhas.values() for aluno in grupo]
+    roster_ids_sombra = {str(aluno.id) for aluno in roster_sombra if getattr(aluno, "id", None)}
+    try:
+        from app.services.participation_census_shadow import log_participation_census_shadow
+
+        log_participation_census_shadow(
+            superficie="relatorio_geral",
+            municipio_id=municipio_id,
+            universo="todos",
+            test_ids=test_ids,
+            testes=tests,
+            alunos=roster_sombra,
+            class_tests=class_tests_linhas,
+            resultados=results_linhas,
+            antigo_matriculados=len(roster_ids_sombra),
+            antigo_participantes=len(
+                {
+                    str(row.student_id)
+                    for row in results_linhas
+                    if getattr(row, "student_id", None) and str(row.student_id) in roster_ids_sombra
+                }
+            ),
+            class_ids_permitidos=restrict,
+        )
+    except Exception:
+        logging.warning(
+            "PARTICIPATION_CENSUS_SHADOW falhou ao registrar relatório geral",
+            exc_info=True,
+        )
+
+    notas_linhas = _notas_do_recorte(
+        test_ids, students_linhas, results_linhas, alunos_filtro
+    )
+    notas_rede = notas_linhas
+    if escola_id:
+        notas_rede = _notas_do_recorte(
+            test_ids, students_rede, results_rede, alunos_filtro
+        )
+
     return _assemble_payload(
         tipo_entidade="avaliacao",
         filtros=filtros,
@@ -2350,21 +2481,27 @@ def build_digital_consolidated_report(
         ctx=ctx,
         series_aplicadas=series_aplicadas,
         consolidado_frequencia=_build_frequencia_section_digital(
-            ctx, results_linhas, results_rede, tests_by_id, all_disciplines
+            ctx,
+            results_linhas,
+            results_rede,
+            tests_by_id,
+            all_disciplines,
+            censo_linhas=censo_linhas,
+            censo_rede=censo_rede,
         ),
         consolidado_medias_nota=_build_medias_section_digital(
-            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, "grade",
+            ctx, notas_linhas, notas_rede, tests_by_id, all_disciplines, "grade",
             has_matematica=has_mat,
         ),
         consolidado_medias_proficiencia=_build_medias_section_digital(
-            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, "proficiency",
+            ctx, notas_linhas, notas_rede, tests_by_id, all_disciplines, "proficiency",
             has_matematica=has_mat,
         ),
         acertos_por_habilidade=_digital_acertos_data(
             ctx, tests_by_id, test_ids, class_ids_linhas, class_ids_rede, all_disciplines
         ),
         distribuicao_niveis_proficiencia=_build_distribuicao_section_digital(
-            ctx, results_linhas, results_rede, tests_by_id, all_disciplines, has_mat
+            ctx, notas_linhas, notas_rede, tests_by_id, all_disciplines, has_mat
         ),
     )
 

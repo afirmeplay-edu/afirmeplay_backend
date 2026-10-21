@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Pareamento ADAP ↔ regular e escolha do resultado válido (menu Resultados).
+"""Pareamento ADAP ↔ regular (menu Resultados).
 
 Ativado só quando o cliente envia o parâmetro ``alunos``. Sem o parâmetro,
 ou sem vínculos ``paired_regular_test_id``, o comportamento permanece o de sempre.
+
+Regular entra só com a prova regular. ADAP 1, 2 ou 3 entra só com a prova
+pareada. As duas modalidades, ou só a modalidade errada, não geram nota.
 """
 from __future__ import annotations
 
@@ -19,10 +22,10 @@ from app.services.special_education import (
 
 logger = logging.getLogger(__name__)
 
-# Ranking: ADAP 1/2 ficam de fora. Troque para True para incluí-los no ranking.
+# Ranking: ADAP 1, 2 e 3 ficam de fora. Troque para True para incluí-los no ranking.
 ADAP_INCLUDED_IN_RANKING = False
 
-_ADAP_LEVELS = (1, 2)
+_ADAP_LEVELS = (1, 2, 3)
 
 _ADAP_TITLE_RE = re.compile(
     r"^adap\s*(i{1,3}|[123])\b",
@@ -39,7 +42,7 @@ class AdapValidResult:
     source_test_id: Optional[str]
     source_test_title: Optional[str]
     result: Any  # EvaluationResult ou None
-    situation: str  # "participou" | "pendente"
+    situation: str  # "participou" | "pendente" | "inconsistente"
     from_adap_test: bool
 
 
@@ -115,39 +118,74 @@ def extract_pairing_key(title: Any) -> Optional[Tuple[Optional[int], Optional[st
     return (ano, disc, avaliacao, norm)
 
 
+def _resultados_preenchidos(results: Sequence[Any]) -> List[Any]:
+    return [item for item in (results or []) if item is not None]
+
+
+def _resultado_mais_recente(results: Sequence[Any]) -> Any:
+    """Deduplica a mesma modalidade pelo calculated_at. Não compara nota."""
+    rows = _resultados_preenchidos(results)
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+
+    def sort_key(result: Any):
+        calculated_at = getattr(result, "calculated_at", None)
+        return (calculated_at is not None, calculated_at)
+
+    return max(rows, key=sort_key)
+
+
+def classificar_resultado_modalidade(
+    regular_result: Any,
+    adap_results: Sequence[Any],
+    *,
+    aluno_e_adap: bool,
+) -> Tuple[Any, str]:
+    """
+    Devolve (resultado_valido, situacao).
+
+    Regular usa só a prova regular. ADAP usa só a prova pareada.
+    Modalidade errada, ou as duas juntas, não geram resultado.
+    """
+    adap_list = _resultados_preenchidos(adap_results)
+    has_regular = regular_result is not None
+    has_adap = bool(adap_list)
+    if aluno_e_adap:
+        if has_adap and not has_regular:
+            return _resultado_mais_recente(adap_list), "participou"
+        if has_regular or has_adap:
+            return None, "inconsistente"
+        return None, "pendente"
+    if has_adap:
+        return None, "inconsistente"
+    if has_regular:
+        return regular_result, "participou"
+    return None, "pendente"
+
+
 def choose_valid_evaluation_result(
     regular_result: Any,
     adap_results: Sequence[Any],
 ) -> Any:
     """
-    Regra do gestor: maior nota; empate → maior proficiência; empate → prova ADAP.
+    Resultado quando só um lado existe.
 
-    Recebe objetos com ``grade``, ``proficiency`` e opcionalmente ``test_id``.
-    Não recalcula nota.
+    Prova regular e prova ADAP juntas devolvem None. Não escolhe a maior nota.
+    Não recalcula a nota já gravada. Quem é regular ou ADAP fica em
+    ``classificar_resultado_modalidade``.
     """
-    candidates: List[Tuple[Any, bool]] = []
-    if regular_result is not None:
-        candidates.append((regular_result, False))
-    for item in adap_results or []:
-        if item is not None:
-            candidates.append((item, True))
-    if not candidates:
+    adap_list = _resultados_preenchidos(adap_results)
+    if regular_result is not None and adap_list:
         return None
-    if len(candidates) == 1:
-        return candidates[0][0]
-
-    def sort_key(pair: Tuple[Any, bool]):
-        result, from_adap = pair
-        grade = float(getattr(result, "grade", None) or 0.0)
-        prof = float(getattr(result, "proficiency", None) or 0.0)
-        # Maior nota/prof; em empate total, ADAP vence (from_adap=True → 1)
-        return (grade, prof, 1 if from_adap else 0)
-
-    return max(candidates, key=sort_key)[0]
+    if regular_result is not None:
+        return regular_result
+    return _resultado_mais_recente(adap_list)
 
 
 def adap_students_level_12(students: Sequence[Any]) -> Dict[str, SpecialEducationStatus]:
-    """Alunos ADAP nível 1 ou 2 no universo (subturma ou série)."""
+    """Alunos ADAP nível 1, 2 ou 3 no universo (subturma ou série)."""
     rows = [s for s in students if s is not None]
     if not rows:
         return {}
@@ -191,8 +229,9 @@ def resolve_adap_valid_results(
     regular_results_by_student: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, AdapValidResult]:
     """
-    Para cada aluno ADAP 1/2 do universo, devolve o resultado válido
-    (regular vs provas ADAP pareadas) e a origem.
+    Para cada aluno ADAP 1, 2 ou 3, devolve a prova pareada quando ela é a única.
+
+    Prova regular sozinha, ou regular junto com ADAP, fica inconsistente e sem resultado.
     """
     adap_map = adap_students_level_12(students)
     if not adap_map:
@@ -232,7 +271,11 @@ def resolve_adap_valid_results(
     for sid, status in adap_map.items():
         regular_er = regular_by.get(sid)
         adap_ers = adap_results_by_student.get(sid) or []
-        chosen = choose_valid_evaluation_result(regular_er, adap_ers)
+        chosen, situation = classificar_resultado_modalidade(
+            regular_er,
+            adap_ers,
+            aluno_e_adap=True,
+        )
         if chosen is None:
             out[sid] = AdapValidResult(
                 student_id=sid,
@@ -240,23 +283,12 @@ def resolve_adap_valid_results(
                 source_test_id=None,
                 source_test_title=None,
                 result=None,
-                situation="pendente",
+                situation=situation,
                 from_adap_test=False,
             )
             continue
         chosen_tid = str(getattr(chosen, "test_id", "") or "")
-        from_adap = chosen_tid in paired_by_id
-        title = None
-        if from_adap:
-            title = getattr(paired_by_id.get(chosen_tid), "title", None)
-        else:
-            try:
-                from app.models.test import Test
-
-                reg = Test.query.get(regular_test_id)
-                title = getattr(reg, "title", None) if reg else None
-            except Exception:
-                title = None
+        title = getattr(paired_by_id.get(chosen_tid), "title", None)
         out[sid] = AdapValidResult(
             student_id=sid,
             level=int(status.level or 0),
@@ -264,9 +296,42 @@ def resolve_adap_valid_results(
             source_test_title=title,
             result=chosen,
             situation="participou",
-            from_adap_test=from_adap,
+            from_adap_test=True,
         )
     return out
+
+
+def ids_regulares_com_prova_adap(
+    regular_test_id: str,
+    student_ids: Sequence[str],
+) -> Set[str]:
+    """Regulares com resultado numa prova ADAP pareada. Não escolhe nota."""
+    ids = [str(sid) for sid in (student_ids or []) if sid]
+    if not regular_test_id or not ids:
+        return set()
+    try:
+        paired_ids = [str(test.id) for test in find_paired_adap_tests(regular_test_id)]
+        if not paired_ids:
+            return set()
+        from app.models.evaluationResult import EvaluationResult
+
+        rows = (
+            EvaluationResult.query.filter(
+                EvaluationResult.test_id.in_(paired_ids),
+                EvaluationResult.student_id.in_(ids),
+            )
+            .with_entities(EvaluationResult.student_id)
+            .distinct()
+            .all()
+        )
+        return {str(row[0]) for row in rows if row[0]}
+    except Exception as exc:
+        logger.warning(
+            "Pareamento ADAP: falha ao localizar prova ADAP de aluno regular em %s: %s",
+            regular_test_id,
+            exc,
+        )
+        return set()
 
 
 def merge_results_with_adap_valid(
@@ -307,7 +372,7 @@ def protect_adap_ids_in_roster(
     roster_ids: Set[str],
     adap_student_ids: Iterable[str],
 ) -> Set[str]:
-    """Garante que ADAP 1/2 da turma atual não saiam do universo."""
+    """Garante que ADAP 1, 2 e 3 da turma atual não saiam do universo."""
     merged = set(roster_ids or set())
     for sid in adap_student_ids or []:
         if sid:
@@ -319,7 +384,7 @@ def build_tabela_adap_rows(
     students_by_id: Dict[str, Any],
     adap_valid: Dict[str, AdapValidResult],
 ) -> List[Dict[str, Any]]:
-    """Payload do bloco ``tabela_adap`` (só ADAP 1/2)."""
+    """Payload do bloco ``tabela_adap`` (ADAP 1, 2 e 3)."""
     rows: List[Dict[str, Any]] = []
     for sid, info in sorted(
         (adap_valid or {}).items(),
@@ -474,8 +539,10 @@ def apply_pareamento_to_universe(
     results: Sequence[Any],
 ) -> Tuple[List[Any], List[Any], Dict[str, AdapValidResult]]:
     """
-    Protege ADAP 1/2 no roster, resolve resultado válido e devolve
+    Protege ADAP 1, 2 e 3 no roster e devolve
     (students, results_efetivos, adap_valid).
+
+    Resultado inconsistente sai de results_efetivos e não entra na média.
     """
     students_list = list(students or [])
     results_list = list(results or [])
@@ -505,19 +572,26 @@ def apply_pareamento_to_universe(
             students_list,
             regular_results_by_student=regular_by,
         )
-        if not adap_valid:
+        students_by_id = {str(getattr(s, "id", "") or ""): s for s in students_list}
+        regulares = [sid for sid in students_by_id if sid not in adap_map]
+        inconsistentes_regulares = ids_regulares_com_prova_adap(
+            regular_test_id, regulares
+        )
+        if not adap_valid and not inconsistentes_regulares:
             return students_list, results_list, {}
 
-        # Remover resultados da regular só dos ADAP (serão substituídos pelo válido)
+        # ADAP sai da prova regular. Volta só quem tem a prova pareada como única origem.
         adap_ids = set(adap_valid.keys())
         kept = [
             row
             for row in results_list
             if str(getattr(row, "student_id", "") or "") not in adap_ids
+            and str(getattr(row, "student_id", "") or "") not in inconsistentes_regulares
         ]
-        students_by_id = {str(getattr(s, "id", "") or ""): s for s in students_list}
         for sid, info in adap_valid.items():
             if info.result is None:
+                continue
+            if info.situation != "participou":
                 continue
             kept.append(
                 project_result_onto_regular_test(

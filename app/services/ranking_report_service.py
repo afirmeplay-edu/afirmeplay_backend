@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import logging
 import math
 import json
 import re
@@ -1639,6 +1640,10 @@ class RankingReportService:
             row["total_students"] = int(school_card.get("quantidade_alunos") or row.get("total_students") or row.get("students_count") or 0)
             row["total_classes"] = int(school_card.get("total_turmas") or 0)
 
+        pacote = cls._pacote_universo_avaliacao(scope, req.filters)
+        if pacote is not None:
+            cls._aplicar_pacote_nas_escolas(school_rows, pacote, req.filters)
+
         school_rows.sort(
             key=lambda row: (
                 -float(row.get("average_score") or 0),
@@ -1677,12 +1682,16 @@ class RankingReportService:
             }
             for row in student_rows
         ]
-        students_total = int(students_data.get("total") or 0)
+        if pacote is not None and pacote.get("parear") and not str(req.filters.get("disciplina") or "").strip():
+            students_items = cls._alunos_do_pacote(pacote, students_items)
+        students_total = len(students_items) if pacote is not None and pacote.get("parear") and not str(req.filters.get("disciplina") or "").strip() else int(students_data.get("total") or 0)
 
         evaluation_id = str(req.filters.get("evaluation_id") or "").strip()
         answer_sheet_id = str(req.filters.get("answer_sheet_id") or "").strip()
         if evaluation_id or answer_sheet_id:
             class_rows = cls._build_evaluation_class_rows(scope, req.filters)
+            if pacote is not None and evaluation_id and not answer_sheet_id:
+                cls._aplicar_pacote_nas_turmas(class_rows, pacote, req.filters)
         else:
             class_rows_data = DashboardService.get_class_ranking_card(scope, limit=1000, offset=0) or {}
             class_rows = class_rows_data.get("ranking") or []
@@ -2646,10 +2655,210 @@ class RankingReportService:
         return result
 
     @classmethod
+    def _pacote_universo_avaliacao(cls, scope: Dict[str, Any], filters: Dict[str, Any]):
+        """Censo e notas da prova. Cartão e ranking sem prova ficam de fora."""
+        evaluation_id = str(filters.get("evaluation_id") or "").strip()
+        if not evaluation_id or str(filters.get("answer_sheet_id") or "").strip():
+            return None
+        from app.models.studentClass import Class
+        from app.services.alunos_resultado_filtro import filtro_restringe
+        from app.services.resultado_universo import carregar_universo_da_prova
+
+        alunos_filtro = filters.get("alunos") or "todos"
+        parear = str(filters.get("alunos_informado") or "") == "1" or filtro_restringe(alunos_filtro)
+        class_ids = list(scope.get("class_ids") or [])
+        if filters.get("turma"):
+            class_ids = [filters.get("turma")]
+        if filters.get("serie"):
+            consulta = Class.query.filter(Class.grade_id == str(filters.get("serie")))
+            if class_ids:
+                consulta = consulta.filter(Class.id.in_(class_ids))
+            class_ids = [row.id for row in consulta.all()]
+        school_ids = list(scope.get("school_ids") or [])
+        if filters.get("escola"):
+            school_ids = [filters.get("escola")]
+        try:
+            restringe_turma = bool(
+                filters.get("serie") or filters.get("turma") or scope.get("class_ids")
+            )
+            students, notas, censo = carregar_universo_da_prova(
+                evaluation_id,
+                municipio_id=scope.get("city_id") or filters.get("municipio"),
+                alunos_filtro=alunos_filtro,
+                parear=parear,
+                class_ids=class_ids if restringe_turma else None,
+                school_ids=school_ids or None,
+            )
+        except Exception:
+            logging.warning("Recorte de alunos falhou no ranking", exc_info=True)
+            return None
+        if censo is None and not parear:
+            return None
+        return {
+            "students": students,
+            "notas": notas,
+            "censo": censo,
+            "parear": parear,
+            "evaluation_id": evaluation_id,
+        }
+
+    @classmethod
+    def _aplicar_pacote_nas_escolas(cls, school_rows, pacote, filters):
+        censo = pacote.get("censo")
+        if censo is not None:
+            grupo = len(censo.geral.por_disciplina) > 1
+            por_escola = {str(item.escola_id or ""): item for item in censo.por_escola}
+            for row in school_rows:
+                agregado = por_escola.get(str(row.get("school_id") or ""))
+                if agregado is None:
+                    row["total_students"] = 0
+                    row["participating_students"] = 0
+                    row["participation_rate"] = 0.0
+                    continue
+                presentes = agregado.presentes_completos if grupo else agregado.presentes_pelo_menos_uma
+                percentual = agregado.percentual_completa if grupo else agregado.percentual_pelo_menos_uma
+                row["total_students"] = agregado.matriculados
+                row["participating_students"] = presentes
+                row["participation_rate"] = round(percentual, 1)
+        if not pacote.get("parear") or str(filters.get("disciplina") or "").strip():
+            return
+        from app.utils.school_equal_weight_means import hierarchical_mean_grade_and_proficiency
+
+        alunos = {str(student.id): student for student in pacote.get("students") or []}
+        por_escola_notas = defaultdict(list)
+        for nota in pacote.get("notas") or []:
+            student = alunos.get(str(getattr(nota, "student_id", "") or ""))
+            escola_id = str(getattr(student, "school_id", "") or getattr(nota, "school_id_snapshot", "") or "")
+            if escola_id:
+                por_escola_notas[escola_id].append(nota)
+        course = cls._curso_da_prova(pacote.get("evaluation_id"))
+        for row in school_rows:
+            notas = por_escola_notas.get(str(row.get("school_id") or "")) or []
+            row["students_count"] = len(notas)
+            if not notas:
+                row["average_score"] = 0.0
+                row["average_proficiency"] = 0.0
+                continue
+            grade, prof = hierarchical_mean_grade_and_proficiency(
+                notas, "escola", course_name=course
+            )
+            row["average_proficiency"] = round(float(prof or 0), 1)
+            row["average_score"] = round(float(grade or 0), 1)
+
+    @classmethod
+    def _aplicar_pacote_nas_turmas(cls, class_rows, pacote, filters):
+        censo = pacote.get("censo")
+        if censo is not None:
+            grupo = len(censo.geral.por_disciplina) > 1
+            por_turma = {str(item.turma_id or ""): item for item in censo.por_turma}
+            for row in class_rows:
+                agregado = por_turma.get(str(row.get("class_id") or ""))
+                if agregado is None:
+                    row["total_students"] = 0
+                    row["participating_students"] = 0
+                    row["alunos"] = 0
+                    row["participation_rate"] = 0.0
+                    row["conclusao"] = 0.0
+                    continue
+                presentes = agregado.presentes_completos if grupo else agregado.presentes_pelo_menos_uma
+                percentual = agregado.percentual_completa if grupo else agregado.percentual_pelo_menos_uma
+                row["total_students"] = agregado.matriculados
+                row["participating_students"] = presentes
+                row["alunos"] = presentes
+                row["participation_rate"] = round(percentual, 1)
+                row["conclusao"] = round(percentual, 1)
+        if not pacote.get("parear") or str(filters.get("disciplina") or "").strip():
+            return
+        from app.utils.school_equal_weight_means import hierarchical_mean_grade_and_proficiency
+
+        alunos = {str(student.id): student for student in pacote.get("students") or []}
+        por_turma_notas = defaultdict(list)
+        for nota in pacote.get("notas") or []:
+            student = alunos.get(str(getattr(nota, "student_id", "") or ""))
+            turma_id = str(getattr(student, "class_id", "") or getattr(nota, "class_id_snapshot", "") or "")
+            if turma_id:
+                por_turma_notas[turma_id].append(nota)
+        course = cls._curso_da_prova(pacote.get("evaluation_id"))
+        for row in class_rows:
+            notas = por_turma_notas.get(str(row.get("class_id") or "")) or []
+            if not notas:
+                row["media"] = 0.0
+                row["average_score"] = 0.0
+                row["average_proficiency"] = 0.0
+                continue
+            grade, prof = hierarchical_mean_grade_and_proficiency(
+                notas, "turma", course_name=course
+            )
+            row["average_proficiency"] = round(float(prof or 0), 1)
+            row["average_score"] = round(float(grade or 0), 1)
+            row["media"] = row["average_score"]
+
+    @classmethod
+    def _alunos_do_pacote(cls, pacote, anteriores=None) -> List[Dict[str, Any]]:
+        alunos = {str(student.id): student for student in pacote.get("students") or []}
+        conhecidos = {
+            str(item.get("student_id") or ""): item for item in (anteriores or [])
+        }
+        linhas = []
+        for nota in pacote.get("notas") or []:
+            student_id = str(getattr(nota, "student_id", "") or "")
+            student = alunos.get(student_id)
+            anterior = conhecidos.get(student_id) or {}
+            turma = getattr(student, "class_", None) if student is not None else None
+            linhas.append(
+                {
+                    "student_id": student_id,
+                    "name": anterior.get("name") or (getattr(student, "name", "") if student is not None else ""),
+                    "school_name": anterior.get("school_name") or "",
+                    "class_name": anterior.get("class_name") or (getattr(turma, "name", "") if turma is not None else ""),
+                    "serie": anterior.get("serie") or "",
+                    "shift": anterior.get("shift") or "",
+                    "average_score": float(getattr(nota, "grade", 0) or 0),
+                    "average_proficiency": float(getattr(nota, "proficiency", 0) or 0),
+                    "classification": getattr(nota, "classification", None),
+                    "completed_evaluations": anterior.get("completed_evaluations") or 1,
+                    "medalha": anterior.get("medalha"),
+                }
+            )
+        linhas.sort(
+            key=lambda item: (
+                -float(item.get("average_score") or 0),
+                -float(item.get("average_proficiency") or 0),
+                str(item.get("name") or ""),
+            )
+        )
+        for index, item in enumerate(linhas, start=1):
+            item["position"] = index
+        return linhas
+
+    @classmethod
+    def _ranking_alunos_do_universo(cls, scope, req, pacote):
+        linhas = cls._alunos_do_pacote(pacote)
+        total = len(linhas)
+        offset = (req.page - 1) * req.per_page
+        return cls._build_response(req, scope, total=total, items=linhas[offset:offset + req.per_page])
+
+    @staticmethod
+    def _curso_da_prova(evaluation_id) -> str:
+        from app.models.educationStage import EducationStage
+        from app.models.test import Test
+
+        test = Test.query.get(str(evaluation_id)) if evaluation_id else None
+        course_id = getattr(test, "course", None) if test is not None else None
+        if not course_id:
+            return "Anos Iniciais"
+        course = EducationStage.query.get(course_id)
+        return course.name if course is not None and course.name else "Anos Iniciais"
+
+    @classmethod
     def _evaluation_ranking(cls, scope: Dict[str, Any], req: RankingRequest) -> Dict[str, Any]:
         evaluation_id = req.filters.get("evaluation_id")
         if not evaluation_id:
             raise ValueError("evaluation_id é obrigatório para ranking_type=specific_evaluation.")
+        if str(req.filters.get("alunos_informado") or "") == "1" and not str(req.filters.get("answer_sheet_id") or "").strip():
+            pacote = cls._pacote_universo_avaliacao(scope, req.filters)
+            if pacote is not None:
+                return cls._ranking_alunos_do_universo(scope, req, pacote)
 
         # Alinha com a tela de resultados: considera o registro mais recente por aluno
         # para a avaliação selecionada, evitando média/moda entre múltiplas tentativas.

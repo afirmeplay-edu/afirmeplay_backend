@@ -83,8 +83,17 @@ def parse_ranking_request_args(args) -> Tuple[str, int, int, Dict[str, str]]:
             evaluation_ids = [avaliacao]
             evaluation_id = avaliacao
 
+    from app.services.alunos_resultado_filtro import AlunosFiltroInvalido, parse_alunos_filtro
+
+    try:
+        alunos_filtro = parse_alunos_filtro(args.get("alunos"))
+    except AlunosFiltroInvalido as exc:
+        raise ValueError(str(exc)) from exc
+
     filters = {
         "scope": (_clean_arg(args.get("scope")) or "").lower() or None,
+        "alunos": alunos_filtro,
+        "alunos_informado": "1" if "alunos" in args else "",
         "estado": _clean_arg(args.get("estado")),
         "municipio": _clean_arg(args.get("municipio")),
         "escola": _clean_arg(args.get("escola")),

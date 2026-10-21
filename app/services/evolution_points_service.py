@@ -151,7 +151,13 @@ def _earliest_application(test: Any) -> datetime:
     return application_date
 
 
-def _load_scoped_results(test_id: str, escopo_calculo: Optional[Dict[str, Any]]):
+def _load_scoped_results(
+    test_id: str,
+    escopo_calculo: Optional[Dict[str, Any]],
+    *,
+    alunos_filtro: str = "todos",
+    parear: bool = False,
+):
     from app.models.evaluationResult import EvaluationResult
     from app.models.student import Student
     from app.routes.evaluation_results_routes import _dedupe_evaluation_results_by_student
@@ -168,7 +174,7 @@ def _load_scoped_results(test_id: str, escopo_calculo: Optional[Dict[str, Any]])
         ] if class_ids else []
         results = query_evaluation_results_for_class_group(str(test_id), class_ids, base_ids).all()
         results = _dedupe_evaluation_results_by_student(results)
-        return results, class_ids
+        return _aplicar_recorte(test_id, class_ids, results, alunos_filtro, parear)
 
     from app.models.classTest import ClassTest
 
@@ -178,7 +184,23 @@ def _load_scoped_results(test_id: str, escopo_calculo: Optional[Dict[str, Any]])
         if class_test.class_id
     ]
     results = EvaluationResult.query.filter_by(test_id=test_id).all()
-    return results, class_ids
+    return _aplicar_recorte(test_id, class_ids, results, alunos_filtro, parear)
+
+
+def _aplicar_recorte(test_id, class_ids, results, alunos_filtro, parear):
+    from app.services.alunos_resultado_filtro import filtro_restringe
+    from app.services.resultado_universo import resultados_para_notas
+    from app.models.student import Student
+
+    if not parear and not filtro_restringe(alunos_filtro):
+        return results, class_ids
+    students = (
+        Student.query.filter(Student.class_id.in_(list(class_ids))).all() if class_ids else []
+    )
+    return (
+        resultados_para_notas([test_id], students, results, alunos_filtro, parear=bool(parear)),
+        class_ids,
+    )
 
 
 def _course_of(test: Any) -> Any:
@@ -253,6 +275,9 @@ def _group_title(tests_info: Sequence[Any], tests: Sequence[Any]) -> str:
 def build_comparison_points(
     points: Sequence[Sequence[str]],
     escopo_calculo: Optional[Dict[str, Any]],
+    *,
+    alunos_filtro: str = "todos",
+    parear: bool = False,
 ) -> List[ComparisonPointData]:
     """Monta um ponto por grupo. Grupo com 2+ IDs usa a mescla de Resultados."""
     from app.models.test import Test
@@ -275,7 +300,12 @@ def build_comparison_points(
             ordered.append(test)
         if len(ordered) == 1:
             test = ordered[0]
-            results, class_ids = _load_scoped_results(str(test.id), escopo_calculo)
+            results, class_ids = _load_scoped_results(
+                str(test.id),
+                escopo_calculo,
+                alunos_filtro=alunos_filtro,
+                parear=parear,
+            )
             if not results:
                 raise ValueError(f"Avaliação {test.id} não possui resultados no escopo")
             built.append(
@@ -303,7 +333,12 @@ def build_comparison_points(
         class_ids: List[Any] = []
         seen_classes = set()
         for test in ordered:
-            results, scoped_classes = _load_scoped_results(str(test.id), escopo_calculo)
+            results, scoped_classes = _load_scoped_results(
+                str(test.id),
+                escopo_calculo,
+                alunos_filtro=alunos_filtro,
+                parear=parear,
+            )
             if not results:
                 raise ValueError(f"Avaliação {test.id} não possui resultados no escopo")
             combined_results.extend(results)

@@ -46,6 +46,8 @@ class ClassPeerRankingRequest:
     serie: Optional[str] = None
     turma_nome: Optional[str] = None
     turno: Optional[str] = None
+    alunos: Optional[str] = None
+    alunos_informado: bool = False
 
     @property
     def evaluation_id(self) -> str:
@@ -284,6 +286,13 @@ class ClassPeerRankingService:
         if scope == "escola" and not escola:
             raise ValueError("escola é obrigatória quando scope=escola.")
 
+        from app.services.alunos_resultado_filtro import AlunosFiltroInvalido, parse_alunos_filtro
+
+        try:
+            alunos_filtro = parse_alunos_filtro(args.get("alunos"))
+        except AlunosFiltroInvalido as exc:
+            raise ValueError(str(exc)) from exc
+
         return ClassPeerRankingRequest(
             scope=scope,
             evaluation_ids=evaluation_ids,
@@ -294,6 +303,8 @@ class ClassPeerRankingService:
             serie=serie,
             turma_nome=turma_nome,
             turno=turno,
+            alunos=alunos_filtro,
+            alunos_informado="alunos" in args,
         )
 
     @classmethod
@@ -584,6 +595,28 @@ class ClassPeerRankingService:
         return scope
 
     @classmethod
+    def _resultados_validos_do_recorte(cls, req: ClassPeerRankingRequest, results: List[EvaluationResult]):
+        """Nota da modalidade certa quando o filtro de alunos veio na request."""
+        from app.models.classTest import ClassTest
+        from app.services.resultado_universo import resultados_para_notas
+
+        evaluation_ids = [str(item) for item in req.evaluation_ids]
+        class_tests = ClassTest.query.filter(ClassTest.test_id.in_(evaluation_ids)).all()
+        class_ids = [item.class_id for item in class_tests if item.class_id]
+        students = (
+            Student.query.filter(Student.class_id.in_(class_ids)).all() if class_ids else []
+        )
+        if req.scope == "escola" and req.escola:
+            students = [
+                student
+                for student in students
+                if str(getattr(student, "school_id", "") or "") == str(req.escola)
+            ]
+        return resultados_para_notas(
+            evaluation_ids, students, results, req.alunos, parear=True
+        )
+
+    @classmethod
     def _load_latest_results(
         cls, req: ClassPeerRankingRequest, scope: Dict[str, Any]
     ) -> List[EvaluationResult]:
@@ -615,6 +648,8 @@ class ClassPeerRankingService:
             )
 
         results = base_q.all()
+        if req.alunos_informado:
+            results = cls._resultados_validos_do_recorte(req, results)
         # Um aluno = um resultado (o mais recente entre as avaliações selecionadas).
         latest_by_student: Dict[str, EvaluationResult] = {}
         for er in results:

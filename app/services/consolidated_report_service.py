@@ -2359,10 +2359,6 @@ def build_digital_consolidated_report(
         raise ValueError(f"Avaliações não encontradas: {', '.join(missing)}")
     # Ordem estável = ordem dos IDs na requisição (evita flip de tests[0] entre gerações).
     tests = _order_rows_by_requested_ids(tests, [str(t) for t in test_ids], lambda t: t.id)
-    if len(tests) >= 2:
-        series_das_provas = {str(t.grade_id) for t in tests if getattr(t, "grade_id", None)}
-        if len(series_das_provas) > 1:
-            raise ValueError("As avaliações do relatório geral devem ser da mesma série")
     tests_by_id = {str(t.id): t for t in tests}
     itens = [_digital_item_selecionado(t) for t in tests]
 

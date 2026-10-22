@@ -460,7 +460,9 @@ def _build_preview(
         parsed.append({
             "line": raw["line"],
             "question": question,
+            "question_input": raw["question"],
             "answer": answer,
+            "answer_input": raw["answer"],
             "alternatives_count": alternatives_count,
             "subject": {"id": str(subject.id), "name": subject.name} if subject else None,
             "subject_input": raw["subject"],

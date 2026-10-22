@@ -713,6 +713,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".subjective_tests (
     municipalities JSON,
     schools JSON,
     classes JSON,
+    subturmas JSON,
     status VARCHAR(20) DEFAULT 'pendente',
     created_by VARCHAR REFERENCES public.users(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -917,6 +918,16 @@ CREATE INDEX IF NOT EXISTS idx_subjective_questions_rubric_group_id
 """
 
 
+def get_subjective_subturmas_upgrade_ddl(schema: str) -> str:
+    """Coluna de escopo ADAP na prova subjetiva. Idempotente."""
+    return f"""
+ALTER TABLE "{schema}".subjective_tests
+    ADD COLUMN IF NOT EXISTS subturmas JSON;
+COMMENT ON COLUMN "{schema}".subjective_tests.subturmas IS
+    'Ids de subturma ADAP no escopo da prova. A turma regular continua em classes.';
+"""
+
+
 def provision_subjective_evaluation_for_city_schema(schema_name: str) -> None:
     """Aplica apenas o bloco DDL da avaliação subjetiva em um schema city_* existente (idempotente)."""
     if not schema_name.replace("_", "").isalnum() or not schema_name.startswith("city_"):
@@ -927,6 +938,7 @@ def provision_subjective_evaluation_for_city_schema(schema_name: str) -> None:
         raw_conn.set_isolation_level(0)
         cursor = raw_conn.cursor()
         cursor.execute(get_subjective_evaluation_tables_ddl(schema_name))
+        cursor.execute(get_subjective_subturmas_upgrade_ddl(schema_name))
         logger.info("Avaliação subjetiva DDL aplicado em schema %s", schema_name)
     except Exception as e:
         logger.exception("Falha ao aplicar avaliação subjetiva em %s: %s", schema_name, e)

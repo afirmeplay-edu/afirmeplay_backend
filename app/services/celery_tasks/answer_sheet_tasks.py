@@ -16,6 +16,11 @@ from app.report_analysis.celery_app import celery_app
 from app.services.progress_store import get_job
 from app.services.answer_sheet_job_store import update_answer_sheet_job
 from app.services.cartao_resposta.answer_sheet_generator import (
+    allocate_class_pdf_basename,
+    class_pdf_basename,
+    class_pdf_zip_prefix,
+    join_zip_path,
+    legacy_student_zip_path,
     reserve_pdf_path,
     sanitize_filename,
     student_pdf_filename,
@@ -579,7 +584,8 @@ def generate_answer_sheets_batch_async(
     questions_options: Dict = None,
     batch_id: str = None,
     scope: str = 'class',
-    class_ids: List[str] = None
+    class_ids: List[str] = None,
+    pdf_mode: str = 'per_student',
 ) -> Dict[str, Any]:
     """
     Task Celery para geração ASSÍNCRONA de cartões de resposta em batch.
@@ -604,7 +610,15 @@ def generate_answer_sheets_batch_async(
         Dict com status e informações dos cartões gerados
     """
     try:
-        logger.info(f"[CELERY-BATCH] 🚀 Iniciando geração de cartões - Escopo: {scope}, Gabaritos: {len(gabarito_ids)}")
+        if not isinstance(pdf_mode, str) or pdf_mode.strip() not in ('per_student', 'per_class', 'both'):
+            pdf_mode = 'per_student'
+        else:
+            pdf_mode = pdf_mode.strip()
+
+        logger.info(
+            f"[CELERY-BATCH] 🚀 Iniciando geração de cartões - Escopo: {scope}, "
+            f"Gabaritos: {len(gabarito_ids)}, pdf_mode: {pdf_mode}"
+        )
         
         from app.models.answerSheetGabarito import AnswerSheetGabarito
         from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
@@ -654,6 +668,8 @@ def generate_answer_sheets_batch_async(
         generated_pdfs = []
         skipped_classes = []  # ✅ NOVO: rastrear turmas puladas
         total_students = 0
+        # Nomes de PDF de turma já usados, por pasta do ZIP (evita colisão na mesma escola).
+        used_class_pdf_names = {}
 
         # ========================================================================
         # ✅ NOVO: Gerar PDFs a partir de UM gabarito (escopo) e lista de turmas
@@ -756,8 +772,12 @@ def generate_answer_sheets_batch_async(
                     turma_name_log = (class_obj.name or '')
                     logger.info(f"[CELERY-BATCH] 🔨 Processando turma {idx}/{len(classes)}: {turma_name_log}")
 
-                    # Buscar alunos da turma
-                    students = Student.query.filter_by(class_id=class_obj.id).all()
+                    # Ordem alfabética, a mesma leitura da lista da turma.
+                    students = (
+                        Student.query.filter_by(class_id=class_obj.id)
+                        .order_by(Student.name.asc(), Student.id.asc())
+                        .all()
+                    )
                     
                     # Informações da turma para progress tracking
                     grade_name = ''
@@ -786,8 +806,23 @@ def generate_answer_sheets_batch_async(
                         output_dir, f"{grade_safe}_{class_safe}_{class_obj.school_id}_{class_obj.id}"
                     )
                     os.makedirs(class_folder, exist_ok=True)
+
+                    class_writer = None
+                    class_page_readers = []
+                    class_display_name = None
+                    class_zip_prefix = ''
+                    if pdf_mode in ('per_class', 'both'):
+                        class_writer = PdfWriter()
+                        grade_label = (class_obj.grade.name if class_obj.grade else '') or ''
+                        class_zip_prefix = class_pdf_zip_prefix(scope, school_name)
+                        used_names = used_class_pdf_names.setdefault(class_zip_prefix, set())
+                        class_display_name = allocate_class_pdf_basename(
+                            class_pdf_basename(grade_label.strip(), class_name_raw),
+                            class_obj.id,
+                            used_names,
+                        )
                     
-                    # Gerar overlay e PDF individual para cada aluno
+                    # Uma página por aluno (miolo + overlay + QR). O PDF da turma reaproveita essa página.
                     for student_idx, student in enumerate(students):
                         item_index = student_item_idx
                         student_item_idx += 1
@@ -839,31 +874,47 @@ def generate_answer_sheets_batch_async(
                             writer.write(pdf_buffer)
                             pdf_buffer.seek(0)
                             pdf_bytes = pdf_buffer.read()
-                            
-                            filepath = reserve_pdf_path(os.path.join(
-                                class_folder,
-                                student_pdf_filename(student_data.get('name', 'aluno'), grade_safe, class_safe, student.id),
-                            ))
-                            filename = os.path.basename(filepath)
-                            
-                            with open(filepath, 'wb') as f:
-                                f.write(pdf_bytes)
-                            
+
                             total_students += 1
                             total_processed += 1
-                            # ZIP / resultado da task: 1 entrada por PDF gerado (caminho relativo no ZIP)
-                            rel_zip_name = f"{grade_safe}_{class_safe}/{filename}"
-                            generated_pdfs.append({
-                                'gabarito_id': str(gabarito_master.id),
-                                'class_id': str(class_obj.id),
-                                'pdf_path': filepath,
-                                'filename': rel_zip_name,
-                                'grade_name': grade_name,
-                                'class_name': class_obj.name,
-                                'school_name': school_name,
-                                'total_students': 1,
-                                'total_pages': 1,
-                            })
+
+                            if pdf_mode in ('per_student', 'both'):
+                                filepath = reserve_pdf_path(os.path.join(
+                                    class_folder,
+                                    student_pdf_filename(student_data.get('name', 'aluno'), grade_safe, class_safe, student.id),
+                                ))
+                                filename = os.path.basename(filepath)
+                                with open(filepath, 'wb') as f:
+                                    f.write(pdf_bytes)
+                                if pdf_mode == 'per_student':
+                                    rel_zip_name = f"{grade_safe}_{class_safe}/{filename}"
+                                    student_zip_path = legacy_student_zip_path(
+                                        scope, school_name, grade_name, rel_zip_name
+                                    )
+                                else:
+                                    student_zip_path = join_zip_path(
+                                        class_zip_prefix, class_display_name, filename
+                                    )
+                                generated_pdfs.append({
+                                    'gabarito_id': str(gabarito_master.id),
+                                    'class_id': str(class_obj.id),
+                                    'pdf_path': filepath,
+                                    'filename': student_zip_path,
+                                    'zip_path': student_zip_path,
+                                    'grade_name': grade_name,
+                                    'class_name': class_obj.name,
+                                    'school_name': school_name,
+                                    'total_students': 1,
+                                    'total_pages': 1,
+                                    'entry_kind': 'student',
+                                })
+
+                            if class_writer is not None:
+                                # Relê a página já mesclada: não gera o cartão de novo.
+                                # O reader fica vivo até o write, senão o pypdf perde a página.
+                                page_reader = PdfReader(io.BytesIO(pdf_bytes))
+                                class_page_readers.append(page_reader)
+                                class_writer.add_page(page_reader.pages[0])
                             
                             # Marcar aluno como concluído no progress store
                             if batch_id:
@@ -886,8 +937,40 @@ def generate_answer_sheets_batch_async(
                                     'student_name': student.name,
                                 })
                             continue
+
+                    if class_writer is not None and class_display_name:
+                        page_count = len(class_writer.pages)
+                        if page_count > 0:
+                            class_pdf_dir = os.path.join(output_dir, '_turmas')
+                            os.makedirs(class_pdf_dir, exist_ok=True)
+                            disk_name = sanitize_filename(class_display_name, max_length=80) or 'turma'
+                            class_path = reserve_pdf_path(os.path.join(class_pdf_dir, f"{disk_name}.pdf"))
+                            class_buf = io.BytesIO()
+                            class_writer.write(class_buf)
+                            with open(class_path, 'wb') as class_file:
+                                class_file.write(class_buf.getvalue())
+                            class_zip_path = join_zip_path(class_zip_prefix, f"{class_display_name}.pdf")
+                            # No modo ambos os alunos já entraram na contagem; aqui só o arquivo da turma.
+                            count_students = 0 if pdf_mode == 'both' else page_count
+                            generated_pdfs.append({
+                                'gabarito_id': str(gabarito_master.id),
+                                'class_id': str(class_obj.id),
+                                'pdf_path': class_path,
+                                'filename': f"{class_display_name}.pdf",
+                                'zip_path': class_zip_path,
+                                'grade_name': grade_name,
+                                'class_name': class_obj.name,
+                                'school_name': school_name,
+                                'total_students': count_students,
+                                'total_pages': count_students,
+                                'entry_kind': 'class',
+                            })
+                        class_page_readers.clear()
+                        class_writer = None
                     
-                    logger.info(f"[CELERY-BATCH] ✅ Turma {class_obj.name}: {len(students)} PDFs individuais gerados")
+                    logger.info(
+                        f"[CELERY-BATCH] ✅ Turma {class_obj.name}: {len(students)} aluno(s), pdf_mode={pdf_mode}"
+                    )
 
                 except Exception as e:
                     try:
@@ -1016,42 +1099,23 @@ def generate_answer_sheets_batch_async(
         logger.info(f"[CELERY-BATCH] 📦 Criando ZIP com estrutura hierárquica...")
         
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            if scope == 'city':
-                # ✅ ESCOPO MUNICÍPIO: Organizar por Escola/Série
-                by_school = {}
-                for pdf_info in generated_pdfs:
-                    school = pdf_info.get('school_name', 'Sem Escola')
-                    grade = pdf_info.get('grade_name', 'Sem Serie')
-                    folder = f"{school}/{grade}"
-                    if folder not in by_school:
-                        by_school[folder] = []
-                    by_school[folder].append(pdf_info)
-
-                for folder, pdfs in by_school.items():
-                    for pdf_info in pdfs:
-                        if os.path.exists(pdf_info['pdf_path']):
-                            zip_internal_path = f"{folder}/{pdf_info['filename']}"
-                            zf.write(pdf_info['pdf_path'], zip_internal_path)
-
-            elif scope == 'school':
-                # ✅ ESCOPO ESCOLA: Organizar por série (pastas por série)
-                by_grade = {}
-                for pdf_info in generated_pdfs:
-                    grade = pdf_info.get('grade_name', 'Sem Serie')
-                    if grade not in by_grade:
-                        by_grade[grade] = []
-                    by_grade[grade].append(pdf_info)
-                
-                for grade_name, pdfs in by_grade.items():
-                    for pdf_info in pdfs:
-                        if os.path.exists(pdf_info['pdf_path']):
-                            zip_internal_path = f"{grade_name}/{pdf_info['filename']}"
-                            zf.write(pdf_info['pdf_path'], zip_internal_path)
-            else:
-                # ✅ ESCOPO TURMA/SÉRIE: ZIP plano (sem pastas)
-                for pdf_info in generated_pdfs:
-                    if os.path.exists(pdf_info['pdf_path']):
-                        zf.write(pdf_info['pdf_path'], pdf_info['filename'])
+            for pdf_info in generated_pdfs:
+                if not pdf_info.get('pdf_path') or not os.path.exists(pdf_info['pdf_path']):
+                    continue
+                arc = pdf_info.get('zip_path')
+                if not arc:
+                    # Fluxo legado (sem class_ids): mantém escola/série como antes.
+                    rel = pdf_info.get('filename') or ''
+                    if scope == 'city':
+                        arc = (
+                            f"{pdf_info.get('school_name', 'Sem Escola')}/"
+                            f"{pdf_info.get('grade_name', 'Sem Serie')}/{rel}"
+                        )
+                    elif scope == 'school':
+                        arc = f"{pdf_info.get('grade_name', 'Sem Serie')}/{rel}"
+                    else:
+                        arc = rel
+                zf.write(pdf_info['pdf_path'], arc)
         
         zip_size = os.path.getsize(zip_path)
         download_size = zip_size  # Para retorno na resposta
@@ -1167,6 +1231,7 @@ def generate_answer_sheets_batch_async(
                             'scope': scope,
                             'city_id': city_id,
                             'class_ids': build_class_scope_entries(cid_list) if cid_list else [],
+                            'pdf_mode': pdf_mode,
                         }
                         record_answer_sheet_generations(
                             gabarito_ids=[str(g) for g in gabarito_ids],

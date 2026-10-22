@@ -42,6 +42,9 @@ class SubjectiveTest(db.Model):
     municipalities = db.Column(JSON)
     schools = db.Column(JSON)
     classes = db.Column(JSON)
+    # Ids de subturma ADAP escolhidos à parte da turma regular.
+    # Vazio: a prova segue só por classes / escola / município.
+    subturmas = db.Column(JSON)
 
     status = db.Column(db.String(20), default='pendente')  # pendente, em_correcao, concluida
     created_by = db.Column(db.String, db.ForeignKey('public.users.id'))

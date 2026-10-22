@@ -338,6 +338,7 @@ def create_app():
     from app.boletim_aluno import bp as boletim_aluno_bp
     from app.unified_report import bp as unified_report_bp
     from app.question_import import bp as question_import_bp
+    from app.answer_sheet_import.routes import bp as answer_sheet_import_bp
     from app.logistics import bp as logistics_bp
     from app.notifications import bp as notifications_bp
 
@@ -414,6 +415,7 @@ def create_app():
     app.register_blueprint(boletim_aluno_bp)
     app.register_blueprint(unified_report_bp)
     app.register_blueprint(question_import_bp)
+    app.register_blueprint(answer_sheet_import_bp)
     app.register_blueprint(logistics_bp)
     app.register_blueprint(notifications_bp)
 

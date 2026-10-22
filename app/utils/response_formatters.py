@@ -650,25 +650,32 @@ def format_subjective_test_response(subjective_test, questions=None, include_pro
                 logging.warning(f"Erro ao buscar escolas da avaliação subjetiva: {str(e)}")
 
         classes_info = []
-        if subjective_test.classes:
-            class_ids = (
-                subjective_test.classes if isinstance(subjective_test.classes, list) else [subjective_test.classes]
-            )
-            try:
-                from app.utils.uuid_helpers import ensure_uuid_list
-                class_ids_uuids = ensure_uuid_list(class_ids)
-                specific_classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
-                for class_obj in specific_classes:
-                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
-                    classes_info.append({
-                        'id': class_obj.id,
-                        'name': class_obj.name,
-                        'students_count': len(class_obj.students) if class_obj.students else 0,
-                        'school': {'id': school_obj.id, 'name': school_obj.name} if school_obj else None,
-                    })
-            except Exception as e:
-                db.session.rollback()
-                logging.warning(f"Erro ao buscar turmas da avaliação subjetiva: {str(e)}")
+        subturmas_info = []
+        try:
+            from app.services.subjective_evaluation_service import SubjectiveEvaluationService
+            school_cache = {}
+            for item in SubjectiveEvaluationService.audience_slices(subjective_test):
+                school_key = str(item.get("school_id") or "")
+                school_obj = None
+                if school_key:
+                    if school_key not in school_cache:
+                        school_cache[school_key] = School.query.get(school_key)
+                    school_obj = school_cache[school_key]
+                row = {
+                    'id': item['class_id'] if item.get('subturma_id') is None else item['subturma_id'],
+                    'class_id': item['class_id'],
+                    'subturma_id': item.get('subturma_id'),
+                    'name': item['name'],
+                    'students_count': len(item['students']),
+                    'school': {'id': school_obj.id, 'name': school_obj.name} if school_obj else None,
+                }
+                if item.get('subturma_id') is None and subjective_test.classes:
+                    classes_info.append(row)
+                elif item.get('subturma_id') is not None:
+                    subturmas_info.append(row)
+        except Exception as e:
+            db.session.rollback()
+            logging.warning(f"Erro ao buscar turmas da avaliação subjetiva: {str(e)}")
 
         if questions is None:
             questions = subjective_test.questions
@@ -696,6 +703,8 @@ def format_subjective_test_response(subjective_test, questions=None, include_pro
             'schools_count': len(schools_list),
             'classes': classes_info,
             'classes_count': len(classes_info),
+            'subturmas': subturmas_info,
+            'subturmas_count': len(subturmas_info),
             'status': subjective_test.status,
             'createdBy': (
                 {'id': subjective_test.creator.id, 'name': subjective_test.creator.name}

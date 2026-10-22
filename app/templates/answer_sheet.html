@@ -286,8 +286,10 @@
 			}
 
 			.test-name-section {
-				border-top: 1px solid #000;
-				padding-top: 2px;
+				/* A borda do bloco é .answer-sheet-header. O 1px a mais no
+				   padding substitui o border-top removido, para as linhas do
+				   overlay não subirem. */
+				padding-top: 3px;
 				margin-top: 2px;
 				margin-bottom: 2px;
 			}
@@ -703,14 +705,9 @@
 						</div>
 						<div class="header-info-line">
 							<span class="label">TURMA:</span>
-							<span class="value"
-								>{{ student.grade_name or test_data.grade_name or 'Sem série' }} - {{
-								student.class_name or 'A' }}</span
-							>
 						</div>
 						<div class="header-info-line">
 							<span class="label">TURNO:</span>
-							<span class="value">{{ student.shift or '—' }}</span>
 						</div>
 					</div>
 					<div class="student-name-grid">
@@ -1064,14 +1061,9 @@
 						</div>
 						<div class="header-info-line">
 							<span class="label">TURMA:</span>
-							<span class="value"
-								>{{ student.grade_name or test_data.grade_name or 'Sem série' }} - {{
-								student.class_name or 'A' }}</span
-							>
 						</div>
 						<div class="header-info-line">
 							<span class="label">TURNO:</span>
-							<span class="value">{{ student.shift or '—' }}</span>
 						</div>
 					</div>
 					<div class="student-name-grid">

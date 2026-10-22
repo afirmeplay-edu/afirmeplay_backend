@@ -21,6 +21,7 @@ from app.models.subjectiveTest import SubjectiveTest
 from app.models.subjectiveQuestion import SubjectiveQuestion
 from app.models.studentClass import Class
 from app.models.school import School
+from app.models.subturma import Subturma
 from app.permissions.utils import get_teacher_classes
 from app.services.subjective_evaluation_service import SubjectiveEvaluationService
 from app.utils.response_formatters import format_subjective_test_response
@@ -44,10 +45,17 @@ def _user_can_edit(user, subjective_test: SubjectiveTest) -> bool:
     return subjective_test.created_by == user.get('id')
 
 
+def _normalize_id_list(raw):
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    return [item.get('id') if isinstance(item, dict) else item for item in items]
+
+
 def _validate_scope_fields(data: dict):
     """
-    Valida escolas/turmas informadas (mesmo padrão de POST/PUT /test) e, se turmas
-    específicas forem informadas, deriva as escolas a partir delas.
+    Valida escolas, turmas e subturmas ADAP.
+    As escolas efetivas são derivadas no serviço a partir das turmas e subturmas.
     Retorna (data_normalizado, None) ou (None, (response, status)) se inválido.
     """
     if data.get('schools'):
@@ -56,19 +64,65 @@ def _validate_scope_fields(data: dict):
         if len(existing_schools) != len(school_ids):
             return None, (jsonify({"error": "Uma ou mais escolas não foram encontradas"}), 400)
 
-    if data.get('classes'):
-        raw_classes = data['classes'] if isinstance(data['classes'], list) else [data['classes']]
-        class_ids = [c.get('id') if isinstance(c, dict) else c for c in raw_classes]
-        class_ids_uuids = ensure_uuid_list(class_ids)
-        existing_classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
-        if len(existing_classes) != len(class_ids_uuids):
-            return None, (jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400)
+    if 'classes' in data:
+        class_ids = _normalize_id_list(data.get('classes'))
+        if class_ids:
+            class_ids_uuids = ensure_uuid_list(class_ids)
+            if len(class_ids_uuids) != len(class_ids):
+                return None, (jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400)
+            existing_classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
+            class_set = {item.id for item in existing_classes}
+            missing = [item for item in class_ids_uuids if item not in class_set]
+            sub_rows = Subturma.query.filter(Subturma.id.in_(missing)).all() if missing else []
+            sub_set = {item.id for item in sub_rows}
+            if any(item not in sub_set for item in missing):
+                return None, (jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400)
+            data['classes'] = uuid_list_to_str([item for item in class_ids_uuids if item in class_set])
+            if sub_rows:
+                merged = _normalize_id_list(data.get('subturmas'))
+                merged.extend(str(item.id) for item in sub_rows)
+                data['subturmas'] = list(dict.fromkeys(merged))
+        else:
+            data['classes'] = []
 
-        school_ids_from_classes = list({c.school_id for c in existing_classes})
-        data['schools'] = uuid_list_to_str(school_ids_from_classes) if school_ids_from_classes else []
-        data['classes'] = uuid_list_to_str(class_ids_uuids)
+    if 'subturmas' in data:
+        subturma_ids = _normalize_id_list(data.get('subturmas'))
+        if subturma_ids:
+            subturma_uuids = ensure_uuid_list(subturma_ids)
+            if len({str(item) for item in subturma_ids}) != len(subturma_ids) or len(subturma_uuids) != len(subturma_ids):
+                return None, (jsonify({"error": "Uma ou mais subturmas ADAP não foram encontradas"}), 400)
+            existing = Subturma.query.filter(Subturma.id.in_(subturma_uuids)).all()
+            if len(existing) != len(subturma_uuids):
+                return None, (jsonify({"error": "Uma ou mais subturmas ADAP não foram encontradas"}), 400)
+            data['subturmas'] = uuid_list_to_str(subturma_uuids)
+        else:
+            data['subturmas'] = []
 
     return data, None
+
+
+def _subturma_id_from_request():
+    raw = request.args.get('subturma_id')
+    if not raw:
+        return None, None
+    subturma_uuid = ensure_uuid(raw)
+    if not subturma_uuid:
+        return None, (jsonify({"error": "ID de subturma inválido"}), 400)
+    return subturma_uuid, None
+
+
+def _audience_error_response(payload):
+    code = payload.get("error")
+    if code == "subturma_required":
+        return jsonify({
+            "error": "Informe subturma_id. Esta turma tem mais de um recorte ADAP nesta avaliação.",
+            "slices": payload.get("slices") or [],
+        }), 400
+    if code == "out_of_scope":
+        return jsonify({"error": "Turma fora do escopo desta avaliação ou sem permissão"}), 403
+    if code == "not_found":
+        return jsonify({"error": "Avaliação não encontrada"}), 404
+    return None
 
 
 def _validate_questions(questions):
@@ -90,7 +144,8 @@ def create_subjective_test():
     """
     Cria uma avaliação subjetiva.
     Body: { title, subject_id, grade_id, description?, test_type?, application_date?,
-             municipalities?, schools?, classes?, questions?: [{number, code, skill_description}] }
+             municipalities?, schools?, classes?, subturmas?, questions?: [{number, code, skill_description}] }
+    subturmas: ids da subturma ADAP. Não misturar esses ids em classes.
     """
     try:
         user = get_current_user_from_token()
@@ -166,6 +221,68 @@ def list_subjective_tests():
         }), 200
     except Exception as e:
         logging.error("Erro ao listar avaliações subjetivas: %s", str(e), exc_info=True)
+        return jsonify({"error": "Erro interno no servidor", "details": str(e)}), 500
+
+
+@bp.route('/series-disponiveis', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def list_available_grades():
+    """
+    Séries do formulário da prova subjetiva.
+    Curso normal: séries desse curso.
+    Educação Especial: séries regulares que têm subturma ADAP.
+    Query: education_stage_id (obrigatório), school_id?, municipality_id?
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não autenticado"}), 401
+        stage_id = ensure_uuid(request.args.get('education_stage_id'))
+        if not stage_id:
+            return jsonify({"error": "education_stage_id é obrigatório"}), 400
+        payload = SubjectiveEvaluationService.list_available_grades(
+            education_stage_id=stage_id,
+            school_id=request.args.get('school_id'),
+            municipality_id=request.args.get('municipality_id'),
+            user=user,
+        )
+        return jsonify(payload), 200
+    except Exception as e:
+        logging.error("Erro ao listar séries da prova subjetiva: %s", str(e), exc_info=True)
+        return jsonify({"error": "Erro interno no servidor", "details": str(e)}), 500
+
+
+@bp.route('/turmas-disponiveis', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def list_available_classes():
+    """
+    Turmas do formulário da prova subjetiva.
+    Curso normal: turmas regulares.
+    Educação Especial: linhas "5º Ano A ADAP 3". O id é o da subturma.
+    Query: education_stage_id (obrigatório), grade_id?, school_id?, municipality_id?
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não autenticado"}), 401
+        stage_id = ensure_uuid(request.args.get('education_stage_id'))
+        if not stage_id:
+            return jsonify({"error": "education_stage_id é obrigatório"}), 400
+        grade_id = ensure_uuid(request.args.get('grade_id')) if request.args.get('grade_id') else None
+        payload = SubjectiveEvaluationService.list_available_classes(
+            education_stage_id=stage_id,
+            grade_id=grade_id,
+            school_id=request.args.get('school_id'),
+            municipality_id=request.args.get('municipality_id'),
+            user=user,
+        )
+        return jsonify(payload), 200
+    except Exception as e:
+        logging.error("Erro ao listar turmas da prova subjetiva: %s", str(e), exc_info=True)
         return jsonify({"error": "Erro interno no servidor", "details": str(e)}), 500
 
 
@@ -320,6 +437,7 @@ def get_subjective_dashboard(subjective_test_id):
 
     Query params:
       - class_id (opcional): filtra por uma turma; sem ele, agrega todas as turmas do escopo.
+      - subturma_id (opcional): recorte ADAP dessa turma.
     """
     try:
         user = get_current_user_from_token()
@@ -331,6 +449,9 @@ def get_subjective_dashboard(subjective_test_id):
             return jsonify({"error": "Avaliação não encontrada"}), 404
 
         class_id_param = request.args.get('class_id')
+        subturma_uuid, subturma_error = _subturma_id_from_request()
+        if subturma_error:
+            return subturma_error
         class_uuid = None
         if class_id_param:
             class_uuid = ensure_uuid(class_id_param)
@@ -349,9 +470,13 @@ def get_subjective_dashboard(subjective_test_id):
             subjective_test_id=subjective_test_id,
             class_id=class_uuid,
             allowed_class_ids=allowed_class_ids,
+            subturma_id=subturma_uuid,
         )
         if dashboard is None:
             return jsonify({"error": "Avaliação não encontrada"}), 404
+        audience_error = _audience_error_response(dashboard)
+        if audience_error:
+            return audience_error
         if dashboard.get("error") == "class_out_of_scope":
             return jsonify({"error": "Turma fora do escopo desta avaliação ou sem permissão"}), 403
 
@@ -394,11 +519,24 @@ def get_correction_matrix(subjective_test_id, class_id):
         if not _user_can_access_class(user, class_uuid):
             return jsonify({"error": "Acesso negado a esta turma"}), 403
 
-        matrix = SubjectiveEvaluationService.get_correction_matrix(subjective_test_id, class_uuid)
+        subturma_uuid, subturma_error = _subturma_id_from_request()
+        if subturma_error:
+            return subturma_error
+        if subturma_uuid:
+            subturma = Subturma.query.get(subturma_uuid)
+            if not subturma or str(subturma.class_id) != str(class_uuid):
+                return jsonify({"error": "Subturma ADAP não pertence a esta turma"}), 400
+
+        matrix = SubjectiveEvaluationService.get_correction_matrix(
+            subjective_test_id, class_uuid, subturma_id=subturma_uuid
+        )
         if matrix is None:
             return jsonify({"error": "Avaliação não encontrada"}), 404
+        audience_error = _audience_error_response(matrix)
+        if audience_error:
+            return audience_error
 
-        matrix["class"] = {"id": class_obj.id, "name": class_obj.name}
+        matrix["class"] = matrix.get("class") or {"id": class_obj.id, "name": class_obj.name, "subturma_id": None}
         return jsonify(matrix), 200
     except Exception as e:
         logging.error(
@@ -439,6 +577,8 @@ def preview_student_result(subjective_test_id, student_id):
             return jsonify({"error": "Avaliação não encontrada"}), 404
 
         return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(
             "Erro ao preview resultado aluno=%s avaliacao=%s: %s",
@@ -555,6 +695,8 @@ def upsert_presence(subjective_test_id):
             updated_by=user.get('id'),
         )
         return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(
             "Erro ao lançar presença avaliacao=%s: %s", subjective_test_id, str(e), exc_info=True
@@ -592,9 +734,23 @@ def finalize_class_correction(subjective_test_id, class_id):
         if not _user_can_access_class(user, class_uuid):
             return jsonify({"error": "Acesso negado a esta turma"}), 403
 
+        subturma_uuid, subturma_error = _subturma_id_from_request()
+        if subturma_error:
+            return subturma_error
+        if subturma_uuid:
+            subturma = Subturma.query.get(subturma_uuid)
+            if not subturma or str(subturma.class_id) != str(class_uuid):
+                return jsonify({"error": "Subturma ADAP não pertence a esta turma"}), 400
+
         summary = SubjectiveEvaluationService.finalize_class(
-            subjective_test_id=subjective_test_id, class_id=class_uuid, corrected_by=user.get('id')
+            subjective_test_id=subjective_test_id,
+            class_id=class_uuid,
+            corrected_by=user.get('id'),
+            subturma_id=subturma_uuid,
         )
+        audience_error = _audience_error_response(summary)
+        if audience_error:
+            return audience_error
         return jsonify(summary), 200
     except Exception as e:
         logging.error(

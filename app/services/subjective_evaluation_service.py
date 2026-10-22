@@ -399,6 +399,408 @@ class SubjectiveEvaluationService:
         raise ValueError(f'Grupo de critérios inválido na questão {q.get("number")}: {key}')
 
     @staticmethod
+    def adap_option_name(grade_name, class_name, level) -> str:
+        """Rótulo da linha ADAP: série regular, turma e nível. Ex.: 5º Ano A ADAP 3."""
+        parts = []
+        for piece in (grade_name, class_name, f"ADAP {int(level)}"):
+            text = str(piece or "").strip()
+            if text:
+                parts.append(text)
+        return " ".join(parts)
+
+    @staticmethod
+    def _json_id_list(value) -> List:
+        if not value:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    @staticmethod
+    def _same_id(left, right) -> bool:
+        return str(left or "") == str(right or "")
+
+    @staticmethod
+    def partition_subjective_audience(students, whole_classes, subturmas) -> List[Dict[str, Any]]:
+        """
+        Monta os recortes da prova.
+
+        Turma inteira: alunos da turma, menos quem está numa subturma também escolhida.
+        Subturma: só os alunos daquele subturma_id, na turma-mãe.
+        """
+        selected_by_class: Dict[str, set] = {}
+        for sub in subturmas or []:
+            selected_by_class.setdefault(str(sub["class_id"]), set()).add(str(sub["id"]))
+
+        by_class: Dict[str, List] = {}
+        for student in students or []:
+            by_class.setdefault(str(student.class_id), []).append(student)
+
+        slices: List[Dict[str, Any]] = []
+        for cls in whole_classes or []:
+            class_id = str(cls["id"])
+            excluded = selected_by_class.get(class_id, set())
+            group = [
+                student for student in by_class.get(class_id, [])
+                if str(getattr(student, "subturma_id", None) or "") not in excluded
+            ]
+            group.sort(key=lambda item: (item.name or "").lower())
+            slices.append({
+                "class_id": cls["id"],
+                "subturma_id": None,
+                "support_level": None,
+                "name": cls.get("name") or "",
+                "class_name": cls.get("name") or "",
+                "school_id": cls.get("school_id"),
+                "students": group,
+            })
+
+        for sub in subturmas or []:
+            class_id = str(sub["class_id"])
+            sub_id = str(sub["id"])
+            group = [
+                student for student in by_class.get(class_id, [])
+                if str(getattr(student, "subturma_id", None) or "") == sub_id
+            ]
+            group.sort(key=lambda item: (item.name or "").lower())
+            class_name = sub.get("class_name") or ""
+            slices.append({
+                "class_id": sub["class_id"],
+                "subturma_id": sub["id"],
+                "support_level": int(sub["support_level"]),
+                "name": sub.get("name") or SubjectiveEvaluationService.adap_option_name(
+                    sub.get("grade_name"), class_name, sub["support_level"]
+                ),
+                "class_name": class_name,
+                "school_id": sub.get("school_id"),
+                "students": group,
+            })
+
+        slices.sort(key=lambda item: (
+            (item.get("class_name") or "").lower(),
+            item.get("subturma_id") is not None,
+            item.get("support_level") or 0,
+            (item.get("name") or "").lower(),
+        ))
+        return slices
+
+    @staticmethod
+    def _fallback_class_ids(subjective_test: SubjectiveTest) -> List:
+        """Turmas da série quando o escopo é escola ou município, sem turma nem subturma explícita."""
+        if subjective_test.schools:
+            school_ids = SubjectiveEvaluationService._json_id_list(subjective_test.schools)
+            classes = Class.query.filter(
+                Class.grade_id == subjective_test.grade_id,
+                Class.school_id.in_([str(s) for s in school_ids]),
+            ).all()
+            return [c.id for c in classes]
+
+        if subjective_test.municipalities:
+            municipality_ids = SubjectiveEvaluationService._json_id_list(subjective_test.municipalities)
+            schools_in_cities = School.query.filter(School.city_id.in_(municipality_ids)).with_entities(School.id).all()
+            school_ids = [s.id for s in schools_in_cities]
+            if not school_ids:
+                return []
+            classes = Class.query.filter(
+                Class.grade_id == subjective_test.grade_id,
+                Class.school_id.in_(school_ids),
+            ).all()
+            return [c.id for c in classes]
+
+        return []
+
+    @staticmethod
+    def audience_slices(subjective_test: SubjectiveTest) -> List[Dict[str, Any]]:
+        """Recortes de aluno da prova: turma inteira e/ou subturma ADAP."""
+        from sqlalchemy.orm import undefer
+
+        from app.models.subturma import Subturma
+        from app.utils.uuid_helpers import ensure_uuid_list
+
+        explicit_classes = ensure_uuid_list(
+            SubjectiveEvaluationService._json_id_list(subjective_test.classes)
+        )
+        sub_ids = ensure_uuid_list(
+            SubjectiveEvaluationService._json_id_list(getattr(subjective_test, "subturmas", None))
+        )
+        sub_rows = (
+            Subturma.query.filter(Subturma.id.in_(sub_ids)).all()
+            if sub_ids else []
+        )
+        if explicit_classes or sub_ids:
+            whole_ids = explicit_classes
+        else:
+            whole_ids = SubjectiveEvaluationService._fallback_class_ids(subjective_test)
+            sub_rows = []
+
+        parent_ids = list(whole_ids) + [row.class_id for row in sub_rows]
+        if not parent_ids:
+            return []
+
+        from app.models.grades import Grade
+
+        classes = Class.query.filter(Class.id.in_(parent_ids)).all()
+        class_by_id = {item.id: item for item in classes}
+        grade_ids = {item.grade_id for item in classes if item.grade_id}
+        grades = {
+            item.id: item for item in Grade.query.filter(Grade.id.in_(list(grade_ids))).all()
+        } if grade_ids else {}
+        students = (
+            Student.query.options(undefer(Student.subturma_id))
+            .filter(Student.class_id.in_(parent_ids))
+            .all()
+        )
+        whole_classes = []
+        for class_id in whole_ids:
+            class_obj = class_by_id.get(class_id)
+            if not class_obj:
+                continue
+            whole_classes.append({
+                "id": class_obj.id,
+                "name": class_obj.name,
+                "school_id": class_obj.school_id,
+            })
+        sub_payload = []
+        for row in sub_rows:
+            class_obj = class_by_id.get(row.class_id)
+            if not class_obj:
+                continue
+            grade = grades.get(class_obj.grade_id)
+            sub_payload.append({
+                "id": row.id,
+                "class_id": row.class_id,
+                "class_name": class_obj.name,
+                "grade_name": grade.name if grade else "",
+                "school_id": class_obj.school_id,
+                "support_level": int(row.support_level),
+            })
+        return SubjectiveEvaluationService.partition_subjective_audience(
+            students, whole_classes, sub_payload
+        )
+
+    @staticmethod
+    def select_audience_slice(slices, class_id, subturma_id=None):
+        """
+        Uma turma com um único recorte abre direto.
+        Turma inteira e ADAP juntas: sem subturma_id abre a turma inteira.
+        Vários ADAP sem a turma inteira exigem subturma_id.
+        """
+        class_slices = [
+            item for item in slices
+            if SubjectiveEvaluationService._same_id(item.get("class_id"), class_id)
+        ]
+        if subturma_id:
+            found = [
+                item for item in class_slices
+                if SubjectiveEvaluationService._same_id(item.get("subturma_id"), subturma_id)
+            ]
+            if not found:
+                return None, "out_of_scope"
+            return found[0], None
+        whole = [item for item in class_slices if item.get("subturma_id") is None]
+        if whole:
+            return whole[0], None
+        if len(class_slices) == 1:
+            return class_slices[0], None
+        if not class_slices:
+            return None, "out_of_scope"
+        return None, "subturma_required"
+
+    @staticmethod
+    def _slice_brief(item: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": item.get("class_id"),
+            "name": item.get("name"),
+            "subturma_id": item.get("subturma_id"),
+        }
+
+    @staticmethod
+    def _picker_school_ids(school_id=None, municipality_id=None):
+        if school_id:
+            return [str(school_id)]
+        if not municipality_id:
+            return None
+        return [
+            str(row.id)
+            for row in School.query.filter(School.city_id == municipality_id).with_entities(School.id).all()
+        ]
+
+    @staticmethod
+    def _restrict_professor_classes(query, user):
+        from app.permissions.utils import get_teacher_classes
+        from app.utils.uuid_helpers import ensure_uuid_list
+
+        role = str((user or {}).get("role") or "").lower()
+        if role != "professor":
+            return query, None
+        allowed = ensure_uuid_list(get_teacher_classes((user or {}).get("id")) or [])
+        if not allowed:
+            return None, []
+        return query.filter(Class.id.in_(allowed)), None
+
+    @staticmethod
+    def list_available_grades(education_stage_id, school_id=None, municipality_id=None, user=None) -> Dict[str, Any]:
+        """
+        Séries do formulário.
+        Curso normal: séries desse curso.
+        Educação Especial: séries regulares que têm subturma ADAP.
+        """
+        from app.models.grades import Grade
+        from app.models.subturma import Subturma
+        from app.services.special_education import is_adap_education_stage
+
+        school_ids = SubjectiveEvaluationService._picker_school_ids(school_id, municipality_id)
+        if school_ids is not None and not school_ids:
+            return {"grades": []}
+
+        if is_adap_education_stage(education_stage_id):
+            query = (
+                db.session.query(Grade)
+                .join(Class, Class.grade_id == Grade.id)
+                .join(Subturma, Subturma.class_id == Class.id)
+            )
+            if school_ids is not None:
+                query = query.filter(Class.school_id.in_(school_ids))
+            query, empty = SubjectiveEvaluationService._restrict_professor_classes(query, user)
+            if empty is not None:
+                return {"grades": []}
+            grades = query.distinct().order_by(Grade.name.asc()).all()
+        else:
+            query = (
+                db.session.query(Grade)
+                .join(Class, Class.grade_id == Grade.id)
+                .filter(Grade.education_stage_id == education_stage_id)
+            )
+            if school_ids is not None:
+                query = query.filter(Class.school_id.in_(school_ids))
+            query, empty = SubjectiveEvaluationService._restrict_professor_classes(query, user)
+            if empty is not None:
+                return {"grades": []}
+            grades = query.distinct().order_by(Grade.name.asc()).all()
+
+        return {
+            "grades": [{"id": str(grade.id), "name": grade.name} for grade in grades],
+        }
+
+    @staticmethod
+    def list_available_classes(
+        education_stage_id,
+        grade_id=None,
+        school_id=None,
+        municipality_id=None,
+        user=None,
+    ) -> Dict[str, Any]:
+        """
+        Curso normal: turmas regulares da série.
+        Educação Especial: uma linha por subturma, no formato "5º Ano A ADAP 3".
+        """
+        from sqlalchemy import func
+
+        from app.models.grades import Grade
+        from app.models.subturma import Subturma
+        from app.services.special_education import is_adap_education_stage
+
+        school_ids = SubjectiveEvaluationService._picker_school_ids(school_id, municipality_id)
+        if school_ids is not None and not school_ids:
+            return {"classes": []}
+        especial = is_adap_education_stage(education_stage_id)
+
+        if especial:
+            query = (
+                db.session.query(Subturma, Class, Grade)
+                .join(Class, Class.id == Subturma.class_id)
+                .join(Grade, Grade.id == Class.grade_id)
+            )
+            if grade_id:
+                query = query.filter(Class.grade_id == grade_id)
+            if school_ids is not None:
+                query = query.filter(Class.school_id.in_(school_ids))
+            query, empty = SubjectiveEvaluationService._restrict_professor_classes(query, user)
+            if empty is not None:
+                return {"classes": []}
+            rows = query.order_by(Grade.name.asc(), Class.name.asc(), Subturma.support_level.asc()).all()
+            if not rows:
+                return {"classes": []}
+            counts = {
+                str(subturma_id): int(total)
+                for subturma_id, total in (
+                    db.session.query(Student.subturma_id, func.count(Student.id))
+                    .filter(Student.subturma_id.in_([sub.id for sub, _, _ in rows]))
+                    .group_by(Student.subturma_id)
+                    .all()
+                )
+            }
+            school_map = {
+                str(item.id): item
+                for item in School.query.filter(School.id.in_({str(cls.school_id) for _, cls, _ in rows if cls.school_id})).all()
+            }
+            payload = []
+            for sub, class_obj, grade in rows:
+                school = school_map.get(str(class_obj.school_id)) if class_obj.school_id else None
+                payload.append({
+                    "id": str(sub.id),
+                    "class_id": str(class_obj.id),
+                    "subturma_id": str(sub.id),
+                    "support_level": int(sub.support_level),
+                    "name": SubjectiveEvaluationService.adap_option_name(grade.name, class_obj.name, sub.support_level),
+                    "students_count": counts.get(str(sub.id), 0),
+                    "school": {"id": school.id, "name": school.name} if school else None,
+                    "grade": {"id": str(grade.id), "name": grade.name},
+                    "grade_id": str(grade.id),
+                })
+            return {"classes": payload}
+
+        query = db.session.query(Class, Grade).join(Grade, Grade.id == Class.grade_id).filter(
+            Grade.education_stage_id == education_stage_id
+        )
+        if grade_id:
+            query = query.filter(Class.grade_id == grade_id)
+        if school_ids is not None:
+            query = query.filter(Class.school_id.in_(school_ids))
+        query, empty = SubjectiveEvaluationService._restrict_professor_classes(query, user)
+        if empty is not None:
+            return {"classes": []}
+        rows = query.order_by(Grade.name.asc(), Class.name.asc()).all()
+        if not rows:
+            return {"classes": []}
+        counts = {
+            str(class_id): int(total)
+            for class_id, total in (
+                db.session.query(Student.class_id, func.count(Student.id))
+                .filter(Student.class_id.in_([cls.id for cls, _ in rows]))
+                .group_by(Student.class_id)
+                .all()
+            )
+        }
+        school_map = {
+            str(item.id): item
+            for item in School.query.filter(School.id.in_({str(cls.school_id) for cls, _ in rows if cls.school_id})).all()
+        }
+        payload = []
+        for class_obj, grade in rows:
+            school = school_map.get(str(class_obj.school_id)) if class_obj.school_id else None
+            payload.append({
+                "id": str(class_obj.id),
+                "name": class_obj.name,
+                "students_count": counts.get(str(class_obj.id), 0),
+                "school": {"id": school.id, "name": school.name} if school else None,
+                "grade": {"id": str(grade.id), "name": grade.name},
+                "grade_id": str(grade.id),
+                "subturma_id": None,
+            })
+        return {"classes": payload}
+
+    @staticmethod
+    def student_in_audience(subjective_test: SubjectiveTest, student) -> bool:
+        student_id = str(getattr(student, "id", "") or "")
+        if not student_id:
+            return False
+        for item in SubjectiveEvaluationService.audience_slices(subjective_test):
+            if any(str(aluno.id) == student_id for aluno in item["students"]):
+                return True
+        return False
+
+    @staticmethod
     def get_class_progress(subjective_test: SubjectiveTest) -> List[Dict[str, Any]]:
         """Progresso de correção por turma (pendente / em_correcao / concluida)."""
         try:
@@ -409,18 +811,15 @@ class SubjectiveEvaluationService:
 
     @staticmethod
     def _get_class_progress(subjective_test: SubjectiveTest) -> List[Dict[str, Any]]:
-        class_ids = SubjectiveEvaluationService._resolve_target_class_ids(subjective_test)
-        if not class_ids:
+        slices = SubjectiveEvaluationService.audience_slices(subjective_test)
+        if not slices:
             return []
 
         questions_n = SubjectiveQuestion.query.filter_by(subjective_test_id=subjective_test.id).count()
-        classes = Class.query.filter(Class.id.in_(class_ids)).order_by(Class.name).all()
-        students = Student.query.filter(Student.class_id.in_(class_ids)).all()
-        students_by_class: Dict[Any, List] = {}
         student_ids = []
-        for student in students:
-            students_by_class.setdefault(student.class_id, []).append(student)
-            student_ids.append(student.id)
+        for item in slices:
+            for student in item["students"]:
+                student_ids.append(student.id)
 
         filled_by_student: Dict[str, int] = {}
         if student_ids:
@@ -440,8 +839,9 @@ class SubjectiveEvaluationService:
                 finalized_students.add(str(er.student_id))
 
         progress = []
-        for cls in classes:
-            class_students = students_by_class.get(cls.id, [])
+        school_cache: Dict[str, Any] = {}
+        for item in slices:
+            class_students = item["students"]
             n_students = len(class_students)
             expected = n_students * questions_n
             filled = sum(filled_by_student.get(str(s.id), 0) for s in class_students)
@@ -452,10 +852,16 @@ class SubjectiveEvaluationService:
                 status = 'em_correcao'
             else:
                 status = 'pendente'
-            school_obj = School.query.get(str(cls.school_id)) if getattr(cls, 'school_id', None) else None
+            school_key = str(item.get("school_id") or "")
+            school_obj = None
+            if school_key:
+                if school_key not in school_cache:
+                    school_cache[school_key] = School.query.get(school_key)
+                school_obj = school_cache[school_key]
             progress.append({
-                'id': cls.id,
-                'name': cls.name,
+                'id': item["class_id"],
+                'subturma_id': item.get("subturma_id"),
+                'name': item["name"],
                 'school': {'id': school_obj.id, 'name': school_obj.name} if school_obj else None,
                 'students_count': n_students,
                 'filled_cells': filled,
@@ -514,44 +920,90 @@ class SubjectiveEvaluationService:
     @staticmethod
     def _resolve_target_class_ids(subjective_test: SubjectiveTest) -> List:
         """
-        Resolve as turmas-alvo a partir do escopo (mesma prioridade do padrão de Test):
-        turmas específicas > escolas (+ série) > municípios (+ série).
+        Turmas-mãe do escopo: turmas explícitas e as turmas das subturmas ADAP.
+        Sem nenhuma das duas, cai em escolas (+ série) ou municípios (+ série).
         """
+        from app.models.subturma import Subturma
         from app.utils.uuid_helpers import ensure_uuid_list
 
-        if subjective_test.classes:
-            class_ids = (
-                subjective_test.classes if isinstance(subjective_test.classes, list) else [subjective_test.classes]
-            )
-            return ensure_uuid_list(class_ids)
+        class_ids = ensure_uuid_list(
+            SubjectiveEvaluationService._json_id_list(subjective_test.classes)
+        )
+        sub_ids = ensure_uuid_list(
+            SubjectiveEvaluationService._json_id_list(getattr(subjective_test, "subturmas", None))
+        )
+        parent_ids = []
+        if sub_ids:
+            parent_ids = [
+                row.class_id for row in Subturma.query.filter(Subturma.id.in_(sub_ids)).all()
+            ]
+        if class_ids or sub_ids:
+            seen = []
+            for item in list(class_ids) + parent_ids:
+                if item not in seen:
+                    seen.append(item)
+            return seen
+        return SubjectiveEvaluationService._fallback_class_ids(subjective_test)
 
-        if subjective_test.schools:
-            school_ids = (
-                subjective_test.schools if isinstance(subjective_test.schools, list) else [subjective_test.schools]
-            )
-            classes = Class.query.filter(
-                Class.grade_id == subjective_test.grade_id,
-                Class.school_id.in_([str(s) for s in school_ids]),
-            ).all()
-            return [c.id for c in classes]
+    @staticmethod
+    def _sync_scope_schools(subjective_test: SubjectiveTest) -> None:
+        """Escolas do escopo passam a ser as das turmas e das subturmas escolhidas."""
+        class_ids = SubjectiveEvaluationService._resolve_target_class_ids(subjective_test)
+        explicit = SubjectiveEvaluationService._json_id_list(subjective_test.classes)
+        subturmas = SubjectiveEvaluationService._json_id_list(getattr(subjective_test, "subturmas", None))
+        if not explicit and not subturmas:
+            return
+        if not class_ids:
+            subjective_test.schools = []
+            return
+        classes = Class.query.filter(Class.id.in_(class_ids)).all()
+        schools = []
+        seen = set()
+        for class_obj in classes:
+            school_id = str(class_obj.school_id) if class_obj.school_id else None
+            if school_id and school_id not in seen:
+                seen.add(school_id)
+                schools.append(school_id)
+        subjective_test.schools = schools
+        if subturmas:
+            SubjectiveEvaluationService._align_grade_with_subturmas(subjective_test, classes)
 
-        if subjective_test.municipalities:
-            municipality_ids = (
-                subjective_test.municipalities
-                if isinstance(subjective_test.municipalities, list)
-                else [subjective_test.municipalities]
-            )
-            schools_in_cities = School.query.filter(School.city_id.in_(municipality_ids)).with_entities(School.id).all()
-            school_ids = [s.id for s in schools_in_cities]
-            if not school_ids:
-                return []
-            classes = Class.query.filter(
-                Class.grade_id == subjective_test.grade_id,
-                Class.school_id.in_(school_ids),
-            ).all()
-            return [c.id for c in classes]
+    @staticmethod
+    def _align_grade_with_subturmas(subjective_test: SubjectiveTest, classes) -> None:
+        """A série gravada é a série regular da turma ADAP. Suporte N não permanece."""
+        from app.models.grades import Grade
+        from app.models.subturma import Subturma
+        from app.utils.uuid_helpers import ensure_uuid_list
+        from app.services.special_education import (
+            is_adap_education_stage,
+            support_level_from_exact_grade_name,
+        )
 
-        return []
+        sub_ids = ensure_uuid_list(SubjectiveEvaluationService._json_id_list(subjective_test.subturmas))
+        parent_ids = {
+            row.class_id for row in Subturma.query.filter(Subturma.id.in_(sub_ids)).all()
+        }
+        parent_grades = {
+            class_obj.grade_id
+            for class_obj in classes
+            if class_obj.id in parent_ids and class_obj.grade_id
+        }
+        if len(parent_grades) != 1:
+            raise ValueError(
+                "Uma prova com ADAP usa uma série regular por vez. "
+                "Separe, por exemplo, o 4º Ano e o 5º Ano em provas diferentes."
+            )
+        regular_grade_id = next(iter(parent_grades))
+        current = Grade.query.get(subjective_test.grade_id) if subjective_test.grade_id else None
+        special = False
+        if current is not None:
+            special = bool(
+                is_adap_education_stage(getattr(current, "education_stage_id", None))
+                or support_level_from_exact_grade_name(getattr(current, "name", None))
+            )
+        if current is not None and not special and str(current.id) != str(regular_grade_id):
+            raise ValueError("A série da prova precisa ser a série regular das turmas ADAP escolhidas.")
+        subjective_test.grade_id = regular_grade_id
 
     @staticmethod
     def _sync_shadow_class_tests(subjective_test: SubjectiveTest) -> None:
@@ -566,6 +1018,10 @@ class SubjectiveEvaluationService:
             return
 
         target_class_ids = set(SubjectiveEvaluationService._resolve_target_class_ids(subjective_test))
+        shadow = subjective_test.shadow_test or Test.query.get(subjective_test.shadow_test_id)
+        if shadow:
+            shadow.schools = subjective_test.schools
+            shadow.classes = [str(class_id) for class_id in target_class_ids]
 
         existing = ClassTest.query.filter_by(test_id=subjective_test.shadow_test_id).all()
         existing_by_class = {ct.class_id: ct for ct in existing}
@@ -609,11 +1065,13 @@ class SubjectiveEvaluationService:
             municipalities=data.get('municipalities'),
             schools=data.get('schools'),
             classes=data.get('classes'),
+            subturmas=data.get('subturmas'),
             status='pendente',
             created_by=created_by,
         )
         db.session.add(subjective_test)
         db.session.flush()
+        SubjectiveEvaluationService._sync_scope_schools(subjective_test)
 
         questions = data.get('questions') or []
         groups = SubjectiveEvaluationService.normalize_rubric_groups_payload(
@@ -648,7 +1106,7 @@ class SubjectiveEvaluationService:
         Atualiza campos da avaliação e, se `questions` for enviado, substitui a lista
         de questões por completo (mais simples e seguro que fazer diff parcial).
         """
-        simple_fields = ('title', 'description', 'test_type', 'municipalities', 'schools', 'classes')
+        simple_fields = ('title', 'description', 'test_type', 'municipalities', 'schools', 'classes', 'subturmas')
         for field in simple_fields:
             if field in data:
                 setattr(subjective_test, field, data[field])
@@ -657,6 +1115,8 @@ class SubjectiveEvaluationService:
             subjective_test.subject_id = data.get('subject_id') or data.get('subject')
         if 'grade_id' in data or 'grade' in data:
             subjective_test.grade_id = data.get('grade_id') or data.get('grade')
+        if 'classes' in data or 'subturmas' in data:
+            SubjectiveEvaluationService._sync_scope_schools(subjective_test)
         if 'application_date' in data:
             raw = data['application_date']
             subjective_test.application_date = (
@@ -724,7 +1184,6 @@ class SubjectiveEvaluationService:
             shadow.grade_id = subjective_test.grade_id
             shadow.municipalities = subjective_test.municipalities
             shadow.schools = subjective_test.schools
-            shadow.classes = subjective_test.classes
         SubjectiveEvaluationService._sync_shadow_class_tests(subjective_test)
 
         db.session.commit()
@@ -788,9 +1247,9 @@ class SubjectiveEvaluationService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def get_correction_matrix(subjective_test_id: str, class_id) -> Optional[Dict[str, Any]]:
+    def get_correction_matrix(subjective_test_id: str, class_id, subturma_id=None) -> Optional[Dict[str, Any]]:
         """
-        Matriz aluno x questão para a tela de correção manual de uma turma.
+        Matriz aluno x questão para a tela de correção manual de uma turma ou subturma ADAP.
 
         Se já existir EvaluationResult no Test espelho (após finalizar), inclui em cada
         aluno o campo `evaluation` com nota/proficiência/classificação gravadas.
@@ -799,8 +1258,16 @@ class SubjectiveEvaluationService:
         if not subjective_test:
             return None
 
+        slices = SubjectiveEvaluationService.audience_slices(subjective_test)
+        chosen, error = SubjectiveEvaluationService.select_audience_slice(slices, class_id, subturma_id)
+        if error:
+            return {
+                "error": error,
+                "slices": [SubjectiveEvaluationService._slice_brief(item) for item in slices if SubjectiveEvaluationService._same_id(item.get("class_id"), class_id)],
+            }
+
         questions = subjective_test.questions
-        students = Student.query.filter(Student.class_id == class_id).order_by(Student.name).all()
+        students = chosen["students"]
         student_ids = [s.id for s in students]
 
         results = (
@@ -845,6 +1312,11 @@ class SubjectiveEvaluationService:
                 "title": subjective_test.title,
                 "test_type": subjective_test.test_type,
                 "subject": SubjectiveEvaluationService._subject_ref(subjective_test),
+            },
+            "class": {
+                "id": chosen["class_id"],
+                "name": chosen["name"],
+                "subturma_id": chosen.get("subturma_id"),
             },
             "rubric_groups": SubjectiveEvaluationService.get_rubric_groups(subjective_test_id),
             "rubric_marks": SubjectiveEvaluationService.get_rubric_marks(subjective_test_id),
@@ -896,6 +1368,11 @@ class SubjectiveEvaluationService:
         if value is not None and value not in allowed:
             raise ValueError(f"Valor de rubrica inválido: {value}. Aceitos: {', '.join(allowed)}")
 
+        subjective_test = SubjectiveTest.query.get(subjective_test_id)
+        student = Student.query.get(student_id)
+        if subjective_test and student and not SubjectiveEvaluationService.student_in_audience(subjective_test, student):
+            raise ValueError("Aluno fora do escopo desta avaliação")
+
         existing = SubjectiveResult.query.filter_by(
             subjective_test_id=subjective_test_id,
             subjective_question_id=subjective_question_id,
@@ -922,7 +1399,6 @@ class SubjectiveEvaluationService:
             )
             db.session.add(existing)
 
-        subjective_test = SubjectiveTest.query.get(subjective_test_id)
         if subjective_test and subjective_test.status == 'pendente':
             subjective_test.status = 'em_correcao'
 
@@ -937,6 +1413,10 @@ class SubjectiveEvaluationService:
         updated_by: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Atualiza (ou cria) a presença de um aluno na avaliação subjetiva."""
+        subjective_test = SubjectiveTest.query.get(subjective_test_id)
+        student = Student.query.get(student_id)
+        if subjective_test and student and not SubjectiveEvaluationService.student_in_audience(subjective_test, student):
+            raise ValueError("Aluno fora do escopo desta avaliação")
         existing = SubjectivePresence.query.filter_by(
             subjective_test_id=subjective_test_id, student_id=student_id
         ).first()
@@ -1084,6 +1564,9 @@ class SubjectiveEvaluationService:
         subjective_test = SubjectiveTest.query.get(subjective_test_id)
         if not subjective_test:
             return None
+        student = Student.query.get(student_id)
+        if student and not SubjectiveEvaluationService.student_in_audience(subjective_test, student):
+            raise ValueError("Aluno fora do escopo desta avaliação")
 
         legend = SubjectiveEvaluationService.get_classification_legend_for_test(subjective_test)
 
@@ -1275,9 +1758,23 @@ class SubjectiveEvaluationService:
             logging.warning("Falha ao marcar relatórios dirty (avaliação subjetiva): %s", str(e))
 
     @staticmethod
-    def finalize_class(subjective_test_id: str, class_id, corrected_by: Optional[str] = None) -> Dict[str, Any]:
-        """Calcula e grava o resultado de todos os alunos de uma turma para a avaliação."""
-        students = Student.query.filter(Student.class_id == class_id).all()
+    def finalize_class(subjective_test_id: str, class_id, corrected_by: Optional[str] = None, subturma_id=None) -> Dict[str, Any]:
+        """Calcula e grava o resultado dos alunos de uma turma ou subturma ADAP."""
+        subjective_test = SubjectiveTest.query.get(subjective_test_id)
+        if not subjective_test:
+            return {"error": "not_found"}
+        slices = SubjectiveEvaluationService.audience_slices(subjective_test)
+        chosen, error = SubjectiveEvaluationService.select_audience_slice(slices, class_id, subturma_id)
+        if error:
+            return {
+                "error": error,
+                "slices": [
+                    SubjectiveEvaluationService._slice_brief(item)
+                    for item in slices
+                    if SubjectiveEvaluationService._same_id(item.get("class_id"), class_id)
+                ],
+            }
+        students = chosen["students"]
         processed = []
         skipped = []
         errors = []
@@ -1314,6 +1811,7 @@ class SubjectiveEvaluationService:
         subjective_test_id: str,
         class_id=None,
         allowed_class_ids: Optional[List] = None,
+        subturma_id=None,
     ) -> Optional[Dict[str, Any]]:
         """
         Agrega os dados do painel de resultados da avaliação subjetiva.
@@ -1333,29 +1831,38 @@ class SubjectiveEvaluationService:
         if not subjective_test:
             return None
 
-        scope_class_ids = SubjectiveEvaluationService._resolve_target_class_ids(subjective_test)
+        slices = SubjectiveEvaluationService.audience_slices(subjective_test)
         if allowed_class_ids is not None:
-            allowed_set = set(allowed_class_ids)
-            scope_class_ids = [cid for cid in scope_class_ids if cid in allowed_set]
+            allowed_set = {str(item) for item in allowed_class_ids}
+            slices = [item for item in slices if str(item.get("class_id")) in allowed_set]
 
-        # Lista de turmas do filtro (escopo completo acessível), independente do class_id selecionado.
-        filter_classes = (
-            Class.query.filter(Class.id.in_(scope_class_ids)).order_by(Class.name).all()
-            if scope_class_ids else []
-        )
-        classes_payload = [{"id": c.id, "name": c.name} for c in filter_classes]
+        classes_payload = [SubjectiveEvaluationService._slice_brief(item) for item in slices]
 
-        if class_id is not None:
-            if scope_class_ids and class_id not in scope_class_ids:
+        if class_id is not None or subturma_id is not None:
+            if class_id is None:
                 return {"error": "class_out_of_scope"}
-            target_class_ids = [class_id]
+            chosen, error = SubjectiveEvaluationService.select_audience_slice(slices, class_id, subturma_id)
+            if error == "subturma_required":
+                return {
+                    "error": error,
+                    "slices": [
+                        SubjectiveEvaluationService._slice_brief(item)
+                        for item in slices
+                        if SubjectiveEvaluationService._same_id(item.get("class_id"), class_id)
+                    ],
+                }
+            if error or chosen is None:
+                return {"error": "class_out_of_scope"}
+            students = list(chosen["students"])
         else:
-            target_class_ids = scope_class_ids
-
-        students = (
-            Student.query.filter(Student.class_id.in_(target_class_ids)).all()
-            if target_class_ids else []
-        )
+            students = []
+            seen_students = set()
+            for item in slices:
+                for student in item["students"]:
+                    if str(student.id) in seen_students:
+                        continue
+                    seen_students.add(str(student.id))
+                    students.append(student)
         student_ids = [s.id for s in students]
         total_students = len(students)
 
@@ -1529,6 +2036,7 @@ class SubjectiveEvaluationService:
             "rubric_marks": marks,
             "filters": {
                 "class_id": str(class_id) if class_id is not None else None,
+                "subturma_id": str(subturma_id) if subturma_id is not None else None,
                 "classes": classes_payload,
             },
             "kpis": {
@@ -1839,16 +2347,25 @@ class SubjectiveEvaluationService:
                 ctx for ctx in filtered_contexts if ctx["test"].id == avaliacao_efetiva
             ]
 
-        # Turmas
-        turma_ids = set()
+        # Turmas e subturmas ADAP do escopo já corrigido.
+        turma_rows = []
+        seen_slices = set()
         for ctx in filtered_contexts:
-            for cid in ctx["class_ids"]:
-                turma_ids.add(cid)
-        turmas = (
-            Class.query.filter(Class.id.in_(list(turma_ids))).order_by(Class.name).all()
-            if turma_ids else []
-        )
-        response["turmas"] = [{"id": str(t.id), "nome": t.name} for t in turmas]
+            allowed = {str(cid) for cid in ctx["class_ids"]}
+            for item in SubjectiveEvaluationService.audience_slices(ctx["test"]):
+                if str(item.get("class_id")) not in allowed:
+                    continue
+                key = (str(item.get("class_id")), str(item.get("subturma_id") or ""))
+                if key in seen_slices:
+                    continue
+                seen_slices.add(key)
+                turma_rows.append({
+                    "id": str(item["class_id"]),
+                    "nome": item["name"],
+                    "subturma_id": str(item["subturma_id"]) if item.get("subturma_id") else None,
+                })
+        turma_rows.sort(key=lambda item: (item["nome"] or "").lower())
+        response["turmas"] = turma_rows
 
         return response
 

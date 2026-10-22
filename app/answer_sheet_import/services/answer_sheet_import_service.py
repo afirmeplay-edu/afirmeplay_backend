@@ -35,6 +35,7 @@ MAX_SHEET_ROWS = 500
 MAX_QUESTIONS = 104
 MAX_SUBJECT_BLOCKS = 4
 MIN_ALTERNATIVES = 2
+# Leitura aceita até E; o limite efetivo do cartão impresso é validado no cadastro.
 ALTERNATIVE_LETTERS = "ABCDE"
 METADATA_MAX_LEN = 200
 

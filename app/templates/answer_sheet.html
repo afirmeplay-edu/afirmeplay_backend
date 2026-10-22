@@ -845,6 +845,8 @@
 							<div class="block-title">
 								{% if block.subject_name %}{{ block.subject_name }}{% else %}BLOCO {{ "%02d"|format(block.block_number) }}{% endif %}
 							</div>
+							{% set ns_alt = namespace(has_e=false) %}
+							{% for _q in block.questions %}{% if _q.options and _q.options | length > 4 %}{% set ns_alt.has_e = true %}{% endif %}{% endfor %}
 							<div class="block-column-labels">
 								<span class="question-num-spacer" aria-hidden="true"></span>
 								<div class="column-labels">
@@ -852,6 +854,7 @@
 									<span class="column-label">B</span>
 									<span class="column-label">C</span>
 									<span class="column-label">D</span>
+									{% if ns_alt.has_e %}<span class="column-label">E</span>{% endif %}
 								</div>
 							</div>
 						</div>
@@ -900,6 +903,8 @@
 					<div class="block-wrapper">
 						<div class="block-header">
 							<div class="block-title">BLOCO {{ "%02d"|format(block_num) }}</div>
+							{% set ns_alt = namespace(has_e=false) %}
+							{% for _q in range(start_question, end_question + 1) %}{% if questions_map and questions_map[_q] and questions_map[_q] | length > 4 %}{% set ns_alt.has_e = true %}{% endif %}{% endfor %}
 							<div class="block-column-labels">
 								<span class="question-num-spacer" aria-hidden="true"></span>
 								<div class="column-labels">
@@ -907,6 +912,7 @@
 									<span class="column-label">B</span>
 									<span class="column-label">C</span>
 									<span class="column-label">D</span>
+									{% if ns_alt.has_e %}<span class="column-label">E</span>{% endif %}
 								</div>
 							</div>
 						</div>
@@ -956,6 +962,8 @@
 					<div class="block-wrapper">
 						<div class="block-header">
 							<div class="block-title">BLOCO {{ "%02d"|format(block) }}</div>
+							{% set ns_alt = namespace(has_e=false) %}
+							{% for _q in range(start_question, end_question + 1) %}{% if questions_map and questions_map[_q] and questions_map[_q] | length > 4 %}{% set ns_alt.has_e = true %}{% endif %}{% endfor %}
 							<div class="block-column-labels">
 								<span class="question-num-spacer" aria-hidden="true"></span>
 								<div class="column-labels">
@@ -963,6 +971,7 @@
 									<span class="column-label">B</span>
 									<span class="column-label">C</span>
 									<span class="column-label">D</span>
+									{% if ns_alt.has_e %}<span class="column-label">E</span>{% endif %}
 								</div>
 							</div>
 						</div>
@@ -1201,6 +1210,8 @@
 							<div class="block-title">
 								{% if block.subject_name %}{{ block.subject_name }}{% else %}BLOCO {{ "%02d"|format(block.block_number) }}{% endif %}
 							</div>
+							{% set ns_alt = namespace(has_e=false) %}
+							{% for _q in block.questions %}{% if _q.options and _q.options | length > 4 %}{% set ns_alt.has_e = true %}{% endif %}{% endfor %}
 							<div class="block-column-labels">
 								<span class="question-num-spacer" aria-hidden="true"></span>
 								<div class="column-labels">
@@ -1208,6 +1219,7 @@
 									<span class="column-label">B</span>
 									<span class="column-label">C</span>
 									<span class="column-label">D</span>
+									{% if ns_alt.has_e %}<span class="column-label">E</span>{% endif %}
 								</div>
 							</div>
 						</div>
@@ -1256,6 +1268,8 @@
 					<div class="block-wrapper">
 						<div class="block-header">
 							<div class="block-title">BLOCO {{ "%02d"|format(block_num) }}</div>
+							{% set ns_alt = namespace(has_e=false) %}
+							{% for _q in range(start_question, end_question + 1) %}{% if questions_map and questions_map[_q] and questions_map[_q] | length > 4 %}{% set ns_alt.has_e = true %}{% endif %}{% endfor %}
 							<div class="block-column-labels">
 								<span class="question-num-spacer" aria-hidden="true"></span>
 								<div class="column-labels">
@@ -1263,6 +1277,7 @@
 									<span class="column-label">B</span>
 									<span class="column-label">C</span>
 									<span class="column-label">D</span>
+									{% if ns_alt.has_e %}<span class="column-label">E</span>{% endif %}
 								</div>
 							</div>
 						</div>
@@ -1312,6 +1327,8 @@
 					<div class="block-wrapper">
 						<div class="block-header">
 							<div class="block-title">BLOCO {{ "%02d"|format(block) }}</div>
+							{% set ns_alt = namespace(has_e=false) %}
+							{% for _q in range(start_question, end_question + 1) %}{% if questions_map and questions_map[_q] and questions_map[_q] | length > 4 %}{% set ns_alt.has_e = true %}{% endif %}{% endfor %}
 							<div class="block-column-labels">
 								<span class="question-num-spacer" aria-hidden="true"></span>
 								<div class="column-labels">
@@ -1319,6 +1336,7 @@
 									<span class="column-label">B</span>
 									<span class="column-label">C</span>
 									<span class="column-label">D</span>
+									{% if ns_alt.has_e %}<span class="column-label">E</span>{% endif %}
 								</div>
 							</div>
 						</div>

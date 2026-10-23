@@ -22,6 +22,7 @@ from sqlalchemy import text
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.question import Question
+from app.utils.question_helpers import AFIRME_LER_QUESTION_IN_PLAY_ERROR, afirme_ler_question_ids
 from app.models.student import Student
 from app.models.subject import Subject
 from app.models.studentTestOlimpics import StudentTestOlimpics
@@ -278,6 +279,9 @@ class CompetitionService:
     @staticmethod
     def add_questions_manually(competition_id: str, question_ids: list) -> None:
         """Adiciona questões manualmente (para question_mode = 'manual')."""
+        if afirme_ler_question_ids(question_ids):
+            raise ValidationError(AFIRME_LER_QUESTION_IN_PLAY_ERROR)
+
         ctx = get_current_tenant_context()
         tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
         competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)

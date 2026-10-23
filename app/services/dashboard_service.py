@@ -35,6 +35,7 @@ from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.answerSheetResult import AnswerSheetResult
 from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
 from app.utils.uuid_helpers import ensure_uuid_list, uuid_list_to_str
+from app.utils.question_helpers import play_questions_only
 from app.permissions.utils import (
     get_manager_school,
     get_teacher,
@@ -894,7 +895,7 @@ class DashboardService:
 
         subject_ids = [
             subject_id
-            for (subject_id,) in Question.query.with_entities(Question.subject_id)
+            for (subject_id,) in play_questions_only(Question.query).with_entities(Question.subject_id)
             .distinct()
             .limit(50)
             .all()
@@ -1103,7 +1104,7 @@ class DashboardService:
         """
         from sqlalchemy import or_, and_
         
-        query = Question.query
+        query = play_questions_only(Question.query)
         user = scope.get("user", {})
         user_id = user.get("id")
         city_id = scope.get("city_id")

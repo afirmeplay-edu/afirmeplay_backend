@@ -31,6 +31,11 @@ import os
 from PIL import Image
 import io
 from app.utils.response_formatters import format_test_response
+from app.utils.question_helpers import (
+    AFIRME_LER_QUESTION_IN_PLAY_ERROR,
+    afirme_ler_question_ids,
+    question_ids_from_payload,
+)
 from app.utils.test_class_helpers import (
     merge_apply_classes_payload,
     remove_orphaned_class_tests,
@@ -229,6 +234,13 @@ def criar_avaliacao():
         if evaluation_mode not in EVALUATION_MODES:
             return jsonify({
                 "error": f"evaluation_mode inválido: {evaluation_mode}. Valores aceitos: {', '.join(EVALUATION_MODES)}"
+            }), 400
+
+        ler_question_ids = afirme_ler_question_ids(question_ids_from_payload(data.get('questions')))
+        if ler_question_ids:
+            return jsonify({
+                "error": AFIRME_LER_QUESTION_IN_PLAY_ERROR,
+                "question_ids": ler_question_ids,
             }), 400
 
         available_to_municipality, available_from, availability_err = resolve_availability_for_create(
@@ -1099,6 +1111,13 @@ def atualizar_avaliacao(test_id):
         if 'evaluation_mode' in data and data['evaluation_mode'] not in EVALUATION_MODES:
             return jsonify({
                 "error": f"evaluation_mode inválido: {data['evaluation_mode']}. Valores aceitos: {', '.join(EVALUATION_MODES)}"
+            }), 400
+
+        ler_question_ids = afirme_ler_question_ids(question_ids_from_payload(data.get('questions')))
+        if ler_question_ids:
+            return jsonify({
+                "error": AFIRME_LER_QUESTION_IN_PLAY_ERROR,
+                "question_ids": ler_question_ids,
             }), 400
 
         updated_class_ids_uuids = None

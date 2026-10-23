@@ -3,6 +3,42 @@ Helper functions para buscar questões considerando multitenant
 """
 from app import db
 
+AFIRME_LER_QUESTION_IN_PLAY_ERROR = (
+    "Questões do Afirme Ler não podem ser usadas no Afirme Play."
+)
+
+
+def play_questions_only(query):
+    """Restringe uma query de Question às questões de origem Afirme Play."""
+    from app.models.question import Question, QUESTION_ORIGIN_PLAY
+
+    return query.filter(Question.origin == QUESTION_ORIGIN_PLAY)
+
+
+def afirme_ler_question_ids(question_ids):
+    """Devolve, entre os ids informados, os que são questões do Afirme Ler."""
+    from app.models.question import Question, QUESTION_ORIGIN_LER
+
+    ids = list({str(qid) for qid in (question_ids or []) if qid})
+    if not ids:
+        return []
+    rows = (
+        Question.query.with_entities(Question.id)
+        .filter(Question.id.in_(ids), Question.origin == QUESTION_ORIGIN_LER)
+        .all()
+    )
+    return sorted(str(row[0]) for row in rows)
+
+
+def question_ids_from_payload(questions):
+    """Ids de questões existentes num payload `questions` de avaliação do Play."""
+    if not isinstance(questions, list):
+        return []
+    return [
+        item.get('id') for item in questions
+        if isinstance(item, dict) and item.get('id')
+    ]
+
 
 def get_questions_from_test(test_id, order_by_test_question=True):
     """

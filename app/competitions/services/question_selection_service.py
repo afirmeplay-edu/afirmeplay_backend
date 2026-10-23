@@ -18,6 +18,7 @@ from app import db
 from app.competitions.constants import STAGE_NAMES_BY_LEVEL
 from app.models.educationStage import EducationStage
 from app.models.question import Question
+from app.utils.question_helpers import play_questions_only
 
 from app.competitions.exceptions import ValidationError
 from .question_rules_validator import validate_question_rules
@@ -40,7 +41,7 @@ class QuestionSelectionService:
         - campos legados: grade_ids, difficulty_level
         """
         rules = rules or {}
-        query = Question.query.filter_by(subject_id=subject_id)
+        query = play_questions_only(Question.query).filter(Question.subject_id == subject_id)
 
         # Filtro por etapa de ensino (a partir do level da competição)
         if level is not None:

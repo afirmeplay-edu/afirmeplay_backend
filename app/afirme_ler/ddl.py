@@ -319,6 +319,7 @@ WRITTEN_TEST_TABLES = (
     "reading_written_test",
     "reading_written_test_question",
     "reading_written_test_class",
+    "reading_written_test_print_run",
 )
 
 
@@ -381,4 +382,30 @@ CREATE INDEX IF NOT EXISTS ix_reading_written_test_class_class
     ON "{schema}".reading_written_test_class(class_id);
 COMMENT ON TABLE "{schema}".reading_written_test_class IS 'Aplicação da avaliação escrita do Afirme Ler por turma (alunos pela turma atual)';
 COMMENT ON COLUMN "{schema}".reading_written_test_class.application_start IS 'Data/hora local no fuso da coluna timezone';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_print_run (
+    id VARCHAR PRIMARY KEY,
+    written_test_id VARCHAR NOT NULL
+        REFERENCES "{schema}".reading_written_test(id) ON DELETE CASCADE,
+    class_id UUID REFERENCES "{schema}".class(id) ON DELETE CASCADE,
+    status VARCHAR(20) NOT NULL DEFAULT 'pendente',
+    task_id VARCHAR(64),
+    total_students INTEGER NOT NULL DEFAULT 0,
+    generated_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    minio_bucket VARCHAR(100),
+    minio_object_name VARCHAR(500),
+    answer_sheet_map JSON,
+    created_by VARCHAR NOT NULL REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    CONSTRAINT chk_reading_written_test_print_run_status
+        CHECK (status IN ('pendente', 'processando', 'concluido', 'erro'))
+);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_print_run_test
+    ON "{schema}".reading_written_test_print_run(written_test_id, created_at DESC);
+COMMENT ON TABLE "{schema}".reading_written_test_print_run IS 'Gerações de cartões-resposta da avaliação escrita do Afirme Ler (ZIP no MinIO)';
+COMMENT ON COLUMN "{schema}".reading_written_test_print_run.class_id IS 'Turma da geração; NULL = todas as turmas aplicadas';
+COMMENT ON COLUMN "{schema}".reading_written_test_print_run.answer_sheet_map IS 'Coordenadas das bolhas e das áreas de escrita extraídas do PDF base';
 """

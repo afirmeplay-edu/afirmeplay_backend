@@ -3,8 +3,9 @@
 Base path: `/afirme-reading/written-tests`
 
 Este contrato cobre a criação da avaliação escrita, a definição das questões dela, a publicação, a
-aplicação às turmas (com data de início) e o PDF da prova (caderno de questões). Cartão-resposta,
-respostas de aluno, correção e notificações **não existem ainda** e virão em etapas futuras.
+aplicação às turmas (com data de início), o PDF da prova (caderno de questões) e a geração dos
+cartões-resposta. Leitura/correção dos cartões, lançamento de respostas e notificações **não existem
+ainda** e virão em etapas futuras.
 
 A avaliação escrita é **outra coisa** que a avaliação de fluência (`/afirme-reading/evaluations`).
 Ela fica em tabelas próprias do município (`reading_written_test`, `reading_written_test_question` e
@@ -31,6 +32,7 @@ de qualquer origem (`afirme_ler` ou `afirme_play`).
 | Ação | Perfis |
 |---|---|
 | Listar e ver (`GET`, inclusive turmas e alunos da aplicação e o PDF da prova) | `admin`, `tecadm`, `professor`, `coordenador`, `diretor`, `aplicador` |
+| Gerar, listar e baixar cartões-resposta | `admin`, `tecadm`, `professor`, `coordenador`, `diretor`, `aplicador` |
 | Criar, editar, definir questões, publicar, excluir, aplicar e retirar turma | `admin`, `tecadm`, `professor`, `coordenador`, `diretor` (**sem** `aplicador`) |
 
 Quem pode editar, definir questões, publicar, excluir, aplicar e retirar turma de **uma** avaliação:
@@ -609,6 +611,118 @@ para mostrar a mensagem.
 
 ---
 
+## 14. Cartões-resposta
+
+Um PDF por aluno, empacotados num ZIP gerado em segundo plano (Celery) e guardado no armazenamento.
+O fluxo é assíncrono: `POST` dispara (202), `GET` acompanha, `.../download` baixa quando `concluido`.
+
+### Regras
+
+1. Só avaliação **publicada** e só turmas **aplicadas** (seção 9). Sem turma aplicada = `400`.
+2. Alunos: todos os da **turma atual** de cada turma aplicada (inclui subturma ADAP), como na seção 11.
+3. Se já houver geração `pendente` ou `processando` que cubra a mesma turma (a mesma turma, ou "todas as
+   turmas" de um lado ou do outro), responde `409`. Geração presa há mais de 30 minutos não bloqueia.
+4. Cada geração é um registro novo; as anteriores continuam na lista e podem ser baixadas.
+
+### O cartão (A4)
+
+- 4 quadrados de referência nos cantos e QR em cada folha (mesmo padrão do cartão do socioeconômico).
+- QR: `{"v":1,"student_id":"<12 primeiros caracteres>","written_test_id":"<12 primeiros>","p":"<folha>/<total>"}`.
+- Cabeçalho (por aluno): título da avaliação, aluno, escola, série/turma, linhas de assinatura e data,
+  "FOLHA n DE N".
+- Instruções curtas e as questões **com o mesmo número da prova**, na ordem da avaliação:
+  - `multipleChoice`: número + bolhas com as letras da questão (A até a última alternativa, máximo H);
+  - `dictation`: número + linha para escrever a palavra (sem bolhas);
+  - `text_production`: número + área pautada de 15 linhas (vai para a folha seguinte se não couber).
+- Nunca são impressos: gabarito, palavra ditada, pontuação.
+- No ZIP: `municipio_<m>/escola_<e>/serie_<s>/turma_<t>/<aluno>_<serie>_<turma>_<8 do id>.pdf`
+  (sem acentos; o sufixo do id separa homônimos).
+
+### Objeto Geração
+
+```json
+{
+  "id": "1b2c3d4e-5f60-4a7b-8c9d-0e1f2a3b4c5d",
+  "writtenTestId": "6f2c1d0a-7b3e-4f5a-9c8d-1e2f3a4b5c6d",
+  "classId": null,
+  "className": null,
+  "allClasses": true,
+  "status": "concluido",
+  "taskId": "0d8f5e2a-...",
+  "totalStudents": 25,
+  "generatedCount": 25,
+  "errorMessage": null,
+  "createdBy": "u-123",
+  "createdAt": "2026-10-26T15:10:00",
+  "startedAt": "2026-10-26T15:10:02",
+  "finishedAt": "2026-10-26T15:10:40",
+  "hasAnswerSheetMap": true,
+  "zipAvailable": true,
+  "downloadUrl": "/afirme-reading/written-tests/6f2c.../answer-sheets/1b2c.../download"
+}
+```
+
+- `status`: `pendente` (na fila) → `processando` → `concluido` ou `erro`.
+- `errorMessage` pode vir preenchido também em `concluido` (ex.: alguns alunos não gerados, ou o mapa do
+  cartão não pôde ser extraído — os cartões continuam válidos para impressão).
+- Datas em UTC, sem fuso.
+- `hasAnswerSheetMap`: o mapa de coordenadas (bolhas e áreas de escrita) para a correção futura foi
+  guardado. O mapa não é exposto pela API nesta etapa.
+
+### 14.1 Gerar
+
+`POST /afirme-reading/written-tests/<id>/answer-sheets`
+
+Corpo opcional:
+
+```json
+{ "classId": "7c9e1a3b-5d7f-4a2c-8e0b-2d4f6a8c0e1b" }
+```
+
+Sem `classId` (ou corpo vazio): todas as turmas aplicadas.
+
+Resposta `202`: Objeto Geração (`status: "pendente"`). Acompanhe pelo `GET`.
+
+Erros:
+
+| Status | `error` |
+|---|---|
+| 400 | `Só avaliação publicada pode gerar os cartões-resposta.` |
+| 400 | `A avaliação ainda não foi aplicada a nenhuma turma.` |
+| 400 | `A turma <nome> não está aplicada nesta avaliação.` / `classId inválido: <valor>` |
+| 400 | `Nenhum aluno nas turmas aplicadas.` |
+| 400 | `A questão <id> (posição <n>) não existe mais no banco de questões. Não é possível gerar os cartões-resposta.` |
+| 400 | `Município do contexto não identificado.` |
+| 404 | `Avaliação escrita não encontrada.` |
+| 409 | `Já existe uma geração de cartões em andamento para esta avaliação/turma.` (o corpo traz também `run`, a geração em andamento) |
+
+### 14.2 Listar gerações
+
+`GET /afirme-reading/written-tests/<id>/answer-sheets`
+
+```json
+{
+  "writtenTestId": "6f2c1d0a-7b3e-4f5a-9c8d-1e2f3a4b5c6d",
+  "runs": [ { "...": "Objeto Geração" } ]
+}
+```
+
+Mais recentes primeiro. Para acompanhar uma geração, consulte a cada poucos segundos até `concluido`/`erro`.
+
+### 14.3 Baixar o ZIP
+
+`GET /afirme-reading/written-tests/<id>/answer-sheets/<runId>/download`
+
+Resposta `200`: `application/zip`, `Content-Disposition: attachment; filename=cartoes_<titulo>[_<turma>].zip`.
+Baixar como blob (`responseType: "blob"`), como no PDF da prova.
+
+| Status | `error` |
+|---|---|
+| 400 | `A geração ainda não foi concluída (status: <status>).` |
+| 404 | `Geração de cartões não encontrada.` / `ZIP dos cartões não encontrado.` |
+
+---
+
 ## Fluxo sugerido no frontend
 
 1. `POST /written-tests` com título e escopo (séries → escolas → turmas).
@@ -620,3 +734,5 @@ para mostrar a mensagem.
    Turmas `agendada` podem ser reaplicadas (nova data) ou retiradas; `em_andamento`/`encerrada` não.
 6. Lista de alunos de uma turma: `GET /written-tests/<id>/classes/<classId>/students`.
 7. Botão "Baixar prova (PDF)" em avaliação publicada: `GET /written-tests/<id>/pdf`.
+8. Cartões-resposta (avaliação aplicada): `POST /written-tests/<id>/answer-sheets` (todas as turmas ou
+   `classId`), acompanhar com `GET /written-tests/<id>/answer-sheets` e baixar o ZIP pelo `downloadUrl`.

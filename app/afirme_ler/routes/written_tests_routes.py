@@ -14,6 +14,7 @@ from app.entitlements import require_feature
 from app.permissions import get_current_user_from_token, role_required
 from app.afirme_ler.routes import AFIRME_LER_ROLES, bp
 from app.afirme_ler.services.question_bank_service import WRITE_ROLES
+from app.afirme_ler.services import written_test_answer_sheet_service as answer_sheets
 from app.afirme_ler.services.written_test_pdf_service import (
     WrittenTestPdfService,
     pdf_filename,
@@ -237,6 +238,80 @@ def download_written_test_pdf(written_test_id):
         mimetype="application/pdf",
         as_attachment=True,
         download_name=pdf_filename(written_test.title),
+        max_age=0,
+    )
+
+
+def _context_city_id():
+    from app.utils.tenant_middleware import get_current_tenant_context
+
+    context = get_current_tenant_context()
+    return getattr(context, "city_id", None) if context else None
+
+
+@bp.route("/written-tests/<written_test_id>/answer-sheets", methods=["POST"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def create_written_test_answer_sheets(written_test_id):
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    data = request.get_json(silent=True)
+    if data is not None and not isinstance(data, dict):
+        return _error_response("Corpo da requisição inválido.", 400)
+    city_id = _context_city_id()
+    if not city_id:
+        return _error_response("Município do contexto não identificado.", 400)
+    try:
+        run = answer_sheets.create_run(user, written_test_id, data or {})
+        answer_sheets.dispatch_run(run, city_id)
+        return jsonify(answer_sheets.describe_run(run)), 202
+    except answer_sheets.GenerationInProgress as conflict:
+        db.session.rollback()
+        payload = {"error": str(conflict), "run": answer_sheets.describe_run(conflict.run)}
+        return jsonify(payload), 409
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/answer-sheets", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def list_written_test_answer_sheets(written_test_id):
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        return jsonify(answer_sheets.list_runs(written_test_id)), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/answer-sheets/<run_id>/download", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def download_written_test_answer_sheets(written_test_id, run_id):
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        zip_bytes, filename = answer_sheets.download_zip(written_test_id, run_id)
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+    return send_file(
+        io.BytesIO(zip_bytes),
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=filename,
         max_age=0,
     )
 

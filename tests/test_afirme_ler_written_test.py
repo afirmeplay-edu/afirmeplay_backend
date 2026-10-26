@@ -18,6 +18,7 @@ from sqlalchemy.pool import StaticPool
 
 from app import db
 import app.models  # noqa: F401  registra todos os mappers
+from app.models.city import City
 from app.models.educationStage import EducationStage
 from app.models.grades import Grade
 from app.models.question import Question
@@ -31,6 +32,7 @@ from app.afirme_ler.ddl import get_afirme_ler_written_test_tables_ddl
 from app.afirme_ler.models.reading_written_test import (
     ReadingWrittenTest,
     ReadingWrittenTestClass,
+    ReadingWrittenTestPrintRun,
     ReadingWrittenTestQuestion,
 )
 from app.afirme_ler.services import written_test_service as svc
@@ -99,8 +101,9 @@ def flask_app():
         engine.dispose()
         tables = [
             m.__table__ for m in (
-                EducationStage, Subject, Grade, User, Question, School, Class, Subturma,
+                EducationStage, Subject, Grade, User, City, Question, School, Class, Subturma,
                 Student, ReadingWrittenTest, ReadingWrittenTestQuestion, ReadingWrittenTestClass,
+                ReadingWrittenTestPrintRun,
             )
         ]
         db.metadata.create_all(engine, tables=tables)
@@ -940,3 +943,319 @@ def test_pdf_route(flask_app):
 
         response, status = _call_view("download_written_test_pdf", PROFESSOR, "nao-existe")
         assert status == 404
+
+
+# ---------------------------------------------------------------------------
+# Cartões-resposta — sem WeasyPrint, Celery nem MinIO de verdade
+# ---------------------------------------------------------------------------
+
+import io  # noqa: E402
+import zipfile  # noqa: E402
+from datetime import timedelta  # noqa: E402
+
+from pypdf import PdfReader  # noqa: E402
+
+from app.afirme_ler.services import written_test_answer_sheet_service as cards  # noqa: E402
+
+
+def _fake_pdf(pages=2):
+    from reportlab.pdfgen.canvas import Canvas
+
+    buffer = io.BytesIO()
+    canvas = Canvas(buffer)
+    for page in range(pages):
+        canvas.drawString(100, 100, f"base {page + 1}")
+        canvas.showPage()
+    canvas.save()
+    return buffer.getvalue()
+
+
+def _published_applied(class_ids=(CLASS_A1,)):
+    written_test = _published_for_pdf()
+    if class_ids:
+        _apply(written_test.id, list(class_ids))
+    return WrittenTestService.get(written_test.id)
+
+
+def test_card_items_letters_lines_and_no_answer_key(flask_app):
+    items = cards.build_card_items(_published_for_pdf())
+
+    assert [i["number"] for i in items] == list(range(1, 21))
+    assert [i["question_id"] for i in items] == PDF_ORDER
+    assert items[0] == {"number": 1, "question_id": "mc-img", "type": "multipleChoice",
+                        "letters": ["A", "B", "C"]}
+    assert items[1]["letters"] == ["A", "B"]
+    assert items[18] == {"number": 19, "question_id": "dict-1", "type": "dictation"}
+    assert items[19] == {"number": 20, "question_id": "prod-1", "type": "text_production", "lines": 15}
+
+    dumped = json.dumps(items, ensure_ascii=False)
+    for forbidden in ("sapato", "isCorrect", "correct", "solution", "SOLUCAO", "value", "Gato"):
+        assert forbidden not in dumped
+
+
+def test_card_items_letters_stop_at_h(flask_app):
+    db.session.get(Question, "mc-03").alternatives = [
+        {"id": chr(65 + i), "text": f"op {i}", "isCorrect": i == 0} for i in range(10)
+    ]
+    db.session.commit()
+    items = cards.build_card_items(_published_for_pdf())
+    assert items[[i["question_id"] for i in items].index("mc-03")]["letters"] == list("ABCDEFGH")
+
+
+def test_card_html_has_bubbles_lines_and_no_answer_key(flask_app):
+    written_test = _published_for_pdf()
+    items = cards.build_card_items(written_test)
+    html = cards.render_card_html(written_test, items, generator=_pdf_service().generator)
+
+    assert html.count('class="bubble"') == 3 + 17 * 2
+    assert html.count('class="dictation-area"') == 1
+    assert html.count('class="writing-line"') == 15
+    assert html.count('class="num"') == 20
+    assert html.count("@top-left-corner") == 1 and html.count("@bottom-right-corner") == 1
+    assert "width: 340px" in html and "height: 482px" in html
+    for forbidden in ("sapato", "isCorrect", "SOLUCAO-SECRETA", "Pontuação", "Gato", "Qual é o animal"):
+        assert forbidden not in html
+
+
+def test_card_qr_payload_format():
+    payload = cards.build_qr_payload("st-caio-1234567890", "caead568-498e-47ec-9155-ad43a480a058", 1, 2)
+    assert payload == {"v": 1, "student_id": "st-caio-1234", "written_test_id": "caead568-498", "p": "1/2"}
+    assert cards.qr_text("st-caio-1234567890", "caead568-498e-47ec", 2, 2) == (
+        '{"v":1,"student_id":"st-caio-1234","written_test_id":"caead568-498","p":"2/2"}'
+    )
+    with pytest.raises(ValueError):
+        cards.build_qr_payload("st", "wt", 3, 2)
+    with pytest.raises(ValueError):
+        cards.build_qr_payload("", "wt", 1, 1)
+
+
+def test_card_map_from_pdf_content():
+    items = [
+        {"number": 1, "question_id": "q1", "type": "multipleChoice", "letters": ["A", "B"]},
+        {"number": 2, "question_id": "q2", "type": "dictation"},
+        {"number": 3, "question_id": "q3", "type": "text_production", "lines": 15},
+    ]
+
+    def image(x, y, w, h):
+        return f"q 1 0 0 1 {x} {y} cm 0 0 {w} {h} re W n /Im1 Do Q"
+
+    page_1 = " ".join([
+        "q 0.75 0 0 0.75 0 0 cm",
+        image(5, 5, 32, 32),           # quadrado de canto: ignorado
+        "0 0 500 20 re f",             # borda/linha sem imagem: ignorada
+        image(100, 300, 340, 44),      # linha do ditado (fundo de bloco vem antes das bolhas)
+        image(100, 600, 12, 12),       # bolha A
+        image(130, 600, 12, 12),       # bolha B
+        "Q",
+    ])
+    page_2 = "q 0.75 0 0 0.75 0 0 cm " + image(40, 100, 660, 482) + " Q"
+
+    result = cards.build_answer_sheet_map_from_pages([page_1, page_2], items, "wt-1")
+    assert result["page_count"] == 2 and result["written_test_id"] == "wt-1"
+    first, second = result["pages"]
+    assert [(b["number"], b["letter"]) for b in first["bubbles"]] == [(1, "A"), (1, "B")]
+    bubble_a = first["bubbles"][0]
+    assert bubble_a["cx"] == pytest.approx(79.5) and bubble_a["cy"] == pytest.approx(454.5)
+    assert bubble_a["r"] == pytest.approx(4.5)
+    assert set(bubble_a["pixel"]) == {"x", "y", "r"}
+    assert first["writing_areas"][0]["type"] == "dictation"
+    assert first["writing_areas"][0]["right"] - first["writing_areas"][0]["left"] == pytest.approx(255.0)
+    assert second["bubbles"] == []
+    area = second["writing_areas"][0]
+    assert (area["number"], area["type"]) == (3, "text_production")
+    assert area["pixel"]["width"] > 0 and area["pixel"]["height"] > 0
+
+    with pytest.raises(ValueError, match="1 bolhas e a avaliação tem 2"):
+        cards.build_answer_sheet_map_from_pages([page_1.replace(image(130, 600, 12, 12), "")], items, "wt-1")
+    with pytest.raises(ValueError, match="não corresponde ao tipo"):
+        swapped = page_1.replace("340 44", "660 482")
+        cards.build_answer_sheet_map_from_pages([swapped, page_2.replace("660 482", "340 44")], items, "wt-1")
+
+
+def test_card_zip_names_do_not_collide_for_homonyms(flask_app, tmp_path):
+    from app.socioeconomic_forms.services.print_package import write_print_zip
+
+    db.session.add(Student(id="st-ana-2", name="Ana", class_id=CLASS_A1, school_id=SCHOOL_A, grade_id=GRADE_1))
+    db.session.commit()
+    students = cards.list_card_students([str(CLASS_A1)])
+    assert [s["name"] for s in students] == ["Ana", "Ana", "Bia", "Caio"]
+    assert students[0]["school_name"] == "Escola A" and students[0]["grade_name"] == "1º ano"
+
+    zip_path = str(tmp_path / "cards.zip")
+    stats = write_print_zip(zip_path, b"%PDF base", "wt-1", students, personalize=lambda base, **kw: b"%PDF aluno")
+    assert stats["generated"] == 4
+    names = zipfile.ZipFile(zip_path).namelist()
+    assert len(set(names)) == 4
+    anas = [n for n in names if "/ana_" in n]
+    assert len(anas) == 2 and anas[0] != anas[1]
+    assert all(n.startswith("municipio_municipio/escola_escola_a/serie_1o_ano/turma_1o_a/") for n in names)
+
+
+def test_create_run_rules(flask_app, clock):
+    draft = _create(questions=_items(PDF_ORDER))
+    with pytest.raises(ValueError, match="Só avaliação publicada pode gerar os cartões-resposta."):
+        cards.create_run(APLICADOR, draft.id, {})
+    db.session.rollback()
+
+    published = _published_applied(class_ids=())
+    with pytest.raises(ValueError, match="ainda não foi aplicada a nenhuma turma"):
+        cards.create_run(APLICADOR, published.id, {})
+    _apply(published.id, [CLASS_A1])
+    with pytest.raises(ValueError, match="A turma 1º B não está aplicada nesta avaliação."):
+        cards.create_run(APLICADOR, published.id, {"classId": str(CLASS_B1)})
+    with pytest.raises(ValueError, match="classId inválido"):
+        cards.create_run(APLICADOR, published.id, {"classId": "x"})
+
+    run = cards.create_run(APLICADOR, published.id, {})
+    assert (run.status, run.total_students, run.class_id, run.created_by) == ("pendente", 3, None, "u-apl")
+
+    with pytest.raises(cards.GenerationInProgress):
+        cards.create_run(PROFESSOR, published.id, {"classId": str(CLASS_A1)})
+
+    run.created_at = datetime.utcnow() - timedelta(minutes=31)
+    db.session.commit()
+    second = cards.create_run(PROFESSOR, published.id, {"classId": str(CLASS_A1)})
+    assert str(second.class_id) == str(CLASS_A1)
+    with pytest.raises(cards.GenerationInProgress):
+        cards.create_run(PROFESSOR, published.id, {})
+    second.status = "concluido"
+    db.session.commit()
+    assert cards.create_run(PROFESSOR, published.id, {}).status == "pendente"
+
+
+def test_create_run_without_students(flask_app, clock):
+    published = _published_applied(class_ids=(CLASS_B1,))
+    db.session.get(Student, "st-davi").class_id = CLASS_A2
+    db.session.commit()
+    with pytest.raises(ValueError, match="Nenhum aluno nas turmas aplicadas."):
+        cards.create_run(PROFESSOR, published.id, {})
+
+
+def _run_generation(run_id, upload=None, map_side_effect=None):
+    uploaded = {}
+
+    def fake_upload(self, bucket, object_name, path):
+        with zipfile.ZipFile(path) as archive:
+            uploaded["files"] = {name: archive.read(name) for name in archive.namelist()}
+        uploaded["bucket"], uploaded["object_name"] = bucket, object_name
+        return {"bucket": bucket, "object_name": object_name} if upload is None else upload
+
+    from app.services.storage.minio_service import MinIOService
+
+    with patch.object(cards, "render_base_pdf", return_value=_fake_pdf(2)), \
+            patch.object(cards, "extract_answer_sheet_map",
+                         side_effect=map_side_effect, return_value={"version": 1, "pages": []}), \
+            patch.object(MinIOService, "__init__", lambda self: None), \
+            patch.object(MinIOService, "upload_from_path", fake_upload):
+        result = cards.run_generation(run_id)
+    return result, uploaded
+
+
+def test_run_generation_builds_zip_with_overlay(flask_app, clock):
+    published = _published_applied()
+    run = cards.create_run(PROFESSOR, published.id, {})
+
+    result, uploaded = _run_generation(run.id)
+    assert result == {"success": True, "generated": 3, "failed": 0}
+
+    stored = db.session.get(ReadingWrittenTestPrintRun, run.id)
+    assert stored.status == "concluido" and stored.generated_count == 3 and stored.total_students == 3
+    assert stored.minio_bucket == "afirme-reading-audio"
+    assert stored.minio_object_name == f"afirme-ler/written-tests/{published.id}/runs/{run.id}.zip"
+    assert stored.answer_sheet_map == {"version": 1, "pages": []}
+    assert stored.started_at is not None and stored.finished_at is not None and stored.error_message is None
+
+    assert uploaded["object_name"] == stored.minio_object_name
+    pdfs = uploaded["files"]
+    assert len(pdfs) == 3
+    caio = next(content for name, content in pdfs.items() if "/caio_" in name)
+    reader = PdfReader(io.BytesIO(caio))
+    assert len(reader.pages) == 2
+    page_1 = reader.pages[0].extract_text()
+    assert "CAIO" in page_1 and "ESCOLA A" in page_1 and "1º ANO - 1º A" in page_1
+    assert "FOLHA 1 DE 2" in page_1 and "FOLHA 2 DE 2" in reader.pages[1].extract_text()
+    assert "Avaliação escrita — 1º bimestre" in page_1
+    assert "sapato" not in page_1
+
+
+def test_run_generation_keeps_zip_when_map_fails_and_fails_without_upload(flask_app, clock):
+    published = _published_applied()
+    run = cards.create_run(PROFESSOR, published.id, {})
+    _run_generation(run.id, map_side_effect=ValueError("O cartão desenhou 0 bolhas e a avaliação tem 37."))
+    stored = db.session.get(ReadingWrittenTestPrintRun, run.id)
+    assert stored.status == "concluido"
+    assert "Mapa do cartão não extraído" in stored.error_message
+    assert stored.answer_sheet_map["error"].startswith("O cartão desenhou 0 bolhas")
+
+    second = cards.create_run(PROFESSOR, published.id, {"classId": str(CLASS_A1)})
+    result, _ = _run_generation(second.id, upload={})
+    assert result["success"] is False
+    stored = db.session.get(ReadingWrittenTestPrintRun, second.id)
+    assert stored.status == "erro" and "Falha ao enviar o ZIP" in stored.error_message
+    assert stored.minio_object_name is None
+
+
+def test_answer_sheet_routes(flask_app, clock):
+    from app.afirme_ler.routes import written_tests_routes as module
+    from app.afirme_ler import tasks
+    from app.services.storage.minio_service import MinIOService
+
+    draft = _create(questions=_items(PDF_ORDER))
+    with patch.object(module, "_context_city_id", return_value=CITY_ID):
+        response, status = _call_view("create_written_test_answer_sheets", APLICADOR, draft.id, method="POST")
+    assert status == 400
+    assert response.get_json() == {"error": "Só avaliação publicada pode gerar os cartões-resposta."}
+
+    published = _published_applied()
+    with patch.object(module, "_context_city_id", return_value=CITY_ID), \
+            patch.object(tasks.generate_written_test_answer_sheets, "delay",
+                         return_value=SimpleNamespace(id="task-123")) as delay:
+        response, status = _call_view(
+            "create_written_test_answer_sheets", APLICADOR, published.id, method="POST", json={},
+        )
+        assert status == 202
+        body = response.get_json()
+        assert body["status"] == "pendente" and body["taskId"] == "task-123"
+        assert body["totalStudents"] == 3 and body["allClasses"] is True and body["zipAvailable"] is False
+        delay.assert_called_once_with(body["id"], CITY_ID)
+
+        response, status = _call_view(
+            "create_written_test_answer_sheets", APLICADOR, published.id, method="POST",
+            json={"classId": str(CLASS_A1)},
+        )
+        assert status == 409
+        assert response.get_json()["run"]["id"] == body["id"]
+
+    response, status = _call_view("list_written_test_answer_sheets", APLICADOR, published.id)
+    assert status == 200 and [r["id"] for r in response.get_json()["runs"]] == [body["id"]]
+
+    response, status = _call_view(
+        "download_written_test_answer_sheets", APLICADOR, published.id, body["id"],
+    )
+    assert status == 400
+    assert "ainda não foi concluída" in response.get_json()["error"]
+
+    run = db.session.get(ReadingWrittenTestPrintRun, body["id"])
+    run.status, run.minio_bucket, run.minio_object_name = "concluido", "afirme-reading-audio", "x.zip"
+    db.session.commit()
+    with patch.object(MinIOService, "__init__", lambda self: None), \
+            patch.object(MinIOService, "download_file", return_value=b"PK zip") as download:
+        response = _call_view("download_written_test_answer_sheets", APLICADOR, published.id, body["id"])
+        assert response.status_code == 200 and response.mimetype == "application/zip"
+        assert response.headers["Content-Disposition"] == (
+            "attachment; filename=cartoes_avaliacao_escrita_1o_bimestre.zip"
+        )
+        response.direct_passthrough = False
+        assert response.get_data() == b"PK zip"
+        download.assert_called_once_with("afirme-reading-audio", "x.zip")
+
+    response, status = _call_view("download_written_test_answer_sheets", APLICADOR, published.id, "nao-existe")
+    assert status == 404
+
+
+def test_ddl_print_run_table():
+    ddl = get_afirme_ler_written_test_tables_ddl("city_teste")
+    assert 'CREATE TABLE IF NOT EXISTS "city_teste".reading_written_test_print_run (' in ddl
+    assert "CHECK (status IN ('pendente', 'processando', 'concluido', 'erro'))" in ddl
+    assert "answer_sheet_map JSON" in ddl
+    assert 'class_id UUID REFERENCES "city_teste".class(id) ON DELETE CASCADE' in ddl

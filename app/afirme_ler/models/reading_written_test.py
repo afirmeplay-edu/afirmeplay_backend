@@ -101,3 +101,41 @@ class ReadingWrittenTestClass(db.Model):
     )
 
     written_test = db.relationship("ReadingWrittenTest", back_populates="applications")
+
+
+PRINT_RUN_PENDING = "pendente"
+PRINT_RUN_PROCESSING = "processando"
+PRINT_RUN_DONE = "concluido"
+PRINT_RUN_ERROR = "erro"
+
+
+class ReadingWrittenTestPrintRun(db.Model):
+    """Geração dos cartões-resposta (ZIP no MinIO) e o mapa do cartão para a correção futura."""
+
+    __tablename__ = "reading_written_test_print_run"
+    __table_args__ = {"schema": "tenant"}
+
+    id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    written_test_id = db.Column(
+        db.String,
+        db.ForeignKey("tenant.reading_written_test.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # NULL = todas as turmas aplicadas.
+    class_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("tenant.class.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    status = db.Column(db.String(20), nullable=False, default=PRINT_RUN_PENDING)
+    task_id = db.Column(db.String(64), nullable=True)
+    total_students = db.Column(db.Integer, nullable=False, default=0)
+    generated_count = db.Column(db.Integer, nullable=False, default=0)
+    error_message = db.Column(db.Text, nullable=True)
+    minio_bucket = db.Column(db.String(100), nullable=True)
+    minio_object_name = db.Column(db.String(500), nullable=True)
+    answer_sheet_map = db.Column(db.JSON, nullable=True)
+    created_by = db.Column(db.String, db.ForeignKey("public.users.id"), nullable=False)
+    created_at = db.Column(db.TIMESTAMP, server_default=db.text("CURRENT_TIMESTAMP"))
+    started_at = db.Column(db.TIMESTAMP, nullable=True)
+    finished_at = db.Column(db.TIMESTAMP, nullable=True)

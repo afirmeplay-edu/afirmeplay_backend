@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Cria as tabelas da avaliação escrita do Afirme Ler nos schemas city_* JÁ EXISTENTES:
-reading_written_test, reading_written_test_question e reading_written_test_class
-(CREATE TABLE IF NOT EXISTS). Em schemas que já têm parte delas, cria só as que faltam.
+reading_written_test, reading_written_test_question, reading_written_test_class e
+reading_written_test_print_run (CREATE TABLE IF NOT EXISTS). Em schemas que já têm parte delas,
+cria só as que faltam.
 
 Não toca reading_evaluation nem as demais tabelas da fluência.
 Municípios novos já recebem as tabelas pelo provisionamento (city_schema_service).
@@ -17,7 +18,7 @@ Uso (na raiz do repositório):
   python migrations_multitenant/provision_afirme_ler_written_tests.py --rollback
   python migrations_multitenant/provision_afirme_ler_written_tests.py --rollback --execute
 
---rollback apaga as três tabelas (e os dados delas) nos schemas escolhidos.
+--rollback apaga as quatro tabelas (e os dados delas) nos schemas escolhidos.
 
 Requer DATABASE_URL em app/.env (ou no ambiente). DATABASE_URL_LEITURA não é usada.
 """

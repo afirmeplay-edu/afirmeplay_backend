@@ -45,15 +45,48 @@ Definido pelo perfil de quem cria, igual ao Afirme Play. O frontend **não** env
 O município usado para `CITY` é o do contexto da requisição (token, ou header do admin). Admin sem
 município no contexto vê `GLOBAL` e as próprias `PRIVATE`.
 
-### Regras da questão do Afirme Ler
+### Tipos de questão do Afirme Ler
 
-1. Só o tipo `multipleChoice` (múltipla escolha). A prova será aplicada no papel e corrigida por cartão-resposta.
-2. De 2 a 8 alternativas (letras A a H), cada uma com texto ou imagem.
-3. **Exatamente uma** alternativa com `isCorrect: true`.
-4. O gabarito (`correct_answer` / `solution`) é calculado pelo backend e gravado como a **letra** da
+A prova será aplicada no papel e terá cartão-resposta. Ditado e produção escrita não têm campo de
+resposta na prova; o aluno responde no cartão (linha para a palavra ditada e área para o bilhete).
+
+| `type` (canônico) | Aliases aceitos na entrada | Alternativas (`options`) | Gabarito (`correct_answer`) |
+|---|---|---|---|
+| `multipleChoice` (múltipla escolha) | `multiple_choice` | Obrigatórias: 2 a 8 | Letra da alternativa correta |
+| `dictation` (ditado) | `ditado` | **Não pode** enviar | A palavra ditada (`dictatedWord`) |
+| `text_production` (produção escrita, ex.: bilhete) | `producao_textual`, `produção textual`, `bilhete` | **Não pode** enviar | Nenhum (`null` no banco) |
+
+Os aliases não diferenciam maiúsculas (`Ditado`, `Bilhete`…). O backend grava sempre o nome canônico.
+Qualquer outro tipo (ex.: `essay`, `ligar_colunas`) é recusado.
+
+### Regras por tipo
+
+**`multipleChoice`**
+
+1. De 2 a 8 alternativas (letras A a H), cada uma com texto ou imagem.
+2. **Exatamente uma** alternativa com `isCorrect: true`.
+3. O gabarito (`correct_answer` / `solution`) é calculado pelo backend e gravado como a **letra** da
    alternativa correta (`A`, `B`, `C`…), pela posição dela na lista. Vale na criação e na edição.
-   O campo `solution` enviado pelo frontend é ignorado.
-5. Pontuação: `value`. Se não vier, grava `1`. Se vier, tem que ser número maior que zero.
+   O campo `solution` enviado pelo frontend é ignorado. `dictatedWord`, se vier, é ignorado.
+
+**`dictation` (ditado)**
+
+1. `text` é a instrução (ex.: "Escreva a palavra que o aplicador vai ditar").
+2. `dictatedWord` é obrigatório: a palavra que o aplicador dita. É gravada em `correct_answer`, sem os
+   espaços das pontas e sem mudar maiúsculas/minúsculas.
+3. `dictatedWord` tem que ser **uma** palavra (sem espaços no meio) com no máximo 40 caracteres.
+4. Sem alternativas: `options` ausente, `null` ou `[]`. Qualquer outro valor é erro.
+
+**`text_production` (produção escrita)**
+
+1. `text` é o comando da produção (ex.: "Escreva um bilhete…").
+2. Sem alternativas (mesma regra do ditado) e sem gabarito: `correct_answer` fica `null` no banco.
+3. `formattedSolution` (opcional) guarda os critérios de correção para o professor.
+
+**Todos os tipos**
+
+- Pontuação: `value`. Se não vier, grava `1`. Se vier, tem que ser número maior que zero.
+- `subjectId`, `grade` e `educationStageId` seguem as mesmas regras (ver tabela do corpo).
 
 ### Formato de erro
 
@@ -116,12 +149,17 @@ Todas as rotas devolvem a questão neste formato (o mesmo do Afirme Play, mais `
   "updatedAt": "2026-10-23T11:00:00",
   "lastModifiedBy": null,
   "origin": "afirme_ler",
-  "scopeType": "PRIVATE"
+  "scopeType": "PRIVATE",
+  "dictatedWord": null
 }
 ```
 
 Observações:
 
+- `dictatedWord` é a palavra ditada (igual a `correct_answer`) quando `type = "dictation"`; nos outros
+  tipos vem `null`.
+- Em `dictation` e `text_production`, `alternatives` e `options` vêm `[]`. Em `text_production`,
+  `correct_answer` e `solution` vêm `""` (o banco guarda `null`; o formatter do Play troca por `""`).
 - `alternatives` e `options` são o mesmo array. Cada alternativa volta só com `id`, `text`, `isCorrect`
   e, se houver, `image` (`{ "id", "type", "width", "height", "minio_bucket", "minio_object_name", "imageUrl" }`,
   com `imageUrl = "/questions/<questionId>/images/<imageId>"`).
@@ -148,7 +186,7 @@ Mesmo corpo do `POST /questions` do Afirme Play. `createdBy` **não** é enviado
 | `text` | string | Sim | Enunciado simples. Não pode ser vazio |
 | `formattedText` | string (HTML) | Não | Imagens em base64 (`data:image/...`) são enviadas ao MinIO |
 | `secondStatement` | string | Não | Texto de apoio |
-| `type` | string | Sim | Só `multipleChoice` (aceita também `multiple_choice`; grava `multipleChoice`) |
+| `type` | string | Sim | `multipleChoice`, `dictation` ou `text_production` (ou os aliases da tabela de tipos; grava o nome canônico) |
 | `subjectId` | string | Sim | Id de `public.subject`. Precisa existir |
 | `grade` | string (UUID) ou `{ "id": "<uuid>" }` | Sim | Id de `public.grade`. Precisa existir |
 | `educationStageId` | string (UUID) | Não | Id de `public.education_stage`. Se enviado, precisa existir. `""` vira `null` |
@@ -156,8 +194,9 @@ Mesmo corpo do `POST /questions` do Afirme Play. `createdBy` **não** é enviado
 | `skills` | string (UUID) ou array | Não | Se vier array, só o primeiro é gravado |
 | `value` | number | Não | Maior que zero. Se não vier: `1` |
 | `topics` | array | Não | Livre |
-| `options` | array | Sim | Ver regras acima: 2 a 8 alternativas, exatamente uma com `isCorrect: true` |
-| `formattedSolution` | string (HTML) | Não | Resolução comentada |
+| `options` | array | Só em `multipleChoice` | `multipleChoice`: 2 a 8 alternativas, exatamente uma com `isCorrect: true`. `dictation` e `text_production`: não enviar (ou `null`/`[]`) |
+| `dictatedWord` | string | Só em `dictation` | Uma palavra, sem espaços no meio, até 40 caracteres. Gravada em `correct_answer`. Ignorada nos outros tipos |
+| `formattedSolution` | string (HTML) | Não | Resolução comentada. Em `text_production`: critérios de correção para o professor |
 | `number`, `title`, `description`, `command`, `subtitle` | — | Não | Mesmos campos opcionais do Play |
 
 Cada alternativa em `options`:
@@ -169,7 +208,7 @@ Cada alternativa em `options`:
 | `image` | string (data-URL/base64) ou objeto | Opcional. É enviada ao MinIO |
 | `isCorrect` | boolean | `true` em exatamente uma. Precisa ser booleano (`true`/`false`, não `"true"`) |
 
-### Exemplo
+### Exemplo (múltipla escolha)
 
 ```http
 POST /afirme-reading/questions
@@ -195,9 +234,72 @@ Content-Type: application/json
 }
 ```
 
-### Resposta `201`
+Resposta `201`: Objeto Questão (seção acima), com `origin: "afirme_ler"`, `version: 1`,
+`correct_answer: "C"`, `value: 1.0`.
 
-Objeto Questão (seção acima), com `origin: "afirme_ler"`, `version: 1`, `correct_answer: "C"`, `value: 1.0`.
+### Exemplo (ditado)
+
+```json
+{
+  "text": "Escreva a palavra que o aplicador vai ditar.",
+  "type": "dictation",
+  "subjectId": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+  "grade": "5600f4b8-af7e-429d-b03c-f7886c046b39",
+  "dictatedWord": "borboleta",
+  "value": 1
+}
+```
+
+Resposta `201` (trecho; os demais campos seguem o Objeto Questão):
+
+```json
+{
+  "id": "8b0e6c1a-2f7d-4f0e-9b1c-3d5a7e9f1a2b",
+  "text": "Escreva a palavra que o aplicador vai ditar.",
+  "type": "dictation",
+  "alternatives": [],
+  "options": [],
+  "solution": "borboleta",
+  "correct_answer": "borboleta",
+  "dictatedWord": "borboleta",
+  "value": 1.0,
+  "version": 1,
+  "origin": "afirme_ler",
+  "scopeType": "PRIVATE"
+}
+```
+
+### Exemplo (produção escrita / bilhete)
+
+```json
+{
+  "text": "Escreva um bilhete para a sua professora convidando-a para a festa da turma.",
+  "type": "text_production",
+  "subjectId": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+  "grade": "5600f4b8-af7e-429d-b03c-f7886c046b39",
+  "formattedSolution": "<p>Tem destinatário, mensagem, despedida e assinatura.</p>"
+}
+```
+
+Resposta `201` (trecho):
+
+```json
+{
+  "id": "c4d2a9e7-1b3f-4a6c-8e0d-5f7b9a1c3e5d",
+  "text": "Escreva um bilhete para a sua professora convidando-a para a festa da turma.",
+  "type": "text_production",
+  "alternatives": [],
+  "options": [],
+  "solution": "",
+  "correct_answer": "",
+  "formattedSolution": "<p>Tem destinatário, mensagem, despedida e assinatura.</p>",
+  "dictatedWord": null,
+  "value": 1.0,
+  "version": 1,
+  "origin": "afirme_ler",
+  "scopeType": "PRIVATE"
+}
+```
 
 ### Erros
 
@@ -206,8 +308,14 @@ Objeto Questão (seção acima), com `origin: "afirme_ler"`, `version: 1`, `corr
 | 400 | `Corpo da requisição inválido.` |
 | 400 | `text é obrigatório.` / `type é obrigatório.` / `subjectId é obrigatório.` / `grade é obrigatório.` |
 | 400 | `grade deve ser o UUID de uma série.` / `educationStageId deve ser um UUID.` |
-| 400 | `No Afirme Ler só é permitido o tipo multipleChoice (múltipla escolha).` |
-| 400 | `options é obrigatório e deve ser uma lista de alternativas.` |
+| 400 | `Tipo de questão inválido no Afirme Ler. Tipos permitidos: multipleChoice (múltipla escolha), dictation (ditado) e text_production (produção escrita).` |
+| 400 | `dictatedWord é obrigatório para questões de ditado (dictation).` |
+| 400 | `dictatedWord deve ser um texto.` |
+| 400 | `dictatedWord deve ser uma única palavra, sem espaços.` |
+| 400 | `dictatedWord deve ter no máximo 40 caracteres.` |
+| 400 | `Questão de ditado (dictation) não tem alternativas. Não envie options.` |
+| 400 | `Questão de produção escrita (text_production) não tem alternativas. Não envie options.` |
+| 400 | `options é obrigatório e deve ser uma lista de alternativas.` (só `multipleChoice`) |
 | 400 | `Informe pelo menos 2 alternativas.` / `Informe no máximo 8 alternativas (letras A a H).` |
 | 400 | `A alternativa B deve ser um objeto.` / `A alternativa B precisa de texto ou imagem.` |
 | 400 | `isCorrect da alternativa B deve ser true ou false.` |
@@ -235,7 +343,7 @@ Lista as questões **visíveis ao usuário** (escopo), das duas origens, mais re
 |---|---|---|---|
 | `page` | int | `1` | Maior que zero |
 | `per_page` | int | `10` | Maior que zero; máximo `100` (acima disso vira 100) |
-| `type` | string | — | `multipleChoice` (ou `multiple_choice`) traz as duas grafias gravadas no banco; outros valores filtram exato |
+| `type` | string | — | `multipleChoice` (ou `multiple_choice`) traz as duas grafias gravadas no banco. `dictation`/`ditado` e `text_production`/`producao_textual`/`produção textual`/`bilhete` filtram pelo nome canônico. Outros valores filtram exato |
 | `subject_id` | string | — | Id da disciplina |
 | `grade_id` | string (UUID) | — | Id da série |
 | `difficulty` | string | — | Igualdade exata (ex.: `Básico`) |
@@ -243,7 +351,8 @@ Lista as questões **visíveis ao usuário** (escopo), das duas origens, mais re
 | `q` | string | — | Busca no enunciado (`text` e `formattedText`), sem diferenciar maiúsculas |
 
 Observação: questões do Play de outros tipos (ex.: `ligar_colunas`) também aparecem se não houver filtro
-de `type`. Para montar a prova do Afirme Ler, use `type=multipleChoice`.
+de `type`. Para montar a prova do Afirme Ler, filtre por `type=multipleChoice`, `type=dictation` ou
+`type=text_production`.
 
 ### Exemplo
 
@@ -322,8 +431,14 @@ Perfis: `admin`, `tecadm`, `professor`, `coordenador`, `diretor`.
 - Atualização **parcial**: envie só os campos que mudam (mesmos campos e regras da criação).
   Campos ausentes ficam como estão.
 - Se `options` vier, substitui a lista inteira de alternativas.
-- Tipo e gabarito são **revalidados** no estado final (mesmo sem enviar `options`), e `correct_answer`
-  é recalculado como letra.
+- Tipo, alternativas e gabarito são **revalidados** no estado final, pelas regras do tipo final
+  (mesmo sem enviar `options` ou `dictatedWord`):
+  - final `multipleChoice`: usa `options` enviado ou as alternativas atuais; `correct_answer` é
+    recalculado como letra. Vindo de `dictation`/`text_production` (sem alternativas), `options` é obrigatório;
+  - final `dictation`: usa `dictatedWord` enviado ou, se a questão já era ditado, a palavra atual.
+    Vindo de outro tipo, `dictatedWord` é obrigatório. As alternativas são limpas (`[]`);
+  - final `text_production`: alternativas limpas (`[]`) e `correct_answer` = `null`.
+- Trocar o tipo é permitido.
 - `version` sobe 1 a cada edição. `lastModifiedBy` passa a ser o usuário do token.
 - `scopeType`, `origin` e `createdBy` não mudam.
 
@@ -340,9 +455,16 @@ Perfis: `admin`, `tecadm`, `professor`, `coordenador`, `diretor`.
 }
 ```
 
+Trocar uma múltipla escolha por ditado:
+
+```json
+{ "type": "dictation", "dictatedWord": "sapato" }
+```
+
 ### Resposta `200`
 
-Objeto Questão atualizado (`correct_answer: "B"`, `version` incrementada).
+Objeto Questão atualizado (no primeiro exemplo `correct_answer: "B"`; no segundo `type: "dictation"`,
+`options: []`, `correct_answer` e `dictatedWord` = `"sapato"`), com `version` incrementada.
 
 ### Erros
 

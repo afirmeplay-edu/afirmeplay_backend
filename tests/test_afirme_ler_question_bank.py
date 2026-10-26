@@ -244,9 +244,216 @@ def test_ler_rejects_invalid_gabarito(options, message):
         bank.parse_create_payload(_payload(options=options))
 
 
-def test_ler_rejects_non_multiple_choice():
-    with pytest.raises(ValueError, match="multipleChoice"):
-        bank.parse_create_payload(_payload(type="essay"))
+@pytest.mark.parametrize("question_type", ["essay", "ligar_colunas", "trueFalse"])
+def test_ler_rejects_other_types(question_type):
+    with pytest.raises(
+        ValueError,
+        match="Tipos permitidos: multipleChoice .*, dictation .* e text_production",
+    ):
+        bank.parse_create_payload(_payload(type=question_type))
+
+
+def test_ler_multiple_choice_ignores_dictated_word():
+    fields = bank.parse_create_payload(_payload(dictatedWord="casa"))
+    assert fields["question_type"] == "multipleChoice"
+    assert fields["correct_answer"] == "C"
+    assert len(fields["alternatives"]) == 4
+
+
+# ---------------------------------------------------------------------------
+# Ditado (dictation) e produção escrita (text_production)
+# ---------------------------------------------------------------------------
+
+def _dictation_payload(**overrides):
+    data = {
+        "text": "Escreva a palavra que o aplicador vai ditar.",
+        "type": "dictation",
+        "subjectId": SUBJECT_ID,
+        "grade": str(GRADE_ID),
+        "dictatedWord": "  borboleta  ",
+    }
+    data.update(overrides)
+    return data
+
+
+def _text_production_payload(**overrides):
+    data = {
+        "text": "Escreva um bilhete para a sua professora convidando-a para a festa da turma.",
+        "type": "text_production",
+        "subjectId": SUBJECT_ID,
+        "grade": str(GRADE_ID),
+        "formattedSolution": "<p>Tem destinatário, mensagem, despedida e assinatura.</p>",
+    }
+    data.update(overrides)
+    return data
+
+
+@pytest.mark.parametrize(
+    "raw, canonical",
+    [
+        ("dictation", "dictation"),
+        ("ditado", "dictation"),
+        ("Ditado", "dictation"),
+        ("text_production", "text_production"),
+        ("producao_textual", "text_production"),
+        ("Produção textual", "text_production"),
+        ("bilhete", "text_production"),
+        ("multiple_choice", "multipleChoice"),
+    ],
+)
+def test_ler_type_aliases_store_canonical_name(raw, canonical):
+    assert bank.normalize_ler_question_type(raw) == canonical
+
+
+def test_ler_create_dictation_stores_word_as_answer(flask_app):
+    question = QuestionBankService.create(PROFESSOR, _dictation_payload(type="ditado", value=2))
+
+    stored = db.session.get(Question, question.id)
+    assert stored.question_type == "dictation"
+    assert stored.correct_answer == "borboleta"
+    assert stored.alternatives == []
+    assert stored.value == 2.0
+    assert stored.origin == "afirme_ler"
+
+    body = bank.to_response(question)
+    assert body["type"] == "dictation"
+    assert body["dictatedWord"] == "borboleta"
+    assert body["correct_answer"] == "borboleta"
+    assert body["options"] == []
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"dictatedWord": None}, "dictatedWord é obrigatório"),
+        ({"dictatedWord": "   "}, "dictatedWord é obrigatório"),
+        ({"dictatedWord": 123}, "dictatedWord deve ser um texto"),
+        ({"dictatedWord": "bola azul"}, "uma única palavra"),
+        ({"dictatedWord": "a" * 41}, "no máximo 40 caracteres"),
+        ({"options": _options()}, "ditado \\(dictation\\) não tem alternativas"),
+    ],
+)
+def test_ler_rejects_invalid_dictation(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        bank.parse_create_payload(_dictation_payload(**overrides))
+
+
+def test_ler_dictation_without_word_key_is_rejected():
+    data = _dictation_payload()
+    del data["dictatedWord"]
+    with pytest.raises(ValueError, match="dictatedWord é obrigatório"):
+        bank.parse_create_payload(data)
+
+
+def test_ler_dictation_accepts_word_with_40_chars_and_empty_options():
+    fields = bank.parse_create_payload(_dictation_payload(dictatedWord="b" * 40, options=[]))
+    assert fields["correct_answer"] == "b" * 40
+    assert fields["alternatives"] == []
+
+
+def test_ler_create_text_production_without_answer(flask_app):
+    question = QuestionBankService.create(PROFESSOR, _text_production_payload(type="bilhete"))
+
+    stored = db.session.get(Question, question.id)
+    assert stored.question_type == "text_production"
+    assert stored.correct_answer is None
+    assert stored.alternatives == []
+    assert stored.value == 1.0
+    assert stored.formatted_solution.startswith("<p>Tem destinatário")
+
+    body = bank.to_response(question)
+    assert body["type"] == "text_production"
+    assert body["dictatedWord"] is None
+
+
+def test_ler_rejects_text_production_with_options():
+    with pytest.raises(ValueError, match="produção escrita \\(text_production\\) não tem alternativas"):
+        bank.parse_create_payload(_text_production_payload(options=_options()))
+
+
+def test_ler_create_route_returns_400_for_invalid_dictation(flask_app):
+    from app.afirme_ler.routes import questions_routes
+
+    response, status = _call_play_view(
+        questions_routes, "create_bank_question", PROFESSOR,
+        path="/afirme-reading/questions", method="POST",
+        json=_dictation_payload(dictatedWord="bola azul"),
+    )
+    assert status == 400
+    assert response.get_json() == {
+        "error": "dictatedWord deve ser uma única palavra, sem espaços."
+    }
+
+
+def test_ler_update_multiple_choice_to_dictation(flask_app):
+    question = QuestionBankService.create(PROFESSOR, _payload())
+
+    with pytest.raises(ValueError, match="dictatedWord é obrigatório"):
+        QuestionBankService.update(PROFESSOR, question.id, {"type": "dictation"})
+    db.session.rollback()
+
+    updated = QuestionBankService.update(
+        PROFESSOR, question.id, {"type": "ditado", "dictatedWord": "sapato"}
+    )
+    assert updated.question_type == "dictation"
+    assert updated.correct_answer == "sapato"
+    assert updated.alternatives == []
+    assert updated.version == 2
+
+
+def test_ler_update_dictation_keeps_word_and_rejects_options(flask_app):
+    question = QuestionBankService.create(PROFESSOR, _dictation_payload())
+
+    updated = QuestionBankService.update(PROFESSOR, question.id, {"text": "Escreva a palavra ditada."})
+    assert updated.correct_answer == "borboleta"
+
+    updated = QuestionBankService.update(PROFESSOR, question.id, {"dictatedWord": "janela"})
+    assert updated.correct_answer == "janela"
+
+    with pytest.raises(ValueError, match="não tem alternativas"):
+        QuestionBankService.update(PROFESSOR, question.id, {"options": _options()})
+    db.session.rollback()
+
+
+def test_ler_update_dictation_to_multiple_choice_requires_options(flask_app):
+    question = QuestionBankService.create(PROFESSOR, _dictation_payload())
+
+    with pytest.raises(ValueError, match="options é obrigatório"):
+        QuestionBankService.update(PROFESSOR, question.id, {"type": "multipleChoice"})
+    db.session.rollback()
+
+    updated = QuestionBankService.update(
+        PROFESSOR, question.id,
+        {"type": "multipleChoice", "options": _options(correct_index=1)},
+    )
+    assert updated.question_type == "multipleChoice"
+    assert updated.correct_answer == "B"
+    assert len(updated.alternatives) == 4
+
+
+def test_ler_update_dictation_to_text_production_clears_answer(flask_app):
+    question = QuestionBankService.create(PROFESSOR, _dictation_payload())
+
+    updated = QuestionBankService.update(PROFESSOR, question.id, {"type": "producao_textual"})
+    assert updated.question_type == "text_production"
+    assert updated.correct_answer is None
+    assert updated.alternatives == []
+
+
+def test_ler_list_filters_by_new_types(flask_app):
+    dictation = QuestionBankService.create(ADMIN, _dictation_payload())
+    production = QuestionBankService.create(ADMIN, _text_production_payload())
+
+    def ids(type_filter):
+        result = QuestionBankService.list_questions(ADMIN, {"type": type_filter})
+        return sorted(q["id"] for q in result["data"])
+
+    assert ids("dictation") == [dictation.id]
+    assert ids("ditado") == [dictation.id]
+    assert ids("text_production") == [production.id]
+    assert ids("bilhete") == [production.id]
+    assert ids("Produção textual") == [production.id]
+    assert ids("multipleChoice") == ["ler-1", "play-1"]
 
 
 def test_ler_rejects_aplicador_on_write():

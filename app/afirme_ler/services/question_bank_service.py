@@ -21,7 +21,28 @@ from app.afirme_ler.services.scope_service import (
 )
 
 QUESTION_TYPE_MULTIPLE_CHOICE = "multipleChoice"
+QUESTION_TYPE_DICTATION = "dictation"
+QUESTION_TYPE_TEXT_PRODUCTION = "text_production"
+LER_QUESTION_TYPES = (
+    QUESTION_TYPE_MULTIPLE_CHOICE,
+    QUESTION_TYPE_DICTATION,
+    QUESTION_TYPE_TEXT_PRODUCTION,
+)
 OBJECTIVE_DB_TYPES = ("multipleChoice", "multiple_choice")
+
+# Chaves já passadas por normalize_question_type (minúsculas, espaço/hífen → "_").
+DICTATION_ALIASES = {"dictation", "ditado"}
+TEXT_PRODUCTION_ALIASES = {
+    "text_production",
+    "producao_textual",
+    "produção_textual",
+    "bilhete",
+}
+TYPE_LABELS = {
+    QUESTION_TYPE_DICTATION: "ditado (dictation)",
+    QUESTION_TYPE_TEXT_PRODUCTION: "produção escrita (text_production)",
+}
+MAX_DICTATED_WORD_LENGTH = 40
 
 WRITE_ROLES = (
     Roles.ADMIN,
@@ -63,14 +84,29 @@ def assert_can_write(user: Dict[str, Any]) -> None:
         raise PermissionError("Seu perfil não pode cadastrar ou editar questões.")
 
 
+def canonical_ler_question_type(value: Any) -> Optional[str]:
+    """Nome canônico do tipo no Afirme Ler, ou None se não for um tipo do Ler."""
+    key = normalize_question_type(value)
+    if key in OBJECTIVE_TYPES:
+        return QUESTION_TYPE_MULTIPLE_CHOICE
+    if key in DICTATION_ALIASES:
+        return QUESTION_TYPE_DICTATION
+    if key in TEXT_PRODUCTION_ALIASES:
+        return QUESTION_TYPE_TEXT_PRODUCTION
+    return None
+
+
 def normalize_ler_question_type(value: Any) -> str:
     if value is None or not str(value).strip():
         raise ValueError("type é obrigatório.")
-    if normalize_question_type(value) not in OBJECTIVE_TYPES:
+    canonical = canonical_ler_question_type(value)
+    if canonical is None:
         raise ValueError(
-            "No Afirme Ler só é permitido o tipo multipleChoice (múltipla escolha)."
+            "Tipo de questão inválido no Afirme Ler. Tipos permitidos: "
+            "multipleChoice (múltipla escolha), dictation (ditado) e "
+            "text_production (produção escrita)."
         )
-    return QUESTION_TYPE_MULTIPLE_CHOICE
+    return canonical
 
 
 def _alternative_has_content(alt: Dict[str, Any]) -> bool:
@@ -128,6 +164,53 @@ def validate_ler_alternatives(options: Any) -> Tuple[List[Dict[str, Any]], str]:
     if len(correct_indexes) != 1:
         raise ValueError("Marque exatamente uma alternativa correta (isCorrect: true).")
     return normalized, LETTERS[correct_indexes[0]]
+
+
+def parse_dictated_word(value: Any) -> str:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError("dictatedWord é obrigatório para questões de ditado (dictation).")
+    if not isinstance(value, str):
+        raise ValueError("dictatedWord deve ser um texto.")
+    word = value.strip()
+    if any(char.isspace() for char in word):
+        raise ValueError("dictatedWord deve ser uma única palavra, sem espaços.")
+    if len(word) > MAX_DICTATED_WORD_LENGTH:
+        raise ValueError(
+            f"dictatedWord deve ter no máximo {MAX_DICTATED_WORD_LENGTH} caracteres."
+        )
+    return word
+
+
+def _assert_without_options(question_type: str, options: Any) -> None:
+    if options is None or options == [] or options == "":
+        return
+    raise ValueError(
+        f"Questão de {TYPE_LABELS[question_type]} não tem alternativas. Não envie options."
+    )
+
+
+def resolve_answer_fields(
+    question_type: str,
+    data: Dict[str, Any],
+    current_alternatives: Any = None,
+    current_dictated_word: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """
+    Alternativas e gabarito do estado final, pelas regras do tipo.
+
+    multipleChoice: alternativas validadas e letra. dictation: sem alternativas,
+    gabarito = palavra ditada. text_production: sem alternativas e sem gabarito.
+    """
+    if question_type == QUESTION_TYPE_MULTIPLE_CHOICE:
+        options = data["options"] if "options" in data else current_alternatives
+        return validate_ler_alternatives(options)
+
+    if "options" in data:
+        _assert_without_options(question_type, data.get("options"))
+    if question_type == QUESTION_TYPE_DICTATION:
+        word = data["dictatedWord"] if "dictatedWord" in data else current_dictated_word
+        return [], parse_dictated_word(word)
+    return [], None
 
 
 def parse_value(value: Any) -> float:
@@ -195,9 +278,9 @@ def parse_create_payload(data: Any) -> Dict[str, Any]:
         "skill": parse_skill(data.get("skills")),
         "value": parse_value(data.get("value")),
     }
-    alternatives, letter = validate_ler_alternatives(data.get("options"))
+    alternatives, answer = resolve_answer_fields(fields["question_type"], data)
     fields["alternatives"] = alternatives
-    fields["correct_answer"] = letter
+    fields["correct_answer"] = answer
 
     for key, column in _OPTIONAL_FIELDS.items():
         if key in data:
@@ -224,13 +307,21 @@ def apply_update_payload(question: Any, data: Any) -> None:
         if key in data:
             setattr(question, column, _optional_value(key, data.get(key)))
 
-    question.question_type = normalize_ler_question_type(
-        data["type"] if "type" in data else question.question_type
+    previous_type = question.question_type
+    final_type = normalize_ler_question_type(
+        data["type"] if "type" in data else previous_type
     )
-    options = data["options"] if "options" in data else question.alternatives
-    alternatives, letter = validate_ler_alternatives(options)
+    alternatives, answer = resolve_answer_fields(
+        final_type,
+        data,
+        current_alternatives=question.alternatives,
+        current_dictated_word=(
+            question.correct_answer if previous_type == QUESTION_TYPE_DICTATION else None
+        ),
+    )
+    question.question_type = final_type
     question.alternatives = alternatives
-    question.correct_answer = letter
+    question.correct_answer = answer
 
 
 def _assert_references_exist(subject_id: Optional[str], grade_id: Optional[uuid.UUID],
@@ -283,6 +374,11 @@ def to_response(question: Question) -> Dict[str, Any]:
     data = format_question_response(question)
     data["origin"] = question.origin
     data["scopeType"] = question.scope_type
+    data["dictatedWord"] = (
+        question.correct_answer
+        if question.question_type == QUESTION_TYPE_DICTATION
+        else None
+    )
     return data
 
 
@@ -311,8 +407,11 @@ class QuestionBankService:
 
         question_type = (filters.get("type") or "").strip()
         if question_type:
-            if normalize_question_type(question_type) in OBJECTIVE_TYPES:
+            canonical = canonical_ler_question_type(question_type)
+            if canonical == QUESTION_TYPE_MULTIPLE_CHOICE:
                 query = query.filter(Question.question_type.in_(OBJECTIVE_DB_TYPES))
+            elif canonical:
+                query = query.filter(Question.question_type == canonical)
             else:
                 query = query.filter(Question.question_type == question_type)
 
@@ -405,7 +504,7 @@ class QuestionBankService:
             question.grade_level if "grade" in data else None,
             question.education_stage_id if "educationStageId" in data else None,
         )
-        if any(key in data for key in ("formattedText", "formattedSolution", "options")):
+        if any(key in data for key in ("type", "formattedText", "formattedSolution", "options")):
             _apply_images(question)
 
         question.last_modified_by = _user_id(user)

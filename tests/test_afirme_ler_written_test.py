@@ -6,6 +6,7 @@ Roda em SQLite em memória (schemas "public" e "tenant" anexados); não conecta 
 Execução: python -m pytest tests/test_afirme_ler_written_test.py -q
 """
 import inspect
+import json
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -57,6 +58,8 @@ OTHER_PROFESSOR = {"id": "u-prof2", "role": "professor", "city_id": CITY_ID, "te
 APLICADOR = {"id": "u-apl", "role": "aplicador", "city_id": CITY_ID, "tenant_id": CITY_ID}
 
 MC_IDS = [f"mc-{i:02d}" for i in range(1, 22)]  # 21 múltipla escolha GLOBAL, value 1
+IMG_STATEMENT = "eeeeeeee-0000-4000-8000-0000000000e1"
+IMG_ALTERNATIVE = "eeeeeeee-0000-4000-8000-0000000000e2"
 
 
 def _options():
@@ -120,6 +123,20 @@ def flask_app():
                       correct_answer=None, value=None),
             _question("play-ligar", origin="afirme_play", question_type="ligar_colunas"),
             _question("private-other", scope_type="PRIVATE", owner_user_id="u-prof2"),
+            _question(
+                "mc-img",
+                formatted_text=f'<p>Observe a figura.</p><img src="/questions/mc-img/images/{IMG_STATEMENT}" />',
+                secondstatement="<p>Qual é o animal?</p>",
+                images=[{"id": IMG_STATEMENT, "type": "image/png", "minio_bucket": "question-images",
+                         "minio_object_name": f"mc-img/{IMG_STATEMENT}.png"}],
+                alternatives=[
+                    {"id": "A", "text": "Gato", "isCorrect": True},
+                    {"id": "B", "text": "", "image": {"id": IMG_ALTERNATIVE, "type": "image/png"},
+                     "isCorrect": False},
+                    {"id": "C", "text": "Pato", "isCorrect": False},
+                ],
+                formatted_solution="<p>SOLUCAO-SECRETA</p>",
+            ),
             Subturma(id=SUBTURMA_A1, class_id=CLASS_A1, support_level=1),
             Student(id="st-ana", name="Ana", registration="M001", class_id=CLASS_A1,
                     school_id=SCHOOL_A, grade_id=GRADE_1),
@@ -766,3 +783,160 @@ def test_application_routes(clock):
     )
     assert status == 200
     assert response.get_json() == {"message": "Aplicação da turma retirada com sucesso."}
+
+
+# ---------------------------------------------------------------------------
+# PDF da prova (caderno de questões) — sem gerar PDF de verdade
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from app.afirme_ler.services import written_test_pdf_service as pdf_svc  # noqa: E402
+
+PDF_ORDER = ["mc-img"] + MC_IDS[:17] + ["dict-1", "prod-1"]
+
+
+def _published_for_pdf():
+    written_test = _create(questions=_items(PDF_ORDER))
+    return WrittenTestService.publish(PROFESSOR, written_test.id)
+
+
+class _FakeMinio:
+    def download_file(self, bucket, object_name):
+        return b"\x89PNG-fake"
+
+
+def _pdf_service():
+    from app.services.institutional_test_weasyprint_generator import (
+        InstitutionalTestWeasyPrintGenerator,
+    )
+
+    generator = InstitutionalTestWeasyPrintGenerator()
+    generator._minio_service = _FakeMinio()
+    generator._load_default_logo = lambda: None
+    return pdf_svc.WrittenTestPdfService(generator=generator)
+
+
+def test_pdf_data_order_numbers_and_letters(flask_app):
+    data = pdf_svc.build_pdf_data(_published_for_pdf(), SimpleNamespace(name="Limoeiro", state="AL"))
+
+    assert data["municipality"] == "Limoeiro" and data["state"] == "AL"
+    assert data["grades"] == ["1º ano"]
+    assert data["total_questions"] == 20
+    assert [q["id"] for q in data["questions"]] == PDF_ORDER
+    assert [q["number"] for q in data["questions"]] == list(range(1, 21))
+
+    first = data["questions"][0]
+    assert first["type"] == "multipleChoice"
+    assert first["support_html"] == "<p>Qual é o animal?</p>"
+    assert [a["letter"] for a in first["alternatives"]] == ["A", "B", "C"]
+    assert first["alternatives"][1]["content_html"] == (
+        f'<img src="/questions/mc-img/images/{IMG_ALTERNATIVE}" />'
+    )
+    assert data["questions"][1]["statement_html"] == "<p>Questão mc-01</p>"
+
+
+def test_pdf_data_has_no_answer_key(flask_app):
+    data = pdf_svc.build_pdf_data(_published_for_pdf())
+    dictation, production = data["questions"][18], data["questions"][19]
+
+    assert dictation["type"] == "dictation" and production["type"] == "text_production"
+    for item in (dictation, production):
+        assert item["alternatives"] == [] and item["support_html"] == ""
+        assert item["answer_on_card"] is True
+    expected_keys = {
+        "number", "id", "type", "statement_html", "images", "support_html", "alternatives",
+        "answer_on_card",
+    }
+    assert all(set(q) == expected_keys for q in data["questions"])
+
+    dumped = json.dumps(data, ensure_ascii=False, default=str)
+    for forbidden in ("sapato", "isCorrect", "correct", "solution", "SOLUCAO-SECRETA", "value"):
+        assert forbidden not in dumped
+
+
+def test_pdf_html_prints_questions_without_answer_key(flask_app):
+    service = _pdf_service()
+    data = pdf_svc.build_pdf_data(_published_for_pdf(), SimpleNamespace(name="Limoeiro", state="AL"))
+    html = service.render_html(data)
+
+    assert "Limoeiro" in html and "Avaliação escrita — 1º bimestre" in html
+    assert "Nome do aluno:" in html and "Escola:" in html and "Turma:" in html and "Data:" in html
+    assert html.count('class="question-number"') == 20
+    assert html.count("Responda no cartão-resposta.") == 2
+    assert "<span class=\"alternative-letter\">C)</span>" in html
+    assert "Qual é o animal?" in html
+    assert "data:image/png;base64," in html  # imagens do MinIO embutidas
+    assert "/questions/mc-img/images/" not in html
+    for forbidden in ("sapato", "isCorrect", "SOLUCAO-SECRETA", "Pontuação", "pontos"):
+        assert forbidden not in html
+
+
+def test_pdf_blocks_draft_and_missing_question(flask_app):
+    draft = _create(questions=_items(PDF_ORDER))
+    with pytest.raises(ValueError, match="Só avaliação publicada pode gerar a prova."):
+        pdf_svc.build_pdf_data(draft)
+
+    published = WrittenTestService.publish(PROFESSOR, draft.id)
+    table = Question.__table__
+    db.session.execute(table.delete().where(table.c.id == "dict-1"))
+    db.session.commit()
+    with pytest.raises(ValueError, match="dict-1 \\(posição 19\\) não existe mais"):
+        pdf_svc.build_pdf_data(WrittenTestService.get(published.id))
+
+
+def test_pdf_blocks_type_no_longer_allowed(flask_app):
+    published = _published_for_pdf()
+    db.session.get(Question, "mc-05").question_type = "ligar_colunas"
+    db.session.commit()
+    with pytest.raises(ValueError, match="tipo ligar_colunas, que não é aceito"):
+        pdf_svc.build_pdf_data(WrittenTestService.get(published.id))
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("Avaliação escrita — 1º bimestre", "prova_avaliacao_escrita_1o_bimestre.pdf"),
+        ("Prova/../../etc", "prova_provaetc.pdf"),
+        ("!!!", "prova_avaliacao.pdf"),
+        ("", "prova_avaliacao.pdf"),
+    ],
+)
+def test_pdf_filename_is_safe(title, expected):
+    assert pdf_svc.pdf_filename(title) == expected
+
+
+def test_pdf_route(flask_app):
+    from app.afirme_ler.routes import written_tests_routes as module
+    from app.services.institutional_test_weasyprint_generator import (
+        InstitutionalTestWeasyPrintGenerator,
+    )
+
+    published = _published_for_pdf()
+    city = SimpleNamespace(name="Limoeiro", state="AL", logo_url=None)
+    with patch.object(module, "resolve_context_city", return_value=city), \
+            patch.object(InstitutionalTestWeasyPrintGenerator, "_html_to_pdf_bytes",
+                         return_value=b"%PDF-1.4 fake") as render, \
+            patch.object(InstitutionalTestWeasyPrintGenerator, "_load_default_logo",
+                         return_value=None), \
+            patch.object(InstitutionalTestWeasyPrintGenerator, "_get_minio_service",
+                         return_value=_FakeMinio()):
+        response = _call_view("download_written_test_pdf", APLICADOR, published.id)
+
+        assert response.status_code == 200
+        assert response.mimetype == "application/pdf"
+        assert response.headers["Content-Disposition"] == (
+            "attachment; filename=prova_avaliacao_escrita_1o_bimestre.pdf"
+        )
+        response.direct_passthrough = False
+        assert response.get_data() == b"%PDF-1.4 fake"
+        html = render.call_args.args[0]
+        assert "sapato" not in html and html.count('class="question-number"') == 20
+
+        draft = _create(questions=_items(MC_IDS[:2]))
+        response, status = _call_view("download_written_test_pdf", PROFESSOR, draft.id)
+        assert status == 400
+        assert response.get_json() == {"error": "Só avaliação publicada pode gerar a prova."}
+
+        response, status = _call_view("download_written_test_pdf", PROFESSOR, "nao-existe")
+        assert status == 404

@@ -2,9 +2,9 @@
 
 Base path: `/afirme-reading/written-tests`
 
-Este contrato cobre a criação da avaliação escrita, a definição das questões dela, a publicação e a
-aplicação às turmas (com data de início). PDF da prova, cartão-resposta, respostas de aluno,
-correção e notificações **não existem ainda** e virão em etapas futuras.
+Este contrato cobre a criação da avaliação escrita, a definição das questões dela, a publicação, a
+aplicação às turmas (com data de início) e o PDF da prova (caderno de questões). Cartão-resposta,
+respostas de aluno, correção e notificações **não existem ainda** e virão em etapas futuras.
 
 A avaliação escrita é **outra coisa** que a avaliação de fluência (`/afirme-reading/evaluations`).
 Ela fica em tabelas próprias do município (`reading_written_test`, `reading_written_test_question` e
@@ -30,7 +30,7 @@ de qualquer origem (`afirme_ler` ou `afirme_play`).
 
 | Ação | Perfis |
 |---|---|
-| Listar e ver (`GET`, inclusive turmas e alunos da aplicação) | `admin`, `tecadm`, `professor`, `coordenador`, `diretor`, `aplicador` |
+| Listar e ver (`GET`, inclusive turmas e alunos da aplicação e o PDF da prova) | `admin`, `tecadm`, `professor`, `coordenador`, `diretor`, `aplicador` |
 | Criar, editar, definir questões, publicar, excluir, aplicar e retirar turma | `admin`, `tecadm`, `professor`, `coordenador`, `diretor` (**sem** `aplicador`) |
 
 Quem pode editar, definir questões, publicar, excluir, aplicar e retirar turma de **uma** avaliação:
@@ -558,6 +558,57 @@ estar aplicada.
 
 ---
 
+## 13. PDF da prova (caderno de questões)
+
+`GET /afirme-reading/written-tests/<id>/pdf`
+
+Gera o caderno de questões na hora (A4) e devolve o arquivo. Não grava nada (nem no banco nem no
+armazenamento); chamar de novo gera de novo, já com as questões atuais do banco de questões.
+
+Perfis: todos os do Afirme Ler, **inclusive `aplicador`** (quem imprime/aplica).
+
+### Resposta `200`
+
+- `Content-Type: application/pdf`
+- `Content-Disposition: attachment; filename=prova_<titulo>.pdf` — título sem acentos, minúsculo, com
+  `_` no lugar de espaços (ex.: `prova_avaliacao_escrita_1o_bimestre.pdf`); título sem letras/números
+  vira `prova_avaliacao.pdf`.
+
+No frontend, baixar como blob (a rota exige o header `Authorization`):
+
+```ts
+const res = await api.get(`/afirme-reading/written-tests/${id}/pdf`, { responseType: "blob" });
+```
+
+### Conteúdo do PDF
+
+- **Cabeçalho**: logo do município (se cadastrada; senão a logo Afirme), município/UF, título, séries e
+  linhas em branco para **Nome do aluno**, **Escola**, **Turma** e **Data**.
+- **Instruções**: marcar as respostas e responder o ditado e a produção escrita no cartão-resposta.
+- **Questões** na ordem da avaliação, numeradas de 1 a 20:
+  - `multipleChoice`: enunciado (`formattedText`, ou `text` se vazio), texto de apoio
+    (`secondStatement`), imagens e alternativas `A)`, `B)`, `C)`… com texto e/ou imagem;
+  - `dictation`: número, enunciado e "Responda no cartão-resposta." — **a palavra ditada não é impressa**;
+  - `text_production`: número, comando e "Responda no cartão-resposta.".
+- **Nunca** são impressos: gabarito, `isCorrect`, `formattedSolution`, `dictatedWord`, pontuação.
+- Fonte grande (enunciado e alternativas em 15pt), questão de múltipla escolha não é quebrada entre
+  páginas quando cabe numa página, "Página X de Y" no rodapé.
+
+### Erros
+
+| Status | `error` |
+|---|---|
+| 400 | `Só avaliação publicada pode gerar a prova.` |
+| 400 | `A questão <id> (posição <n>) não existe mais no banco de questões. Não é possível gerar a prova.` |
+| 400 | `A questão <id> é do tipo <tipo>, que não é aceito na avaliação escrita. Tipos permitidos: multipleChoice, dictation e text_production.` |
+| 404 | `Avaliação escrita não encontrada.` |
+| 500 | `Erro interno ao processar a solicitação.` (ex.: falha do gerador de PDF) |
+
+Erros vêm em JSON (`{"error": "..."}`), não em PDF: com `responseType: "blob"`, ler o blob como texto
+para mostrar a mensagem.
+
+---
+
 ## Fluxo sugerido no frontend
 
 1. `POST /written-tests` com título e escopo (séries → escolas → turmas).
@@ -568,3 +619,4 @@ estar aplicada.
 5. Tela de aplicação: `GET /written-tests/<id>/classes`, escolher turmas e data, `POST /written-tests/<id>/apply`.
    Turmas `agendada` podem ser reaplicadas (nova data) ou retiradas; `em_andamento`/`encerrada` não.
 6. Lista de alunos de uma turma: `GET /written-tests/<id>/classes/<classId>/students`.
+7. Botão "Baixar prova (PDF)" em avaliação publicada: `GET /written-tests/<id>/pdf`.

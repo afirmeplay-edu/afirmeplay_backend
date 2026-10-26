@@ -2,9 +2,10 @@
 """Rotas da avaliação escrita do Afirme Ler (/afirme-reading/written-tests)."""
 from __future__ import annotations
 
+import io
 import logging
 
-from flask import jsonify, request
+from flask import jsonify, request, send_file
 from flask_jwt_extended import jwt_required
 
 from app import db
@@ -13,6 +14,11 @@ from app.entitlements import require_feature
 from app.permissions import get_current_user_from_token, role_required
 from app.afirme_ler.routes import AFIRME_LER_ROLES, bp
 from app.afirme_ler.services.question_bank_service import WRITE_ROLES
+from app.afirme_ler.services.written_test_pdf_service import (
+    WrittenTestPdfService,
+    pdf_filename,
+    resolve_context_city,
+)
 from app.afirme_ler.services.written_test_service import WrittenTestService, to_detail
 
 
@@ -209,6 +215,30 @@ def remove_written_test_class(written_test_id, class_id):
     except Exception as error:
         db.session.rollback()
         return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/pdf", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def download_written_test_pdf(written_test_id):
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        written_test = WrittenTestService.get(written_test_id)
+        pdf_bytes = WrittenTestPdfService().generate_pdf(written_test, resolve_context_city())
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=pdf_filename(written_test.title),
+        max_age=0,
+    )
 
 
 @bp.route("/written-tests/<written_test_id>/publish", methods=["POST"])

@@ -143,6 +143,74 @@ def set_written_test_questions(written_test_id):
         return _handle_service_error(error)
 
 
+@bp.route("/written-tests/<written_test_id>/apply", methods=["POST"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*WRITE_ROLES)
+@requires_city_context
+def apply_written_test(written_test_id):
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    data = _json_body()
+    if data is None:
+        return _error_response("Corpo da requisição inválido.", 400)
+    try:
+        return jsonify(WrittenTestService.apply(user, written_test_id, data)), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/classes", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def list_written_test_classes(written_test_id):
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        return jsonify(WrittenTestService.list_classes(written_test_id)), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/classes/<class_id>/students", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def list_written_test_class_students(written_test_id, class_id):
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        return jsonify(WrittenTestService.list_students(written_test_id, class_id)), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/classes/<class_id>", methods=["DELETE"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*WRITE_ROLES)
+@requires_city_context
+def remove_written_test_class(written_test_id, class_id):
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        WrittenTestService.remove_class(user, written_test_id, class_id)
+        return jsonify({"message": "Aplicação da turma retirada com sucesso."}), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
 @bp.route("/written-tests/<written_test_id>/publish", methods=["POST"])
 @jwt_required()
 @require_feature("afirme_reading")

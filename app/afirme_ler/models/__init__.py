@@ -12,7 +12,11 @@ from .reading_guided_auto_word import ReadingGuidedAutoWord
 from .reading_guided_auto_comprehension_answer import ReadingGuidedAutoComprehensionAnswer
 from .reading_fluency_session import ReadingFluencySession
 from .reading_fluency_comprehension_answer import ReadingFluencyComprehensionAnswer
-from .reading_written_test import ReadingWrittenTest, ReadingWrittenTestQuestion
+from .reading_written_test import (
+    ReadingWrittenTest,
+    ReadingWrittenTestClass,
+    ReadingWrittenTestQuestion,
+)
 
 __all__ = [
     "ReadingText",
@@ -30,4 +34,5 @@ __all__ = [
     "ReadingFluencyComprehensionAnswer",
     "ReadingWrittenTest",
     "ReadingWrittenTestQuestion",
+    "ReadingWrittenTestClass",
 ]

@@ -2,13 +2,13 @@
 
 Base path: `/afirme-reading/written-tests`
 
-Este contrato cobre **somente** a criação da avaliação escrita e a definição das questões dela, com
-publicação. Aplicação às turmas, datas de aplicação, PDF da prova, cartão-resposta e correção
-**não existem ainda** e virão em etapas futuras.
+Este contrato cobre a criação da avaliação escrita, a definição das questões dela, a publicação e a
+aplicação às turmas (com data de início). PDF da prova, cartão-resposta, respostas de aluno,
+correção e notificações **não existem ainda** e virão em etapas futuras.
 
 A avaliação escrita é **outra coisa** que a avaliação de fluência (`/afirme-reading/evaluations`).
-Ela fica em tabelas próprias do município (`reading_written_test` e `reading_written_test_question`) e
-**não aparece no Afirme Play**.
+Ela fica em tabelas próprias do município (`reading_written_test`, `reading_written_test_question` e
+`reading_written_test_class`) e **não aparece no Afirme Play**.
 
 As questões vêm do banco de questões do Afirme Ler (`/afirme-reading/questions`, ver
 `CONTRATO_QUESTOES.md`): `multipleChoice`, `dictation` (ditado) e `text_production` (produção escrita),
@@ -30,11 +30,11 @@ de qualquer origem (`afirme_ler` ou `afirme_play`).
 
 | Ação | Perfis |
 |---|---|
-| Listar e ver (`GET`) | `admin`, `tecadm`, `professor`, `coordenador`, `diretor`, `aplicador` |
-| Criar, editar, definir questões, publicar e excluir | `admin`, `tecadm`, `professor`, `coordenador`, `diretor` (**sem** `aplicador`) |
+| Listar e ver (`GET`, inclusive turmas e alunos da aplicação) | `admin`, `tecadm`, `professor`, `coordenador`, `diretor`, `aplicador` |
+| Criar, editar, definir questões, publicar, excluir, aplicar e retirar turma | `admin`, `tecadm`, `professor`, `coordenador`, `diretor` (**sem** `aplicador`) |
 
-Quem pode editar, definir questões, publicar e excluir **uma** avaliação: quem criou, `admin` e
-`tecadm` (do município do contexto). Outros perfis de escrita recebem `403`.
+Quem pode editar, definir questões, publicar, excluir, aplicar e retirar turma de **uma** avaliação:
+quem criou, `admin` e `tecadm` (do município do contexto). Outros perfis de escrita recebem `403`.
 
 Na listagem e no detalhe, todos os perfis acima veem todas as avaliações escritas do município.
 
@@ -52,7 +52,8 @@ Na listagem e no detalhe, todos os perfis acima veem todas as avaliações escri
    `publicada` e grava `publishedAt`.
 4. Avaliação **publicada** não pode ter dados nem questões alterados, nem ser excluída (`400`).
 5. **Pontuação**: a de cada questão (`value`; vazio = `1`). `totalScore` = soma.
-6. `status`: `rascunho` (padrão) ou `publicada`.
+6. `status` da avaliação: `rascunho` (padrão) ou `publicada`. A aplicação **não** muda esse status;
+   o andamento é por turma (seção 8).
 
 ### Erros barrados antes da rota
 
@@ -95,12 +96,17 @@ Na listagem e no detalhe, todos os perfis acima veem todas as avaliações escri
   "publishedAt": null,
   "totalQuestions": 20,
   "totalScore": 22.0,
-  "questionsByType": { "multipleChoice": 18, "dictation": 1, "text_production": 1 }
+  "questionsByType": { "multipleChoice": 18, "dictation": 1, "text_production": 1 },
+  "appliedClassesCount": 1,
+  "nextApplicationStart": "2026-11-12T08:00:00"
 }
 ```
 
 - `questionsByType` sempre traz as três chaves (com `0` quando não há).
 - `totalQuestions` conta todas as questões da avaliação.
+- `appliedClassesCount`: quantas turmas têm aplicação (qualquer status).
+- `nextApplicationStart`: o início mais próximo entre as turmas que ainda **não começaram**
+  (`agendada`), em hora local do fuso daquela turma; `null` se não houver.
 
 ### Detalhe
 
@@ -371,10 +377,194 @@ Detalhe com `status: "publicada"` e `publishedAt` preenchido.
 
 ---
 
+## 8. Aplicação às turmas — regras
+
+1. Só avaliação **publicada** pode ser aplicada.
+2. Só turmas que estão em `classIds` da avaliação (definidas na criação).
+3. `applicationStart` é obrigatório. `applicationEnd` é opcional; se vier, tem que ser **depois** do início.
+4. Aplicar é **upsert por turma**: turma sem aplicação é criada; turma com aplicação que **ainda não
+   começou** tem as datas substituídas (incluindo `applicationEnd`: se não vier, fica sem fim).
+   Se a aplicação daquela turma **já começou**, o pedido inteiro é recusado (`400`).
+5. Retirar turma só antes do início.
+6. O pedido é **tudo ou nada**: se uma turma falhar, nenhuma é gravada.
+7. Alunos: todos os alunos cuja **turma atual** é a turma aplicada (inclui quem está em subturma
+   ADAP dessa turma). Nada é gravado por aluno: se o aluno mudar de turma, passa a aparecer na nova.
+
+### Datas e fuso
+
+Mesmo padrão da avaliação de fluência: a data/hora é guardada **local** (sem fuso) junto com o
+`timezone` da aplicação.
+
+- `timezone` opcional; padrão `America/Sao_Paulo`. Precisa ser um nome IANA válido (ex.: `America/Manaus`).
+- `applicationStart`/`applicationEnd` em ISO 8601:
+  - **sem offset** (`2026-11-12T08:00:00`): é a hora local do `timezone`;
+  - **com offset ou `Z`** (`2026-11-12T11:00:00Z`): é convertido para a hora local do `timezone`.
+- Nas respostas as datas vêm **sem offset** (hora local) + `timezone`. Segundos fracionários são descartados.
+- Datas no passado são aceitas (a turma já entra como `em_andamento`).
+
+### Status da turma (calculado na leitura, não gravado)
+
+| `status` | Quando |
+|---|---|
+| `agendada` | Agora (no fuso da turma) é antes de `applicationStart` |
+| `em_andamento` | A partir de `applicationStart` e antes de `applicationEnd` (ou sem `applicationEnd`) |
+| `encerrada` | A partir de `applicationEnd` |
+| `null` | Turma da avaliação sem aplicação (`applied: false`) |
+
+### Objeto Turma da aplicação
+
+```json
+{
+  "classId": "7c9e1a3b-5d7f-4a2c-8e0b-2d4f6a8c0e1b",
+  "className": "1º A",
+  "school": { "id": "0b3e6a1c-2d4f-4b8a-9c1e-3f5a7b9d1e2f", "name": "Escola Municipal A" },
+  "grade": { "id": "5600f4b8-af7e-429d-b03c-f7886c046b39", "name": "1º ano" },
+  "applied": true,
+  "applicationStart": "2026-11-12T08:00:00",
+  "applicationEnd": "2026-11-12T11:30:00",
+  "timezone": "America/Sao_Paulo",
+  "status": "agendada",
+  "studentCount": 25
+}
+```
+
+Sem aplicação: `applied: false` e `applicationStart`, `applicationEnd`, `timezone`, `status` = `null`
+(`studentCount` continua preenchido).
+
+---
+
+## 9. Aplicar às turmas
+
+`POST /afirme-reading/written-tests/<id>/apply`
+
+### Corpo
+
+| Campo | Tipo | Obrigatório | Regra |
+|---|---|---|---|
+| `classIds` | array de UUID | Sim | Ao menos uma; todas em `classIds` da avaliação |
+| `applicationStart` | string ISO 8601 | Sim | Início da aplicação |
+| `applicationEnd` | string ISO 8601 | Não | Depois do início |
+| `timezone` | string | Não | Padrão `America/Sao_Paulo` |
+
+```json
+{
+  "classIds": ["7c9e1a3b-5d7f-4a2c-8e0b-2d4f6a8c0e1b", "1d3f5b7a-9c2e-4f6a-8b0d-3e5f7a9c1b2d"],
+  "applicationStart": "2026-11-12T08:00:00",
+  "applicationEnd": "2026-11-12T11:30:00"
+}
+```
+
+### Resposta `200`
+
+As turmas enviadas, já com as datas e o status:
+
+```json
+{
+  "writtenTestId": "6f2c1d0a-7b3e-4f5a-9c8d-1e2f3a4b5c6d",
+  "classes": [ { "...": "Objeto Turma da aplicação" } ]
+}
+```
+
+### Erros (`400`)
+
+| `error` |
+|---|
+| `Só avaliação publicada pode ser aplicada.` |
+| `Informe ao menos uma turma em classIds.` / `classIds deve ser uma lista.` / `classIds contém ID inválido: <valor>` |
+| `A turma <nome> não faz parte desta avaliação.` |
+| `applicationStart é obrigatório.` |
+| `applicationStart deve ser uma data/hora ISO 8601 (ex.: 2026-11-03T08:00:00).` (idem `applicationEnd`) |
+| `applicationEnd deve ser depois de applicationStart.` |
+| `timezone inválido: <valor>.` |
+| `A aplicação da turma <nome> já começou e não pode ser alterada.` |
+
+---
+
+## 10. Turmas da avaliação
+
+`GET /afirme-reading/written-tests/<id>/classes`
+
+Todas as turmas de `classIds` da avaliação, aplicadas ou não, na ordem de `classIds`.
+
+### Resposta `200`
+
+```json
+{
+  "writtenTestId": "6f2c1d0a-7b3e-4f5a-9c8d-1e2f3a4b5c6d",
+  "classes": [ { "...": "Objeto Turma da aplicação" } ]
+}
+```
+
+---
+
+## 11. Alunos de uma turma aplicada
+
+`GET /afirme-reading/written-tests/<id>/classes/<classId>/students`
+
+Só para turma **aplicada**. Alunos em ordem alfabética.
+
+### Resposta `200`
+
+Objeto Turma da aplicação, mais `writtenTestId` e `students`:
+
+```json
+{
+  "writtenTestId": "6f2c1d0a-7b3e-4f5a-9c8d-1e2f3a4b5c6d",
+  "classId": "7c9e1a3b-5d7f-4a2c-8e0b-2d4f6a8c0e1b",
+  "className": "1º A",
+  "applied": true,
+  "status": "agendada",
+  "studentCount": 2,
+  "students": [
+    { "id": "st-1", "name": "Ana Souza", "registration": "2026001", "subturma": null },
+    { "id": "st-2", "name": "Caio Lima", "registration": null,
+      "subturma": { "id": "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b", "name": "ADAP 1" } }
+  ],
+  "...": "demais campos do Objeto Turma da aplicação"
+}
+```
+
+`registration` é a matrícula (pode ser `null`). `subturma` é a subturma ADAP da turma, se houver.
+
+### Erros
+
+| Status | `error` |
+|---|---|
+| 400 | `A avaliação ainda não foi aplicada a esta turma.` |
+| 404 | `Turma não encontrada nesta avaliação.` (turma fora de `classIds` ou id inválido) |
+
+---
+
+## 12. Retirar turma da aplicação
+
+`DELETE /afirme-reading/written-tests/<id>/classes/<classId>`
+
+Só antes do início da aplicação daquela turma. A turma continua na avaliação (`classIds`), só deixa de
+estar aplicada.
+
+### Resposta `200`
+
+```json
+{ "message": "Aplicação da turma retirada com sucesso." }
+```
+
+### Erros
+
+| Status | `error` |
+|---|---|
+| 400 | `A aplicação desta turma já começou e não pode ser retirada.` |
+| 404 | `Turma não encontrada nesta avaliação.` |
+| 404 | `A avaliação não está aplicada a esta turma.` |
+
+---
+
 ## Fluxo sugerido no frontend
 
 1. `POST /written-tests` com título e escopo (séries → escolas → turmas).
 2. Montar a prova com `GET /afirme-reading/questions?type=multipleChoice` (ou `dictation`,
    `text_production`) e enviar a lista com `PUT /written-tests/<id>/questions` a cada alteração.
 3. Habilitar "Publicar" quando `totalQuestions === 20`; chamar `POST /written-tests/<id>/publish`.
-4. Depois de publicada, a tela fica só leitura.
+4. Depois de publicada, os dados e as questões ficam só leitura.
+5. Tela de aplicação: `GET /written-tests/<id>/classes`, escolher turmas e data, `POST /written-tests/<id>/apply`.
+   Turmas `agendada` podem ser reaplicadas (nova data) ou retiradas; `em_andamento`/`encerrada` não.
+6. Lista de alunos de uma turma: `GET /written-tests/<id>/classes/<classId>/students`.

@@ -7,6 +7,7 @@ Execução: python -m pytest tests/test_afirme_ler_written_test.py -q
 """
 import inspect
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -20,12 +21,15 @@ from app.models.educationStage import EducationStage
 from app.models.grades import Grade
 from app.models.question import Question
 from app.models.school import School
+from app.models.student import Student
 from app.models.studentClass import Class
 from app.models.subject import Subject
+from app.models.subturma import Subturma
 from app.models.user import User
 from app.afirme_ler.ddl import get_afirme_ler_written_test_tables_ddl
 from app.afirme_ler.models.reading_written_test import (
     ReadingWrittenTest,
+    ReadingWrittenTestClass,
     ReadingWrittenTestQuestion,
 )
 from app.afirme_ler.services import written_test_service as svc
@@ -41,7 +45,10 @@ SCHOOL_B = "b2b2b2b2-0000-4000-8000-0000000000bb"
 CLASS_A1 = uuid.UUID("c1c1c1c1-0000-4000-8000-0000000000a1")  # escola A, 1º ano
 CLASS_A2 = uuid.UUID("c2c2c2c2-0000-4000-8000-0000000000a2")  # escola A, 2º ano
 CLASS_B1 = uuid.UUID("c3c3c3c3-0000-4000-8000-0000000000b1")  # escola B, 1º ano
+SUBTURMA_A1 = uuid.UUID("d1d1d1d1-0000-4000-8000-0000000000d1")  # ADAP 1 da turma 1º A
 CITY_ID = "city-1"
+# 12:00 UTC = 09:00 em America/Sao_Paulo (UTC-3).
+NOW = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
 
 ADMIN = {"id": "u-admin", "role": "admin", "city_id": None, "tenant_id": None}
 TECADM = {"id": "u-tec", "role": "tecadm", "city_id": CITY_ID, "tenant_id": CITY_ID}
@@ -89,8 +96,8 @@ def flask_app():
         engine.dispose()
         tables = [
             m.__table__ for m in (
-                EducationStage, Subject, Grade, User, Question, School, Class,
-                ReadingWrittenTest, ReadingWrittenTestQuestion,
+                EducationStage, Subject, Grade, User, Question, School, Class, Subturma,
+                Student, ReadingWrittenTest, ReadingWrittenTestQuestion, ReadingWrittenTestClass,
             )
         ]
         db.metadata.create_all(engine, tables=tables)
@@ -113,6 +120,17 @@ def flask_app():
                       correct_answer=None, value=None),
             _question("play-ligar", origin="afirme_play", question_type="ligar_colunas"),
             _question("private-other", scope_type="PRIVATE", owner_user_id="u-prof2"),
+            Subturma(id=SUBTURMA_A1, class_id=CLASS_A1, support_level=1),
+            Student(id="st-ana", name="Ana", registration="M001", class_id=CLASS_A1,
+                    school_id=SCHOOL_A, grade_id=GRADE_1),
+            Student(id="st-caio", name="Caio", registration="M002", class_id=CLASS_A1,
+                    school_id=SCHOOL_A, grade_id=GRADE_1, subturma_id=SUBTURMA_A1),
+            Student(id="st-bia", name="Bia", registration=None, class_id=CLASS_A1,
+                    school_id=SCHOOL_A, grade_id=GRADE_1),
+            Student(id="st-davi", name="Davi", registration="M004", class_id=CLASS_B1,
+                    school_id=SCHOOL_B, grade_id=GRADE_1),
+            Student(id="st-eva", name="Eva", registration="M005", class_id=CLASS_A2,
+                    school_id=SCHOOL_A, grade_id=GRADE_2),
         ])
         db.session.commit()
 
@@ -496,3 +514,255 @@ def test_new_city_provisioning_includes_written_test_tables():
     ddl = _get_city_tables_ddl("city_teste")
     assert 'CREATE TABLE IF NOT EXISTS "city_teste".reading_written_test (' in ddl
     assert 'CREATE TABLE IF NOT EXISTS "city_teste".reading_written_test_question (' in ddl
+    assert 'CREATE TABLE IF NOT EXISTS "city_teste".reading_written_test_class (' in ddl
+
+
+def test_ddl_application_table():
+    ddl = get_afirme_ler_written_test_tables_ddl("city_teste")
+    assert "UNIQUE (written_test_id, class_id)" in ddl
+    assert 'class_id UUID NOT NULL REFERENCES "city_teste".class(id) ON DELETE CASCADE' in ddl
+    assert "application_start TIMESTAMP NOT NULL" in ddl
+    assert "CHECK (application_end IS NULL OR application_end > application_start)" in ddl
+
+
+# ---------------------------------------------------------------------------
+# Aplicação por turma
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def clock(flask_app):
+    holder = {"now": NOW}
+    with patch.object(svc, "_utcnow", lambda: holder["now"]):
+        yield holder
+
+
+def _published(user=PROFESSOR):
+    written_test = _create(user=user, questions=_items(MC_IDS[:20]))
+    return WrittenTestService.publish(user, written_test.id).id
+
+
+def _apply(test_id, class_ids, start="2026-11-12T08:00:00", user=PROFESSOR, **extra):
+    data = {"classIds": [str(c) for c in class_ids], "applicationStart": start}
+    data.update(extra)
+    return WrittenTestService.apply(user, test_id, data)
+
+
+def _by_class(result):
+    return {item["classId"]: item for item in result["classes"]}
+
+
+def test_apply_draft_is_rejected(clock):
+    written_test = _create(questions=_items(MC_IDS[:20]))
+    with pytest.raises(ValueError, match="Só avaliação publicada pode ser aplicada."):
+        _apply(written_test.id, [CLASS_A1])
+
+
+def test_apply_class_outside_test_is_rejected(clock):
+    test_id = _published()
+    with pytest.raises(ValueError, match="A turma 2º A não faz parte desta avaliação."):
+        _apply(test_id, [CLASS_A1, CLASS_A2])
+    db.session.rollback()
+    assert ReadingWrittenTestClass.query.count() == 0
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        ({"applicationStart": None}, "applicationStart é obrigatório."),
+        ({"applicationStart": "  "}, "applicationStart é obrigatório."),
+        ({"applicationStart": "12/11/2026"}, "applicationStart deve ser uma data/hora ISO 8601"),
+        ({"applicationEnd": "2026-11-12T07:00:00"}, "applicationEnd deve ser depois de applicationStart."),
+        ({"applicationEnd": "2026-11-12T08:00:00"}, "applicationEnd deve ser depois de applicationStart."),
+        ({"timezone": "Marte/Base"}, "timezone inválido: Marte/Base."),
+        ({"classIds": []}, "Informe ao menos uma turma em classIds."),
+    ],
+)
+def test_apply_rejects_invalid_payload(clock, extra, message):
+    test_id = _published()
+    data = {"classIds": [str(CLASS_A1)], "applicationStart": "2026-11-12T08:00:00"}
+    data.update(extra)
+    with pytest.raises(ValueError, match=message):
+        WrittenTestService.apply(PROFESSOR, test_id, data)
+
+
+def test_apply_and_upsert_before_start(clock):
+    test_id = _published()
+    first = _by_class(_apply(test_id, [CLASS_A1, CLASS_B1]))
+    assert first[str(CLASS_A1)]["applied"] is True
+    assert first[str(CLASS_A1)]["applicationStart"] == "2026-11-12T08:00:00"
+    assert first[str(CLASS_A1)]["applicationEnd"] is None
+    assert first[str(CLASS_A1)]["timezone"] == "America/Sao_Paulo"
+    assert first[str(CLASS_A1)]["status"] == "agendada"
+
+    second = _by_class(_apply(
+        test_id, [CLASS_A1], start="2026-11-13T07:30:00", applicationEnd="2026-11-13T11:30:00",
+    ))
+    assert second[str(CLASS_A1)]["applicationStart"] == "2026-11-13T07:30:00"
+    assert second[str(CLASS_A1)]["applicationEnd"] == "2026-11-13T11:30:00"
+    assert ReadingWrittenTestClass.query.count() == 2
+    stored = ReadingWrittenTestClass.query.filter_by(class_id=CLASS_A1).one()
+    assert stored.created_by == "u-prof"
+
+
+def test_apply_converts_offset_to_local_time(clock):
+    test_id = _published()
+    result = _by_class(_apply(test_id, [CLASS_A1], start="2026-11-12T11:00:00Z"))
+    assert result[str(CLASS_A1)]["applicationStart"] == "2026-11-12T08:00:00"
+
+    result = _by_class(_apply(
+        test_id, [CLASS_B1], start="2026-11-12T08:00:00-03:00", timezone="America/Manaus",
+    ))
+    assert result[str(CLASS_B1)]["applicationStart"] == "2026-11-12T07:00:00"
+    assert result[str(CLASS_B1)]["timezone"] == "America/Manaus"
+
+
+def test_apply_after_start_cannot_change(clock):
+    test_id = _published()
+    _apply(test_id, [CLASS_A1], start="2026-11-10T08:00:00")  # 08:00 local; agora são 09:00
+    with pytest.raises(ValueError, match="A aplicação da turma 1º A já começou e não pode ser alterada."):
+        _apply(test_id, [CLASS_B1, CLASS_A1], start="2026-11-20T08:00:00")
+    db.session.rollback()
+    assert ReadingWrittenTestClass.query.count() == 1
+
+
+def test_remove_class_before_and_after_start(clock):
+    test_id = _published()
+    _apply(test_id, [CLASS_A1, CLASS_B1], start="2026-11-12T08:00:00")
+    WrittenTestService.remove_class(PROFESSOR, test_id, str(CLASS_B1))
+    assert [str(a.class_id) for a in ReadingWrittenTestClass.query.all()] == [str(CLASS_A1)]
+
+    with pytest.raises(LookupError, match="não está aplicada a esta turma"):
+        WrittenTestService.remove_class(PROFESSOR, test_id, str(CLASS_B1))
+    with pytest.raises(LookupError, match="Turma não encontrada nesta avaliação"):
+        WrittenTestService.remove_class(PROFESSOR, test_id, str(CLASS_A2))
+
+    clock["now"] = datetime(2026, 11, 12, 11, 0, tzinfo=timezone.utc)  # 08:00 local
+    with pytest.raises(ValueError, match="A aplicação desta turma já começou e não pode ser retirada."):
+        WrittenTestService.remove_class(PROFESSOR, test_id, str(CLASS_A1))
+    db.session.rollback()
+    assert ReadingWrittenTestClass.query.count() == 1
+
+
+def test_status_is_calculated_on_read(clock):
+    test_id = _published()
+    _apply(test_id, [CLASS_A1], start="2026-11-12T08:00:00", applicationEnd="2026-11-12T12:00:00")
+    _apply(test_id, [CLASS_B1], start="2026-11-12T08:00:00")
+
+    def statuses():
+        return {k: v["status"] for k, v in _by_class(WrittenTestService.list_classes(test_id)).items()}
+
+    assert statuses() == {str(CLASS_A1): "agendada", str(CLASS_B1): "agendada"}
+    clock["now"] = datetime(2026, 11, 12, 12, 0, tzinfo=timezone.utc)  # 09:00 local
+    assert statuses() == {str(CLASS_A1): "em_andamento", str(CLASS_B1): "em_andamento"}
+    clock["now"] = datetime(2026, 11, 12, 15, 0, tzinfo=timezone.utc)  # 12:00 local = fim
+    assert statuses() == {str(CLASS_A1): "encerrada", str(CLASS_B1): "em_andamento"}
+
+
+def test_classes_list_and_student_count(clock):
+    test_id = _published()
+    _apply(test_id, [CLASS_A1])
+
+    classes = WrittenTestService.list_classes(test_id)["classes"]
+    assert [c["classId"] for c in classes] == [str(CLASS_A1), str(CLASS_B1)]
+    a1, b1 = classes
+    assert a1["className"] == "1º A"
+    assert a1["school"] == {"id": SCHOOL_A, "name": "Escola A"}
+    assert a1["grade"] == {"id": str(GRADE_1), "name": "1º ano"}
+    assert a1["applied"] is True and a1["studentCount"] == 3
+    assert b1["applied"] is False and b1["status"] is None and b1["studentCount"] == 1
+
+
+def test_students_of_applied_class(clock):
+    test_id = _published()
+    _apply(test_id, [CLASS_A1])
+
+    result = WrittenTestService.list_students(test_id, str(CLASS_A1))
+    assert result["studentCount"] == 3
+    assert result["status"] == "agendada"
+    assert [s["name"] for s in result["students"]] == ["Ana", "Bia", "Caio"]
+    caio = result["students"][2]
+    assert caio == {
+        "id": "st-caio", "name": "Caio", "registration": "M002",
+        "subturma": {"id": str(SUBTURMA_A1), "name": "ADAP 1"},
+    }
+    assert result["students"][1]["registration"] is None
+    assert result["students"][0]["subturma"] is None
+
+    with pytest.raises(ValueError, match="ainda não foi aplicada a esta turma"):
+        WrittenTestService.list_students(test_id, str(CLASS_B1))
+    with pytest.raises(LookupError, match="Turma não encontrada nesta avaliação"):
+        WrittenTestService.list_students(test_id, str(CLASS_A2))
+
+
+def test_students_follow_current_class(clock):
+    test_id = _published()
+    _apply(test_id, [CLASS_B1])
+    db.session.get(Student, "st-ana").class_id = CLASS_B1
+    db.session.commit()
+    names = [s["name"] for s in WrittenTestService.list_students(test_id, str(CLASS_B1))["students"]]
+    assert names == ["Ana", "Davi"]
+
+
+def test_apply_permissions(clock):
+    test_id = _published()
+    with pytest.raises(PermissionError, match="não pode criar ou alterar avaliações escritas"):
+        _apply(test_id, [CLASS_A1], user=APLICADOR)
+    with pytest.raises(PermissionError, match="não tem permissão para alterar esta avaliação"):
+        _apply(test_id, [CLASS_A1], user=OTHER_PROFESSOR)
+    assert _apply(test_id, [CLASS_A1], user=TECADM)["classes"][0]["applied"] is True
+    with pytest.raises(PermissionError):
+        WrittenTestService.remove_class(APLICADOR, test_id, str(CLASS_A1))
+    WrittenTestService.remove_class(ADMIN, test_id, str(CLASS_A1))
+    assert ReadingWrittenTestClass.query.count() == 0
+
+
+def test_detail_and_list_show_application_summary(clock):
+    test_id = _published()
+    detail = svc.to_detail(WrittenTestService.get(test_id))
+    assert detail["appliedClassesCount"] == 0
+    assert detail["nextApplicationStart"] is None
+
+    _apply(test_id, [CLASS_A1], start="2026-11-12T08:00:00")
+    _apply(test_id, [CLASS_B1], start="2026-11-11T08:00:00")
+    detail = svc.to_detail(WrittenTestService.get(test_id))
+    assert detail["appliedClassesCount"] == 2
+    assert detail["nextApplicationStart"] == "2026-11-11T08:00:00"
+    assert detail["totalQuestions"] == 20
+
+    clock["now"] = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)  # B1 já começou
+    item = WrittenTestService.list_tests({})["data"][0]
+    assert item["appliedClassesCount"] == 2
+    assert item["nextApplicationStart"] == "2026-11-12T08:00:00"
+    assert item["totalQuestions"] == 20
+
+
+def test_application_routes(clock):
+    draft = _create(questions=_items(MC_IDS[:3]))
+    response, status = _call_view(
+        "apply_written_test", PROFESSOR, draft.id, method="POST",
+        json={"classIds": [str(CLASS_A1)], "applicationStart": "2026-11-12T08:00:00"},
+    )
+    assert status == 400
+    assert response.get_json() == {"error": "Só avaliação publicada pode ser aplicada."}
+
+    test_id = _published()
+    response, status = _call_view(
+        "apply_written_test", PROFESSOR, test_id, method="POST",
+        json={"classIds": [str(CLASS_A1)], "applicationStart": "2026-11-12T08:00:00"},
+    )
+    assert status == 200
+    assert response.get_json()["classes"][0]["status"] == "agendada"
+
+    response, status = _call_view("list_written_test_classes", APLICADOR, test_id)
+    assert status == 200 and len(response.get_json()["classes"]) == 2
+
+    response, status = _call_view(
+        "list_written_test_class_students", APLICADOR, test_id, str(CLASS_A1)
+    )
+    assert status == 200 and response.get_json()["studentCount"] == 3
+
+    response, status = _call_view(
+        "remove_written_test_class", PROFESSOR, test_id, str(CLASS_A1), method="DELETE"
+    )
+    assert status == 200
+    assert response.get_json() == {"message": "Aplicação da turma retirada com sucesso."}

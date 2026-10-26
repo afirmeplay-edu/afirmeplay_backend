@@ -315,7 +315,11 @@ COMMENT ON TABLE "{schema}".reading_fluency_comprehension_answer IS 'Respostas d
 """
 
 
-WRITTEN_TEST_TABLES = ("reading_written_test", "reading_written_test_question")
+WRITTEN_TEST_TABLES = (
+    "reading_written_test",
+    "reading_written_test_question",
+    "reading_written_test_class",
+)
 
 
 def get_afirme_ler_written_test_tables_ddl(schema: str) -> str:
@@ -357,4 +361,24 @@ CREATE INDEX IF NOT EXISTS ix_reading_written_test_question_question
     ON "{schema}".reading_written_test_question(question_id);
 COMMENT ON TABLE "{schema}".reading_written_test_question IS 'Questões da avaliação escrita do Afirme Ler, na ordem da prova';
 COMMENT ON COLUMN "{schema}".reading_written_test_question.question_id IS 'public.question.id, sem FK para não bloquear a exclusão de questões no Afirme Play';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_class (
+    id VARCHAR PRIMARY KEY,
+    written_test_id VARCHAR NOT NULL
+        REFERENCES "{schema}".reading_written_test(id) ON DELETE CASCADE,
+    class_id UUID NOT NULL REFERENCES "{schema}".class(id) ON DELETE CASCADE,
+    application_start TIMESTAMP NOT NULL,
+    application_end TIMESTAMP,
+    timezone VARCHAR(50) NOT NULL DEFAULT 'America/Sao_Paulo',
+    created_by VARCHAR NOT NULL REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_reading_written_test_class UNIQUE (written_test_id, class_id),
+    CONSTRAINT chk_reading_written_test_class_dates
+        CHECK (application_end IS NULL OR application_end > application_start)
+);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_class_class
+    ON "{schema}".reading_written_test_class(class_id);
+COMMENT ON TABLE "{schema}".reading_written_test_class IS 'Aplicação da avaliação escrita do Afirme Ler por turma (alunos pela turma atual)';
+COMMENT ON COLUMN "{schema}".reading_written_test_class.application_start IS 'Data/hora local no fuso da coluna timezone';
 """

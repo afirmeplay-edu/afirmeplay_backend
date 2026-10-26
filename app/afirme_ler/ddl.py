@@ -313,3 +313,48 @@ CREATE INDEX IF NOT EXISTS ix_reading_fluency_comp_answer_session
     ON "{schema}".reading_fluency_comprehension_answer(session_id);
 COMMENT ON TABLE "{schema}".reading_fluency_comprehension_answer IS 'Respostas de compreensão na sessão ad-hoc de fluência';
 """
+
+
+WRITTEN_TEST_TABLES = ("reading_written_test", "reading_written_test_question")
+
+
+def get_afirme_ler_written_test_tables_ddl(schema: str) -> str:
+  """Avaliação escrita do Afirme Ler. Separado da fluência: não toca reading_evaluation."""
+  return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test (
+    id VARCHAR PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    grade_ids JSON NOT NULL DEFAULT '[]'::json,
+    school_ids JSON NOT NULL DEFAULT '[]'::json,
+    class_ids JSON NOT NULL DEFAULT '[]'::json,
+    status VARCHAR(20) NOT NULL DEFAULT 'rascunho',
+    created_by VARCHAR NOT NULL REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    published_at TIMESTAMP,
+    CONSTRAINT chk_reading_written_test_status
+        CHECK (status IN ('rascunho', 'publicada'))
+);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_status
+    ON "{schema}".reading_written_test(status);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_created_by
+    ON "{schema}".reading_written_test(created_by);
+COMMENT ON TABLE "{schema}".reading_written_test IS 'Avaliação escrita do Afirme Ler (prova impressa com questões do banco)';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_question (
+    id VARCHAR PRIMARY KEY,
+    written_test_id VARCHAR NOT NULL
+        REFERENCES "{schema}".reading_written_test(id) ON DELETE CASCADE,
+    question_id VARCHAR NOT NULL,
+    "order" INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_reading_written_test_question UNIQUE (written_test_id, question_id),
+    CONSTRAINT uq_reading_written_test_order UNIQUE (written_test_id, "order"),
+    CONSTRAINT chk_reading_written_test_order CHECK ("order" BETWEEN 1 AND 20)
+);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_question_question
+    ON "{schema}".reading_written_test_question(question_id);
+COMMENT ON TABLE "{schema}".reading_written_test_question IS 'Questões da avaliação escrita do Afirme Ler, na ordem da prova';
+COMMENT ON COLUMN "{schema}".reading_written_test_question.question_id IS 'public.question.id, sem FK para não bloquear a exclusão de questões no Afirme Play';
+"""

@@ -86,16 +86,22 @@ class AnswerSheetGabaritoGeneration(db.Model):
 logger = logging.getLogger(__name__)
 
 
-def build_class_scope_entries(class_ids: List[str]) -> List[Dict[str, str]]:
+def build_class_scope_entries(
+    class_ids: List[str],
+    subturmas: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     """
     Monta entradas para scope_snapshot: série + turma legíveis (ex.: "8º Ano - A").
     Requer sessão no schema da cidade (Class com grade).
+
+    subturmas: turma-mãe -> Subturma da geração ADAP. A entrada ganha subturma_id,
+    support_level e o rótulo "8º Ano A – ADAP 1".
     """
     if not class_ids:
         return []
     from app.models.studentClass import Class
 
-    entries: List[Dict[str, str]] = []
+    entries: List[Dict[str, Any]] = []
     for cid in class_ids:
         if not cid:
             continue
@@ -116,14 +122,20 @@ def build_class_scope_entries(class_ids: List[str]) -> List[Dict[str, str]]:
             label = f"{gname} - {cname}"
         else:
             label = gname or cname or str(co.id)
-        entries.append(
-            {
-                "class_id": str(co.id),
-                "class_name": cname,
-                "grade_name": gname,
-                "label": label,
-            }
-        )
+        entry: Dict[str, Any] = {
+            "class_id": str(co.id),
+            "class_name": cname,
+            "grade_name": gname,
+            "label": label,
+        }
+        sub = (subturmas or {}).get(str(co.id))
+        if sub is not None:
+            from app.services.cartao_resposta.answer_sheet_audience import cartao_adap_label
+
+            entry["subturma_id"] = str(sub.id)
+            entry["support_level"] = int(sub.support_level)
+            entry["label"] = cartao_adap_label(gname, cname, sub.support_level)
+        entries.append(entry)
     return entries
 
 

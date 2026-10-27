@@ -3,6 +3,10 @@ import uuid
 from sqlalchemy.dialects.postgresql import UUID, JSON, BYTEA
 from datetime import datetime
 
+QUESTION_ORIGIN_PLAY = 'afirme_play'
+QUESTION_ORIGIN_LER = 'afirme_ler'
+QUESTION_ORIGINS = (QUESTION_ORIGIN_PLAY, QUESTION_ORIGIN_LER)
+
 
 class Question(db.Model):
     __tablename__ = 'question'
@@ -45,6 +49,15 @@ class Question(db.Model):
     owner_user_id = db.Column(db.String, db.ForeignKey('public.users.id'))  # ID do usuário dono (para PRIVATE)
     approved_by = db.Column(db.String, db.ForeignKey('public.users.id'))  # Quem aprovou para uso global
     approved_at = db.Column(db.TIMESTAMP)  # Data de aprovação para uso global
+
+    # Produto que criou a questão: 'afirme_play' ou 'afirme_ler'.
+    # Questões 'afirme_ler' não aparecem no Afirme Play.
+    origin = db.Column(
+        db.String(20),
+        nullable=False,
+        default=QUESTION_ORIGIN_PLAY,
+        server_default=QUESTION_ORIGIN_PLAY,
+    )
     
     # Relacionamentos
     subject = db.relationship('Subject', backref='questions')

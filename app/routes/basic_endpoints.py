@@ -21,6 +21,7 @@ from sqlalchemy import func, cast, String, text
 from datetime import datetime, timedelta
 import logging
 from app.models.question import Question
+from app.utils.question_helpers import play_questions_only
 from app.models.classTest import ClassTest
 from app.models.schoolTeacher import SchoolTeacher
 from app.decorators.role_required import get_current_tenant_id
@@ -307,7 +308,7 @@ def comprehensive_dashboard_stats():
         test_query = Test.query
         game_query = Game.query
         user_query = User.query
-        question_query = Question.query
+        question_query = play_questions_only(Question.query)
         class_query = Class.query
         teacher_query = Teacher.query
         
@@ -552,7 +553,7 @@ def evaluations_stats():
         total_questions = 0
         try:
             total_questions = (
-                Question.query.filter(
+                play_questions_only(Question.query).filter(
                     Question.scope_type == "CITY",
                     Question.owner_city_id == city_id_str,
                 ).count()
@@ -1952,11 +1953,11 @@ def recent_questions():
             return jsonify({"erro": "Usuário não encontrado"}), 404
         
         # Base query
-        question_query = Question.query.options(
+        question_query = play_questions_only(Question.query.options(
             joinedload(Question.subject),
             joinedload(Question.grade),
             joinedload(Question.creator)
-        )
+        ))
         
         # Filtragem baseada no papel do usuário
         if current_user['role'] == "admin":

@@ -3635,6 +3635,7 @@ class AnswerSheetCorrectionNewGrid:
             classification = "Não calculado"
             proficiency_by_subject = None
             gabarito_obj = None
+            student_obj = None
             
             if gabarito_id:
                 gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
@@ -3678,6 +3679,14 @@ class AnswerSheetCorrectionNewGrid:
             # Decidir onde salvar
             if gabarito_id and not test_id:
                 # Cartão resposta: salvar em AnswerSheetResult
+                from app.services.cartao_resposta.answer_sheet_audience import (
+                    warn_if_student_outside_audience,
+                )
+                warn_if_student_outside_audience(
+                    gabarito_obj,
+                    student_obj,
+                    correction.get('detection_method') or 'omr',
+                )
                 self.logger.info(f"💾 Salvando resultado em AnswerSheetResult (gabarito_id={gabarito_id})")
                 return self._salvar_resultado_answer_sheet(
                     gabarito_id=gabarito_id,

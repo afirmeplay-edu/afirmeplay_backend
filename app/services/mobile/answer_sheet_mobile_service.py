@@ -193,7 +193,11 @@ def collect_gabaritos_for_school(
 
         turma_ids = [c.id for c in turmas_alvo]
         if turma_ids:
-            alunos = Student.query.filter(Student.class_id.in_(turma_ids)).all()
+            from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
+            alunos = apply_gabarito_audience(
+                Student.query.filter(Student.class_id.in_(turma_ids)), gabarito_id
+            ).all()
             logger.info(
                 "Gabarito %s: %s alunos em %s turmas",
                 gabarito_id,

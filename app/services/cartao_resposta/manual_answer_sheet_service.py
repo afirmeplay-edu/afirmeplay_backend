@@ -377,15 +377,25 @@ def list_students_for_gabarito(
         turmas_alvo, class_id, grade_id, school_id
     )
 
+    from app.services.cartao_resposta.answer_sheet_audience import (
+        gabarito_audience_cached,
+    )
+
+    audience = gabarito_audience_cached(gabarito)
     class_ids = [c.id for c in turmas_filtradas]
     alunos_por_turma: Dict[Any, List[Student]] = defaultdict(list)
     if class_ids:
         for aluno in (
-            Student.query.filter(Student.class_id.in_(class_ids))
+            audience.apply(Student.query.filter(Student.class_id.in_(class_ids)))
             .order_by(Student.class_id, Student.name)
             .all()
         ):
             alunos_por_turma[aluno.class_id].append(aluno)
+    adap_tag = (
+        " – " + ", ".join(f"ADAP {n}" for n in sorted(audience.levels))
+        if audience.has_restrictions and audience.levels
+        else ""
+    )
 
     results_by_student = _latest_results_by_student(str(gabarito.id))
 
@@ -393,8 +403,13 @@ def list_students_for_gabarito(
     flat_students: List[Dict[str, Any]] = []
     total_students = 0
 
+    so_adap = audience.publico == "adap"
     for classe in turmas_filtradas:
+        if so_adap and not alunos_por_turma.get(classe.id):
+            continue
         meta = _class_meta(classe)
+        if adap_tag and str(classe.id).lower() in audience.restricted:
+            meta["class_name"] = f"{meta['class_name']}{adap_tag}"
         students_payload = []
         for student in alunos_por_turma.get(classe.id, []):
             result = results_by_student.get(str(student.id))
@@ -421,9 +436,10 @@ def list_students_for_gabarito(
         "num_questions": gabarito.num_questions,
         "scope_summary": {
             "scope_type": gabarito.scope_type,
-            "class_count": len(turmas_filtradas),
+            "class_count": len(classes_payload) if so_adap else len(turmas_filtradas),
             "student_count": total_students,
         },
+        **audience.to_dict(),
     }
 
     if flat:

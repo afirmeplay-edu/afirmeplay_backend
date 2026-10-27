@@ -106,6 +106,27 @@ def class_pdf_zip_prefix(scope: str, school_name: str) -> str:
     return ''
 
 
+def _students_and_adap_label(class_obj, subturma_id: Any = None):
+    """Alunos da turma, ou só da subturma ADAP (com o rótulo "5º Ano A – ADAP 1")."""
+    from app.services.cartao_resposta.answer_sheet_audience import (
+        cartao_adap_label,
+        slice_students_query,
+    )
+
+    students = slice_students_query(class_obj.id, subturma_id).all()
+    if not subturma_id:
+        return students, None
+    import uuid as _uuid
+
+    from app.models.subturma import Subturma
+
+    sub = Subturma.query.get(_uuid.UUID(str(subturma_id)))
+    if sub is None or str(sub.class_id) != str(class_obj.id):
+        return [], None
+    grade_name = (class_obj.grade.name if class_obj.grade else '') or ''
+    return students, cartao_adap_label(grade_name, class_obj.name, sub.support_level)
+
+
 def legacy_student_zip_path(scope: str, school_name: str, grade_name: str, rel_zip_name: str) -> str:
     """Caminho interno do ZIP no modo um PDF por aluno (formato anterior)."""
     rel = (rel_zip_name or '').lstrip('/')
@@ -164,7 +185,7 @@ class AnswerSheetGenerator:
                               num_questions: int, use_blocks: bool,
                               blocks_config: Dict, correct_answers: Dict,
                               gabarito_id: str = None, questions_options: Dict = None,
-                              output_dir: str = None) -> Dict:
+                              output_dir: str = None, subturma_id: str = None) -> Dict:
         """
         ⚠️ MÉTODO AUXILIAR - NÃO USAR DIRETAMENTE
         
@@ -218,8 +239,8 @@ class AnswerSheetGenerator:
             if not class_obj:
                 raise ValueError(f"Turma {class_id} não encontrada")
 
-            # Buscar alunos da turma
-            students = Student.query.filter_by(class_id=class_id).all()
+            # Buscar alunos da turma (ou só da subturma ADAP)
+            students, adap_label = _students_and_adap_label(class_obj, subturma_id)
             logging.info(f"[GENERATOR ARCH4] Turma: {class_obj.name} (ID: {class_id})")
             logging.info(f"[GENERATOR ARCH4] Estudantes encontrados: {len(students)}")
             
@@ -311,6 +332,8 @@ class AnswerSheetGenerator:
                 try:
                     # Buscar dados completos do aluno
                     student_data = self._get_complete_student_data(student)
+                    if adap_label:
+                        student_data['turma_label'] = adap_label
                     
                     # Gerar overlay PDF (ReportLab: nome, escola, turma, QR)
                     overlay_bytes = self._generate_student_overlay_pdf(
@@ -417,7 +440,8 @@ class AnswerSheetGenerator:
                               num_questions: int, use_blocks: bool,
                               blocks_config: Dict, correct_answers: Dict,
                               gabarito_id: str = None, questions_options: Dict = None,
-                              output_dir: str = None, use_arch4: bool = True) -> Dict:
+                              output_dir: str = None, use_arch4: bool = True,
+                              subturma_id: str = None) -> Dict:
         """
         ⚠️ MÉTODO DESCONTINUADO - NÃO ESTÁ SENDO USADO
         
@@ -472,7 +496,8 @@ class AnswerSheetGenerator:
                 correct_answers=correct_answers,
                 gabarito_id=gabarito_id,
                 questions_options=questions_options,
-                output_dir=output_dir
+                output_dir=output_dir,
+                subturma_id=subturma_id,
             )
         
         # ========================================================================
@@ -492,8 +517,8 @@ class AnswerSheetGenerator:
             if not class_obj:
                 raise ValueError(f"Turma {class_id} não encontrada")
 
-            # Buscar alunos da turma
-            students = Student.query.filter_by(class_id=class_id).all()
+            # Buscar alunos da turma (ou só da subturma ADAP)
+            students, adap_label = _students_and_adap_label(class_obj, subturma_id)
             logging.info(f"[GENERATOR] Turma: {class_obj.name} (ID: {class_id})")
             logging.info(f"[GENERATOR] Estudantes encontrados: {len(students)}")
             
@@ -541,6 +566,8 @@ class AnswerSheetGenerator:
             for student in students:
                 try:
                     student_data = self._get_complete_student_data(student)
+                    if adap_label:
+                        student_data['turma_label'] = adap_label
                     
                     # Gerar QR code
                     qr_code_base64 = self._generate_qr_code(
@@ -698,6 +725,7 @@ class AnswerSheetGenerator:
         gabarito_id: str = None,
         questions_options: Dict = None,
         use_arch4: bool = True,
+        subturma_id: str = None,
     ) -> Optional[Dict]:
         """
         Gera 1 PDF por aluno da turma.
@@ -715,7 +743,7 @@ class AnswerSheetGenerator:
             class_obj = Class.query.get(class_id)
             if not class_obj:
                 raise ValueError(f"Turma {class_id} não encontrada")
-            students = Student.query.filter_by(class_id=class_id).all()
+            students, adap_label = _students_and_adap_label(class_obj, subturma_id)
             if not students:
                 logging.warning(f"[GENERATOR] ⚠️ Turma {class_obj.name} sem alunos cadastrados")
                 return None
@@ -726,6 +754,8 @@ class AnswerSheetGenerator:
             grade_name = (class_obj.grade.name if class_obj.grade else '').strip() or 'serie'
             grade_safe = sanitize_filename(grade_name, max_length=40)
             class_name_raw = (class_obj.name or 'turma').strip()
+            if adap_label:
+                class_name_raw = adap_label
             class_safe = sanitize_filename(class_name_raw, max_length=40)
 
             folder = self._build_class_folder_path(base_output_dir, class_obj)
@@ -772,6 +802,8 @@ class AnswerSheetGenerator:
                 for idx, student in enumerate(students, 1):
                     try:
                         student_data = self._get_complete_student_data(student)
+                        if adap_label:
+                            student_data['turma_label'] = adap_label
                         
                         # Gerar overlay
                         overlay_bytes = self._generate_student_overlay_pdf(
@@ -1296,7 +1328,10 @@ class AnswerSheetGenerator:
             class_name = (student.get('class_name') or student.get('turma') or '').strip()
             grade_name = (student.get('grade_name') or (test_data or {}).get('grade_name') or '').strip()
             
-            if grade_name and class_name:
+            adap_turma = (student.get('turma_label') or '').strip()
+            if adap_turma:
+                turma_raw = adap_turma
+            elif grade_name and class_name:
                 turma_raw = f"{grade_name} - {class_name}"
             elif grade_name:
                 turma_raw = grade_name

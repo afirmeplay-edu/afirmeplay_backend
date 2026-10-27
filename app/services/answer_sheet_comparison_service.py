@@ -81,9 +81,13 @@ class AnswerSheetComparisonService:
             def _load_scoped_results(gab_id: str, class_ids: List[Any]) -> List[AnswerSheetResult]:
                 if not class_ids:
                     return []
+                from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
                 base_ids = {
                     s.id
-                    for s in Student.query.filter(Student.class_id.in_(class_ids)).all()
+                    for s in apply_gabarito_audience(
+                        Student.query.filter(Student.class_id.in_(class_ids)), gab_id
+                    ).all()
                 }
                 merged_ids = student_ids_for_answer_sheet_class_group(
                     str(gab_id), class_ids, base_ids
@@ -748,8 +752,10 @@ class AnswerSheetComparisonService:
             except ValueError:
                 class_uuids = class_ids
 
-            total_students = Student.query.filter(
-                Student.class_id.in_(class_uuids)
+            from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
+            total_students = apply_gabarito_audience(
+                Student.query.filter(Student.class_id.in_(class_uuids)), gabarito_id
             ).count()
 
             from app.services.answer_sheet_result_snapshot import (
@@ -758,7 +764,9 @@ class AnswerSheetComparisonService:
 
             base_ids = [
                 s.id
-                for s in Student.query.filter(Student.class_id.in_(class_uuids))
+                for s in apply_gabarito_audience(
+                    Student.query.filter(Student.class_id.in_(class_uuids)), gabarito_id
+                )
                 .with_entities(Student.id)
                 .all()
             ]
@@ -826,18 +834,22 @@ class AnswerSheetComparisonService:
                 query_answer_sheet_results_for_class_group,
             )
 
+            from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
             participation_by_school: Dict[str, Dict[str, Any]] = {}
             for school_id, school_info in schools_data.items():
                 class_ids_school = school_info["class_ids"]
-                total_students = Student.query.filter(
-                    Student.class_id.in_(class_ids_school)
+                total_students = apply_gabarito_audience(
+                    Student.query.filter(Student.class_id.in_(class_ids_school)), gabarito_id
                 ).count()
                 if total_students == 0:
                     continue
 
                 base_ids = [
                     s.id
-                    for s in Student.query.filter(Student.class_id.in_(class_ids_school))
+                    for s in apply_gabarito_audience(
+                        Student.query.filter(Student.class_id.in_(class_ids_school)), gabarito_id
+                    )
                     .with_entities(Student.id)
                     .all()
                 ]

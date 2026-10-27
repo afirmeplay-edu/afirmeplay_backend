@@ -58,21 +58,29 @@ def seed_answer_sheet_progress_job(
     gabarito_id: str,
     user_id: str,
     task_ids: list,
+    students_by_class: Optional[Dict[str, list]] = None,
+    class_labels: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Semeia Redis (progress_store) com um item por aluno e metadados de turma/escola,
     igual à prova física, para GET /jobs/.../status mostrar turmas e progresso em tempo real
     antes e durante a task Celery.
+
+    students_by_class / class_labels: recorte ADAP (só os alunos da subturma e o rótulo dela).
     """
     items_meta = []
     for cls in classes_to_generate:
         school_name = (cls.school.name if getattr(cls, "school", None) else None) or "Sem Escola"
-        students = getattr(cls, "students", None) or []
+        if students_by_class is not None:
+            students = students_by_class.get(str(cls.id)) or []
+        else:
+            students = getattr(cls, "students", None) or []
+        class_name = (class_labels or {}).get(str(cls.id)) or cls.name or ""
         for student in students:
             items_meta.append(
                 {
                     "class_id": str(cls.id),
-                    "class_name": cls.name or "",
+                    "class_name": class_name,
                     "school_name": school_name,
                     "student_id": str(student.id),
                     "student_name": student.name or "",

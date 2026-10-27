@@ -242,11 +242,16 @@ def _montar_listas_turmas_bulk(turmas, tipo, test, fill_status, gabarito=None, c
     if not turmas:
         return []
 
+    from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
     class_ids = [c.id for c in turmas]
     alunos_por_turma = defaultdict(list)
     if class_ids:
         for aluno in (
-            Student.query.filter(Student.class_id.in_(class_ids))
+            apply_gabarito_audience(
+                Student.query.filter(Student.class_id.in_(class_ids)),
+                str(gabarito.id) if gabarito is not None else None,
+            )
             .order_by(Student.class_id, Student.name)
             .all()
         ):
@@ -319,9 +324,14 @@ def _response_turmas_lista(lista):
 
 def _montar_lista_turma(classe, tipo, test, fill_status, gabarito=None):
     """Monta um item de lista (cabecalho + estudantes) para uma turma."""
+    from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
     cabecalho = _cabecalho_real(classe, tipo, test=test, gabarito=gabarito)
     alunos = (
-        Student.query.filter_by(class_id=classe.id)
+        apply_gabarito_audience(
+            Student.query.filter_by(class_id=classe.id),
+            str(gabarito.id) if gabarito is not None else None,
+        )
         .order_by(Student.name)
         .all()
     )

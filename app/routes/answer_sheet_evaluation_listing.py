@@ -52,10 +52,18 @@ def _gabarito_aplica_serie(gabarito, serie_id: str, municipio_id: str) -> bool:
     """True se o gabarito foi aplicado (ou direcionado) a turmas da série informada."""
     from sqlalchemy import cast, String
     from app.models.grades import Grade
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
+    from app.services.cartao_resposta.gabarito_grades import get_gabarito_grades
 
     serie_str = str(serie_id).strip()
     if not serie_str:
         return True
+    own_grades = get_gabarito_grades(gabarito)
+    if any(str(item.get("id") or "") == serie_str for item in own_grades):
+        return True
+    # Cartão ADAP entra pelo filtro da série Suporte N, não pela turma-mãe (5º, 8º…).
+    if gabarito_adap_level(gabarito) is not None:
+        return False
     if getattr(gabarito, "class_id", None):
         cls = Class.query.get(gabarito.class_id)
         return bool(cls and str(cls.grade_id) == serie_str)
@@ -146,9 +154,18 @@ def obter_series_com_gabaritos_municipio(
 
     if not grade_ids:
         return []
+    from app.services.cartao_resposta.answer_sheet_audience import adap_series_label
+    from app.services.special_education import support_level_from_exact_grade_name
+
     rows = Grade.query.filter(Grade.id.in_(list(grade_ids))).order_by(Grade.name.asc()).all()
     # Mesmo formato das demais telas de cartão: id + nome (+ name para compat).
-    return [{"id": str(g.id), "nome": g.name, "name": g.name} for g in rows]
+    # Série Suporte N aparece como ADAP N.
+    out = []
+    for g in rows:
+        level = support_level_from_exact_grade_name(g.name)
+        nome = adap_series_label(level) if level is not None else g.name
+        out.append({"id": str(g.id), "nome": nome, "name": nome})
+    return out
 
 
 def obter_gabaritos_por_municipio(
@@ -1278,11 +1295,16 @@ def build_answer_sheet_relatorio_detalhado_json(
 
     alunos_data: List[Dict[str, Any]] = []
     if target_classes:
+        from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
         by_sid = {str(r.student_id): r for r in results if r.student_id}
         class_ids = [c.id for c in target_classes]
         enrolled = (
-            Student.query.options(joinedload(Student.class_), joinedload(Student.user))
-            .filter(Student.class_id.in_(class_ids))
+            apply_gabarito_audience(
+                Student.query.options(joinedload(Student.class_), joinedload(Student.user))
+                .filter(Student.class_id.in_(class_ids)),
+                str(gab.id),
+            )
             .order_by(Student.class_id, Student.name)
             .all()
         )

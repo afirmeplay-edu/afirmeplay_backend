@@ -313,3 +313,99 @@ CREATE INDEX IF NOT EXISTS ix_reading_fluency_comp_answer_session
     ON "{schema}".reading_fluency_comprehension_answer(session_id);
 COMMENT ON TABLE "{schema}".reading_fluency_comprehension_answer IS 'Respostas de compreensão na sessão ad-hoc de fluência';
 """
+
+
+WRITTEN_TEST_TABLES = (
+    "reading_written_test",
+    "reading_written_test_question",
+    "reading_written_test_class",
+    "reading_written_test_print_run",
+)
+
+
+def get_afirme_ler_written_test_tables_ddl(schema: str) -> str:
+  """Avaliação escrita do Afirme Ler. Separado da fluência: não toca reading_evaluation."""
+  return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test (
+    id VARCHAR PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    grade_ids JSON NOT NULL DEFAULT '[]'::json,
+    school_ids JSON NOT NULL DEFAULT '[]'::json,
+    class_ids JSON NOT NULL DEFAULT '[]'::json,
+    status VARCHAR(20) NOT NULL DEFAULT 'rascunho',
+    created_by VARCHAR NOT NULL REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    published_at TIMESTAMP,
+    CONSTRAINT chk_reading_written_test_status
+        CHECK (status IN ('rascunho', 'publicada'))
+);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_status
+    ON "{schema}".reading_written_test(status);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_created_by
+    ON "{schema}".reading_written_test(created_by);
+COMMENT ON TABLE "{schema}".reading_written_test IS 'Avaliação escrita do Afirme Ler (prova impressa com questões do banco)';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_question (
+    id VARCHAR PRIMARY KEY,
+    written_test_id VARCHAR NOT NULL
+        REFERENCES "{schema}".reading_written_test(id) ON DELETE CASCADE,
+    question_id VARCHAR NOT NULL,
+    "order" INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_reading_written_test_question UNIQUE (written_test_id, question_id),
+    CONSTRAINT uq_reading_written_test_order UNIQUE (written_test_id, "order"),
+    CONSTRAINT chk_reading_written_test_order CHECK ("order" BETWEEN 1 AND 20)
+);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_question_question
+    ON "{schema}".reading_written_test_question(question_id);
+COMMENT ON TABLE "{schema}".reading_written_test_question IS 'Questões da avaliação escrita do Afirme Ler, na ordem da prova';
+COMMENT ON COLUMN "{schema}".reading_written_test_question.question_id IS 'public.question.id, sem FK para não bloquear a exclusão de questões no Afirme Play';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_class (
+    id VARCHAR PRIMARY KEY,
+    written_test_id VARCHAR NOT NULL
+        REFERENCES "{schema}".reading_written_test(id) ON DELETE CASCADE,
+    class_id UUID NOT NULL REFERENCES "{schema}".class(id) ON DELETE CASCADE,
+    application_start TIMESTAMP NOT NULL,
+    application_end TIMESTAMP,
+    timezone VARCHAR(50) NOT NULL DEFAULT 'America/Sao_Paulo',
+    created_by VARCHAR NOT NULL REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_reading_written_test_class UNIQUE (written_test_id, class_id),
+    CONSTRAINT chk_reading_written_test_class_dates
+        CHECK (application_end IS NULL OR application_end > application_start)
+);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_class_class
+    ON "{schema}".reading_written_test_class(class_id);
+COMMENT ON TABLE "{schema}".reading_written_test_class IS 'Aplicação da avaliação escrita do Afirme Ler por turma (alunos pela turma atual)';
+COMMENT ON COLUMN "{schema}".reading_written_test_class.application_start IS 'Data/hora local no fuso da coluna timezone';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_print_run (
+    id VARCHAR PRIMARY KEY,
+    written_test_id VARCHAR NOT NULL
+        REFERENCES "{schema}".reading_written_test(id) ON DELETE CASCADE,
+    class_id UUID REFERENCES "{schema}".class(id) ON DELETE CASCADE,
+    status VARCHAR(20) NOT NULL DEFAULT 'pendente',
+    task_id VARCHAR(64),
+    total_students INTEGER NOT NULL DEFAULT 0,
+    generated_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    minio_bucket VARCHAR(100),
+    minio_object_name VARCHAR(500),
+    answer_sheet_map JSON,
+    created_by VARCHAR NOT NULL REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    CONSTRAINT chk_reading_written_test_print_run_status
+        CHECK (status IN ('pendente', 'processando', 'concluido', 'erro'))
+);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_print_run_test
+    ON "{schema}".reading_written_test_print_run(written_test_id, created_at DESC);
+COMMENT ON TABLE "{schema}".reading_written_test_print_run IS 'Gerações de cartões-resposta da avaliação escrita do Afirme Ler (ZIP no MinIO)';
+COMMENT ON COLUMN "{schema}".reading_written_test_print_run.class_id IS 'Turma da geração; NULL = todas as turmas aplicadas';
+COMMENT ON COLUMN "{schema}".reading_written_test_print_run.answer_sheet_map IS 'Coordenadas das bolhas e das áreas de escrita extraídas do PDF base';
+"""

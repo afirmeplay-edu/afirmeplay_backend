@@ -25,6 +25,7 @@ import re
 from io import BytesIO
 from sqlalchemy.orm import aliased, joinedload, subqueryload
 from app.utils.response_formatters import format_question_response, format_test_response
+from app.utils.question_helpers import play_questions_only
 
 bp = Blueprint('questions', __name__, url_prefix='/questions')
 
@@ -611,24 +612,24 @@ def debug_questions():
         tenant_physical_schema = get_effective_tenant_physical_schema()
         
         # Contar questões sem filtro
-        total_questions = db.session.execute(text("SELECT COUNT(*) FROM public.question")).scalar()
+        total_questions = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE origin = 'afirme_play'")).scalar()
         
         # Contar por scope_type
-        global_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'GLOBAL'")).scalar()
-        city_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'CITY'")).scalar()
-        private_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'PRIVATE'")).scalar()
-        null_scope = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type IS NULL")).scalar()
+        global_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE origin = 'afirme_play' AND scope_type = 'GLOBAL'")).scalar()
+        city_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE origin = 'afirme_play' AND scope_type = 'CITY'")).scalar()
+        private_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE origin = 'afirme_play' AND scope_type = 'PRIVATE'")).scalar()
+        null_scope = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE origin = 'afirme_play' AND scope_type IS NULL")).scalar()
         
         # Contar questões CITY para a cidade atual
         city_questions = 0
         if context and context.city_id:
             city_questions = db.session.execute(
-                text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'CITY' AND owner_city_id = :city_id"),
+                text("SELECT COUNT(*) FROM public.question WHERE origin = 'afirme_play' AND scope_type = 'CITY' AND owner_city_id = :city_id"),
                 {"city_id": context.city_id}
             ).scalar()
         
         # Testar query ORM
-        orm_count = Question.query.count()
+        orm_count = play_questions_only(Question.query).count()
         
         return jsonify({
             "context": {
@@ -736,6 +737,7 @@ def list_questions():
         
         # Aplicar filtro de scope (OR entre todos os filtros)
         query = query.filter(or_(*scope_filters))
+        query = play_questions_only(query)
         
         # Aplicar filtros adicionais
         if question_type:
@@ -776,13 +778,13 @@ def get_questions_batch():
             return jsonify([]), 200
 
         questions = (
-            Question.query.options(
+            play_questions_only(Question.query.options(
                 joinedload(Question.subject),
                 joinedload(Question.grade),
                 joinedload(Question.education_stage),
                 joinedload(Question.creator),
                 joinedload(Question.last_modifier),
-            )
+            ))
             .filter(Question.id.in_(raw_ids))
             .all()
         )
@@ -828,13 +830,13 @@ def get_question_image(question_id, image_id):
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def get_question(question_id):
     try:
-        question = Question.query.options(
+        question = play_questions_only(Question.query.options(
             joinedload(Question.subject),
             joinedload(Question.grade),
             joinedload(Question.education_stage),
             joinedload(Question.creator),
             joinedload(Question.last_modifier)
-        ).get(question_id)
+        )).filter(Question.id == question_id).first()
 
         if not question:
             return jsonify({"error": "Question not found"}), 404
@@ -855,7 +857,7 @@ def get_question_answer_count(question_id):
     registros em StudentAnswer para essa question_id).
     """
     try:
-        question = Question.query.get(question_id)
+        question = play_questions_only(Question.query).filter(Question.id == question_id).first()
         if not question:
             return jsonify({"error": "Questão não encontrada"}), 404
         quantidade = StudentAnswer.query.filter(StudentAnswer.question_id == question_id).count()
@@ -876,7 +878,7 @@ def get_question_answer_count(question_id):
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def update_question(question_id):
     try:
-        question = Question.query.get(question_id)
+        question = play_questions_only(Question.query).filter(Question.id == question_id).first()
         if not question:
             return jsonify({"error": "Question not found"}), 404
 
@@ -1089,7 +1091,7 @@ def bulk_delete_questions():
             return jsonify({"message": "No question IDs provided to delete"}), 200
 
         # Filtra as questões a serem deletadas
-        questions_to_delete = Question.query.filter(Question.id.in_(question_ids)).all()
+        questions_to_delete = play_questions_only(Question.query).filter(Question.id.in_(question_ids)).all()
 
         if not questions_to_delete:
             return jsonify({"error": "None of the provided question IDs were found"}), 404
@@ -1112,7 +1114,7 @@ def bulk_delete_questions():
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def delete_question(question_id):
     try:
-        question = Question.query.get(question_id)
+        question = play_questions_only(Question.query).filter(Question.id == question_id).first()
         if not question:
             return jsonify({"error": "Question not found"}), 404
 

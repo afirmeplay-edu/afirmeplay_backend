@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tasks Celery da Leitura Guiada Automática."""
+"""Tasks Celery do Afirme Ler: Leitura Guiada Automática e cartões-resposta da avaliação escrita."""
 from __future__ import annotations
 
 import logging
@@ -62,3 +62,24 @@ def process_guided_auto_session(
         except Exception:
             pass
         raise self.retry(exc=exc)
+
+
+@celery_app.task(
+    bind=True,
+    name="afirme_ler.generate_written_test_answer_sheets",
+    max_retries=0,
+    time_limit=1800,
+    soft_time_limit=1740,
+)
+def generate_written_test_answer_sheets(self: Task, run_id: str, city_id: str) -> Dict[str, Any]:
+    """Cartões-resposta da avaliação escrita: um PDF por aluno num ZIP no MinIO."""
+    from app.afirme_ler.services.written_test_answer_sheet_service import run_generation
+    from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
+
+    if not city_id:
+        raise ValueError("city_id é obrigatório para gerar os cartões-resposta.")
+    set_search_path(city_id_to_schema_name(str(city_id)))
+    try:
+        return run_generation(run_id)
+    finally:
+        set_search_path("public")

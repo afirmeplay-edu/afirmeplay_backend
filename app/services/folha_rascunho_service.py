@@ -310,9 +310,26 @@ def _collect_cartao_resposta(
     classes = [c for c in classes if _school_allowed(str(c.school_id), allowed)]
     classes.sort(key=lambda c: (str(c.school.name if c.school else ""), str(c.grade_id or ""), str(c.name or "")))
 
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_audience_cached
+
+    audience = gabarito_audience_cached(gab)
     tree: Dict[str, Dict[str, Any]] = {}
     for classe in classes:
-        students = _students_enrolled(classe)
+        if audience.has_restrictions:
+            rows = (
+                audience.apply(Student.query.filter_by(class_id=classe.id))
+                .order_by(Student.name)
+                .all()
+            )
+            students = [
+                {"id": str(s.id), "name": str(s.name or "").strip()}
+                for s in rows
+                if str(s.name or "").strip()
+            ]
+            if not students:
+                continue
+        else:
+            students = _students_enrolled(classe)
         _append_class_to_tree(tree, classe, students, student_ids=student_ids)
 
     titulo = str(gab.title or "").strip() if getattr(gab, "title", None) else ""

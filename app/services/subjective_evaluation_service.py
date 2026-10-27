@@ -706,44 +706,31 @@ class SubjectiveEvaluationService:
         especial = is_adap_education_stage(education_stage_id)
 
         if especial:
-            query = (
-                db.session.query(Subturma, Class, Grade)
-                .join(Class, Class.id == Subturma.class_id)
-                .join(Grade, Grade.id == Class.grade_id)
+            from app.services.subturma_options import list_subturma_rows
+
+            allowed_class_ids = None
+            if str((user or {}).get("role") or "").lower() == "professor":
+                from app.permissions.utils import get_teacher_classes
+                from app.utils.uuid_helpers import ensure_uuid_list
+
+                allowed_class_ids = ensure_uuid_list(get_teacher_classes((user or {}).get("id")) or [])
+                if not allowed_class_ids:
+                    return {"classes": []}
+            rows = list_subturma_rows(
+                grade_ids=[grade_id] if grade_id else None,
+                school_ids=school_ids,
+                allowed_class_ids=allowed_class_ids,
             )
-            if grade_id:
-                query = query.filter(Class.grade_id == grade_id)
-            if school_ids is not None:
-                query = query.filter(Class.school_id.in_(school_ids))
-            query, empty = SubjectiveEvaluationService._restrict_professor_classes(query, user)
-            if empty is not None:
-                return {"classes": []}
-            rows = query.order_by(Grade.name.asc(), Class.name.asc(), Subturma.support_level.asc()).all()
-            if not rows:
-                return {"classes": []}
-            counts = {
-                str(subturma_id): int(total)
-                for subturma_id, total in (
-                    db.session.query(Student.subturma_id, func.count(Student.id))
-                    .filter(Student.subturma_id.in_([sub.id for sub, _, _ in rows]))
-                    .group_by(Student.subturma_id)
-                    .all()
-                )
-            }
-            school_map = {
-                str(item.id): item
-                for item in School.query.filter(School.id.in_({str(cls.school_id) for _, cls, _ in rows if cls.school_id})).all()
-            }
             payload = []
-            for sub, class_obj, grade in rows:
-                school = school_map.get(str(class_obj.school_id)) if class_obj.school_id else None
+            for row in rows:
+                sub, class_obj, grade, school = row["subturma"], row["class"], row["grade"], row["school"]
                 payload.append({
                     "id": str(sub.id),
                     "class_id": str(class_obj.id),
                     "subturma_id": str(sub.id),
                     "support_level": int(sub.support_level),
                     "name": SubjectiveEvaluationService.adap_option_name(grade.name, class_obj.name, sub.support_level),
-                    "students_count": counts.get(str(sub.id), 0),
+                    "students_count": row["students_count"],
                     "school": {"id": school.id, "name": school.name} if school else None,
                     "grade": {"id": str(grade.id), "name": grade.name},
                     "grade_id": str(grade.id),

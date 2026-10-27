@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+	<head>
+		<meta charset="UTF-8" />
+		<title>{{ test.title }}</title>
+		<!--
+			Caderno de questões da avaliação escrita do Afirme Ler (prova impressa).
+			Sem gabarito, sem pontuação e sem a palavra do ditado: as respostas vão no cartão-resposta.
+		-->
+		<style>
+			@page {
+				size: A4 portrait;
+				margin: 1.6cm 1.8cm 1.8cm 1.8cm;
+				@bottom-center {
+					content: "Página " counter(page) " de " counter(pages);
+					font-family: "DejaVu Sans", "Helvetica", Arial, sans-serif;
+					font-size: 10pt;
+					color: #555;
+				}
+			}
+
+			* {
+				box-sizing: border-box;
+			}
+
+			body {
+				margin: 0;
+				font-family: "DejaVu Sans", "Helvetica", Arial, sans-serif;
+				font-size: 14pt;
+				line-height: 1.5;
+				color: #111;
+			}
+
+			p {
+				margin: 0 0 0.25cm 0;
+			}
+
+			img {
+				max-width: 100%;
+				max-height: 9cm;
+				height: auto;
+			}
+
+			img.icon-inline {
+				max-height: 1em;
+				vertical-align: middle;
+			}
+
+			.header {
+				border: 1.5px solid #222;
+				border-radius: 8px;
+				padding: 0.35cm 0.45cm;
+				margin-bottom: 0.4cm;
+			}
+
+			.header-top {
+				display: flex;
+				align-items: center;
+				gap: 0.4cm;
+				margin-bottom: 0.3cm;
+			}
+
+			.header-top img {
+				max-height: 1.8cm;
+				max-width: 4cm;
+			}
+
+			.municipality {
+				font-size: 12pt;
+				font-weight: bold;
+				text-transform: uppercase;
+			}
+
+			.test-title {
+				font-size: 17pt;
+				font-weight: bold;
+				line-height: 1.25;
+			}
+
+			.grades {
+				font-size: 12pt;
+			}
+
+			.field {
+				display: flex;
+				align-items: flex-end;
+				font-size: 13pt;
+				margin-top: 0.3cm;
+			}
+
+			.field-label {
+				font-weight: bold;
+				white-space: nowrap;
+				margin-right: 0.2cm;
+			}
+
+			.field-line {
+				flex: 1;
+				border-bottom: 1px solid #222;
+				height: 0.7cm;
+			}
+
+			.field-row {
+				display: flex;
+				gap: 0.5cm;
+			}
+
+			.field-row .field {
+				flex: 1;
+			}
+
+			.instructions {
+				border: 1px dashed #444;
+				border-radius: 6px;
+				padding: 0.25cm 0.4cm;
+				margin-bottom: 0.5cm;
+				font-size: 13pt;
+			}
+
+			.instructions strong {
+				display: block;
+				margin-bottom: 0.1cm;
+			}
+
+			.question {
+				margin-bottom: 0.55cm;
+				padding-bottom: 0.35cm;
+				border-bottom: 1px solid #ccc;
+			}
+
+			.question.keep-together {
+				page-break-inside: avoid;
+				break-inside: avoid;
+			}
+
+			.question-head {
+				display: flex;
+				align-items: flex-start;
+				gap: 0.3cm;
+			}
+
+			.question-number {
+				flex: 0 0 auto;
+				min-width: 1.1cm;
+				height: 1.1cm;
+				border: 2px solid #111;
+				border-radius: 50%;
+				font-size: 15pt;
+				font-weight: bold;
+				text-align: center;
+				line-height: 1.02cm;
+			}
+
+			.question-body {
+				flex: 1;
+			}
+
+			.statement {
+				font-size: 15pt;
+			}
+
+			.support {
+				font-size: 14pt;
+				margin-top: 0.2cm;
+			}
+
+			.alternatives {
+				list-style: none;
+				margin: 0.25cm 0 0 0;
+				padding: 0;
+			}
+
+			.alternative {
+				display: flex;
+				align-items: flex-start;
+				gap: 0.3cm;
+				font-size: 15pt;
+				margin-bottom: 0.2cm;
+				page-break-inside: avoid;
+				break-inside: avoid;
+			}
+
+			.alternative-letter {
+				flex: 0 0 auto;
+				font-weight: bold;
+				min-width: 0.9cm;
+			}
+
+			.alternative-content p:last-child {
+				margin-bottom: 0;
+			}
+
+			.answer-on-card {
+				margin-top: 0.25cm;
+				font-size: 14pt;
+				font-weight: bold;
+				font-style: italic;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="header">
+			<div class="header-top">
+				{% if municipality_logo %}
+				<img src="data:image/png;base64,{{ municipality_logo }}" alt="Logo do município" />
+				{% elif default_logo %}
+				<img src="data:image/png;base64,{{ default_logo }}" alt="Afirme" />
+				{% endif %}
+				<div>
+					{% if municipality %}
+					<div class="municipality">
+						{{ municipality }}{% if state %} — {{ state }}{% endif %}
+					</div>
+					{% endif %}
+					<div class="test-title">{{ test.title }}</div>
+					{% if test.grades_label %}
+					<div class="grades">Série(s): {{ test.grades_label }}</div>
+					{% endif %}
+				</div>
+			</div>
+
+			<div class="field">
+				<span class="field-label">Nome do aluno:</span>
+				<span class="field-line"></span>
+			</div>
+			<div class="field">
+				<span class="field-label">Escola:</span>
+				<span class="field-line"></span>
+			</div>
+			<div class="field-row">
+				<div class="field">
+					<span class="field-label">Turma:</span>
+					<span class="field-line"></span>
+				</div>
+				<div class="field">
+					<span class="field-label">Data:</span>
+					<span class="field-line"></span>
+				</div>
+			</div>
+		</div>
+
+		<div class="instructions">
+			<strong>Instruções</strong>
+			Leia cada questão com atenção. Marque as respostas no cartão-resposta.
+			O ditado e a produção escrita também são respondidos no cartão-resposta.
+		</div>
+
+		{% for question in questions %}
+		<div class="question{% if question.type == 'multipleChoice' or question.answer_on_card %} keep-together{% endif %}">
+			<div class="question-head">
+				<div class="question-number">{{ question.number }}</div>
+				<div class="question-body">
+					<div class="statement">{{ question.statement }}</div>
+					{% if question.support %}
+					<div class="support">{{ question.support }}</div>
+					{% endif %}
+
+					{% if question.alternatives %}
+					<ul class="alternatives">
+						{% for alternative in question.alternatives %}
+						<li class="alternative">
+							<span class="alternative-letter">{{ alternative.letter }})</span>
+							<span class="alternative-content">{{ alternative.content }}</span>
+						</li>
+						{% endfor %}
+					</ul>
+					{% endif %}
+
+					{% if question.answer_on_card %}
+					<div class="answer-on-card">{{ answer_on_card_text }}</div>
+					{% endif %}
+				</div>
+			</div>
+		</div>
+		{% endfor %}
+	</body>
+</html>

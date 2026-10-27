@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<!--
+  Cartão-resposta da avaliação escrita do Afirme Ler (PDF base, sem dados de aluno).
+
+  Quadrados de 32px a 0,2cm dos cantos, como no cartão do socioeconômico.
+  A margem de cima fica livre: o overlay por aluno desenha ali o cabeçalho
+  (título, aluno, escola, série/turma, assinatura/data) e o QR.
+
+  O mapa do cartão é extraído deste PDF pelo tamanho dos desenhos:
+    - bolha: imagem de {{ sizes.bubble }}px (a mesma do socioeconômico);
+    - linha do ditado: fundo branco de {{ sizes.dictation_w }}x{{ sizes.dictation_h }}px;
+    - área do bilhete: fundo branco de {{ sizes.production_w }}x{{ sizes.production_h }}px.
+  Não usar outras imagens de fundo desses tamanhos neste template.
+  Nunca imprimir gabarito, palavra ditada nem pontuação.
+-->
+<html lang="pt-BR">
+	<head>
+		<meta charset="UTF-8" />
+		<title>Cartão-resposta — {{ test.title }}</title>
+		<style>
+			@page {
+				size: A4 portrait;
+				margin: 4.6cm 1.5cm 1.5cm 1.5cm;
+				@top-left-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat left 0.2cm top 0.2cm / 32px 32px;
+				}
+				@top-right-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat right 0.2cm top 0.2cm / 32px 32px;
+				}
+				@bottom-left-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat left 0.2cm bottom 0.2cm / 32px 32px;
+				}
+				@bottom-right-corner {
+					content: "";
+					background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='black'/></svg>") no-repeat right 0.2cm bottom 0.2cm / 32px 32px;
+				}
+			}
+
+			* {
+				margin: 0;
+				padding: 0;
+				box-sizing: border-box;
+			}
+
+			body {
+				font-family: "DejaVu Sans", "Helvetica", Arial, sans-serif;
+				font-size: 11pt;
+				color: #111;
+			}
+
+			.preview {
+				border: 2px dashed #b45309;
+				padding: 6px 8px;
+				margin-bottom: 8px;
+				font-size: 10pt;
+			}
+
+			.preview strong {
+				display: block;
+				color: #b45309;
+			}
+
+			.instructions {
+				border: 1px solid #000;
+				padding: 6px 8px;
+				margin-bottom: 10px;
+				font-size: 10pt;
+				line-height: 1.35;
+			}
+
+			.instructions strong {
+				display: block;
+				margin-bottom: 2px;
+			}
+
+			.example-mark {
+				display: inline-block;
+				width: 11px;
+				height: 11px;
+				border-radius: 50%;
+				background-color: #000;
+				vertical-align: middle;
+			}
+
+			.row {
+				display: flex;
+				align-items: center;
+				border: 1px solid #000;
+				margin-bottom: -1px;
+				min-height: 0.8cm;
+				break-inside: avoid;
+			}
+
+			.num {
+				flex: 0 0 1.1cm;
+				align-self: stretch;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				background: #f2f2f2;
+				border-right: 1px solid #000;
+				font-size: 12pt;
+				font-weight: bold;
+			}
+
+			.choices {
+				padding: 4px 8px;
+				white-space: nowrap;
+			}
+
+			.choice {
+				display: inline-block;
+				white-space: nowrap;
+				vertical-align: middle;
+				margin-right: 14px;
+			}
+
+			.bubble {
+				display: inline-block;
+				width: {{ sizes.bubble }}px;
+				height: {{ sizes.bubble }}px;
+				background: url("data:image/png;base64,{{ bubble_png }}") center / {{ sizes.bubble }}px {{ sizes.bubble }}px no-repeat;
+				vertical-align: middle;
+			}
+
+			.lbl {
+				display: inline-block;
+				margin-left: 3px;
+				font-size: 10pt;
+				font-weight: bold;
+				line-height: 1;
+				vertical-align: middle;
+			}
+
+			.dictation {
+				padding: 4px 8px 6px;
+				display: flex;
+				align-items: flex-end;
+			}
+
+			.dictation-label {
+				font-size: 9.5pt;
+				margin-right: 8px;
+				white-space: nowrap;
+			}
+
+			.dictation-area {
+				width: {{ sizes.dictation_w }}px;
+				height: {{ sizes.dictation_h }}px;
+				border-bottom: 2px solid #000;
+				background: url("data:image/png;base64,{{ area_png }}") no-repeat 0 0 / 100% 100%;
+			}
+
+			.production {
+				border: 1px solid #000;
+				margin: 10px 0;
+				break-inside: avoid;
+				page-break-inside: avoid;
+			}
+
+			.production-head {
+				display: flex;
+				align-items: stretch;
+				border-bottom: 1px solid #000;
+			}
+
+			.production-title {
+				padding: 4px 8px;
+				font-size: 10pt;
+				font-weight: bold;
+			}
+
+			.writing-area {
+				width: {{ sizes.production_w }}px;
+				height: {{ sizes.production_h }}px;
+				margin: 6px auto 8px;
+				border: 1px solid #000;
+				background: url("data:image/png;base64,{{ area_png }}") no-repeat 0 0 / 100% 100%;
+			}
+
+			.writing-line {
+				height: {{ sizes.production_line }}px;
+				border-bottom: 1px solid #9ca3af;
+			}
+
+			.writing-line:last-child {
+				border-bottom: none;
+			}
+		</style>
+	</head>
+	<body>
+		{% if preview %}
+		<div class="preview">
+			<strong>PRÉ-VISUALIZAÇÃO — no PDF estes dados e o QR são desenhados no topo da folha (overlay).</strong>
+			{{ test.title }}<br />
+			Aluno: {{ preview.name }} | Escola: {{ preview.school_name }} | Série/Turma: {{ preview.grade_name }} — {{ preview.class_name }}<br />
+			QR (folha 1): {{ preview.qr_text }}
+		</div>
+		{% endif %}
+
+		<div class="instructions">
+			<strong>Como responder</strong>
+			Múltipla escolha: preencha completamente a bolha da letra escolhida, assim: <span class="example-mark"></span>. Marque só uma bolha por questão.<br />
+			Ditado: escreva na linha a palavra que o aplicador ditar.<br />
+			Produção escrita: escreva o bilhete na área pautada.
+		</div>
+
+		{% for item in items %}
+		{% if item.type == 'multipleChoice' %}
+		<div class="row">
+			<div class="num">{{ item.number }}</div>
+			<div class="choices">{% for letter in item.letters %}<span class="choice"><span class="bubble"></span><span class="lbl">{{ letter }}</span></span>{% endfor %}</div>
+		</div>
+		{% elif item.type == 'dictation' %}
+		<div class="row">
+			<div class="num">{{ item.number }}</div>
+			<div class="dictation">
+				<span class="dictation-label">Ditado — escreva a palavra:</span>
+				<div class="dictation-area"></div>
+			</div>
+		</div>
+		{% else %}
+		<section class="production">
+			<div class="production-head">
+				<div class="num">{{ item.number }}</div>
+				<div class="production-title">Produção escrita — escreva o bilhete nas linhas abaixo.</div>
+			</div>
+			<div class="writing-area">{% for _ in range(item.lines) %}<div class="writing-line"></div>{% endfor %}</div>
+		</section>
+		{% endif %}
+		{% endfor %}
+	</body>
+</html>

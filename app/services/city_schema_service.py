@@ -10,7 +10,10 @@ import logging
 from app import db
 from app.utils.tenant_middleware import city_id_to_schema_name
 from app.services.mobile.ddl import get_mobile_tables_ddl
-from app.afirme_ler.ddl import get_afirme_ler_evaluation_tables_ddl
+from app.afirme_ler.ddl import (
+    get_afirme_ler_evaluation_tables_ddl,
+    get_afirme_ler_written_test_tables_ddl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1506,6 +1509,7 @@ def _get_city_tables_ddl(schema: str) -> str:
     monitoring_block = get_monitoring_tables_ddl(schema)
     saved_ata_block = get_saved_ata_sala_tables_ddl(schema)
     afirme_ler_block = get_afirme_ler_evaluation_tables_ddl(schema)
+    afirme_ler_written_test_block = get_afirme_ler_written_test_tables_ddl(schema)
     subjective_evaluation_block = get_subjective_evaluation_tables_ddl(schema)
     cover_templates_block = get_cover_templates_table_ddl(schema)
     certificate_artworks_block = get_certificate_artworks_table_ddl(schema)
@@ -2255,7 +2259,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".form_result_cache (
 COMMENT ON TABLE "{schema}".form_result_cache IS 'Cache de resultados de formulários';
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_form_type ON "{schema}".form_result_cache(form_id, report_type);
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_dirty ON "{schema}".form_result_cache(is_dirty);
-""" + play_tv_block + plantao_online_block + ideb_meta_block + monitoring_block + saved_ata_block + afirme_ler_block + subjective_evaluation_block + cover_templates_block + f"""
+""" + play_tv_block + plantao_online_block + ideb_meta_block + monitoring_block + saved_ata_block + afirme_ler_block + afirme_ler_written_test_block + subjective_evaluation_block + cover_templates_block + f"""
 CREATE TABLE IF NOT EXISTS "{schema}".certificate_templates (
     id VARCHAR PRIMARY KEY,
     evaluation_id VARCHAR REFERENCES "{schema}".test(id),

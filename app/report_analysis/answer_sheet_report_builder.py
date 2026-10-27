@@ -410,15 +410,16 @@ def get_answer_sheet_target_classes_for_report(
     return _load_classes_ordered(ids)
 
 
-def _student_count_by_class(class_ids: List[Any]) -> Dict[str, int]:
+def _student_count_by_class(class_ids: List[Any], gabarito_id: Optional[str] = None) -> Dict[str, int]:
+    """Alunos previstos por turma. Com gabarito ADAP, só os das subturmas geradas."""
     if not class_ids:
         return {}
-    rows = (
-        db.session.query(Student.class_id, func.count(Student.id))
-        .filter(Student.class_id.in_(class_ids))
-        .group_by(Student.class_id)
-        .all()
+    from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
+    query = db.session.query(Student.class_id, func.count(Student.id)).filter(
+        Student.class_id.in_(class_ids)
     )
+    rows = apply_gabarito_audience(query, gabarito_id).group_by(Student.class_id).all()
     return {str(row[0]): int(row[1]) for row in rows if row[0] is not None}
 
 
@@ -1082,7 +1083,7 @@ def build_answer_sheet_report_payload(
     if not results and not target_classes:
         raise LookupError("Nenhum resultado de cartão-resposta para o escopo")
 
-    counts = _student_count_by_class([c.id for c in target_classes])
+    counts = _student_count_by_class([c.id for c in target_classes], str(gab.id))
     school_ids: Set[str] = set()
     for c in target_classes:
         if c.school_id:

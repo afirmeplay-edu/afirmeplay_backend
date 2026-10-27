@@ -154,7 +154,8 @@ def _course_name_for_serie(serie_nome: str) -> str:
     """Infere Anos Iniciais / Finais / etc. a partir do rótulo da coluna série."""
     from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
 
-    return infer_course_name_from_grade(serie_nome or "")
+    # Consolidado compartilhado com a avaliação online: "Suporte N" segue a regra anterior.
+    return infer_course_name_from_grade(serie_nome or "", suporte_como_especial=False)
 
 
 def _course_name_for_scope_serie(scope: ScopeIndex, serie_id: str) -> str:
@@ -199,17 +200,21 @@ def _annotate_proficiency_level_labels(
     *,
     subject_name: str = GERAL_KEY,
     has_matematica: Optional[bool] = None,
+    course_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Preenche niveis_por_serie / nivel_media_* usando a escala da série (não um curso global).
 
     nivel_media_escola / nivel_media_geral só são preenchidos quando todas as séries
     com valor compartilham o mesmo course_name (evita misturar Iniciais × Finais).
+    course_override: escala única para todas as colunas (cartão ADAP = Educação Especial).
     """
     if not matriz:
         return matriz
     cols = series_colunas or []
-    course_by_idx = [_course_name_for_serie(str(c.get("serie_nome") or "")) for c in cols]
+    course_by_idx = [
+        course_override or _course_name_for_serie(str(c.get("serie_nome") or "")) for c in cols
+    ]
 
     for linha in matriz.get("linhas") or []:
         valores = linha.get("valores_por_serie") or []
@@ -1250,6 +1255,7 @@ def _build_medias_section_answer_sheet(
     all_disciplines: Set[str],
     field: str,
     has_matematica: Optional[bool] = None,
+    course_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     ⚠️ MÉDIA HIERÁRQUICA (NÃO PONDERADA) ⚠️
@@ -1262,7 +1268,8 @@ def _build_medias_section_answer_sheet(
     NUNCA calcular média das escolas para obter taxa_geral, pois escolas com mais
     séries teriam mais peso (média ponderada).
 
-    O ``course_name`` da conversão nota←proficiência é o da **série da célula**.
+    O ``course_name`` da conversão nota←proficiência é o da **série da célula**,
+    exceto com ``course_override`` (cartão ADAP: escala única de Educação Especial).
     """
     mk = _matriz_kwargs(ctx)
 
@@ -1276,7 +1283,7 @@ def _build_medias_section_answer_sheet(
         cell_results = _filter_answer_sheet_in_cell(scope, results, escola_id, serie_id)
         if not cell_results:
             return None
-        course_name = _course_name_for_scope_serie(scope, serie_id)
+        course_name = course_override or _course_name_for_scope_serie(scope, serie_id)
         if discipline is None:
             mg, mp = hierarchical_mean_grade_and_proficiency(
                 cell_results,
@@ -1316,6 +1323,7 @@ def _build_medias_section_answer_sheet(
                 ctx.series_colunas,
                 subject_name=subj,
                 has_matematica=hm,
+                course_override=course_override,
             )
         return matriz
 
@@ -1389,6 +1397,7 @@ def _build_distribuicao_section_answer_sheet(
     results_rede: List[AnswerSheetResult],
     all_disciplines: Set[str],
     has_matematica: bool,
+    course_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     mk = _matriz_kwargs(ctx)
 
@@ -1425,7 +1434,11 @@ def _build_distribuicao_section_answer_sheet(
         )
 
     out = _section_geral_e_disciplinas(ctx, all_disciplines, _build_one)
-    courses = _unique_course_names_from_series_colunas(ctx.series_colunas)
+    courses = (
+        [course_override]
+        if course_override
+        else _unique_course_names_from_series_colunas(ctx.series_colunas)
+    )
     if len(courses) == 1 and results_rede:
         course_name = courses[0]
         _, mp = hierarchical_mean_grade_and_proficiency(
@@ -2667,6 +2680,15 @@ def build_answer_sheet_consolidated_report(
     if not has_mat:
         has_mat = any("matem" in d.lower() for d in all_disciplines)
 
+    # Cartões ADAP (série Suporte N): escala única de Educação Especial, não a da série regular.
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
+
+    adap_course = (
+        "Educação Especial"
+        if gabs_linhas and all(gabarito_adap_level(g) is not None for g in gabs_linhas)
+        else None
+    )
+
     return _assemble_payload(
         tipo_entidade="cartao_resposta",
         filtros=filtros,
@@ -2680,16 +2702,19 @@ def build_answer_sheet_consolidated_report(
         consolidado_medias_nota=_build_medias_section_answer_sheet(
             ctx, results_linhas, results_rede, all_disciplines, "grade",
             has_matematica=has_mat,
+            course_override=adap_course,
         ),
         consolidado_medias_proficiencia=_build_medias_section_answer_sheet(
             ctx, results_linhas, results_rede, all_disciplines, "proficiency",
             has_matematica=has_mat,
+            course_override=adap_course,
         ),
         acertos_por_habilidade=_answer_sheet_acertos_data(
             ctx, gabs_by_id, gabarito_ids, results_linhas, results_rede, all_disciplines
         ),
         distribuicao_niveis_proficiencia=_build_distribuicao_section_answer_sheet(
-            ctx, results_linhas, results_rede, all_disciplines, has_mat
+            ctx, results_linhas, results_rede, all_disciplines, has_mat,
+            course_override=adap_course,
         ),
     )
 

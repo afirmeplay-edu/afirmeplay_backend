@@ -1,7 +1,10 @@
 import re
 from typing import Any, Optional, Set
 
-from app.services.special_education import grade_label_is_exact_adap
+from app.services.special_education import (
+    grade_label_is_exact_adap,
+    support_level_from_exact_grade_name,
+)
 
 
 # Exige contexto de série (ano/série/médio) para não confundir "1º AVALIA" com "1º ano".
@@ -40,10 +43,12 @@ def looks_like_grade_label(text: str) -> bool:
         return True
     if grade_label_is_exact_adap(grade_lower):
         return True
+    if support_level_from_exact_grade_name(text) is not None:
+        return True
     return _extract_grade_number(grade_lower) is not None
 
 
-def infer_course_name_from_grade(grade_name: str) -> str:
+def infer_course_name_from_grade(grade_name: str, *, suporte_como_especial: bool = True) -> str:
     """
     Inferir nome do curso a partir de diferentes formatos de série.
 
@@ -51,10 +56,16 @@ def infer_course_name_from_grade(grade_name: str) -> str:
     - "5º ano", "5° ANO", "5 ano", "5o ano"
     - "9º ano", "9 ano"
     - "1º médio", "2 medio"
+    - "Suporte 1" (série ADAP do cartão-resposta) → Educação Especial
+
+    suporte_como_especial=False mantém "Suporte N" fora de Educação Especial, como no
+    consolidado compartilhado com a avaliação online.
 
     Títulos sem contexto de série (ex.: "1º AVALIA MUNICIPAL") não inferem número.
     Nunca usar título de gabarito com nome de município aqui — passe só o rótulo de série.
     """
+    if suporte_como_especial and support_level_from_exact_grade_name(grade_name) is not None:
+        return "Educação Especial"
     grade_lower = (grade_name or "").strip().lower()
     if not grade_lower:
         return "Anos Iniciais"
@@ -187,6 +198,22 @@ def _grade_name_from_gabarito_grades(gabarito_obj: Any) -> Optional[str]:
     return None
 
 
+def _adap_grade_name_from_gabarito(gabarito_obj: Any) -> Optional[str]:
+    """Nome da série Suporte N quando o gabarito é de Educação Especial (ADAP)."""
+    if gabarito_obj is None:
+        return None
+    try:
+        from app.services.cartao_resposta.gabarito_grades import get_gabarito_grades
+
+        grades = get_gabarito_grades(gabarito_obj)
+    except Exception:
+        return None
+    if len(grades) != 1:
+        return None
+    name = (grades[0].get("name") or "").strip()
+    return name if support_level_from_exact_grade_name(name) is not None else None
+
+
 def resolve_grade_name_for_proficiency(
     gabarito_obj: Any = None,
     grade_name: str = "",
@@ -197,6 +224,7 @@ def resolve_grade_name_for_proficiency(
     Resolve o rótulo de série usado no cálculo de proficiência/nota.
 
     Ordem (NUNCA usa title do gabarito):
+    0. gabarito ADAP (série Suporte N): a própria série, escala única de Educação Especial
     1. grade_name explícito (se parecer série)
     2. série do aluno (turma atual)
     3. grade_id_snapshot do resultado (se informado)
@@ -206,6 +234,10 @@ def resolve_grade_name_for_proficiency(
     7. scope_snapshot das gerações (somente se série única)
     8. fallback: string vazia (caller trata; não defaultar via title)
     """
+    adap_grade = _adap_grade_name_from_gabarito(gabarito_obj)
+    if adap_grade:
+        return adap_grade
+
     explicit = (grade_name or "").strip()
     if explicit and looks_like_grade_label(explicit):
         return explicit

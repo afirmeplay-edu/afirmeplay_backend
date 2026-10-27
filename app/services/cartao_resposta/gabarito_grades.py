@@ -178,7 +178,13 @@ def course_meta_for_gabarito_serie(
     """
     Retorna (course_name, grade_name, grade_id) para agregação.
     Sem série única resolvível → course_name vazio (caller não deve misturar escalas).
+    Gabarito ADAP (série Suporte N): sempre a série dele, mesmo com filtro de série regular.
     """
+    from app.services.special_education import support_level_from_exact_grade_name
+
+    own = get_gabarito_grades(gabarito)
+    if len(own) == 1 and support_level_from_exact_grade_name(own[0].get("name")) is not None:
+        serie_id = own[0]["id"]
     picked = pick_grade_for_scope(gabarito, serie_id)
     if not picked:
         return "", None, None

@@ -1242,10 +1242,15 @@ def generate_answer_sheets_batch_async(
                     gabarito.class_id = _class_id
                     # Séries: payload/turmas da geração; se já houver grades no gabarito e
                     # a geração não trouxe novas, mantém as existentes.
-                    if grades_resolved:
-                        apply_grades_to_gabarito(gabarito, grades_resolved)
-                    elif not get_gabarito_grades(gabarito) and classes_for_grades:
-                        apply_grades_to_gabarito(gabarito, grades_from_classes(classes_for_grades))
+                    # Gabarito ADAP guarda a série Suporte N do cadastro — não sobrescrever
+                    # com as séries das turmas-mãe (5º, 8º, …).
+                    from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
+
+                    if gabarito_adap_level(gabarito) is None:
+                        if grades_resolved:
+                            apply_grades_to_gabarito(gabarito, grades_resolved)
+                        elif not get_gabarito_grades(gabarito) and classes_for_grades:
+                            apply_grades_to_gabarito(gabarito, grades_from_classes(classes_for_grades))
                     gabarito.last_generation_classes_count = uniq_classes
                     gabarito.last_generation_students_count = total_students
                     updated += 1

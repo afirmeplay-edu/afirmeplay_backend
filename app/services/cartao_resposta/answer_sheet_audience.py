@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Público do cartão-resposta: turma inteira ou subturma ADAP 1 / ADAP 2.
+"""Público do cartão-resposta: turma inteira ou subturma ADAP 1, 2 ou 3.
+
+O nível vem do gabarito: a série dele é "Suporte N" (etapa Educação Especial),
+exibida como "ADAP N", e equivale a ``subturma.support_level = N``. Gabarito com
+séries regulares gera para turmas inteiras; gabarito ADAP gera só para subturmas.
 
 O recorte fica no scope_snapshot de cada geração (answer_sheet_generations):
 chave ``subturma_ids`` e ``subturma_id`` em cada item de ``class_ids``.
 Snapshot sem ``subturma_ids`` vale a turma inteira, como sempre foi.
-
-Uma geração é de turmas regulares ou de subturmas de um único nível. ADAP 3
-não faz prova no sistema e nunca entra no cartão.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-ADAP_CARTAO_LEVELS = (1, 2)
+ADAP_CARTAO_LEVELS = (1, 2, 3)
 PUBLICO_ADAP = "adap"
 PUBLICO_REGULAR = "regular"
 PUBLICO_MISTO = "misto"
@@ -56,6 +57,81 @@ def _as_uuid(value: Any) -> Optional[uuid.UUID]:
 
 
 # ---------------------------------------------------------------------------
+# Série ADAP do gabarito
+# ---------------------------------------------------------------------------
+
+def adap_series_label(level: Any) -> str:
+    """Nome exibido da série Suporte N."""
+    return f"ADAP {int(level)}"
+
+
+def adap_level_of_grade(grade: Any) -> Optional[int]:
+    """
+    Nível ADAP de uma série {id, name} do gabarito: "Suporte N" / "ADAP N".
+    Série da etapa Educação Especial sem nível no nome não é aceita como ADAP.
+    """
+    from app.services.special_education import support_level_from_exact_grade_name
+
+    if isinstance(grade, dict):
+        name = grade.get("name")
+    else:
+        name = getattr(grade, "name", grade)
+    return support_level_from_exact_grade_name(name)
+
+
+def _grade_is_special(grade: Dict[str, Any]) -> bool:
+    if adap_level_of_grade(grade) is not None:
+        return True
+    gid = grade.get("id") if isinstance(grade, dict) else None
+    if not gid:
+        return False
+    try:
+        from app.models.grades import Grade
+        from app.services.special_education import is_adap_education_stage
+
+        row = Grade.query.get(_as_uuid(gid) or gid)
+        return bool(row is not None and is_adap_education_stage(row.education_stage_id))
+    except Exception:
+        return False
+
+
+def validate_gabarito_grades(grades: Sequence[Dict[str, Any]]) -> Optional[int]:
+    """
+    Séries do cadastro. Educação Especial: uma única série ADAP, sem séries regulares.
+    Devolve o nível ADAP ou None (gabarito regular).
+    """
+    rows = list(grades or [])
+    special = [g for g in rows if _grade_is_special(g)]
+    if not special:
+        return None
+    if len(rows) > 1:
+        raise GenerationAudienceError(
+            "Cartão de Educação Especial tem uma única série ADAP e não pode ter outras séries.",
+            "gabarito_series_adap_invalida",
+        )
+    level = adap_level_of_grade(special[0])
+    if level not in ADAP_CARTAO_LEVELS:
+        raise GenerationAudienceError(
+            "Série de Educação Especial sem nível ADAP. Use ADAP 1, ADAP 2 ou ADAP 3.",
+            "gabarito_series_adap_invalida",
+        )
+    return level
+
+
+def gabarito_adap_level(gabarito: Any) -> Optional[int]:
+    """Nível ADAP do gabarito (série Suporte N única). Gabarito regular: None."""
+    if gabarito is None:
+        return None
+    from app.services.cartao_resposta.gabarito_grades import get_gabarito_grades
+
+    grades = get_gabarito_grades(gabarito)
+    if len(grades) != 1:
+        return None
+    level = adap_level_of_grade(grades[0])
+    return level if level in ADAP_CARTAO_LEVELS else None
+
+
+# ---------------------------------------------------------------------------
 # Opções do seletor
 # ---------------------------------------------------------------------------
 
@@ -82,16 +158,20 @@ def list_cartao_adap_options(
     *,
     school_ids: Optional[Sequence[Any]] = None,
     grade_ids: Optional[Sequence[Any]] = None,
+    levels: Optional[Iterable[int]] = None,
     allowed_class_ids: Optional[Sequence[Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Subturmas ADAP 1 e 2 com aluno, em turma-mãe regular."""
+    """Subturmas ADAP com aluno, em turma-mãe regular. levels None = 1, 2 e 3."""
     from app.services.subturma_options import list_subturma_rows
 
+    wanted = [int(level) for level in (levels or ADAP_CARTAO_LEVELS) if int(level) in ADAP_CARTAO_LEVELS]
+    if not wanted:
+        return []
     rows = list_subturma_rows(
         grade_ids=grade_ids,
         school_ids=school_ids,
         allowed_class_ids=allowed_class_ids,
-        levels=ADAP_CARTAO_LEVELS,
+        levels=wanted,
         only_with_students=True,
         exclude_special_parent=True,
     )
@@ -128,11 +208,17 @@ class AdapSlice:
         return cartao_adap_label(self.grade_name, self.class_obj.name, self.level)
 
 
-def check_generation_subturmas(rows: Sequence[Dict[str, Any]], *, city_id: Any) -> int:
+def check_generation_subturmas(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    city_id: Any,
+    expected_level: Optional[int] = None,
+) -> int:
     """
     Regras puras sobre as linhas já carregadas. Devolve o nível único.
 
     Cada linha: subturma_id, level, school_city_id, parent_is_special, students_count, label.
+    expected_level: nível da série ADAP do gabarito.
     """
     if not rows:
         raise GenerationAudienceError("Selecione ao menos uma subturma ADAP.", "subturma_required")
@@ -144,10 +230,18 @@ def check_generation_subturmas(rows: Sequence[Dict[str, Any]], *, city_id: Any) 
     invalid = [row["label"] for row in rows if row.get("level") not in ADAP_CARTAO_LEVELS]
     if invalid:
         raise GenerationAudienceError(
-            "O cartão-resposta aceita só ADAP 1 e ADAP 2. O ADAP 3 não faz prova no sistema.",
+            "Nível ADAP inválido. Use ADAP 1, ADAP 2 ou ADAP 3.",
             "subturma_level_not_allowed",
             invalid,
         )
+    if expected_level is not None:
+        other = [row["label"] for row in rows if int(row["level"]) != int(expected_level)]
+        if other:
+            raise GenerationAudienceError(
+                f"Este cartão é do ADAP {int(expected_level)}. Selecione só subturmas ADAP {int(expected_level)}.",
+                "subturma_level_mismatch",
+                other,
+            )
     special = [row["label"] for row in rows if row.get("parent_is_special")]
     if special:
         raise GenerationAudienceError(
@@ -158,7 +252,7 @@ def check_generation_subturmas(rows: Sequence[Dict[str, Any]], *, city_id: Any) 
     levels = sorted({int(row["level"]) for row in rows})
     if len(levels) > 1:
         raise GenerationAudienceError(
-            "ADAP 1 e ADAP 2 são provas diferentes. Gere cada nível separadamente.",
+            "Cada nível ADAP é uma prova diferente. Gere cada nível separadamente.",
             "subturma_mixed_levels",
         )
     empty = [row["label"] for row in rows if int(row.get("students_count") or 0) == 0]
@@ -176,8 +270,12 @@ def resolve_generation_subturmas(
     class_ids: Sequence[Any] = (),
     school_ids: Sequence[Any] = (),
     grade_ids: Sequence[Any] = (),
+    expected_level: Optional[int] = None,
 ) -> List[AdapSlice]:
-    """Valida o pedido de geração ADAP e devolve as fatias ordenadas por série e turma."""
+    """
+    Valida o pedido de geração ADAP e devolve as fatias ordenadas por série e turma.
+    grade_ids: só séries regulares (filtro das turmas-mãe); séries ADAP são ignoradas.
+    """
     from sqlalchemy import func
 
     from app import db
@@ -193,7 +291,7 @@ def resolve_generation_subturmas(
 
     if class_ids:
         raise GenerationAudienceError(
-            "Uma geração é de turmas regulares ou de subturmas ADAP. Não envie as duas juntas.",
+            "Cartão de Educação Especial vai só para subturmas ADAP. Não envie turmas regulares.",
             "subturma_mixed_with_classes",
         )
     raw = [str(item).strip() for item in (subturma_ids or []) if str(item or "").strip()]
@@ -239,10 +337,13 @@ def resolve_generation_subturmas(
             "students_count": counts.get(str(sub.id), 0),
             "label": cartao_adap_label(grade_name, class_obj.name, sub.support_level),
         })
-    check_generation_subturmas(checks, city_id=city_id)
+    check_generation_subturmas(checks, city_id=city_id, expected_level=expected_level)
 
     school_filter = {_norm(item) for item in school_ids or [] if item}
-    grade_filter = {_norm(item) for item in grade_ids or [] if item}
+    grade_filter = {
+        _norm(item) for item in grade_ids or []
+        if item and not _grade_is_special({"id": item})
+    }
     outside_filters = [
         check["label"]
         for check, (_, class_obj, _, _) in zip(checks, found)
@@ -480,31 +581,30 @@ def filter_students_for_gabarito(students: Iterable[Any], gabarito_or_id: Any) -
     return audience.filter_students(rows)
 
 
-def generation_publico_key(level: Optional[int]) -> str:
-    return f"{PUBLICO_ADAP}{int(level)}" if level else PUBLICO_REGULAR
-
-
-def check_generation_compatible(audience: GabaritoAudience, level: Optional[int]) -> None:
-    """Gabarito ADAP não recebe geração regular nem de outro nível, e vice-versa."""
-    if not audience.restricted and not audience.whole:
-        return
-    if level is None:
-        if audience.restricted:
+def check_generation_request(
+    gabarito_level: Optional[int],
+    *,
+    subturma_ids: Sequence[Any] = (),
+    class_ids: Sequence[Any] = (),
+) -> None:
+    """Gabarito ADAP N gera só para subturmas; gabarito regular nunca recebe subturmas."""
+    if gabarito_level is None:
+        if subturma_ids:
             raise GenerationAudienceError(
-                "Este cartão já foi gerado para subturmas ADAP. Crie outro cartão para as turmas regulares.",
-                "gabarito_publico_conflict",
+                "Este cartão é de séries regulares e não gera para subturmas ADAP. "
+                "Cadastre um cartão de Educação Especial com a série ADAP.",
+                "gabarito_regular_sem_subturmas",
             )
         return
-    if audience.whole and not audience.restricted:
+    if class_ids:
         raise GenerationAudienceError(
-            "Este cartão já foi gerado para turmas regulares. Crie outro cartão para o ADAP.",
-            "gabarito_publico_conflict",
+            f"Este cartão é do ADAP {int(gabarito_level)}: vai só para as subturmas ADAP {int(gabarito_level)}, "
+            "não para turmas regulares.",
+            "gabarito_adap_sem_turmas",
         )
-    if audience.levels and audience.levels != {int(level)}:
-        atual = ", ".join(f"ADAP {item}" for item in sorted(audience.levels))
+    if not subturma_ids:
         raise GenerationAudienceError(
-            f"Este cartão já foi gerado para {atual}. Crie outro cartão para o ADAP {int(level)}.",
-            "gabarito_publico_conflict",
+            f"Selecione ao menos uma subturma ADAP {int(gabarito_level)}.", "subturma_required"
         )
 
 

@@ -24,6 +24,7 @@ from app.services.cartao_resposta.answer_sheet_generator import (
     reserve_pdf_path,
     sanitize_filename,
     student_pdf_filename,
+    zip_entry_name,
 )
 from app import db
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
@@ -586,9 +587,13 @@ def generate_answer_sheets_batch_async(
     scope: str = 'class',
     class_ids: List[str] = None,
     pdf_mode: str = 'per_student',
+    subturma_ids: List[str] = None,
 ) -> Dict[str, Any]:
     """
     Task Celery para geração ASSÍNCRONA de cartões de resposta em batch.
+
+    subturma_ids: geração ADAP. Cada turma-mãe entra só com os alunos da subturma
+    escolhida (um nível por geração, então no máximo uma subturma por turma).
     
     Gera 1 PDF por turma (cada PDF com múltiplas páginas, 1 por aluno).
     Suporta geração para 1 turma, múltiplas turmas de uma série ou escola inteira.
@@ -670,6 +675,7 @@ def generate_answer_sheets_batch_async(
         total_students = 0
         # Nomes de PDF de turma já usados, por pasta do ZIP (evita colisão na mesma escola).
         used_class_pdf_names = {}
+        subturma_by_class = {}
 
         # ========================================================================
         # ✅ NOVO: Gerar PDFs a partir de UM gabarito (escopo) e lista de turmas
@@ -686,6 +692,32 @@ def generate_answer_sheets_batch_async(
             if not classes:
                 raise ValueError("Nenhuma turma encontrada para os IDs informados")
 
+            from app.services.cartao_resposta.answer_sheet_audience import (
+                cartao_adap_label,
+                slice_students_query,
+            )
+            # Turma-mãe -> subturma ADAP da geração. Vazio: turma inteira.
+            if subturma_ids:
+                import uuid as _uuid
+                from app.models.subturma import Subturma
+                sub_uuids = [_uuid.UUID(str(s)) for s in subturma_ids]
+                for sub in Subturma.query.filter(Subturma.id.in_(sub_uuids)).all():
+                    subturma_by_class[str(sub.class_id)] = sub
+                classes = [c for c in classes if str(c.id) in subturma_by_class]
+                if not classes:
+                    raise ValueError("Nenhuma subturma ADAP encontrada para os IDs informados")
+
+            def _slice_query(class_obj):
+                sub = subturma_by_class.get(str(class_obj.id))
+                return slice_students_query(class_obj.id, sub.id if sub else None)
+
+            def _slice_label(class_obj):
+                sub = subturma_by_class.get(str(class_obj.id))
+                if not sub:
+                    return None
+                grade_label = (class_obj.grade.name if class_obj.grade else '') or ''
+                return cartao_adap_label(grade_label, class_obj.name, sub.support_level)
+
             logger.info(f"[CELERY-BATCH] ✅ Gerando PDFs individuais para {len(classes)} turma(s) usando gabarito único {gabarito_master.id}")
             logger.info(f"[CELERY-BATCH] 🚀 OTIMIZADO: 1 template base para TODAS as turmas + overlay por aluno")
 
@@ -699,9 +731,7 @@ def generate_answer_sheets_batch_async(
             import io
 
             # Validar alunos ANTES do WeasyPrint — evita retry em condição permanente
-            total_alunos_todas_turmas = sum(
-                len(Student.query.filter_by(class_id=c.id).all()) for c in classes
-            )
+            total_alunos_todas_turmas = sum(_slice_query(c).count() for c in classes)
             logger.info(f"[CELERY-BATCH] 📊 Total de alunos em todas as turmas: {total_alunos_todas_turmas}")
             if total_alunos_todas_turmas == 0:
                 for class_obj in classes:
@@ -769,15 +799,17 @@ def generate_answer_sheets_batch_async(
                     # a próxima conexão do pool pode não ter search_path → "relation class does not exist" em public.
                     _ensure_tenant_search_path()
                     turma_id_log = str(class_obj.id)
-                    turma_name_log = (class_obj.name or '')
+                    adap_label = _slice_label(class_obj)
+                    turma_name_log = adap_label or (class_obj.name or '')
                     logger.info(f"[CELERY-BATCH] 🔨 Processando turma {idx}/{len(classes)}: {turma_name_log}")
 
                     # Ordem alfabética, a mesma leitura da lista da turma.
                     students = (
-                        Student.query.filter_by(class_id=class_obj.id)
+                        _slice_query(class_obj)
                         .order_by(Student.name.asc(), Student.id.asc())
                         .all()
                     )
+                    progress_class_name = adap_label or class_obj.name
                     
                     # Informações da turma para progress tracking
                     grade_name = ''
@@ -799,6 +831,9 @@ def generate_answer_sheets_batch_async(
                     grade_name = (class_obj.grade.name if class_obj.grade else '').strip() or 'serie'
                     grade_safe = sanitize_filename(grade_name, max_length=40)
                     class_name_raw = (class_obj.name or 'turma').strip()
+                    if adap_label:
+                        sub_level = subturma_by_class[str(class_obj.id)].support_level
+                        class_name_raw = f"{class_name_raw} ADAP {int(sub_level)}"
                     class_safe = sanitize_filename(class_name_raw, max_length=40)
                     # Pasta em disco por escola + turma: turmas homônimas de escolas diferentes não se misturam.
                     # O caminho dentro do ZIP continua sendo {serie}_{turma}/arquivo.
@@ -817,7 +852,8 @@ def generate_answer_sheets_batch_async(
                         class_zip_prefix = class_pdf_zip_prefix(scope, school_name)
                         used_names = used_class_pdf_names.setdefault(class_zip_prefix, set())
                         class_display_name = allocate_class_pdf_basename(
-                            class_pdf_basename(grade_label.strip(), class_name_raw),
+                            zip_entry_name(adap_label) if adap_label
+                            else class_pdf_basename(grade_label.strip(), class_name_raw),
                             class_obj.id,
                             used_names,
                         )
@@ -833,13 +869,15 @@ def generate_answer_sheets_batch_async(
                                     item_index,
                                     extra={
                                         'class_id': str(class_obj.id),
-                                        'class_name': class_obj.name,
+                                        'class_name': progress_class_name,
                                         'school_name': school_name,
                                         'student_id': str(student.id),
                                         'student_name': student.name,
                                     },
                                 )
                             student_data = generator._get_complete_student_data(student)
+                            if adap_label:
+                                student_data['turma_label'] = adap_label
                             
                             # Gerar overlay (ReportLab - rápido!)
                             overlay_bytes = generator._generate_student_overlay_pdf(
@@ -853,7 +891,7 @@ def generate_answer_sheets_batch_async(
                                 if batch_id:
                                     update_item_error(batch_id, item_index, 'Falha ao gerar overlay', extra={
                                         'class_id': str(class_obj.id),
-                                        'class_name': class_obj.name,
+                                        'class_name': progress_class_name,
                                         'school_name': school_name,
                                         'student_id': str(student.id),
                                         'student_name': student.name,
@@ -887,7 +925,8 @@ def generate_answer_sheets_batch_async(
                                 with open(filepath, 'wb') as f:
                                     f.write(pdf_bytes)
                                 if pdf_mode == 'per_student':
-                                    rel_zip_name = f"{grade_safe}_{class_safe}/{filename}"
+                                    student_folder = zip_entry_name(adap_label) if adap_label else f"{grade_safe}_{class_safe}"
+                                    rel_zip_name = f"{student_folder}/{filename}"
                                     student_zip_path = legacy_student_zip_path(
                                         scope, school_name, grade_name, rel_zip_name
                                     )
@@ -920,7 +959,7 @@ def generate_answer_sheets_batch_async(
                             if batch_id:
                                 update_item_done(batch_id, item_index, {
                                     'class_id': str(class_obj.id),
-                                    'class_name': class_obj.name,
+                                    'class_name': progress_class_name,
                                     'school_name': school_name,
                                     'student_id': str(student.id),
                                     'student_name': student.name
@@ -931,7 +970,7 @@ def generate_answer_sheets_batch_async(
                             if batch_id:
                                 update_item_error(batch_id, item_index, str(e), extra={
                                     'class_id': str(class_obj.id),
-                                    'class_name': class_obj.name,
+                                    'class_name': progress_class_name,
                                     'school_name': school_name,
                                     'student_id': str(student.id),
                                     'student_name': student.name,
@@ -1230,9 +1269,16 @@ def generate_answer_sheets_batch_async(
                         snapshot = {
                             'scope': scope,
                             'city_id': city_id,
-                            'class_ids': build_class_scope_entries(cid_list) if cid_list else [],
+                            'class_ids': (
+                                build_class_scope_entries(cid_list, subturmas=subturma_by_class)
+                                if cid_list else []
+                            ),
                             'pdf_mode': pdf_mode,
                         }
+                        if subturma_by_class:
+                            snapshot['publico'] = 'adap'
+                            snapshot['subturma_ids'] = [str(s.id) for s in subturma_by_class.values()]
+                            snapshot['support_level'] = int(next(iter(subturma_by_class.values())).support_level)
                         record_answer_sheet_generations(
                             gabarito_ids=[str(g) for g in gabarito_ids],
                             batch_id=batch_id,

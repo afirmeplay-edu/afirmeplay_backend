@@ -575,12 +575,13 @@ def resolve_participating_students_answer_sheet(
         query_answer_sheet_results_for_class_group,
         student_ids_for_answer_sheet_class_group,
     )
+    from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
 
-    students_base = (
+    students_base = apply_gabarito_audience(
         Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
-        .filter(Student.class_id.in_(class_ids))
-        .all()
-    )
+        .filter(Student.class_id.in_(class_ids)),
+        str(gabarito.id),
+    ).all()
     base_ids = {s.id for s in students_base}
     merged_ids = student_ids_for_answer_sheet_class_group(
         str(gabarito.id), class_ids, base_ids

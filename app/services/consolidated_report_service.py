@@ -2563,6 +2563,23 @@ def _answer_sheet_results_for_classes(gabarito_ids: List[str], class_ids: List[A
     return _dedupe_answer_sheet_by_gabarito_student(out)
 
 
+def _answer_sheet_students_by_class(
+    class_ids: List[Any], item_by_class: Dict[str, str]
+) -> Dict[str, List[Student]]:
+    """Roster por turma, recortado pelo público do gabarito daquela turma (ADAP)."""
+    from app.services.cartao_resposta.answer_sheet_audience import filter_students_for_gabarito
+
+    out: Dict[str, List[Student]] = defaultdict(list)
+    for st in Student.query.filter(Student.class_id.in_(class_ids)).all():
+        if st.class_id:
+            out[str(st.class_id)].append(st)
+    for cid in list(out.keys()):
+        gid = item_by_class.get(cid)
+        if gid:
+            out[cid] = filter_students_for_gabarito(out[cid], gid)
+    return out
+
+
 def build_answer_sheet_consolidated_report(
     municipio_id: str,
     escola_param: Optional[str],
@@ -2603,15 +2620,11 @@ def build_answer_sheet_consolidated_report(
         return _empty_payload("cartao_resposta", filtros, itens)
 
     class_ids_linhas = [c.id for c in all_classes_linhas]
-    students_linhas: Dict[str, List[Student]] = defaultdict(list)
-    for st in Student.query.filter(Student.class_id.in_(class_ids_linhas)).all():
-        if st.class_id:
-            students_linhas[str(st.class_id)].append(st)
-
     item_by_class_linhas: Dict[str, str] = {}
     for gid, cls_list in classes_by_gab_linhas.items():
         for c in cls_list:
             item_by_class_linhas[str(c.id)] = str(gid)
+    students_linhas = _answer_sheet_students_by_class(class_ids_linhas, item_by_class_linhas)
 
     scope_linhas = _build_scope_index(all_classes_linhas, students_linhas, item_by_class_linhas)
     results_linhas = _answer_sheet_results_for_classes(gabarito_ids, class_ids_linhas)
@@ -2621,14 +2634,11 @@ def build_answer_sheet_consolidated_report(
             gabarito_ids, municipio_id, None, user, permissao, area_type
         )
         class_ids_rede = [c.id for c in all_classes_rede]
-        students_rede: Dict[str, List[Student]] = defaultdict(list)
-        for st in Student.query.filter(Student.class_id.in_(class_ids_rede)).all():
-            if st.class_id:
-                students_rede[str(st.class_id)].append(st)
         item_by_class_rede: Dict[str, str] = {}
         for gid, cls_list in classes_by_gab_rede.items():
             for c in cls_list:
                 item_by_class_rede[str(c.id)] = str(gid)
+        students_rede = _answer_sheet_students_by_class(class_ids_rede, item_by_class_rede)
         scope_rede = _build_scope_index(all_classes_rede, students_rede, item_by_class_rede)
         results_rede = _answer_sheet_results_for_classes(gabarito_ids, class_ids_rede)
         ctx = _scope_context_dual(scope_linhas, scope_rede, escola_id)

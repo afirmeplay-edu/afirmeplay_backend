@@ -948,6 +948,44 @@ def generate_answer_sheets():
         school_ids = _norm_list('school_ids', 'school_id')
         grade_ids = _norm_list('grade_ids', 'grade_id')
         class_ids_param = _norm_list('class_ids', 'class_id')
+        subturma_ids_param = _norm_list('subturma_ids', 'subturma_id')
+
+        from app.services.cartao_resposta.answer_sheet_audience import (
+            GenerationAudienceError,
+            check_generation_compatible,
+            gabarito_audience,
+            resolve_generation_subturmas,
+            slice_students_query,
+        )
+
+        def _audience_error(err):
+            return jsonify({"error": err.message, "error_code": err.code, "details": err.details}), 400
+
+        def _adap_seed_kwargs(slices):
+            students_by_class = {
+                s.class_id: slice_students_query(s.class_obj.id, s.subturma_id)
+                .order_by(Student.name.asc(), Student.id.asc())
+                .all()
+                for s in slices
+            }
+            return {
+                'students_by_class': students_by_class,
+                'class_labels': {s.class_id: s.label for s in slices},
+            }
+
+        adap_slices = []
+        if subturma_ids_param:
+            try:
+                adap_slices = resolve_generation_subturmas(
+                    subturma_ids_param,
+                    city_id=city_id_scope,
+                    class_ids=class_ids_param,
+                    school_ids=school_ids,
+                    grade_ids=grade_ids,
+                )
+            except GenerationAudienceError as err:
+                return _audience_error(err)
+        adap_level = adap_slices[0].level if adap_slices else None
 
         # ========== MODO: Gerar a partir de gabarito já criado (POST /create-gabaritos) ==========
         existing_gabarito_id = (data.get('gabarito_id') or '').strip() or None
@@ -959,33 +997,42 @@ def generate_answer_sheets():
                 return unavailable_to_municipality_response()
             if not _user_can_read_gabarito(user, gabarito):
                 return jsonify({"error": "Você não tem permissão para usar este gabarito"}), 403
+            try:
+                check_generation_compatible(gabarito_audience(gabarito), adap_level)
+            except GenerationAudienceError as err:
+                return _audience_error(err)
 
             school_ids_scope = school_ids
             grade_ids_scope = grade_ids
             class_ids_scope = class_ids_param
 
-            school_ids_city_subq = db.session.query(School.id).filter(
-                School.city_id == city_id_scope
-            ).subquery()
-            q = Class.query.filter(Class.school_id.in_(school_ids_city_subq))
-            if school_ids_scope:
-                schools_in_city = db.session.query(School.id).filter(
-                    School.id.in_(school_ids_scope),
+            if adap_slices:
+                classes_to_generate = [s.class_obj for s in adap_slices]
+            else:
+                school_ids_city_subq = db.session.query(School.id).filter(
                     School.city_id == city_id_scope
-                ).all()
-                valid_school_ids = [s[0] for s in schools_in_city]
-                if len(valid_school_ids) != len(school_ids_scope):
-                    return jsonify({"error": "Uma ou mais escolas não pertencem ao município ou não existem"}), 400
-                q = q.filter(Class.school_id.in_(valid_school_ids))
-            if grade_ids_scope:
-                q = q.filter(Class.grade_id.in_(grade_ids_scope))
-            if class_ids_scope:
-                q = q.filter(Class.id.in_(class_ids_scope))
-            classes_to_generate = q.all()
+                ).subquery()
+                q = Class.query.filter(Class.school_id.in_(school_ids_city_subq))
+                if school_ids_scope:
+                    schools_in_city = db.session.query(School.id).filter(
+                        School.id.in_(school_ids_scope),
+                        School.city_id == city_id_scope
+                    ).all()
+                    valid_school_ids = [s[0] for s in schools_in_city]
+                    if len(valid_school_ids) != len(school_ids_scope):
+                        return jsonify({"error": "Uma ou mais escolas não pertencem ao município ou não existem"}), 400
+                    q = q.filter(Class.school_id.in_(valid_school_ids))
+                if grade_ids_scope:
+                    q = q.filter(Class.grade_id.in_(grade_ids_scope))
+                if class_ids_scope:
+                    q = q.filter(Class.id.in_(class_ids_scope))
+                classes_to_generate = q.all()
             if not classes_to_generate:
                 return jsonify({"error": "Nenhuma turma encontrada com os filtros informados"}), 400
 
-            if len(classes_to_generate) == 1 and class_ids_scope:
+            if adap_slices:
+                scope_type = 'class' if len(adap_slices) == 1 else 'city'
+            elif len(classes_to_generate) == 1 and class_ids_scope:
                 scope_type = 'class'
             elif grade_ids_scope and not class_ids_scope and len(school_ids_scope) <= 1:
                 scope_type = 'grade'
@@ -1009,11 +1056,14 @@ def generate_answer_sheets():
                         return jsonify({"error": "Você não tem acesso a uma ou mais turmas selecionadas"}), 403
 
             # Bloquear geração se nenhuma turma tiver alunos (evita job Celery em loop de retry)
-            for cls in classes_to_generate:
-                db.session.refresh(cls)
-            total_students_check = sum(
-                len(cls.students) if cls.students else 0 for cls in classes_to_generate
-            )
+            if adap_slices:
+                total_students_check = sum(s.students_count for s in adap_slices)
+            else:
+                for cls in classes_to_generate:
+                    db.session.refresh(cls)
+                total_students_check = sum(
+                    len(cls.students) if cls.students else 0 for cls in classes_to_generate
+                )
             if total_students_check == 0:
                 return jsonify({
                     "error": "Não há alunos na(s) turma(s) selecionada(s)",
@@ -1106,6 +1156,7 @@ def generate_answer_sheets():
                 scope=scope_type,
                 class_ids=class_ids,  # Lista de turmas para processar
                 pdf_mode=pdf_mode,
+                **({'subturma_ids': [s.subturma_id for s in adap_slices]} if adap_slices else {}),
             )
             task_id = task.id
             create_answer_sheet_job(
@@ -1117,32 +1168,43 @@ def generate_answer_sheets():
                 city_id=city_id_scope,
                 scope_type=scope_type,
             )
-            for cls in classes_to_generate:
-                db.session.refresh(cls)
+            if not adap_slices:
+                for cls in classes_to_generate:
+                    db.session.refresh(cls)
             seed_answer_sheet_progress_job(
                 job_id=job_id,
                 classes_to_generate=classes_to_generate,
                 gabarito_id=existing_gabarito_id,
                 user_id=str(user['id']),
                 task_ids=[task_id],
+                **(_adap_seed_kwargs(adap_slices) if adap_slices else {}),
             )
             gabarito.last_generation_job_id = job_id
             db.session.commit()
 
-            total_students = 0
-            for cls in classes_to_generate:
-                db.session.refresh(cls)
-                total_students += len(cls.students) if cls.students else 0
+            if adap_slices:
+                total_students = sum(s.students_count for s in adap_slices)
+                labels = {s.class_id: s.label for s in adap_slices}
+            else:
+                total_students = 0
+                for cls in classes_to_generate:
+                    db.session.refresh(cls)
+                    total_students += len(cls.students) if cls.students else 0
+                labels = {}
 
             return jsonify({
                 'status': 'processing',
                 'job_id': job_id,
                 'gabarito_id': existing_gabarito_id,
                 'scope_type': scope_type,
+                'publico': 'adap' if adap_slices else 'regular',
                 'total_classes': len(classes_to_generate),
                 'total_students': total_students,
                 'note': 'Números de alunos e turmas são estimativas. Valores reais estão no status do job.',
-                'tasks': [{'class_id': str(c.id), 'class_name': c.name, 'status': 'pending'} for c in classes_to_generate],
+                'tasks': [
+                    {'class_id': str(c.id), 'class_name': labels.get(str(c.id)) or c.name, 'status': 'pending'}
+                    for c in classes_to_generate
+                ],
                 'polling_url': f"/answer-sheets/jobs/{job_id}/status"
             }), 202
         # ========== FIM MODO gabarito_id ==========
@@ -1161,42 +1223,48 @@ def generate_answer_sheets():
         # ✅ 2. DETERMINAR ESCOPO (cascata: município → escolas → séries → turmas)
         class_ids = class_ids_param
 
-        # Base: turmas do município (escolas da cidade)
-        school_ids_city_subq = db.session.query(School.id).filter(
-            School.city_id == city_id_scope
-        ).subquery()
-        q = Class.query.filter(Class.school_id.in_(school_ids_city_subq))
-
-        # Filtro por escolas: só turmas dessas escolas (e validar que escolas são do município)
-        if school_ids:
-            schools_in_city = db.session.query(School.id).filter(
-                School.id.in_(school_ids),
+        if adap_slices:
+            classes_to_generate = [s.class_obj for s in adap_slices]
+        else:
+            # Base: turmas do município (escolas da cidade)
+            school_ids_city_subq = db.session.query(School.id).filter(
                 School.city_id == city_id_scope
-            ).all()
-            valid_school_ids = [s[0] for s in schools_in_city]
-            if len(valid_school_ids) != len(school_ids):
-                return jsonify({"error": "Uma ou mais escolas não pertencem ao município ou não existem"}), 400
-            q = q.filter(Class.school_id.in_(valid_school_ids))
+            ).subquery()
+            q = Class.query.filter(Class.school_id.in_(school_ids_city_subq))
 
-        # Filtro por séries
-        if grade_ids:
-            q = q.filter(Class.grade_id.in_(grade_ids))
+            # Filtro por escolas: só turmas dessas escolas (e validar que escolas são do município)
+            if school_ids:
+                schools_in_city = db.session.query(School.id).filter(
+                    School.id.in_(school_ids),
+                    School.city_id == city_id_scope
+                ).all()
+                valid_school_ids = [s[0] for s in schools_in_city]
+                if len(valid_school_ids) != len(school_ids):
+                    return jsonify({"error": "Uma ou mais escolas não pertencem ao município ou não existem"}), 400
+                q = q.filter(Class.school_id.in_(valid_school_ids))
 
-        # Filtro por turmas (restringe às turmas enviadas)
-        if class_ids:
-            q = q.filter(Class.id.in_(class_ids))
+            # Filtro por séries
+            if grade_ids:
+                q = q.filter(Class.grade_id.in_(grade_ids))
 
-        classes_to_generate = q.all()
+            # Filtro por turmas (restringe às turmas enviadas)
+            if class_ids:
+                q = q.filter(Class.id.in_(class_ids))
+
+            classes_to_generate = q.all()
 
         if not classes_to_generate:
             return jsonify({"error": "Nenhuma turma encontrada com os filtros informados"}), 400
 
         # Bloquear geração se nenhuma turma tiver alunos (evita job Celery em loop de retry)
-        for cls in classes_to_generate:
-            db.session.refresh(cls)
-        total_students_check = sum(
-            len(cls.students) if cls.students else 0 for cls in classes_to_generate
-        )
+        if adap_slices:
+            total_students_check = sum(s.students_count for s in adap_slices)
+        else:
+            for cls in classes_to_generate:
+                db.session.refresh(cls)
+            total_students_check = sum(
+                len(cls.students) if cls.students else 0 for cls in classes_to_generate
+            )
         if total_students_check == 0:
             return jsonify({
                 "error": "Não há alunos na(s) turma(s) selecionada(s)",
@@ -1208,7 +1276,9 @@ def generate_answer_sheets():
             }), 400
 
         # Derivar scope_type para resposta/listagem
-        if len(classes_to_generate) == 1 and class_ids:
+        if adap_slices:
+            scope_type = 'class' if len(adap_slices) == 1 else 'city'
+        elif len(classes_to_generate) == 1 and class_ids:
             scope_type = 'class'
         elif grade_ids and not class_ids and len(school_ids) <= 1:
             scope_type = 'grade'
@@ -1424,6 +1494,7 @@ def generate_answer_sheets():
             scope=scope_type,
             class_ids=class_ids_for_batch,
             pdf_mode=pdf_mode,
+            **({'subturma_ids': [s.subturma_id for s in adap_slices]} if adap_slices else {}),
         )
         task_id = task.id
 
@@ -1436,14 +1507,16 @@ def generate_answer_sheets():
             city_id=city_id_scope,
             scope_type=scope_type,
         )
-        for cls in classes_to_generate:
-            db.session.refresh(cls)
+        if not adap_slices:
+            for cls in classes_to_generate:
+                db.session.refresh(cls)
         seed_answer_sheet_progress_job(
             job_id=job_id,
             classes_to_generate=classes_to_generate,
             gabarito_id=gabarito_id,
             user_id=str(user['id']),
             task_ids=[task_id],
+            **(_adap_seed_kwargs(adap_slices) if adap_slices else {}),
         )
         gabarito.last_generation_job_id = job_id
         db.session.commit()
@@ -1456,15 +1529,20 @@ def generate_answer_sheets():
             len(class_ids_for_batch),
         )
 
-        total_students = 0
-        for cls in classes_to_generate:
-            db.session.refresh(cls)
-            total_students += len(cls.students) if cls.students else 0
+        if adap_slices:
+            total_students = sum(s.students_count for s in adap_slices)
+            labels = {s.class_id: s.label for s in adap_slices}
+        else:
+            total_students = 0
+            for cls in classes_to_generate:
+                db.session.refresh(cls)
+                total_students += len(cls.students) if cls.students else 0
+            labels = {}
 
         response_tasks = [
             {
                 'class_id': str(class_obj.id),
-                'class_name': class_obj.name,
+                'class_name': labels.get(str(class_obj.id)) or class_obj.name,
                 'status': 'pending',
             }
             for class_obj in classes_to_generate
@@ -1475,6 +1553,7 @@ def generate_answer_sheets():
             'job_id': job_id,
             'gabarito_id': gabarito_id,
             'scope_type': scope_type,
+            'publico': 'adap' if adap_slices else 'regular',
             'total_classes': len(classes_to_generate),
             'total_students': total_students,
             'note': 'Números de alunos e turmas são estimativas. Valores reais estão no status do job.',
@@ -2404,6 +2483,7 @@ def get_gabarito(gabarito_id):
             "latest_generation_job_id": gabarito.last_generation_job_id,
             "generations": generations_list,
             "generations_count": len(generations_list),
+            "publico_gabarito": _publico_gabarito_payload(gabarito.id),
             # Novos campos para facilitar edição no frontend
             "question_skills": question_skills_map,
             "questions_options": questions_options_map,
@@ -3621,9 +3701,13 @@ def _load_cartao_roster_and_results(
         student_ids_for_answer_sheet_class_group,
     )
 
+    from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
     if not gabarito_id or not class_ids:
         return [], []
-    base_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    base_students = apply_gabarito_audience(
+        Student.query.filter(Student.class_id.in_(class_ids)), gabarito_id
+    ).all()
     base_ids = {s.id for s in base_students}
     merged_ids = student_ids_for_answer_sheet_class_group(
         str(gabarito_id), class_ids, base_ids
@@ -4361,7 +4445,11 @@ def _complementar_metricas_escola_municipio_cartao(
             gabarito,
             serie_id=serie_id_scope,
         )
-    alunos = Student.query.filter(Student.class_id.in_(class_ids)).all() if class_ids else []
+    from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
+    alunos = apply_gabarito_audience(
+        Student.query.filter(Student.class_id.in_(class_ids)), gabarito_id
+    ).all() if class_ids else []
     if alunos_filtro and alunos_filtro != "todos":
         from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
 
@@ -7187,6 +7275,7 @@ def get_resultados_agregados():
                 "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
             },
             "series_do_gabarito": series_do_gabarito,
+            "publico_gabarito": _publico_gabarito_payload(gabarito_id),
             "requer_filtro_serie": multi_serie_sem_filtro,
             "por_serie": por_serie,
             "estatisticas_gerais": estatisticas_gerais,
@@ -9187,6 +9276,99 @@ def _obter_turmas_por_serie(escola_id: str, serie_id: str, municipio_id: str, us
     return [class_filter_option(t[0], t[1], t[2] if len(t) > 2 else None) for t in turmas]
 
 
+def _publico_gabarito_payload(gabarito_id) -> Dict[str, Any]:
+    """{publico: regular|adap|misto, adap_niveis: [...], subturma_ids: [...]} das gerações."""
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_audience_cached
+
+    if not gabarito_id:
+        return {"publico": "regular", "adap_niveis": [], "subturma_ids": []}
+    return gabarito_audience_cached(str(gabarito_id)).to_dict()
+
+
+def _split_multi_param(values: List[str]) -> List[str]:
+    """Aceita ?serie=a&serie=b e ?serie=a,b."""
+    out: List[str] = []
+    for raw in values or []:
+        for item in str(raw or '').split(','):
+            item = item.strip()
+            if item and item not in out:
+                out.append(item)
+    return out
+
+
+def _turmas_varias_series(escola_id: str, serie_ids: List[str], municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """Turmas regulares de várias séries da escola, com a série em cada linha."""
+    out: List[Dict[str, Any]] = []
+    for serie_id in serie_ids:
+        grade = Grade.query.get(serie_id)
+        for turma in _obter_turmas_por_serie(escola_id, serie_id, municipio_id, user, permissao):
+            item = dict(turma)
+            item['serie_id'] = str(serie_id)
+            item['serie_nome'] = grade.name if grade else ''
+            out.append(item)
+    return out
+
+
+def _escopo_adap_escola(escola_id: str, municipio_id: str, user: dict, permissao: dict):
+    """
+    Mesmas regras de acesso das séries/turmas regulares do cartão.
+    Devolve (permitido, turmas do professor ou None).
+    """
+    city = City.query.get(municipio_id)
+    school = School.query.get(escola_id)
+    if not city or not school or str(school.city_id) != str(city.id):
+        return False, None
+    if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+        return False, None
+    if permissao['scope'] == 'escola':
+        if user.get('role') in ['diretor', 'coordenador']:
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or manager.school_id != school.id:
+                return False, None
+        elif user.get('role') == 'professor':
+            from app.models.teacher import Teacher
+            from app.models.teacherClass import TeacherClass
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return False, None
+            teacher_class_ids = [tc.class_id for tc in TeacherClass.query.filter_by(teacher_id=teacher.id).all()]
+            if not teacher_class_ids:
+                return False, None
+            return True, teacher_class_ids
+    return True, None
+
+
+def _obter_series_adap_por_escola(escola_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """Séries regulares da escola que têm subturma ADAP 1 ou 2 com aluno."""
+    from app.services.cartao_resposta.answer_sheet_audience import list_cartao_adap_options
+
+    permitido, turmas_professor = _escopo_adap_escola(escola_id, municipio_id, user, permissao)
+    if not permitido:
+        return []
+    series: Dict[str, str] = {}
+    for row in list_cartao_adap_options(school_ids=[escola_id], allowed_class_ids=turmas_professor):
+        series.setdefault(row['serie_id'], row['serie_nome'])
+    return [
+        {"id": sid, "nome": nome}
+        for sid, nome in sorted(series.items(), key=lambda item: (item[1] or '').upper())
+    ]
+
+
+def _obter_turmas_adap(escola_id: str, serie_ids: List[str], municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """Subturmas ADAP 1 e 2 com aluno. id = subturma_id; rótulo "5º Ano A – ADAP 1"."""
+    from app.services.cartao_resposta.answer_sheet_audience import list_cartao_adap_options
+
+    permitido, turmas_professor = _escopo_adap_escola(escola_id, municipio_id, user, permissao)
+    if not permitido:
+        return []
+    return list_cartao_adap_options(
+        school_ids=[escola_id],
+        grade_ids=serie_ids or None,
+        allowed_class_ids=turmas_professor,
+    )
+
+
 # ==================== ENDPOINT: GET /opcoes-filtros ====================
 
 @bp.route('/opcoes-filtros', methods=['GET'])
@@ -9203,7 +9385,11 @@ def obter_opcoes_filtros():
     - estado: Estado selecionado
     - municipio: Município selecionado (requer estado)
     - escola: Escola selecionada (requer municipio)
-    - serie: Série selecionada (requer escola)
+    - serie: Série selecionada (requer escola). Aceita várias: ?serie=a&serie=b ou ?serie=a,b
+      (com mais de uma, cada turma traz serie_id e serie_nome).
+    - publico: regular (padrão) ou adap. Com adap, séries são as regulares com subturma
+      ADAP 1/2 com aluno, e turmas são essas subturmas (id = subturma_id), de todas as
+      séries informadas ou de todas, se serie vier vazio.
     
     Exemplos:
     - GET /opcoes-filtros → Retorna apenas estados
@@ -9253,7 +9439,10 @@ def obter_opcoes_filtros():
         estado = request.args.get('estado')
         municipio = request.args.get('municipio')
         escola = request.args.get('escola')
-        serie = request.args.get('serie')
+        serie_ids = _split_multi_param(request.args.getlist('serie'))
+        publico = (request.args.get('publico') or 'regular').strip().lower()
+        if publico not in ('regular', 'adap'):
+            return jsonify({"error": "Parâmetro publico inválido. Use regular ou adap."}), 400
         
         response = {}
         
@@ -9269,12 +9458,17 @@ def obter_opcoes_filtros():
                 response["escolas"] = _obter_escolas_por_municipio(municipio, user_dict, permissao)
                 
                 # 4. Se escola fornecido, retornar séries (nível 3)
-                if escola:
+                if escola and publico == 'adap':
+                    response["series"] = _obter_series_adap_por_escola(escola, municipio, user_dict, permissao)
+                    response["turmas"] = _obter_turmas_adap(escola, serie_ids, municipio, user_dict, permissao)
+                elif escola:
                     response["series"] = _obter_series_por_escola(escola, municipio, user_dict, permissao)
                     
                     # 5. Se série fornecido, retornar turmas (nível 4)
-                    if serie:
-                        response["turmas"] = _obter_turmas_por_serie(escola, serie, municipio, user_dict, permissao)
+                    if len(serie_ids) == 1:
+                        response["turmas"] = _obter_turmas_por_serie(escola, serie_ids[0], municipio, user_dict, permissao)
+                    elif serie_ids:
+                        response["turmas"] = _turmas_varias_series(escola, serie_ids, municipio, user_dict, permissao)
         
         return jsonify(response), 200
 

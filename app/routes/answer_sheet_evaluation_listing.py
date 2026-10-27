@@ -1278,11 +1278,16 @@ def build_answer_sheet_relatorio_detalhado_json(
 
     alunos_data: List[Dict[str, Any]] = []
     if target_classes:
+        from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+
         by_sid = {str(r.student_id): r for r in results if r.student_id}
         class_ids = [c.id for c in target_classes]
         enrolled = (
-            Student.query.options(joinedload(Student.class_), joinedload(Student.user))
-            .filter(Student.class_id.in_(class_ids))
+            apply_gabarito_audience(
+                Student.query.options(joinedload(Student.class_), joinedload(Student.user))
+                .filter(Student.class_id.in_(class_ids)),
+                str(gab.id),
+            )
             .order_by(Student.class_id, Student.name)
             .all()
         )

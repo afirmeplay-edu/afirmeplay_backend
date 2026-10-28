@@ -32,8 +32,9 @@ ALLOWED_EXTENSIONS = {"csv", "xlsx", "xls"}
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_TEXT_CHARS = 200_000
 MAX_SHEET_ROWS = 500
-MAX_QUESTIONS = 104
-MAX_SUBJECT_BLOCKS = 4
+MAX_QUESTIONS = 88
+MAX_QUESTIONS_PER_BLOCK = 22
+MAX_BLOCKS = 4
 MIN_ALTERNATIVES = 2
 # Leitura aceita até E; o limite efetivo do cartão impresso é validado no cadastro.
 ALTERNATIVE_LETTERS = "ABCDE"
@@ -359,18 +360,52 @@ def _parse_metadata(rows: List[Tuple[int, List[Any]]]) -> Tuple[Dict[str, Any], 
     return metadata, warnings
 
 
-def _build_blocks(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Agrupa questões consecutivas da mesma disciplina em blocos."""
-    blocks: List[Dict[str, Any]] = []
+def _chunk_sizes(count: int, max_per_block: int = MAX_QUESTIONS_PER_BLOCK) -> List[int]:
+    """Parte a quantidade em blocos equilibrados, nenhum acima de max_per_block. 26 → 13+13; 23 → 12+11."""
+    if count <= max_per_block:
+        return [count]
+    chunks = (count + max_per_block - 1) // max_per_block
+    base, extra = divmod(count, chunks)
+    return [base + (1 if index < extra else 0) for index in range(chunks)]
+
+
+def _split_warning(subject_name: str, ranges: List[Tuple[int, int]]) -> str:
+    labels = [f"Q{start}–{end}" for start, end in ranges]
+    if len(labels) == 2:
+        listed = f"{labels[0]} e {labels[1]}"
+    else:
+        listed = ", ".join(labels[:-1]) + f" e {labels[-1]}"
+    return f"{subject_name} dividido em {len(ranges)} blocos ({listed})."
+
+
+def _capacity_error(raw_blocks: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    total_blocks = 0
+    for block in raw_blocks:
+        pieces = len(_chunk_sizes(block["questions_count"]))
+        total_blocks += pieces
+        noun = "bloco" if pieces == 1 else "blocos"
+        parts.append(f"{block['subject_name']} ({block['questions_count']}) em {pieces} {noun}")
+    return (
+        f"Não cabe neste cartão: seriam {total_blocks} blocos e o máximo é {MAX_BLOCKS} "
+        f"({MAX_QUESTIONS_PER_BLOCK} questões por bloco, {MAX_QUESTIONS} no total). "
+        + "; ".join(parts)
+        + ". Reduza as questões ou separe em outro cartão."
+    )
+
+
+def _build_blocks(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
+    """Agrupa questões consecutivas da mesma disciplina e divide o que passa de 22."""
+    raw: List[Dict[str, Any]] = []
     for row in rows:
         subject, question = row["subject"], row["question"]
         if subject is None or question is None:
-            return [], []
-        if blocks and blocks[-1]["subject_id"] == subject["id"]:
-            blocks[-1]["end_question"] = question
-            blocks[-1]["questions_count"] += 1
+            return [], [], []
+        if raw and raw[-1]["subject_id"] == subject["id"]:
+            raw[-1]["end_question"] = question
+            raw[-1]["questions_count"] += 1
         else:
-            blocks.append({
+            raw.append({
                 "subject_id": subject["id"],
                 "subject_name": subject["name"],
                 "start_question": question,
@@ -379,15 +414,40 @@ def _build_blocks(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Lis
             })
 
     errors: List[str] = []
-    subject_ids = [b["subject_id"] for b in blocks]
-    repeated = sorted({b["subject_name"] for b in blocks if subject_ids.count(b["subject_id"]) > 1})
+    subject_ids = [block["subject_id"] for block in raw]
+    repeated = sorted({block["subject_name"] for block in raw if subject_ids.count(block["subject_id"]) > 1})
     if repeated:
         errors.append(
             "As questões de cada disciplina devem estar em sequência: " + ", ".join(repeated) + "."
         )
-    if len(blocks) > MAX_SUBJECT_BLOCKS:
-        errors.append(f"Máximo de {MAX_SUBJECT_BLOCKS} disciplinas (blocos) por cartão-resposta.")
-    return blocks, errors
+        return raw, errors, []
+
+    blocks: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    for block in raw:
+        sizes = _chunk_sizes(block["questions_count"])
+        if len(sizes) == 1:
+            blocks.append(block)
+            continue
+        ranges: List[Tuple[int, int]] = []
+        cursor = block["start_question"]
+        for size in sizes:
+            end = cursor + size - 1
+            ranges.append((cursor, end))
+            blocks.append({
+                "subject_id": block["subject_id"],
+                "subject_name": block["subject_name"],
+                "start_question": cursor,
+                "end_question": end,
+                "questions_count": size,
+            })
+            cursor = end + 1
+        warnings.append(_split_warning(block["subject_name"], ranges))
+
+    total_questions = sum(block["questions_count"] for block in raw)
+    if total_questions > MAX_QUESTIONS or len(blocks) > MAX_BLOCKS:
+        return blocks, [_capacity_error(raw)], []
+    return blocks, errors, warnings
 
 
 def _build_preview(
@@ -402,8 +462,6 @@ def _build_preview(
     data_rows = rows[1:] if has_header else rows
     if not data_rows:
         raise ValueError("Nenhuma questão encontrada abaixo do cabeçalho.")
-    if len(data_rows) > MAX_QUESTIONS:
-        raise ValueError(f"Máximo de {MAX_QUESTIONS} questões por cartão-resposta.")
 
     metadata, warnings = _parse_metadata(_non_empty_rows(metadata_rows))
     grade_id_set = set(_clean_grade_ids(grade_ids)) | {g["id"] for g in metadata["grades"]}
@@ -488,8 +546,9 @@ def _build_preview(
                 + ("..." if len(missing) > 20 else ".")
             )
 
-    blocks, block_errors = _build_blocks(parsed)
+    blocks, block_errors, block_warnings = _build_blocks(parsed)
     general_errors.extend(block_errors)
+    warnings.extend(block_warnings)
 
     return {
         "rows": parsed,

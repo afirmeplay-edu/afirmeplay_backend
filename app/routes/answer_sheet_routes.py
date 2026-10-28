@@ -162,16 +162,17 @@ def _user_can_edit_gabarito(user: dict, gabarito: AnswerSheetGabarito) -> bool:
     return str(gabarito.created_by) == str(user.get("id"))
 
 
-def _validate_blocks_config(blocks: List, total_questions: int) -> Optional[str]:
+def _validate_blocks_config(
+    blocks: List,
+    total_questions: int,
+    max_per_block: int = 26,
+    max_total: int = 104,
+) -> Optional[str]:
     """
-    Valida configuração de blocos personalizados
-    
-    Args:
-        blocks: Lista de blocos definidos pelo frontend
-        total_questions: Total de questões esperado
-    
-    Returns:
-        String com mensagem de erro ou None se válido
+    Valida configuração de blocos personalizados.
+
+    O padrão (26 por bloco, 104 no total) permanece na edição de cartão já salvo.
+    A criação (POST /create-gabaritos) chama com 22 e 88, que é o que cabe na folha.
     """
     # 1. Máximo 4 blocos
     if len(blocks) > 4:
@@ -202,8 +203,8 @@ def _validate_blocks_config(blocks: List, total_questions: int) -> Optional[str]
         if questions_count < 1:
             return f"Bloco {block_id} ({block_label}): deve ter pelo menos 1 questão."
         
-        if questions_count > 26:
-            return f"Bloco {block_id} ({block_label}): máximo de 26 questões por bloco. Você definiu {questions_count}."
+        if questions_count > max_per_block:
+            return f"Bloco {block_id} ({block_label}): máximo de {max_per_block} questões por bloco. Você definiu {questions_count}."
         
         # Validar sequência
         if start_question != expected_start:
@@ -219,8 +220,11 @@ def _validate_blocks_config(blocks: List, total_questions: int) -> Optional[str]
     if total_from_blocks != total_questions:
         return f"Soma das questões dos blocos ({total_from_blocks}) difere do total informado ({total_questions})."
     
-    if total_questions > 104:
-        return f"Total de {total_questions} questões excede o máximo de 104 (4 blocos × 26 questões)."
+    if total_questions > max_total:
+        return (
+            f"Total de {total_questions} questões excede o máximo de {max_total} "
+            f"(4 blocos × {max_per_block} questões)."
+        )
     
     return None
 
@@ -753,6 +757,13 @@ def create_gabarito_only():
 
         if not num_questions or num_questions <= 0:
             return jsonify({"error": "num_questions deve ser maior que 0"}), 400
+        if num_questions > 88:
+            return jsonify({
+                "error": (
+                    f"Total de {num_questions} questões excede o máximo de 88 "
+                    "(4 blocos × 22 questões)."
+                )
+            }), 400
         if not correct_answers:
             return jsonify({"error": "correct_answers é obrigatório"}), 400
 
@@ -761,7 +772,9 @@ def create_gabarito_only():
 
         custom_blocks = blocks_config.get('blocks', [])
         if custom_blocks:
-            validation_error = _validate_blocks_config(custom_blocks, num_questions)
+            validation_error = _validate_blocks_config(
+                custom_blocks, num_questions, max_per_block=22, max_total=88
+            )
             if validation_error:
                 return jsonify({"error": validation_error}), 400
             blocks_config['num_blocks'] = len(custom_blocks)
@@ -771,9 +784,20 @@ def create_gabarito_only():
         elif use_blocks:
             blocks_config.setdefault('num_blocks', 1)
             blocks_config.setdefault('questions_per_block', 12)
+            if int(blocks_config.get('num_blocks') or 0) > 4 or int(blocks_config.get('questions_per_block') or 0) > 22:
+                return jsonify({
+                    "error": "Cada bloco cabe no máximo 22 questões, em até 4 blocos (88 no total)."
+                }), 400
             blocks_config['use_blocks'] = True
             blocks_config['separate_by_subject'] = False
         else:
+            if num_questions > 22:
+                return jsonify({
+                    "error": (
+                        "Um bloco único cabe 22 questões. Divida em blocos de até 22 "
+                        "(máximo 4 blocos, 88 questões)."
+                    )
+                }), 400
             blocks_config['use_blocks'] = False
             blocks_config['num_blocks'] = 1
             blocks_config['questions_per_block'] = num_questions

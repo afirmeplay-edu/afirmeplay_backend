@@ -131,6 +131,56 @@ def test_gabarito_sem_geracao_nao_recorta():
     assert audience.allows(TURMA, None) is True
 
 
+ADAP1_OUTRA_SERIE = "aaaaaaaa-0000-0000-0000-000000000011"
+
+
+def test_so_aluno_marcado_no_adap_entra_regular_da_mesma_turma_nao():
+    """ADAP 1 no 5º e no 3º entram juntos; o regular da mesma turma fica de fora."""
+    audience = audience_from_snapshots([
+        _snapshot_adap((TURMA, ADAP1), (OUTRA_TURMA, ADAP1_OUTRA_SERIE), level=1),
+    ])
+    alunos = [
+        _aluno("marcado-5ano", class_id=TURMA, subturma_id=ADAP1),
+        _aluno("regular-5ano", class_id=TURMA, subturma_id=None),
+        _aluno("marcado-3ano", class_id=OUTRA_TURMA, subturma_id=ADAP1_OUTRA_SERIE),
+        _aluno("outro-nivel", class_id=OUTRA_TURMA, subturma_id=ADAP2),
+    ]
+    assert [aluno.id for aluno in audience.filter_students(alunos)] == [
+        "marcado-5ano",
+        "marcado-3ano",
+    ]
+
+
+def test_gabarito_regular_continua_com_a_turma_inteira():
+    check_generation_request(None, class_ids=[TURMA])
+    audience = audience_from_snapshots([_snapshot_regular(TURMA)])
+    alunos = [_aluno("regular"), _aluno("marcado", subturma_id=ADAP1)]
+    assert [aluno.id for aluno in audience.filter_students(alunos)] == ["regular", "marcado"]
+
+
+def test_catalogo_mostra_adap_1_2_e_3_sem_exigir_aluno():
+    grades = {
+        1: SimpleNamespace(id="serie-1"),
+        2: SimpleNamespace(id="serie-2"),
+        3: SimpleNamespace(id="serie-3"),
+    }
+    catalogo = audience_mod.adap_series_catalog(grades)
+    assert [item["nome"] for item in catalogo] == ["ADAP 1", "ADAP 2", "ADAP 3"]
+    assert [item["support_level"] for item in catalogo] == [1, 2, 3]
+
+
+def test_nivel_sem_aluno_marcado_devolve_lista_vazia(monkeypatch):
+    import app.services.subturma_options as subturma_options
+
+    def fake_rows(**kwargs):
+        assert kwargs["only_with_students"] is True
+        assert list(kwargs["levels"]) == [2]
+        return []
+
+    monkeypatch.setattr(subturma_options, "list_subturma_rows", fake_rows)
+    assert audience_mod.list_cartao_adap_options(school_ids=["escola"], levels=[2]) == []
+
+
 def test_gabarito_adap_so_inclui_alunos_da_subturma():
     audience = audience_from_snapshots([_snapshot_adap((TURMA, ADAP1))])
     alunos = [

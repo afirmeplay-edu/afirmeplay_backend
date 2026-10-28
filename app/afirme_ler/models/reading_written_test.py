@@ -139,3 +139,42 @@ class ReadingWrittenTestPrintRun(db.Model):
     created_at = db.Column(db.TIMESTAMP, server_default=db.text("CURRENT_TIMESTAMP"))
     started_at = db.Column(db.TIMESTAMP, nullable=True)
     finished_at = db.Column(db.TIMESTAMP, nullable=True)
+
+
+class ReadingWrittenTestCorrection(db.Model):
+    """Leitura de um cartão: letras das objetivas e imagens do ditado e do bilhete."""
+
+    __tablename__ = "reading_written_test_correction"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "written_test_id", "student_id", name="uq_reading_written_test_correction"
+        ),
+        {"schema": "tenant"},
+    )
+
+    id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    written_test_id = db.Column(
+        db.String,
+        db.ForeignKey("tenant.reading_written_test.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    student_id = db.Column(
+        db.String,
+        db.ForeignKey("tenant.student.id"),
+        nullable=False,
+    )
+    answers = db.Column(db.JSON, nullable=False, default=dict)
+    blank = db.Column(db.JSON, nullable=False, default=list)
+    invalid = db.Column(db.JSON, nullable=False, default=list)
+    crops = db.Column(db.JSON, nullable=False, default=dict)
+    pages = db.Column(db.JSON, nullable=False, default=list)
+    # Nota das 16 objetivas, calculada pelo gabarito. A IA não preenche este campo.
+    objective = db.Column(db.JSON, nullable=False, default=dict)
+    # Nota do ditado e do bilhete: IA quando o cartão foi enviado, ou lançamento do professor.
+    writing = db.Column(db.JSON, nullable=False, default=dict)
+    created_at = db.Column(db.TIMESTAMP, server_default=db.text("CURRENT_TIMESTAMP"))
+    updated_at = db.Column(
+        db.TIMESTAMP,
+        server_default=db.text("CURRENT_TIMESTAMP"),
+        onupdate=db.text("CURRENT_TIMESTAMP"),
+    )

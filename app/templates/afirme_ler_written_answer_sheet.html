@@ -8,6 +8,7 @@
 
   O mapa do cartão é extraído deste PDF pelo tamanho dos desenhos:
     - bolha: imagem de {{ sizes.bubble }}px (a mesma do socioeconômico);
+    - quadrado da questão: imagem preta de {{ sizes.anchor }}px, uma por questão;
     - linha do ditado: fundo branco de {{ sizes.dictation_w }}x{{ sizes.dictation_h }}px;
     - área do bilhete: fundo branco de {{ sizes.production_w }}x{{ sizes.production_h }}px.
   Não usar outras imagens de fundo desses tamanhos neste template.
@@ -104,6 +105,16 @@
 				border-right: 1px solid #000;
 				font-size: 12pt;
 				font-weight: bold;
+			}
+
+			.row-anchor {
+				display: inline-block;
+				width: {{ sizes.anchor }}px;
+				height: {{ sizes.anchor }}px;
+				margin-right: 6px;
+				background: url("data:image/png;base64,{{ anchor_png }}") no-repeat 0 0 / 100% 100%;
+				vertical-align: middle;
+				flex: 0 0 {{ sizes.anchor }}px;
 			}
 
 			.choices {
@@ -212,12 +223,13 @@
 		{% if item.type == 'multipleChoice' %}
 		<div class="row">
 			<div class="num">{{ item.number }}</div>
-			<div class="choices">{% for letter in item.letters %}<span class="choice"><span class="bubble"></span><span class="lbl">{{ letter }}</span></span>{% endfor %}</div>
+			<div class="choices"><span class="row-anchor"></span>{% for letter in item.letters %}<span class="choice"><span class="bubble"></span><span class="lbl">{{ letter }}</span></span>{% endfor %}</div>
 		</div>
 		{% elif item.type == 'dictation' %}
 		<div class="row">
 			<div class="num">{{ item.number }}</div>
 			<div class="dictation">
+				<span class="row-anchor"></span>
 				<span class="dictation-label">Ditado — escreva a palavra:</span>
 				<div class="dictation-area"></div>
 			</div>
@@ -226,7 +238,7 @@
 		<section class="production">
 			<div class="production-head">
 				<div class="num">{{ item.number }}</div>
-				<div class="production-title">Produção escrita — escreva o bilhete nas linhas abaixo.</div>
+				<div class="production-title"><span class="row-anchor"></span>Produção escrita — escreva o bilhete nas linhas abaixo.</div>
 			</div>
 			<div class="writing-area">{% for _ in range(item.lines) %}<div class="writing-line"></div>{% endfor %}</div>
 		</section>

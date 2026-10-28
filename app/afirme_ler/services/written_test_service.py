@@ -48,7 +48,13 @@ from app.afirme_ler.services.question_bank_service import (
 )
 from app.afirme_ler.services.scope_service import apply_visibility_filter
 
-REQUIRED_QUESTIONS = 20
+REQUIRED_QUESTIONS = 19
+# Posições fixas da prova: 1–16 múltipla escolha, 17 e 18 ditado, 19 bilhete.
+PUBLISH_PATTERN = (
+    (range(1, 17), QUESTION_TYPE_MULTIPLE_CHOICE, "múltipla escolha"),
+    (range(17, 19), QUESTION_TYPE_DICTATION, "ditado"),
+    (range(19, 20), QUESTION_TYPE_TEXT_PRODUCTION, "bilhete"),
+)
 ALLOWED_QUESTION_DB_TYPES = OBJECTIVE_DB_TYPES + (
     QUESTION_TYPE_DICTATION,
     QUESTION_TYPE_TEXT_PRODUCTION,
@@ -199,6 +205,20 @@ def parse_question_items(raw: Any) -> List[Tuple[str, int]]:
     if orders != list(range(1, len(items) + 1)):
         raise ValueError(f"Os valores de order devem ser únicos e de 1 a {len(items)}.")
     return sorted(items, key=lambda pair: pair[1])
+
+
+def _assert_publish_pattern(links: List[ReadingWrittenTestQuestion], found: Dict[str, Question]) -> None:
+    """Publicação só com 16 objetivas, ditado nas posições 17 e 18 e bilhete na 19."""
+    by_order = {link.order: found[link.question_id] for link in links}
+    for orders, expected, label in PUBLISH_PATTERN:
+        for order in orders:
+            actual = _type_key(by_order[order].question_type)
+            if actual != expected:
+                raise ValueError(
+                    f"A posição {order} precisa ser {label}. "
+                    "A prova tem 16 questões de múltipla escolha (1 a 16), "
+                    "2 ditados (17 e 18) e 1 bilhete (19)."
+                )
 
 
 def _assert_allowed_type(question: Question) -> None:
@@ -595,6 +615,7 @@ class WrittenTestService:
                     "Troque-a antes de publicar."
                 )
             _assert_allowed_type(question)
+        _assert_publish_pattern(links, found)
 
         written_test.status = WRITTEN_TEST_STATUS_PUBLISHED
         written_test.published_at = db.func.now()

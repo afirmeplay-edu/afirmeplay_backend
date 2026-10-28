@@ -6,7 +6,7 @@ Mesmo desenho do pacote impresso do socioeconômico, com tabela própria (readin
   - PDF base renderizado uma vez (afirme_ler_written_answer_sheet.html, WeasyPrint);
   - overlay por aluno (ReportLab): cabeçalho com título, aluno, escola, série/turma, assinatura/data e
     QR {"v":1,"student_id":<12>,"written_test_id":<12>,"p":"n/N"} em cada folha;
-  - mapa do cartão extraído do PDF base (bolhas por questão/letra e áreas de escrita), guardado no run;
+  - mapa do cartão extraído do PDF base (bolhas, quadrado de cada questão e áreas de escrita), guardado no run;
   - ZIP com um PDF por aluno (pdf_arcname: pastas município/escola/série/turma, sufixo do id contra
     homônimos), enviado ao MinIO pela task Celery.
 Não usa o cartão nem a task da prova física do Play.
@@ -60,11 +60,12 @@ STALE_SECONDS = 30 * 60
 PROGRESS_EVERY = 25
 BUCKET_KEY = "AFIRME_READING_AUDIO"
 QR_PAYLOAD_VERSION = 1
-MAP_VERSION = 1
+MAP_VERSION = 2
 
 # Tamanhos em px CSS. O template os recebe daqui; o mapa reconhece cada desenho por eles.
 SIZES = {
     "bubble": 12,
+    "anchor": 8,
     "dictation_w": 340,
     "dictation_h": 44,
     "production_w": 660,
@@ -83,6 +84,8 @@ BUBBLE_PNG = (
 )
 # Fundo branco 1x1 das áreas de escrita: invisível no papel, marca o retângulo no PDF.
 AREA_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4//8/AAX+Av4zEpUUAAAAAElFTkSuQmCC"
+# Quadrado preto de 8px, um por questão. Tamanho diferente da bolha para o mapa separar os dois.
+ANCHOR_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAADElEQVR4nGNgGB4AAADIAAGtQHYiAAAAAElFTkSuQmCC"
 
 # Overlay do cabeçalho, em pt, origem no canto inferior esquerdo da A4 (595,28 x 841,89).
 # A margem de cima do template (4,6cm) deixa a faixa livre. Os quadrados de 32px ficam a 0,2cm dos
@@ -155,6 +158,7 @@ def card_template_context(
         "items": items,
         "sizes": SIZES,
         "bubble_png": BUBBLE_PNG,
+        "anchor_png": ANCHOR_PNG,
         "area_png": AREA_PNG,
         "preview": preview,
     }
@@ -305,6 +309,8 @@ def _close(value: float, expected: float) -> bool:
 
 
 def _mark_kind(width: float, height: float) -> Optional[str]:
+    if _close(width, SIZES["anchor"]) and _close(height, SIZES["anchor"]):
+        return "anchor"
     if _close(width, SIZES["bubble"]) and _close(height, SIZES["bubble"]):
         return "bubble"
     if _close(width, SIZES["dictation_w"]) and _close(height, SIZES["dictation_h"]):
@@ -349,9 +355,14 @@ def extract_marks_from_content(content: str) -> List[Dict[str, Any]]:
     return marks
 
 
-def expected_marks(items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    bubbles, areas = [], []
+def expected_marks(
+    items: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    bubbles, areas, anchors = [], [], []
     for item in items:
+        anchors.append({
+            "number": item["number"], "question_id": item["question_id"], "type": item["type"],
+        })
         if item["type"] == QUESTION_TYPE_MULTIPLE_CHOICE:
             for index, letter in enumerate(item["letters"]):
                 bubbles.append({
@@ -360,7 +371,7 @@ def expected_marks(items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], L
                 })
         else:
             areas.append({"number": item["number"], "question_id": item["question_id"], "type": item["type"]})
-    return bubbles, areas
+    return bubbles, areas, anchors
 
 
 def _pixels(x: float, y: float) -> Tuple[int, int]:
@@ -374,8 +385,9 @@ def build_answer_sheet_map_from_pages(
     page_contents: List[str], items: List[Dict[str, Any]], written_test_id: str
 ) -> Dict[str, Any]:
     """
-    Bolhas e áreas são casadas com a avaliação separadamente: o WeasyPrint pinta os fundos de bloco
-    (áreas) antes dos inline-block (bolhas), mas cada grupo sai na ordem do template.
+    Bolhas, quadrados e áreas são casados com a avaliação separadamente: o WeasyPrint pinta os
+    fundos de bloco (áreas) antes dos inline-block (quadrado e bolhas), mas cada grupo sai na
+    ordem do template.
     """
     from app.socioeconomic_forms.services.answer_sheet_map import (
         A4_HEIGHT_PX,
@@ -383,11 +395,12 @@ def build_answer_sheet_map_from_pages(
         bubble_to_a4_pixels,
     )
 
-    expected_bubbles, expected_areas = expected_marks(items)
-    found_bubbles, found_areas = [], []
+    expected_bubbles, expected_areas, expected_anchors = expected_marks(items)
+    found_bubbles, found_areas, found_anchors = [], [], []
+    buckets = {"bubble": found_bubbles, "anchor": found_anchors}
     for page_number, content in enumerate(page_contents, start=1):
         for mark in extract_marks_from_content(content):
-            target = found_bubbles if mark["kind"] == "bubble" else found_areas
+            target = buckets.get(mark["kind"], found_areas)
             target.append({**mark, "page": page_number})
 
     if len(found_bubbles) != len(expected_bubbles):
@@ -398,8 +411,16 @@ def build_answer_sheet_map_from_pages(
         raise ValueError(
             f"O cartão desenhou {len(found_areas)} áreas de escrita e a avaliação tem {len(expected_areas)}."
         )
+    if len(found_anchors) != len(expected_anchors):
+        raise ValueError(
+            f"O cartão desenhou {len(found_anchors)} quadrados de questão e a avaliação tem "
+            f"{len(expected_anchors)}."
+        )
 
-    pages = {n: {"page": n, "bubbles": [], "writing_areas": []} for n in range(1, len(page_contents) + 1)}
+    pages = {
+        n: {"page": n, "bubbles": [], "writing_areas": [], "row_anchors": []}
+        for n in range(1, len(page_contents) + 1)
+    }
     for mark, spec in zip(found_bubbles, expected_bubbles):
         cx = (mark["left"] + mark["right"]) / 2.0
         cy = (mark["bottom"] + mark["top"]) / 2.0
@@ -419,6 +440,13 @@ def build_answer_sheet_map_from_pages(
             **spec,
             "left": mark["left"], "bottom": mark["bottom"], "right": mark["right"], "top": mark["top"],
             "pixel": {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1},
+        })
+    for mark, spec in zip(found_anchors, expected_anchors):
+        cx = (mark["left"] + mark["right"]) / 2.0
+        cy = (mark["bottom"] + mark["top"]) / 2.0
+        px, py, _ = bubble_to_a4_pixels(cx, cy, 1.0)
+        pages[mark["page"]]["row_anchors"].append({
+            **spec, "cx": cx, "cy": cy, "pixel": {"x": px, "y": py},
         })
 
     return {

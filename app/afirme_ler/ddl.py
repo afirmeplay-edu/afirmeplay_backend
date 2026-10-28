@@ -356,8 +356,13 @@ CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_question (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_reading_written_test_question UNIQUE (written_test_id, question_id),
     CONSTRAINT uq_reading_written_test_order UNIQUE (written_test_id, "order"),
-    CONSTRAINT chk_reading_written_test_order CHECK ("order" BETWEEN 1 AND 20)
+    CONSTRAINT chk_reading_written_test_order CHECK ("order" BETWEEN 1 AND 19)
 );
+ALTER TABLE "{schema}".reading_written_test_question
+    DROP CONSTRAINT IF EXISTS chk_reading_written_test_order;
+ALTER TABLE "{schema}".reading_written_test_question
+    ADD CONSTRAINT chk_reading_written_test_order
+        CHECK ("order" BETWEEN 1 AND 19);
 CREATE INDEX IF NOT EXISTS ix_reading_written_test_question_question
     ON "{schema}".reading_written_test_question(question_id);
 COMMENT ON TABLE "{schema}".reading_written_test_question IS 'Questões da avaliação escrita do Afirme Ler, na ordem da prova';
@@ -407,5 +412,33 @@ CREATE INDEX IF NOT EXISTS ix_reading_written_test_print_run_test
     ON "{schema}".reading_written_test_print_run(written_test_id, created_at DESC);
 COMMENT ON TABLE "{schema}".reading_written_test_print_run IS 'Gerações de cartões-resposta da avaliação escrita do Afirme Ler (ZIP no MinIO)';
 COMMENT ON COLUMN "{schema}".reading_written_test_print_run.class_id IS 'Turma da geração; NULL = todas as turmas aplicadas';
-COMMENT ON COLUMN "{schema}".reading_written_test_print_run.answer_sheet_map IS 'Coordenadas das bolhas e das áreas de escrita extraídas do PDF base';
+COMMENT ON COLUMN "{schema}".reading_written_test_print_run.answer_sheet_map IS 'Coordenadas das bolhas, dos quadrados de cada questão e das áreas de escrita extraídas do PDF base';
+
+CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_correction (
+    id VARCHAR PRIMARY KEY,
+    written_test_id VARCHAR NOT NULL
+        REFERENCES "{schema}".reading_written_test(id) ON DELETE CASCADE,
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
+    answers JSON NOT NULL DEFAULT '{{}}'::json,
+    blank JSON NOT NULL DEFAULT '[]'::json,
+    invalid JSON NOT NULL DEFAULT '[]'::json,
+    crops JSON NOT NULL DEFAULT '{{}}'::json,
+    pages JSON NOT NULL DEFAULT '[]'::json,
+    objective JSON NOT NULL DEFAULT '{{}}'::json,
+    writing JSON NOT NULL DEFAULT '{{}}'::json,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_reading_written_test_correction UNIQUE (written_test_id, student_id)
+);
+ALTER TABLE "{schema}".reading_written_test_correction
+    ADD COLUMN IF NOT EXISTS objective JSON NOT NULL DEFAULT '{{}}'::json;
+ALTER TABLE "{schema}".reading_written_test_correction
+    ADD COLUMN IF NOT EXISTS writing JSON NOT NULL DEFAULT '{{}}'::json;
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_correction_test
+    ON "{schema}".reading_written_test_correction(written_test_id);
+COMMENT ON TABLE "{schema}".reading_written_test_correction IS 'Leitura do cartão-resposta da avaliação escrita: letras das objetivas, imagens e nota do ditado e do bilhete';
+COMMENT ON COLUMN "{schema}".reading_written_test_correction.answers IS 'Letra marcada por question_id das questões de múltipla escolha';
+COMMENT ON COLUMN "{schema}".reading_written_test_correction.crops IS 'Recortes PNG do ditado e do bilhete no MinIO, por question_id';
+COMMENT ON COLUMN "{schema}".reading_written_test_correction.objective IS 'Nota das 16 objetivas calculada pelo gabarito, sem participação da IA';
+COMMENT ON COLUMN "{schema}".reading_written_test_correction.writing IS 'Nota do ditado e do bilhete: IA quando há cartão, ou lançamento manual do professor';
 """

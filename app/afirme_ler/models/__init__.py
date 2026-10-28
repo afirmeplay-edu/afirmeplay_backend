@@ -15,6 +15,7 @@ from .reading_fluency_comprehension_answer import ReadingFluencyComprehensionAns
 from .reading_written_test import (
     ReadingWrittenTest,
     ReadingWrittenTestClass,
+    ReadingWrittenTestCorrection,
     ReadingWrittenTestPrintRun,
     ReadingWrittenTestQuestion,
 )
@@ -37,4 +38,5 @@ __all__ = [
     "ReadingWrittenTestQuestion",
     "ReadingWrittenTestClass",
     "ReadingWrittenTestPrintRun",
+    "ReadingWrittenTestCorrection",
 ]

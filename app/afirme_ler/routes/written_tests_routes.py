@@ -316,6 +316,82 @@ def download_written_test_answer_sheets(written_test_id, run_id):
     )
 
 
+@bp.route("/written-tests/<written_test_id>/answer-sheet-corrections", methods=["POST"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def correct_written_test_answer_sheets(written_test_id):
+    """Lê várias folhas e grava a letra das objetivas e as imagens do ditado e do bilhete."""
+    from app.afirme_ler.services.written_test_answer_sheet_correction import (
+        correct_uploaded_sheets,
+        load_correction_batch,
+    )
+
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        WrittenTestService.get(written_test_id)
+        images, sources, load_errors, file_count = load_correction_batch(request)
+        if file_count == 0:
+            return _error_response("Envie um ou mais PDFs ou imagens do cartão.", 400)
+        return jsonify(correct_uploaded_sheets(
+            written_test_id,
+            images,
+            sources=sources,
+            load_errors=load_errors,
+            file_count=file_count,
+        )), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/answer-sheet-corrections", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def list_written_test_answer_sheet_corrections(written_test_id):
+    """Lista a nota das objetivas e a correção do ditado e do bilhete."""
+    from app.afirme_ler.services.written_test_writing_grade import list_corrections
+
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        return jsonify(list_corrections(written_test_id)), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/writing-corrections", methods=["POST"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def save_written_test_writing_correction(written_test_id):
+    """Lançamento manual do ditado e do bilhete quando o cartão não foi enviado."""
+    from app.afirme_ler.services.written_test_writing_grade import save_manual_writing
+
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _error_response("Corpo da requisição inválido.", 400)
+    student_id = data.get("studentId")
+    if not student_id or not str(student_id).strip():
+        return _error_response("studentId é obrigatório.", 400)
+    try:
+        return jsonify(save_manual_writing(written_test_id, str(student_id).strip(), data)), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
 @bp.route("/written-tests/<written_test_id>/publish", methods=["POST"])
 @jwt_required()
 @require_feature("afirme_reading")

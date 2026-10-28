@@ -48,10 +48,11 @@ Na listagem e no detalhe, todos os perfis acima veem todas as avaliações escri
    - precisa estar visível ao usuário (mesmo escopo do banco de questões: `GLOBAL`, `CITY` do município,
      `PRIVATE` de quem envia);
    - tem que ser `multipleChoice`, `dictation` ou `text_production`;
-   - não pode repetir; no máximo **20** questões.
+   - não pode repetir; no máximo **19** questões.
    - A série da questão **não** precisa ser uma das séries da avaliação.
-3. **Publicação**: só com **exatamente 20** questões (todos os tipos contam). Muda `status` para
-   `publicada` e grava `publishedAt`.
+3. **Publicação**: só com **exatamente 19** questões, nesta ordem: posições **1 a 16** de
+   `multipleChoice`, **17 e 18** de `dictation` (ditado) e **19** de `text_production` (bilhete).
+   Muda `status` para `publicada` e grava `publishedAt`.
 4. Avaliação **publicada** não pode ter dados nem questões alterados, nem ser excluída (`400`).
 5. **Pontuação**: a de cada questão (`value`; vazio = `1`). `totalScore` = soma.
 6. `status` da avaliação: `rascunho` (padrão) ou `publicada`. A aplicação **não** muda esse status;
@@ -96,9 +97,9 @@ Na listagem e no detalhe, todos os perfis acima veem todas as avaliações escri
   "createdAt": "2026-10-26T11:00:00",
   "updatedAt": "2026-10-26T11:05:00",
   "publishedAt": null,
-  "totalQuestions": 20,
+  "totalQuestions": 19,
   "totalScore": 22.0,
-  "questionsByType": { "multipleChoice": 18, "dictation": 1, "text_production": 1 },
+  "questionsByType": { "multipleChoice": 16, "dictation": 2, "text_production": 1 },
   "appliedClassesCount": 1,
   "nextApplicationStart": "2026-11-12T08:00:00"
 }
@@ -346,7 +347,7 @@ Detalhe atualizado, com `questions` na nova ordem.
 | `error` |
 |---|
 | `questions é obrigatório.` / `questions deve ser uma lista de {id, order}.` |
-| `A avaliação aceita no máximo 20 questões.` |
+| `A avaliação aceita no máximo 19 questões.` |
 | `Cada questão deve ser um objeto {id, order}.` / `Cada questão precisa de id.` |
 | `Questão repetida na avaliação.` |
 | `order deve ser um número inteiro.` |
@@ -361,8 +362,8 @@ Detalhe atualizado, com `questions` na nova ordem.
 
 `POST /afirme-reading/written-tests/<id>/publish`
 
-Sem corpo. Exige **exatamente 20** questões (todos os tipos contam) e que todas ainda existam no banco
-de questões.
+Sem corpo. Exige **exatamente 19** questões, nas posições fixas (1 a 16 múltipla escolha, 17 e 18
+ditado, 19 bilhete), e que todas ainda existam no banco de questões.
 
 ### Resposta `200`
 
@@ -372,7 +373,8 @@ Detalhe com `status: "publicada"` e `publishedAt` preenchido.
 
 | `error` |
 |---|
-| `A avaliação precisa ter exatamente 20 questões para ser publicada (hoje tem <N>).` |
+| `A avaliação precisa ter exatamente 19 questões para ser publicada (hoje tem <N>).` |
+| `A posição <n> precisa ser <tipo>. A prova tem 16 questões de múltipla escolha (1 a 16), 2 ditados (17 e 18) e 1 bilhete (19).` |
 | `A questão <id> não existe mais no banco de questões. Troque-a antes de publicar.` |
 | `A questão <id> é do tipo <tipo>, que não é aceito na avaliação escrita. ...` |
 | `A avaliação já está publicada.` |
@@ -587,7 +589,8 @@ const res = await api.get(`/afirme-reading/written-tests/${id}/pdf`, { responseT
 - **Cabeçalho**: logo do município (se cadastrada; senão a logo Afirme), município/UF, título, séries e
   linhas em branco para **Nome do aluno**, **Escola**, **Turma** e **Data**.
 - **Instruções**: marcar as respostas e responder o ditado e a produção escrita no cartão-resposta.
-- **Questões** na ordem da avaliação, numeradas de 1 a 20:
+- **Questões** na ordem da avaliação, numeradas de 1 a 19 (1 a 16 múltipla escolha, 17 e 18 ditado,
+  19 bilhete):
   - `multipleChoice`: enunciado (`formattedText`, ou `text` se vazio), texto de apoio
     (`secondStatement`), imagens e alternativas `A)`, `B)`, `C)`… com texto e/ou imagem;
   - `dictation`: número, enunciado e "Responda no cartão-resposta." — **a palavra ditada não é impressa**;
@@ -728,7 +731,8 @@ Baixar como blob (`responseType: "blob"`), como no PDF da prova.
 1. `POST /written-tests` com título e escopo (séries → escolas → turmas).
 2. Montar a prova com `GET /afirme-reading/questions?type=multipleChoice` (ou `dictation`,
    `text_production`) e enviar a lista com `PUT /written-tests/<id>/questions` a cada alteração.
-3. Habilitar "Publicar" quando `totalQuestions === 20`; chamar `POST /written-tests/<id>/publish`.
+3. Habilitar "Publicar" quando a prova tiver 16 múltipla escolha, 2 ditados e 1 bilhete
+   (`totalQuestions === 19`, posições 1–16, 17–18 e 19); chamar `POST /written-tests/<id>/publish`.
 4. Depois de publicada, os dados e as questões ficam só leitura.
 5. Tela de aplicação: `GET /written-tests/<id>/classes`, escolher turmas e data, `POST /written-tests/<id>/apply`.
    Turmas `agendada` podem ser reaplicadas (nova data) ou retiradas; `em_andamento`/`encerrada` não.

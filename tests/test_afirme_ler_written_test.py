@@ -32,6 +32,7 @@ from app.afirme_ler.ddl import get_afirme_ler_written_test_tables_ddl
 from app.afirme_ler.models.reading_written_test import (
     ReadingWrittenTest,
     ReadingWrittenTestClass,
+    ReadingWrittenTestCorrection,
     ReadingWrittenTestPrintRun,
     ReadingWrittenTestQuestion,
 )
@@ -103,7 +104,7 @@ def flask_app():
             m.__table__ for m in (
                 EducationStage, Subject, Grade, User, City, Question, School, Class, Subturma,
                 Student, ReadingWrittenTest, ReadingWrittenTestQuestion, ReadingWrittenTestClass,
-                ReadingWrittenTestPrintRun,
+                ReadingWrittenTestPrintRun, ReadingWrittenTestCorrection,
             )
         ]
         db.metadata.create_all(engine, tables=tables)
@@ -122,6 +123,8 @@ def flask_app():
             _question("play-mc", origin="afirme_play", question_type="multiple_choice"),
             _question("dict-1", question_type="dictation", alternatives=[],
                       correct_answer="sapato", value=2.0),
+            _question("dict-2", question_type="dictation", alternatives=[],
+                      correct_answer="borboleta", value=2.0),
             _question("prod-1", question_type="text_production", alternatives=[],
                       correct_answer=None, value=None),
             _question("play-ligar", origin="afirme_play", question_type="ligar_colunas"),
@@ -174,6 +177,11 @@ def _scope(**overrides):
     }
     data.update(overrides)
     return data
+
+
+def _pattern_ids():
+    """16 múltipla escolha, ditado nas posições 17 e 18, bilhete na 19."""
+    return MC_IDS[:16] + ["dict-1", "dict-2", "prod-1"]
 
 
 def _items(ids):
@@ -268,12 +276,12 @@ def test_set_questions_without_order_uses_position(flask_app):
     assert [(q.question_id, q.order) for q in updated.questions] == [("mc-02", 1), ("mc-01", 2)]
 
 
-def test_set_questions_accepts_at_most_20(flask_app):
+def test_set_questions_accepts_at_most_19(flask_app):
     written_test = _create()
-    with pytest.raises(ValueError, match="A avaliação aceita no máximo 20 questões."):
+    with pytest.raises(ValueError, match="A avaliação aceita no máximo 19 questões."):
         WrittenTestService.set_questions(PROFESSOR, written_test.id, {"questions": _items(MC_IDS)})
     db.session.rollback()
-    with pytest.raises(ValueError, match="no máximo 20"):
+    with pytest.raises(ValueError, match="no máximo 19"):
         _create(questions=_items(MC_IDS))
 
 
@@ -325,45 +333,51 @@ def test_total_score_and_counts_by_type(flask_app):
 # Publicação
 # ---------------------------------------------------------------------------
 
-def test_publish_requires_exactly_20(flask_app):
-    written_test = _create(questions=_items(MC_IDS[:19]))
+def test_publish_requires_the_written_pattern(flask_app):
+    written_test = _create(questions=_items(MC_IDS[:18]))
     with pytest.raises(
-        ValueError, match="precisa ter exatamente 20 questões para ser publicada \\(hoje tem 19\\)"
+        ValueError, match="precisa ter exatamente 19 questões para ser publicada \\(hoje tem 18\\)"
     ):
         WrittenTestService.publish(PROFESSOR, written_test.id)
     db.session.rollback()
 
-    WrittenTestService.set_questions(PROFESSOR, written_test.id, {
-        "questions": _items(MC_IDS[:18] + ["dict-1", "prod-1"]),
-    })
+    WrittenTestService.set_questions(PROFESSOR, written_test.id, {"questions": _items(MC_IDS[:19])})
+    with pytest.raises(ValueError, match="A posição 17 precisa ser ditado"):
+        WrittenTestService.publish(PROFESSOR, written_test.id)
+    db.session.rollback()
+
+    WrittenTestService.set_questions(PROFESSOR, written_test.id, {"questions": _items(_pattern_ids())})
     published = WrittenTestService.publish(PROFESSOR, written_test.id)
     assert published.status == "publicada"
     assert published.published_at is not None
     assert svc.to_detail(published)["totalScore"] == 21.0
+    assert svc.to_detail(published)["questionsByType"] == {
+        "multipleChoice": 16, "dictation": 2, "text_production": 1,
+    }
 
 
 def test_publish_with_21_is_rejected(flask_app):
-    written_test = _create(questions=_items(MC_IDS[:20]))
+    written_test = _create(questions=_items(MC_IDS[:16]))
     with patch("app.afirme_ler.services.written_test_service.REQUIRED_QUESTIONS", 25):
         WrittenTestService.set_questions(PROFESSOR, written_test.id, {"questions": _items(MC_IDS)})
-    with pytest.raises(ValueError, match="exatamente 20 questões .*hoje tem 21"):
+    with pytest.raises(ValueError, match="exatamente 19 questões .*hoje tem 21"):
         WrittenTestService.publish(PROFESSOR, written_test.id)
     db.session.rollback()
     assert WrittenTestService.get(written_test.id).status == "rascunho"
 
 
 def test_publish_rejects_deleted_question(flask_app):
-    written_test = _create(questions=_items(MC_IDS[:20]))
+    written_test = _create(questions=_items(_pattern_ids()))
     table = Question.__table__
-    db.session.execute(table.delete().where(table.c.id == "mc-20"))
+    db.session.execute(table.delete().where(table.c.id == "dict-2"))
     db.session.commit()
-    with pytest.raises(ValueError, match="mc-20 não existe mais"):
+    with pytest.raises(ValueError, match="dict-2 não existe mais"):
         WrittenTestService.publish(PROFESSOR, written_test.id)
     db.session.rollback()
 
 
 def test_published_test_is_locked(flask_app):
-    written_test = _create(questions=_items(MC_IDS[:20]))
+    written_test = _create(questions=_items(_pattern_ids()))
     WrittenTestService.publish(PROFESSOR, written_test.id)
 
     with pytest.raises(ValueError, match="Avaliação publicada não pode ser alterada."):
@@ -381,7 +395,7 @@ def test_published_test_is_locked(flask_app):
 
     stored = WrittenTestService.get(written_test.id)
     assert stored.title == "Avaliação escrita — 1º bimestre"
-    assert len(stored.questions) == 20
+    assert len(stored.questions) == 19
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +461,7 @@ def test_list_paginates_filters_and_counts(flask_app):
         title="Prova Beta", gradeIds=[str(GRADE_2)], schoolIds=[SCHOOL_A],
         classIds=[str(CLASS_A2)],
     )
-    published = _create(title="Prova Gama", questions=_items(MC_IDS[:20]))
+    published = _create(title="Prova Gama", questions=_items(_pattern_ids()))
     WrittenTestService.publish(PROFESSOR, published.id)
 
     result = WrittenTestService.list_tests({})
@@ -508,7 +522,7 @@ def test_routes_create_and_publish_errors(flask_app):
     )
     assert status == 400
     assert response.get_json() == {
-        "error": "A avaliação precisa ter exatamente 20 questões para ser publicada (hoje tem 1)."
+        "error": "A avaliação precisa ter exatamente 19 questões para ser publicada (hoje tem 1)."
     }
 
     response, status = _call_view(
@@ -525,6 +539,7 @@ def test_ddl_has_cascade_and_unique_constraints():
     assert "UNIQUE (written_test_id, question_id)" in ddl
     assert 'UNIQUE (written_test_id, "order")' in ddl
     assert "CHECK (status IN ('rascunho', 'publicada'))" in ddl
+    assert 'CHECK ("order" BETWEEN 1 AND 19)' in ddl
     assert "reading_evaluation " not in ddl
 
 
@@ -557,7 +572,7 @@ def clock(flask_app):
 
 
 def _published(user=PROFESSOR):
-    written_test = _create(user=user, questions=_items(MC_IDS[:20]))
+    written_test = _create(user=user, questions=_items(_pattern_ids()))
     return WrittenTestService.publish(user, written_test.id).id
 
 
@@ -572,7 +587,7 @@ def _by_class(result):
 
 
 def test_apply_draft_is_rejected(clock):
-    written_test = _create(questions=_items(MC_IDS[:20]))
+    written_test = _create(questions=_items(_pattern_ids()))
     with pytest.raises(ValueError, match="Só avaliação publicada pode ser aplicada."):
         _apply(written_test.id, [CLASS_A1])
 
@@ -747,13 +762,13 @@ def test_detail_and_list_show_application_summary(clock):
     detail = svc.to_detail(WrittenTestService.get(test_id))
     assert detail["appliedClassesCount"] == 2
     assert detail["nextApplicationStart"] == "2026-11-11T08:00:00"
-    assert detail["totalQuestions"] == 20
+    assert detail["totalQuestions"] == 19
 
     clock["now"] = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)  # B1 já começou
     item = WrittenTestService.list_tests({})["data"][0]
     assert item["appliedClassesCount"] == 2
     assert item["nextApplicationStart"] == "2026-11-12T08:00:00"
-    assert item["totalQuestions"] == 20
+    assert item["totalQuestions"] == 19
 
 
 def test_application_routes(clock):
@@ -796,7 +811,7 @@ from types import SimpleNamespace  # noqa: E402
 
 from app.afirme_ler.services import written_test_pdf_service as pdf_svc  # noqa: E402
 
-PDF_ORDER = ["mc-img"] + MC_IDS[:17] + ["dict-1", "prod-1"]
+PDF_ORDER = ["mc-img"] + MC_IDS[:15] + ["dict-1", "dict-2", "prod-1"]
 
 
 def _published_for_pdf():
@@ -825,9 +840,9 @@ def test_pdf_data_order_numbers_and_letters(flask_app):
 
     assert data["municipality"] == "Limoeiro" and data["state"] == "AL"
     assert data["grades"] == ["1º ano"]
-    assert data["total_questions"] == 20
+    assert data["total_questions"] == 19
     assert [q["id"] for q in data["questions"]] == PDF_ORDER
-    assert [q["number"] for q in data["questions"]] == list(range(1, 21))
+    assert [q["number"] for q in data["questions"]] == list(range(1, 20))
 
     first = data["questions"][0]
     assert first["type"] == "multipleChoice"
@@ -841,10 +856,12 @@ def test_pdf_data_order_numbers_and_letters(flask_app):
 
 def test_pdf_data_has_no_answer_key(flask_app):
     data = pdf_svc.build_pdf_data(_published_for_pdf())
-    dictation, production = data["questions"][18], data["questions"][19]
+    dictations = data["questions"][16:18]
+    production = data["questions"][18]
 
-    assert dictation["type"] == "dictation" and production["type"] == "text_production"
-    for item in (dictation, production):
+    assert [item["type"] for item in dictations] == ["dictation", "dictation"]
+    assert production["type"] == "text_production"
+    for item in (*dictations, production):
         assert item["alternatives"] == [] and item["support_html"] == ""
         assert item["answer_on_card"] is True
     expected_keys = {
@@ -854,7 +871,7 @@ def test_pdf_data_has_no_answer_key(flask_app):
     assert all(set(q) == expected_keys for q in data["questions"])
 
     dumped = json.dumps(data, ensure_ascii=False, default=str)
-    for forbidden in ("sapato", "isCorrect", "correct", "solution", "SOLUCAO-SECRETA", "value"):
+    for forbidden in ("sapato", "borboleta", "isCorrect", "correct", "solution", "SOLUCAO-SECRETA", "value"):
         assert forbidden not in dumped
 
 
@@ -865,13 +882,13 @@ def test_pdf_html_prints_questions_without_answer_key(flask_app):
 
     assert "Limoeiro" in html and "Avaliação escrita — 1º bimestre" in html
     assert "Nome do aluno:" in html and "Escola:" in html and "Turma:" in html and "Data:" in html
-    assert html.count('class="question-number"') == 20
-    assert html.count("Responda no cartão-resposta.") == 2
+    assert html.count('class="question-number"') == 19
+    assert html.count("Responda no cartão-resposta.") == 3
     assert "<span class=\"alternative-letter\">C)</span>" in html
     assert "Qual é o animal?" in html
     assert "data:image/png;base64," in html  # imagens do MinIO embutidas
     assert "/questions/mc-img/images/" not in html
-    for forbidden in ("sapato", "isCorrect", "SOLUCAO-SECRETA", "Pontuação", "pontos"):
+    for forbidden in ("sapato", "borboleta", "isCorrect", "SOLUCAO-SECRETA", "Pontuação", "pontos"):
         assert forbidden not in html
 
 
@@ -884,7 +901,7 @@ def test_pdf_blocks_draft_and_missing_question(flask_app):
     table = Question.__table__
     db.session.execute(table.delete().where(table.c.id == "dict-1"))
     db.session.commit()
-    with pytest.raises(ValueError, match="dict-1 \\(posição 19\\) não existe mais"):
+    with pytest.raises(ValueError, match="dict-1 \\(posição 17\\) não existe mais"):
         pdf_svc.build_pdf_data(WrittenTestService.get(published.id))
 
 
@@ -934,7 +951,7 @@ def test_pdf_route(flask_app):
         response.direct_passthrough = False
         assert response.get_data() == b"%PDF-1.4 fake"
         html = render.call_args.args[0]
-        assert "sapato" not in html and html.count('class="question-number"') == 20
+        assert "sapato" not in html and "borboleta" not in html and html.count('class="question-number"') == 19
 
         draft = _create(questions=_items(MC_IDS[:2]))
         response, status = _call_view("download_written_test_pdf", PROFESSOR, draft.id)
@@ -980,16 +997,17 @@ def _published_applied(class_ids=(CLASS_A1,)):
 def test_card_items_letters_lines_and_no_answer_key(flask_app):
     items = cards.build_card_items(_published_for_pdf())
 
-    assert [i["number"] for i in items] == list(range(1, 21))
+    assert [i["number"] for i in items] == list(range(1, 20))
     assert [i["question_id"] for i in items] == PDF_ORDER
     assert items[0] == {"number": 1, "question_id": "mc-img", "type": "multipleChoice",
                         "letters": ["A", "B", "C"]}
     assert items[1]["letters"] == ["A", "B"]
-    assert items[18] == {"number": 19, "question_id": "dict-1", "type": "dictation"}
-    assert items[19] == {"number": 20, "question_id": "prod-1", "type": "text_production", "lines": 15}
+    assert items[16] == {"number": 17, "question_id": "dict-1", "type": "dictation"}
+    assert items[17] == {"number": 18, "question_id": "dict-2", "type": "dictation"}
+    assert items[18] == {"number": 19, "question_id": "prod-1", "type": "text_production", "lines": 15}
 
     dumped = json.dumps(items, ensure_ascii=False)
-    for forbidden in ("sapato", "isCorrect", "correct", "solution", "SOLUCAO", "value", "Gato"):
+    for forbidden in ("sapato", "borboleta", "isCorrect", "correct", "solution", "SOLUCAO", "value", "Gato"):
         assert forbidden not in dumped
 
 
@@ -1007,13 +1025,14 @@ def test_card_html_has_bubbles_lines_and_no_answer_key(flask_app):
     items = cards.build_card_items(written_test)
     html = cards.render_card_html(written_test, items, generator=_pdf_service().generator)
 
-    assert html.count('class="bubble"') == 3 + 17 * 2
-    assert html.count('class="dictation-area"') == 1
+    assert html.count('class="bubble"') == 3 + 15 * 2
+    assert html.count('class="row-anchor"') == 19
+    assert html.count('class="dictation-area"') == 2
     assert html.count('class="writing-line"') == 15
-    assert html.count('class="num"') == 20
+    assert html.count('class="num"') == 19
     assert html.count("@top-left-corner") == 1 and html.count("@bottom-right-corner") == 1
     assert "width: 340px" in html and "height: 482px" in html
-    for forbidden in ("sapato", "isCorrect", "SOLUCAO-SECRETA", "Pontuação", "Gato", "Qual é o animal"):
+    for forbidden in ("sapato", "borboleta", "isCorrect", "SOLUCAO-SECRETA", "Pontuação", "Gato", "Qual é o animal"):
         assert forbidden not in html
 
 
@@ -1044,11 +1063,18 @@ def test_card_map_from_pdf_content():
         image(5, 5, 32, 32),           # quadrado de canto: ignorado
         "0 0 500 20 re f",             # borda/linha sem imagem: ignorada
         image(100, 300, 340, 44),      # linha do ditado (fundo de bloco vem antes das bolhas)
+        image(80, 600, 8, 8),          # quadrado da questão 1
         image(100, 600, 12, 12),       # bolha A
         image(130, 600, 12, 12),       # bolha B
+        image(80, 300, 8, 8),          # quadrado da questão 2
         "Q",
     ])
-    page_2 = "q 0.75 0 0 0.75 0 0 cm " + image(40, 100, 660, 482) + " Q"
+    page_2 = " ".join([
+        "q 0.75 0 0 0.75 0 0 cm",
+        image(40, 100, 660, 482),
+        image(50, 400, 8, 8),          # quadrado da questão 3
+        "Q",
+    ])
 
     result = cards.build_answer_sheet_map_from_pages([page_1, page_2], items, "wt-1")
     assert result["page_count"] == 2 and result["written_test_id"] == "wt-1"
@@ -1058,6 +1084,11 @@ def test_card_map_from_pdf_content():
     assert bubble_a["cx"] == pytest.approx(79.5) and bubble_a["cy"] == pytest.approx(454.5)
     assert bubble_a["r"] == pytest.approx(4.5)
     assert set(bubble_a["pixel"]) == {"x", "y", "r"}
+    assert [(a["number"], a["type"]) for a in first["row_anchors"]] == [
+        (1, "multipleChoice"), (2, "dictation"),
+    ]
+    assert second["row_anchors"][0]["number"] == 3
+    assert set(first["row_anchors"][0]["pixel"]) == {"x", "y"}
     assert first["writing_areas"][0]["type"] == "dictation"
     assert first["writing_areas"][0]["right"] - first["writing_areas"][0]["left"] == pytest.approx(255.0)
     assert second["bubbles"] == []
@@ -1258,4 +1289,417 @@ def test_ddl_print_run_table():
     assert 'CREATE TABLE IF NOT EXISTS "city_teste".reading_written_test_print_run (' in ddl
     assert "CHECK (status IN ('pendente', 'processando', 'concluido', 'erro'))" in ddl
     assert "answer_sheet_map JSON" in ddl
+    assert 'CREATE TABLE IF NOT EXISTS "city_teste".reading_written_test_correction (' in ddl
+    assert "UNIQUE (written_test_id, student_id)" in ddl
+    assert "objective JSON NOT NULL DEFAULT '{}'::json" in ddl
+    assert "writing JSON NOT NULL DEFAULT '{}'::json" in ddl
+    assert "ADD COLUMN IF NOT EXISTS writing JSON" in ddl
     assert 'class_id UUID REFERENCES "city_teste".class(id) ON DELETE CASCADE' in ddl
+
+
+# ---------------------------------------------------------------------------
+# Correção do cartão
+# ---------------------------------------------------------------------------
+
+def _filled_page():
+    """Folha já alinhada: o quadrado e a bolha A estão 20px à direita e abaixo do mapa."""
+    import cv2
+    import numpy as np
+
+    image = np.full((420, 520, 3), 255, np.uint8)
+    cv2.rectangle(image, (50, 90), (70, 110), (0, 0, 0), -1)
+    cv2.circle(image, (160, 100), 12, (0, 0, 0), -1)
+    cv2.line(image, (140, 230), (280, 230), (0, 0, 0), 3)
+    page = {
+        "page": 1,
+        "bubbles": [
+            {"number": 1, "question_id": "q1", "letter": "A", "option_index": 0,
+             "pixel": {"x": 140, "y": 80, "r": 14}},
+            {"number": 1, "question_id": "q1", "letter": "B", "option_index": 1,
+             "pixel": {"x": 220, "y": 80, "r": 14}},
+        ],
+        "writing_areas": [{
+            "number": 17, "question_id": "dict-1", "type": "dictation",
+            "pixel": {"x": 120, "y": 200, "width": 180, "height": 50},
+        }],
+        "row_anchors": [
+            {"number": 1, "question_id": "q1", "type": "multipleChoice", "pixel": {"x": 40, "y": 80}},
+            {"number": 17, "question_id": "dict-1", "type": "dictation", "pixel": {"x": 40, "y": 250}},
+        ],
+    }
+    return image, page
+
+
+def test_black_square_shifts_the_bubble_and_the_crop_is_a_png(flask_app):
+    from app.afirme_ler.services import written_test_answer_sheet_correction as reading
+
+    image, page = _filled_page()
+    answers, blank, invalid, crops = reading.interpret_aligned_page(image, page)
+
+    assert answers["q1"] == {"number": 1, "letter": "A"}
+    assert blank == [] and invalid == []
+    assert crops["dict-1"]["png"].startswith(b"\x89PNG")
+    assert len(crops["dict-1"]["png"]) > 50
+
+
+def test_correction_saves_letters_and_three_images(flask_app):
+    import cv2
+    import numpy as np
+
+    from app.afirme_ler.services import written_test_answer_sheet_correction as reading
+
+    written_test = _published_for_pdf()
+    image, page = _filled_page()
+    answers, blank, invalid, crops = reading.interpret_aligned_page(image, page)
+
+    bilhete = np.full((300, 400, 3), 255, np.uint8)
+    cv2.rectangle(bilhete, (30, 40), (46, 56), (0, 0, 0), -1)
+    cv2.line(bilhete, (80, 80), (200, 120), (0, 0, 0), 2)
+    bilhete_page = {
+        "page": 2,
+        "bubbles": [],
+        "writing_areas": [{
+            "number": 19, "question_id": "prod-1", "type": "text_production",
+            "pixel": {"x": 60, "y": 60, "width": 180, "height": 80},
+        }],
+        "row_anchors": [{
+            "number": 19, "question_id": "prod-1", "type": "text_production",
+            "pixel": {"x": 38, "y": 48},
+        }],
+    }
+    _, _, _, bilhete_crops = reading.interpret_aligned_page(bilhete, bilhete_page)
+    assert "prod-1" in bilhete_crops
+
+    uploaded = {}
+
+    class FakeMinio:
+        BUCKETS = {"AFIRME_READING_AUDIO": "afirme-reading-audio"}
+
+        def upload_file(self, bucket, name, data, content_type=None, metadata=None):
+            uploaded[(bucket, name)] = bytes(data)
+            return {"bucket": bucket, "object_name": name}
+
+    prefix = "st-caio"
+    first = {
+        "qr": {"student_id": prefix, "written_test_id": written_test.id[:12], "page": 1, "page_count": 2},
+        "answers": answers, "blank": blank, "invalid": invalid, "crops": crops,
+    }
+    second = {
+        "qr": {"student_id": prefix, "written_test_id": written_test.id[:12], "page": 2, "page_count": 2},
+        "answers": {}, "blank": [], "invalid": [], "crops": {
+            "dict-2": {"number": 18, "type": "dictation", "png": crops["dict-1"]["png"]},
+            **bilhete_crops,
+        },
+    }
+    with patch("app.services.storage.minio_service.MinIOService", FakeMinio):
+        saved = reading.save_student_pages(written_test.id, prefix, [first, second], 2)
+
+    assert saved["saved"] is True
+    assert saved["studentId"] == "st-caio"
+    assert saved["answers"] == [{"number": 1, "questionId": "q1", "letter": "A"}]
+    assert saved["missingPages"] == []
+    assert [item["number"] for item in saved["crops"]] == [17, 18, 19]
+    assert all(item["saved"] for item in saved["crops"])
+    assert len(uploaded) == 3
+    assert all(body.startswith(b"\x89PNG") for body in uploaded.values())
+
+    stored = ReadingWrittenTestCorrection.query.filter_by(student_id="st-caio").one()
+    assert stored.answers["q1"]["letter"] == "A"
+    assert stored.pages == [1, 2]
+
+    with patch("app.services.storage.minio_service.MinIOService", FakeMinio):
+        again = reading.save_student_pages(written_test.id, prefix, [second], 2)
+    assert again["answers"] == [{"number": 1, "questionId": "q1", "letter": "A"}]
+
+
+def test_scan_with_corners_and_qr_reads_the_letter_and_the_crop(flask_app):
+    """Imagem sintética com os quatro cantos, o QR, a bolha e o retângulo de escrita."""
+    import cv2
+    import numpy as np
+    import qrcode
+
+    from app.afirme_ler.services.written_test_answer_sheet_correction import read_card_image
+    from app.afirme_ler.services.written_test_answer_sheet_service import qr_text
+
+    written_test = _published_for_pdf()
+    width, height, side = 1200, 1600, 48
+    source = np.float32([[20, 20], [width - 20, 20], [width - 20, height - 20], [20, height - 20]])
+    destination = np.float32([[0, 0], [2480, 0], [2480, 3508], [0, 3508]])
+    inverse = cv2.getPerspectiveTransform(destination, source)
+
+    def place(x, y):
+        point = cv2.perspectiveTransform(np.float32([[[x, y]]]), inverse)[0, 0]
+        return int(round(point[0])), int(round(point[1]))
+
+    image = np.full((height, width, 3), 255, np.uint8)
+    for x, y in (
+        (20, 20),
+        (width - 20 - side, 20),
+        (20, height - 20 - side),
+        (width - 20 - side, height - 20 - side),
+    ):
+        cv2.rectangle(image, (x, y), (x + side, y + side), (0, 0, 0), -1)
+
+    code = qrcode.make(qr_text("st-caio", written_test.id, 1, 1)).convert("RGB").resize((180, 180))
+    image[300:480, 400:580] = cv2.cvtColor(np.array(code), cv2.COLOR_RGB2BGR)
+
+    anchor_x, anchor_y = place(400, 700)
+    cv2.rectangle(image, (anchor_x - 8, anchor_y - 8), (anchor_x + 8, anchor_y + 8), (0, 0, 0), -1)
+    bubble_x, bubble_y = place(560, 700)
+    cv2.circle(image, (bubble_x, bubble_y), 14, (0, 0, 0), -1)
+    line_start, line_end = place(420, 920), place(680, 960)
+    cv2.line(image, line_start, line_end, (0, 0, 0), 4)
+
+    sheet = {
+        "written_test_id": written_test.id,
+        "page_count": 1,
+        "pages": [{
+            "page": 1,
+            "bubbles": [
+                {"number": 1, "question_id": "q1", "letter": "A", "option_index": 0,
+                 "pixel": {"x": 560, "y": 700, "r": 18}},
+                {"number": 1, "question_id": "q1", "letter": "B", "option_index": 1,
+                 "pixel": {"x": 720, "y": 700, "r": 18}},
+            ],
+            "writing_areas": [{
+                "number": 17, "question_id": "dict-1", "type": "dictation",
+                "pixel": {"x": 400, "y": 900, "width": 300, "height": 80},
+            }],
+            "row_anchors": [
+                {"number": 1, "question_id": "q1", "type": "multipleChoice", "pixel": {"x": 400, "y": 700}},
+                {"number": 17, "question_id": "dict-1", "type": "dictation", "pixel": {"x": 400, "y": 1100}},
+            ],
+        }],
+    }
+    read = read_card_image(image, sheet)
+    assert read["status"] == "read"
+    assert read["answers"]["q1"] == {"number": 1, "letter": "A"}
+    assert read["blank"] == [] and read["invalid"] == []
+    assert read["crops"]["dict-1"]["png"].startswith(b"\x89PNG")
+    assert len(read["crops"]["dict-1"]["png"]) > 50
+
+
+def test_page_without_corner_squares_is_skipped():
+    import numpy as np
+
+    from app.afirme_ler.services.written_test_answer_sheet_correction import read_card_image
+
+    white = np.full((200, 160, 3), 255, np.uint8)
+    read = read_card_image(white, {"written_test_id": "wt", "page_count": 1, "pages": []})
+    assert read["status"] == "skipped"
+    assert read["reason"] == "sem quadrados de canto"
+
+
+def test_correction_route_skips_a_blank_image_and_requires_the_map(flask_app):
+    import base64
+
+    import cv2
+    import numpy as np
+
+    published = _published_for_pdf()
+    ok, encoded = cv2.imencode(".png", np.full((60, 60, 3), 255, np.uint8))
+    assert ok
+    payload = {"images": [base64.b64encode(encoded.tobytes()).decode()]}
+
+    response, status = _call_view(
+        "correct_written_test_answer_sheets", APLICADOR, published.id, method="POST", json=payload,
+    )
+    assert status == 400
+    assert "quadrado de cada questão" in response.get_json()["error"]
+
+    db.session.add(ReadingWrittenTestPrintRun(
+        written_test_id=published.id,
+        created_by=PROFESSOR["id"],
+        status="concluido",
+        answer_sheet_map={
+            "version": 2,
+            "written_test_id": published.id,
+            "page_count": 1,
+            "pages": [{"page": 1, "bubbles": [], "writing_areas": [], "row_anchors": [
+                {"number": 1, "question_id": "q1"},
+            ]}],
+        },
+    ))
+    db.session.commit()
+    response, status = _call_view(
+        "correct_written_test_answer_sheets", APLICADOR, published.id, method="POST", json=payload,
+    )
+    assert status == 200
+    body = response.get_json()
+    assert body["students"] == []
+    assert body["skipped"][0]["reason"] == "sem quadrados de canto"
+
+
+def _ai_payload():
+    return {
+        "palavras": [
+            {"numero": 17, "pontos": 2, "transcricao_original": "sapato",
+             "confianca_leitura": "ALTA", "status": "CORRIGIDA"},
+            {"numero": 18, "pontos": 1, "transcricao_original": "borb",
+             "confianca_leitura": "ALTA", "justificativa": "faltou o final"},
+        ],
+        "producao_textual": {
+            "transcricao_original": "MAMAE AMANHA",
+            "adequacao": 2, "tipologia": 2, "uso_pagina": 2, "ortografia": 1,
+            "pontuacao": 0, "coesao": 2, "segmentacao": 2,
+            "confianca_leitura": "ALTA",
+        },
+        "devolutiva": {
+            "aprendizagens_demonstradas": ["escreve o destinatário"],
+            "dificuldades_identificadas": ["ortografia"],
+            "intervencoes_recomendadas": ["revisar o final das palavras"],
+            "observacoes_para_professor": "conferir a questão 18",
+        },
+    }
+
+
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = type("Message", (), {"content": content})()
+
+
+class _FakeOpenAI:
+    calls = []
+
+    def __init__(self, api_key=None, timeout=None):
+        self.api_key = api_key
+
+    class chat:
+        class completions:
+            @staticmethod
+            def create(**kwargs):
+                _FakeOpenAI.calls.append(kwargs)
+                return type("Response", (), {"choices": [_FakeChoice(json.dumps(_ai_payload()))]})()
+
+
+def test_objective_score_uses_the_answer_key_and_ai_grades_only_the_writing(flask_app, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+    _FakeOpenAI.calls = []
+
+    from app.afirme_ler.services import written_test_answer_sheet_correction as reading
+    from app.afirme_ler.services.written_test_writing_grade import grade_scanned_writing
+
+    written_test = _published_for_pdf()
+    links = (
+        ReadingWrittenTestQuestion.query
+        .filter_by(written_test_id=written_test.id)
+        .order_by(ReadingWrittenTestQuestion.order.asc())
+        .all()
+    )
+    answers = {}
+    blank = []
+    for link in links:
+        if link.order > 16:
+            continue
+        if link.order == 2:
+            answers[link.question_id] = {"number": 2, "letter": "B"}
+        elif link.order == 3:
+            blank.append({"number": 3, "questionId": link.question_id})
+        else:
+            answers[link.question_id] = {"number": link.order, "letter": "A"}
+    png = b"\x89PNG\r\n\x1a\nfake"
+    crops = {}
+    for link in links:
+        if link.order < 17:
+            continue
+        crops[link.question_id] = {"number": link.order, "type": "writing", "png": png}
+    page = {
+        "qr": {"student_id": "st-caio", "written_test_id": written_test.id[:12], "page": 1, "page_count": 2},
+        "answers": answers, "blank": blank, "invalid": [], "crops": crops,
+    }
+    with patch("app.services.storage.minio_service.MinIOService") as minio:
+        minio.BUCKETS = {"AFIRME_READING_AUDIO": "afirme-reading-audio"}
+        minio.return_value.upload_file.return_value = {"ok": True}
+        saved = reading.save_student_pages(written_test.id, "st-caio", [page], 2)
+
+    assert saved["objective"]["points"] == 14
+    assert saved["objective"]["maxPoints"] == 16
+    by_number = {item["number"]: item for item in saved["objective"]["items"]}
+    assert by_number[1]["points"] == 1 and by_number[1]["status"] == "CORRETA"
+    assert by_number[2]["points"] == 0 and by_number[2]["status"] == "INCORRETA"
+    assert by_number[3]["points"] == 0 and by_number[3]["status"] == "EM_BRANCO"
+
+    with patch("openai.OpenAI", _FakeOpenAI):
+        writing = grade_scanned_writing(written_test.id, "st-caio", [page])
+
+    assert len(_FakeOpenAI.calls) == 1
+    sent = _FakeOpenAI.calls[0]
+    assert sent["model"] == "gpt-4o"
+    assert sent["messages"][0]["role"] == "system"
+    assert "Questões 17 e 18" in sent["messages"][0]["content"]
+    user_parts = sent["messages"][1]["content"]
+    user_text = user_parts[0]["text"]
+    assert "sapato" in user_text and "borboleta" in user_text
+    assert "mc-img" not in user_text
+    assert sum(1 for part in user_parts if part["type"] == "image_url") == 3
+    assert writing["source"] == "ia"
+    assert writing["status"] == "PENDENTE_REVISAO"
+    assert writing["wordPoints"] == 3
+    assert writing["textPoints"] == 11
+    assert writing["words"][1]["needsReview"] is True
+    assert writing["words"][1]["points"] == 1
+    assert writing["production"]["criteria"]["pontuacao"] == 0
+    assert writing["feedback"]["notes"] == "conferir a questão 18"
+
+    stored = ReadingWrittenTestCorrection.query.filter_by(student_id="st-caio").one()
+    assert stored.objective["points"] == 14
+    assert stored.writing["source"] == "ia"
+
+
+def test_writing_without_a_card_is_manual_and_skips_openai(flask_app, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    written_test = _published_for_pdf()
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("a IA não deve ser chamada sem cartão")
+
+    with patch("openai.OpenAI", explode):
+        response, status = _call_view(
+            "save_written_test_writing_correction",
+            PROFESSOR,
+            written_test.id,
+            method="POST",
+            json={
+                "studentId": "st-caio",
+                "words": [
+                    {"number": 17, "transcription": "sapato", "points": 2},
+                    {"number": 18, "transcription": "borboleta", "points": 2},
+                ],
+                "production": {
+                    "transcription": "MAMAE AMANHA VAI TE FESTA",
+                    "adequacao": 2,
+                    "tipologia": 2,
+                    "usoPagina": 1,
+                    "ortografia": 1,
+                    "pontuacao": 0,
+                    "coesao": 2,
+                    "segmentacao": 2,
+                },
+            },
+        )
+    assert status == 200
+    body = response.get_json()
+    assert body["objective"] is None
+    assert body["writing"]["source"] == "manual"
+    assert body["writing"]["wordPoints"] == 4
+    assert body["writing"]["textPoints"] == 10
+    assert body["writing"]["model"] is None
+
+    response, status = _call_view(
+        "save_written_test_writing_correction",
+        PROFESSOR,
+        written_test.id,
+        method="POST",
+        json={"studentId": "st-caio", "words": [{"number": 17, "points": 3}], "production": {}},
+    )
+    assert status == 400
+
+    response, status = _call_view(
+        "list_written_test_answer_sheet_corrections", PROFESSOR, written_test.id,
+    )
+    assert status == 200
+    listed = response.get_json()["students"]
+    assert listed[0]["studentId"] == "st-caio"
+    assert listed[0]["writing"]["source"] == "manual"
+    assert listed[0]["answers"] == []

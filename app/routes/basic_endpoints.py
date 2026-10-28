@@ -2589,6 +2589,17 @@ def report_users_counts():
         if not current_user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
 
+        from app.services.alunos_resultado_filtro import (
+            AlunosFiltroInvalido,
+            filtro_restringe,
+            parse_alunos_filtro,
+        )
+
+        try:
+            alunos_filtro = parse_alunos_filtro(request.args.get("alunos"))
+        except AlunosFiltroInvalido as exc:
+            return jsonify({"error": str(exc)}), 400
+
         breakdown_raw = (request.args.get('breakdown') or '').strip()
         if breakdown_raw:
             breakdown = {p.strip().lower() for p in breakdown_raw.split(',') if p.strip()}
@@ -2791,14 +2802,22 @@ def report_users_counts():
                     }
                 )
 
-        return jsonify(
-            {
-                "general": general,
-                "by_school": by_school,
-                "by_grade": by_grade,
-                "by_class": by_class,
-            }
-        ), 200
+        payload = {
+            "general": general,
+            "by_school": by_school,
+            "by_grade": by_grade,
+            "by_class": by_class,
+        }
+        if filtro_restringe(alunos_filtro):
+            from app.services.users_report_alunos import (
+                aplicar_recorte_relatorio_usuarios,
+                carregar_registros_usuarios,
+            )
+
+            payload = aplicar_recorte_relatorio_usuarios(
+                payload, carregar_registros_usuarios(), alunos_filtro
+            )
+        return jsonify(payload), 200
 
     except Exception as e:
         logging.error(f"Erro ao gerar relatório de usuários: {str(e)}", exc_info=True)

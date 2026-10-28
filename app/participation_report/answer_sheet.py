@@ -19,6 +19,13 @@ from app.models.student import Student
 from app.models.studentClass import Class
 from app.permissions import get_user_permission_scope
 from app.participation_report.filters import obter_estados, obter_municipios, parse_id_list
+from app.participation_report.grupos import (
+    AcumuladorGrupos,
+    grupos_vazios,
+    linhas_por_serie,
+    recortar_roster,
+)
+from app.services.special_education import SpecialEducationStatus, is_special_education_many
 from app.utils.class_label_helpers import format_grade_class_label, normalize_shift
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 from app.utils.uuid_helpers import ensure_uuid_list
@@ -248,6 +255,7 @@ def build_participation_report_answer_sheet(
     escola_ids: Optional[List[str]] = None,
     serie_ids: Optional[List[str]] = None,
     turma_ids: Optional[List[str]] = None,
+    alunos_filtro: str = "todos",
 ) -> Dict[str, Any]:
     """
     Participação em cartão-resposta: alunos únicos, AnswerSheetResult + turmas-alvo.
@@ -292,6 +300,7 @@ def build_participation_report_answer_sheet(
         "escolas": list(escola_ids_norm),
         "series": list(serie_ids_norm),
         "turmas": list(turma_ids_norm),
+        "alunos": alunos_filtro or "todos",
         "report_entity_type": "answer_sheet",
     }
 
@@ -302,8 +311,10 @@ def build_participation_report_answer_sheet(
             "avaliados": 0,
             "total_turmas": 0,
             "percentual_participacao": 0.0,
+            "grupos": grupos_vazios(),
         },
         "por_escola": [],
+        "por_serie": [],
         "por_turma": [],
     }
 
@@ -394,6 +405,10 @@ def build_participation_report_answer_sheet(
         for s in Student.query.filter(Student.id.in_(list(still_missing))).all():
             students_by_id[s.id] = s
     matriculados_ids = set(students_by_id.keys())
+    statuses = is_special_education_many(students_by_id.values())
+    matriculados_ids, avaliados_ids = recortar_roster(
+        matriculados_ids, avaliados_ids, statuses, alunos_filtro
+    )
 
     matriculados = len(matriculados_ids)
     avaliados = len(avaliados_ids)
@@ -405,6 +420,18 @@ def build_participation_report_answer_sheet(
     av_by_class: Dict[Any, Set[Any]] = defaultdict(set)
     school_names: Dict[str, str] = {}
     class_labels: Dict[Any, Dict[str, Any]] = {}
+    grupos_geral = AcumuladorGrupos()
+    grupos_escola: Dict[str, AcumuladorGrupos] = defaultdict(AcumuladorGrupos)
+    grupos_serie: Dict[str, AcumuladorGrupos] = defaultdict(AcumuladorGrupos)
+    grupos_turma: Dict[str, AcumuladorGrupos] = defaultdict(AcumuladorGrupos)
+    serie_nomes: Dict[str, str] = {}
+    for meta in class_meta.values():
+        serie_id = meta.get("serie_id")
+        if serie_id is None:
+            continue
+        chave = str(serie_id)
+        serie_nomes.setdefault(chave, meta.get("serie_nome") or chave)
+        grupos_serie.setdefault(chave, AcumuladorGrupos())
 
     for sid in matriculados_ids:
         student = students_by_id.get(sid)
@@ -419,10 +446,15 @@ def build_participation_report_answer_sheet(
             school_id = meta.get("escola_id") or school_id
             grade_id = meta.get("serie_id") or grade_id
 
+        status = statuses.get(str(sid), SpecialEducationStatus(False, None, None))
+        avaliado = sid in avaliados_ids
+        grupos_geral.add(status, avaliado)
+
         if school_id:
             mat_by_school[school_id].add(sid)
             if sid in avaliados_ids:
                 av_by_school[school_id].add(sid)
+            grupos_escola[school_id].add(status, avaliado)
             if school_id not in school_names:
                 name = ""
                 for meta in class_meta.values():
@@ -434,7 +466,22 @@ def build_participation_report_answer_sheet(
                     name = sch.name if sch else school_id
                 school_names[school_id] = name
 
+        if grade_id is not None:
+            chave_serie = str(grade_id)
+            grupos_serie[chave_serie].add(status, avaliado)
+            meta_serie = class_meta.get(class_id) or {}
+            nome_serie = (
+                meta_serie.get("serie_nome")
+                if str(meta_serie.get("serie_id") or "") == chave_serie
+                else ""
+            )
+            if nome_serie:
+                serie_nomes[chave_serie] = nome_serie
+            else:
+                serie_nomes.setdefault(chave_serie, chave_serie)
+
         if class_id is not None:
+            grupos_turma[str(class_id)].add(status, avaliado)
             mat_by_class[class_id].add(sid)
             if sid in avaliados_ids:
                 av_by_class[class_id].add(sid)
@@ -501,6 +548,7 @@ def build_participation_report_answer_sheet(
                 "avaliados": a,
                 "total_turmas": len(school_class_ids.get(school_id, set())),
                 "percentual_participacao": _percentual(a, m),
+                "grupos": grupos_escola.get(school_id, AcumuladorGrupos()).fechar(),
             }
         )
 
@@ -520,8 +568,11 @@ def build_participation_report_answer_sheet(
                 "matriculados": m,
                 "avaliados": a,
                 "percentual_participacao": _percentual(a, m),
+                "grupos": grupos_turma.get(str(class_id), AcumuladorGrupos()).fechar(),
             }
         )
+
+    por_serie = linhas_por_serie(grupos_serie, serie_nomes)
 
     logging.info(
         "participation_report answer_sheet municipio=%s gabaritos=%s classes=%s "
@@ -540,7 +591,9 @@ def build_participation_report_answer_sheet(
             "avaliados": avaliados,
             "total_turmas": total_turmas,
             "percentual_participacao": _percentual(avaliados, matriculados),
+            "grupos": grupos_geral.fechar(),
         },
         "por_escola": por_escola,
+        "por_serie": por_serie,
         "por_turma": por_turma,
     }

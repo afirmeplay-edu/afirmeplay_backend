@@ -65,6 +65,21 @@ def adap_series_label(level: Any) -> str:
     return f"ADAP {int(level)}"
 
 
+def adap_series_catalog(grades_by_level: Dict[int, Any]) -> List[Dict[str, Any]]:
+    """ADAP 1, 2 e 3 do cadastro, mesmo quando o nível ainda não tem aluno marcado."""
+    out: List[Dict[str, Any]] = []
+    for level in ADAP_CARTAO_LEVELS:
+        grade = grades_by_level.get(level)
+        if grade is None:
+            continue
+        out.append({
+            "id": str(getattr(grade, "id", grade)),
+            "nome": adap_series_label(level),
+            "support_level": level,
+        })
+    return out
+
+
 def adap_level_of_grade(grade: Any) -> Optional[int]:
     """
     Nível ADAP de uma série {id, name} do gabarito: "Suporte N" / "ADAP N".

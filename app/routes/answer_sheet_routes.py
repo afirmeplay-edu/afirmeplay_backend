@@ -3739,10 +3739,14 @@ def _load_cartao_roster_and_results(
         student_ids_for_answer_sheet_class_group,
     )
 
-    from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
+    from app.services.cartao_resposta.answer_sheet_audience import (
+        apply_gabarito_audience,
+        filter_students_for_gabarito,
+    )
 
     if not gabarito_id or not class_ids:
         return [], []
+
     base_students = apply_gabarito_audience(
         Student.query.filter(Student.class_id.in_(class_ids)), gabarito_id
     ).all()
@@ -3753,11 +3757,18 @@ def _load_cartao_roster_and_results(
     students = (
         Student.query.filter(Student.id.in_(list(merged_ids))).all() if merged_ids else []
     )
+    # Snapshot da turma traz quem já teve resultado nela. No ADAP isso não pode
+    # repor o aluno regular: previstos e participação ficam só com quem está marcado.
+    students = filter_students_for_gabarito(students, gabarito_id)
+    allowed_ids = {str(student.id) for student in students}
     _rq = query_answer_sheet_results_for_class_group(
         str(gabarito_id), class_ids, list(base_ids)
     )
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-    results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
+    results = [
+        row for row in _dedupe_answer_sheet_results_latest_per_student(_rq.all())
+        if str(row.student_id) in allowed_ids
+    ]
     if alunos_filtro and alunos_filtro != "todos":
         from app.services.alunos_resultado_filtro import aplicar_universo_alunos
 
@@ -9403,29 +9414,22 @@ def _split_adap_series(serie_ids: List[str]):
     return levels, regulares
 
 
+def _series_adap_catalogo() -> List[Dict[str, Any]]:
+    """ADAP 1, 2 e 3 da etapa Educação Especial, tenham ou não aluno marcado."""
+    from app.services.cartao_resposta.answer_sheet_audience import adap_series_catalog
+
+    return adap_series_catalog(_adap_series_by_level())
+
+
 def _obter_series_adap_por_escola(escola_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
     """
-    Séries Suporte N (exibidas como ADAP N) dos níveis que têm subturma com aluno na escola.
-    id = id real da série Suporte N.
+    Séries ADAP 1, 2 e 3 (id real da série Suporte N).
+    Não depende de já existir aluno marcado na escola.
     """
-    from app.services.cartao_resposta.answer_sheet_audience import (
-        adap_series_label,
-        list_cartao_adap_options,
-    )
-
-    permitido, turmas_professor = _escopo_adap_escola(escola_id, municipio_id, user, permissao)
+    permitido, _turmas_professor = _escopo_adap_escola(escola_id, municipio_id, user, permissao)
     if not permitido:
         return []
-    niveis = {
-        int(row['support_level'])
-        for row in list_cartao_adap_options(school_ids=[escola_id], allowed_class_ids=turmas_professor)
-    }
-    series = _adap_series_by_level()
-    return [
-        {"id": str(series[n].id), "nome": adap_series_label(n), "support_level": n}
-        for n in sorted(niveis)
-        if n in series
-    ]
+    return _series_adap_catalogo()
 
 
 def _obter_turmas_adap(escola_id: str, serie_ids: List[str], municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
@@ -9466,9 +9470,10 @@ def obter_opcoes_filtros():
     - serie: Série selecionada (requer escola). Aceita várias: ?serie=a&serie=b ou ?serie=a,b
       (com mais de uma, cada turma traz serie_id e serie_nome).
       No modo regular, séries Suporte N (modelo antigo) e suas turmas não aparecem.
-    - publico: regular (padrão) ou adap. Com adap, séries são as Suporte N (nome "ADAP N")
-      dos níveis com subturma com aluno, e turmas são as subturmas (id = subturma_id) de
-      todas as séries regulares. serie=<id Suporte N> escolhe o nível; vazio = 1, 2 e 3.
+    - publico: regular (padrão) ou adap. Com adap, a resposta traz curso Educação Especial
+      e as séries ADAP 1, 2 e 3 (tenham ou não aluno). Turmas são as subturmas
+      (id = subturma_id) com aluno, de todas as séries regulares. serie=<id Suporte N>
+      escolhe o nível; vazio = 1, 2 e 3.
     
     Exemplos:
     - GET /opcoes-filtros → Retorna apenas estados
@@ -9536,10 +9541,22 @@ def obter_opcoes_filtros():
             if municipio:
                 response["escolas"] = _obter_escolas_por_municipio(municipio, user_dict, permissao)
                 
-                # 4. Se escola fornecido, retornar séries (nível 3)
-                if escola and publico == 'adap':
-                    response["series"] = _obter_series_adap_por_escola(escola, municipio, user_dict, permissao)
-                    response["turmas"] = _obter_turmas_adap(escola, serie_ids, municipio, user_dict, permissao)
+                # 4. ADAP: curso Educação Especial e séries ADAP 1/2/3, com ou sem escola.
+                #    Turmas (só as que têm aluno marcado) exigem escola.
+                if publico == 'adap':
+                    response["curso"] = {
+                        "id": ADAP_EDUCATION_STAGE_ID,
+                        "nome": "Educação Especial",
+                    }
+                    if escola:
+                        response["series"] = _obter_series_adap_por_escola(
+                            escola, municipio, user_dict, permissao
+                        )
+                        response["turmas"] = _obter_turmas_adap(
+                            escola, serie_ids, municipio, user_dict, permissao
+                        )
+                    else:
+                        response["series"] = _series_adap_catalogo()
                 elif escola:
                     response["series"] = _obter_series_por_escola(escola, municipio, user_dict, permissao)
                     

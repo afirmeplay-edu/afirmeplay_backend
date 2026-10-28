@@ -28,6 +28,13 @@ from app.services.evaluation_result_snapshot import (
     merge_participant_student_ids,
     query_evaluation_results_for_stats,
 )
+from app.participation_report.grupos import (
+    AcumuladorGrupos,
+    anexar_grupos_do_censo,
+    grupos_vazios,
+    linhas_por_serie,
+)
+from app.services.special_education import SpecialEducationStatus, is_special_education_many
 from app.utils.uuid_helpers import ensure_uuid_list
 from app.utils.class_label_helpers import format_grade_class_label, normalize_shift
 
@@ -241,8 +248,10 @@ def build_participation_report(
             "avaliados": 0,
             "total_turmas": 0,
             "percentual_participacao": 0.0,
+            "grupos": grupos_vazios(),
         },
         "por_escola": [],
+        "por_serie": [],
         "por_turma": [],
     }
 
@@ -493,8 +502,79 @@ def build_participation_report(
             "percentual_participacao": _percentual(avaliados, matriculados),
         },
         "por_escola": por_escola,
+        "por_serie": [],
         "por_turma": por_turma,
     }
+
+    def _serie_nomes_do_escopo() -> Dict[str, str]:
+        nomes: Dict[str, str] = {}
+        for meta in class_meta.values():
+            if meta.get("serie_id") is None:
+                continue
+            nomes[str(meta["serie_id"])] = meta.get("serie_nome") or ""
+        return nomes
+
+    def _completar_series_vazias() -> None:
+        ja = {str(row.get("serie_id") or "") for row in payload.get("por_serie") or []}
+        extras = []
+        for serie_id, nome in _serie_nomes_do_escopo().items():
+            if not serie_id or serie_id in ja:
+                continue
+            extras.append(
+                {
+                    "serie_id": serie_id,
+                    "serie_nome": nome or serie_id,
+                    "matriculados": 0,
+                    "avaliados": 0,
+                    "percentual_participacao": 0.0,
+                    "grupos": grupos_vazios(),
+                }
+            )
+            ja.add(serie_id)
+        linhas = list(payload.get("por_serie") or []) + extras
+        linhas.sort(key=lambda item: (item.get("serie_nome") or "").upper())
+        payload["por_serie"] = linhas
+
+    def _anexar_grupos_brutos() -> None:
+        """Colunas de grupo sobre a mesma lista que gerou o total, sem filtrar de novo."""
+        statuses = is_special_education_many(students_by_id.values())
+        geral = AcumuladorGrupos()
+        por_escola_g: Dict[str, AcumuladorGrupos] = defaultdict(AcumuladorGrupos)
+        por_serie_g: Dict[str, AcumuladorGrupos] = defaultdict(AcumuladorGrupos)
+        por_turma_g: Dict[str, AcumuladorGrupos] = defaultdict(AcumuladorGrupos)
+        for sid in matriculados_ids:
+            student = students_by_id.get(sid)
+            if not student:
+                continue
+            school_id, class_id, grade_id = _placement_for_student(
+                student, best_result_by_student.get(sid)
+            )
+            if class_id not in class_meta and student.class_id in class_meta:
+                class_id = student.class_id
+                meta = class_meta[class_id]
+                school_id = meta.get("escola_id") or school_id
+                grade_id = meta.get("serie_id") or grade_id
+            status = statuses.get(str(sid), SpecialEducationStatus(False, None, None))
+            avaliado = sid in avaliados_ids
+            geral.add(status, avaliado)
+            if school_id:
+                por_escola_g[str(school_id)].add(status, avaliado)
+            if grade_id is not None:
+                por_serie_g[str(grade_id)].add(status, avaliado)
+            if class_id is not None:
+                por_turma_g[str(class_id)].add(status, avaliado)
+        payload["metricas"]["grupos"] = geral.fechar()
+        for row in payload.get("por_escola") or []:
+            row["grupos"] = por_escola_g.get(
+                str(row.get("escola_id") or ""), AcumuladorGrupos()
+            ).fechar()
+        for row in payload.get("por_turma") or []:
+            row["grupos"] = por_turma_g.get(
+                str(row.get("turma_id") or ""), AcumuladorGrupos()
+            ).fechar()
+        payload["por_serie"] = linhas_por_serie(por_serie_g, _serie_nomes_do_escopo())
+        _completar_series_vazias()
+
     try:
         from app.services.participation_census_shadow import (
             log_censo_calculado,
@@ -519,10 +599,33 @@ def build_participation_report(
             antigo_participantes=avaliados,
         )
         if censo is not None:
+            grupo = len(getattr(censo.geral, "por_disciplina", ()) or ()) > 1
             aplicar_censo_no_resumo(payload, censo)
+            anexar_grupos_do_censo(
+                payload,
+                censo,
+                grupo=grupo,
+                serie_nomes=_serie_nomes_do_escopo(),
+            )
+            _completar_series_vazias()
+        else:
+            _anexar_grupos_brutos()
     except Exception:
         logging.warning(
             "Censo de participação falhou no relatório de participação",
             exc_info=True,
         )
+        if "grupos" not in payload.get("metricas", {}):
+            try:
+                _anexar_grupos_brutos()
+            except Exception:
+                logging.warning(
+                    "Grupos do relatório de participação ficaram vazios",
+                    exc_info=True,
+                )
+                payload["metricas"]["grupos"] = grupos_vazios()
+                for row in payload.get("por_escola") or []:
+                    row.setdefault("grupos", grupos_vazios())
+                for row in payload.get("por_turma") or []:
+                    row.setdefault("grupos", grupos_vazios())
     return payload

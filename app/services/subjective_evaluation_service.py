@@ -1031,6 +1031,9 @@ class SubjectiveEvaluationService:
                 expiration=application_iso,
             ))
 
+        from app.logistics.sync import sync_application_safe
+        sync_application_safe(str(subjective_test.shadow_test_id))
+
     @staticmethod
     def create_subjective_test(data: Dict[str, Any], created_by: Optional[str]) -> SubjectiveTest:
         """

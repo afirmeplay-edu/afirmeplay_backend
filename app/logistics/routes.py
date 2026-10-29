@@ -3,6 +3,9 @@
 Rotas do cronograma de logística de aplicação.
 
 GET    /logistics/opcoes-filtros
+GET    /logistics/opcoes-grade
+GET    /logistics/aplicadores
+GET    /logistics/itens
 GET    /logistics/previa
 GET    /logistics/schedules
 POST   /logistics/schedules
@@ -24,6 +27,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required
 
 from app.decorators.tenant_required import get_current_tenant_context, requires_city_context
+from app.logistics import grade as grade_view
 from app.logistics import services
 from app.logistics.filters import build_filter_options, multi_arg
 from app.permissions import get_current_user_from_token, role_required
@@ -70,6 +74,55 @@ def opcoes_filtros():
         return jsonify(build_filter_options(_city_id(), request.args)), 200
 
     return _handle(run, "/logistics/opcoes-filtros")
+
+
+@bp.route("/opcoes-grade", methods=["GET"])
+@jwt_required()
+@role_required(*_READ_ROLES)
+@requires_city_context
+def opcoes_grade():
+    """Opções da grade achatada. Não altera o contrato de /opcoes-filtros."""
+    user, err = _current_user()
+    if err:
+        return err
+
+    def run():
+        return jsonify(grade_view.grade_filter_options(user)), 200
+
+    return _handle(run, "/logistics/opcoes-grade")
+
+
+@bp.route("/aplicadores", methods=["GET"])
+@jwt_required()
+@role_required(*_MANAGE_ROLES)
+@requires_city_context
+def listar_aplicadores():
+    """Usuários do município que podem ser escolhidos como aplicador no editor."""
+    user, err = _current_user()
+    if err:
+        return err
+
+    def run():
+        services.require_manager(user)
+        return jsonify({"aplicadores": services.list_applicator_users(_city_id())}), 200
+
+    return _handle(run, "GET /logistics/aplicadores")
+
+
+@bp.route("/itens", methods=["GET"])
+@jwt_required()
+@role_required(*_READ_ROLES)
+@requires_city_context
+def listar_itens():
+    """Itens achatados (turma + data), com filtros, busca, paginação e cards."""
+    user, err = _current_user()
+    if err:
+        return err
+
+    def run():
+        return jsonify(grade_view.list_items(user, request.args)), 200
+
+    return _handle(run, "GET /logistics/itens")
 
 
 @bp.route("/previa", methods=["GET"])

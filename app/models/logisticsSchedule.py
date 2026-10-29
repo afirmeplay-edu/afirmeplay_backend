@@ -19,6 +19,10 @@ LOGISTICS_STATUSES = (
     LOGISTICS_STATUS_CANCELLED,
 )
 
+LOGISTICS_ORIGEM_MANUAL = "manual"
+LOGISTICS_ORIGEM_AUTO = "auto"
+LOGISTICS_ORIGINS = (LOGISTICS_ORIGEM_MANUAL, LOGISTICS_ORIGEM_AUTO)
+
 
 class LogisticsSchedule(db.Model):
     __tablename__ = "logistics_schedule"
@@ -74,6 +78,11 @@ class LogisticsScheduleItem(db.Model):
             "students_count >= 0 AND tablets_qty >= 0 AND booklets_qty >= 0",
             name="ck_logistics_item_non_negative",
         ),
+        db.CheckConstraint(
+            "origem IN ('manual', 'auto')",
+            name="ck_logistics_item_origem",
+        ),
+        db.Index("idx_logistics_item_applicator_user_id", "applicator_user_id"),
         {"schema": "tenant"},
     )
 
@@ -101,6 +110,20 @@ class LogisticsScheduleItem(db.Model):
     tablets_qty = db.Column(db.Integer, nullable=False, default=0)
     booklets_qty = db.Column(db.Integer, nullable=False, default=0)
     notes = db.Column(db.Text, nullable=True)
+    applicator_user_id = db.Column(
+        db.String,
+        db.ForeignKey("public.users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    origem = db.Column(
+        db.String(20),
+        nullable=False,
+        default=LOGISTICS_ORIGEM_MANUAL,
+        server_default=LOGISTICS_ORIGEM_MANUAL,
+    )
+    editado_manualmente = db.Column(
+        db.Boolean, nullable=False, default=False, server_default=db.text("false")
+    )
     created_at = db.Column(db.TIMESTAMP, nullable=False, default=datetime.utcnow)
     updated_at = db.Column(
         db.TIMESTAMP, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

@@ -1290,6 +1290,8 @@ def atualizar_avaliacao(test_id):
         class_sync_result = None
         if updated_class_ids_uuids is not None:
             class_sync_result = remove_orphaned_class_tests(test.id, updated_class_ids_uuids)
+            from app.logistics.sync import sync_application_safe
+            sync_application_safe(str(test.id))
 
         db.session.commit()
 
@@ -1882,7 +1884,10 @@ def aplicar_avaliacao_classe(test_id):
         if applied_classes:
             # Atualizar o status da avaliação para "agendada" para permitir que alunos realizem
             test.status = 'agendada'
-            
+
+            from app.logistics.sync import sync_application_safe
+            sync_application_safe(str(test_id), str(user["id"]) if user.get("id") else None)
+
             db.session.commit()
             
             response = {
@@ -2158,6 +2163,8 @@ def remover_aplicacao_avaliacao(test_id, class_id):
             return jsonify({"error": "Test application to class not found"}), 404
 
         db.session.delete(class_test)
+        from app.logistics.sync import sync_application_safe
+        sync_application_safe(str(test_id))
         db.session.commit()
 
         return jsonify({"message": "Test application removed successfully"}), 200
@@ -2222,6 +2229,8 @@ def remover_aplicacoes_avaliacao_multiplas(test_id):
                 errors.append(f"Error removing class {class_id}: {str(e)}")
 
         if removed_classes:
+            from app.logistics.sync import sync_application_safe
+            sync_application_safe(str(test_id))
             db.session.commit()
             
             response = {

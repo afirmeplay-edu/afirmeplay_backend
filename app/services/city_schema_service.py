@@ -1440,18 +1440,81 @@ CREATE TABLE IF NOT EXISTS "{schema}".logistics_schedule_item (
     tablets_qty INTEGER NOT NULL DEFAULT 0,
     booklets_qty INTEGER NOT NULL DEFAULT 0,
     notes TEXT,
+    applicator_user_id VARCHAR REFERENCES public.users(id) ON DELETE SET NULL,
+    origem VARCHAR(20) NOT NULL DEFAULT 'manual',
+    editado_manualmente BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_logistics_item_schedule_class_date UNIQUE (schedule_id, class_id, scheduled_date),
     CONSTRAINT ck_logistics_item_non_negative CHECK (
         students_count >= 0 AND tablets_qty >= 0 AND booklets_qty >= 0
-    )
+    ),
+    CONSTRAINT ck_logistics_item_origem CHECK (origem IN ('manual', 'auto'))
 );
 COMMENT ON TABLE "{schema}".logistics_schedule_item IS 'Turma e data de aplicação dentro de um cronograma de logística.';
 COMMENT ON COLUMN "{schema}".logistics_schedule_item.students_count IS 'Nº de alunos da turma no momento em que o item foi salvo.';
 COMMENT ON COLUMN "{schema}".logistics_schedule_item.scheduled_date IS 'Data de aplicação. NULL só é aceito em rascunho.';
+COMMENT ON COLUMN "{schema}".logistics_schedule_item.applicator_user_id IS 'Usuário aplicador. NULL = sem aplicador.';
+COMMENT ON COLUMN "{schema}".logistics_schedule_item.origem IS 'manual: criado no editor. auto: criado pela sincronização da aplicação.';
+COMMENT ON COLUMN "{schema}".logistics_schedule_item.editado_manualmente IS 'Item automático alterado no editor. A sincronização não sobrescreve nem remove.';
 CREATE INDEX IF NOT EXISTS idx_logistics_item_schedule_id ON "{schema}".logistics_schedule_item (schedule_id);
 CREATE INDEX IF NOT EXISTS idx_logistics_item_school_id ON "{schema}".logistics_schedule_item (school_id);
+CREATE INDEX IF NOT EXISTS idx_logistics_item_applicator_user_id ON "{schema}".logistics_schedule_item (applicator_user_id);
+"""
+
+
+def get_logistics_item_applicator_columns_ddl(schema: str) -> str:
+    """ALTER idempotente: aplicador, origem e edição manual em logistics_schedule_item.
+
+    CREATE TABLE IF NOT EXISTS não altera tabela que já existe. Esta função cobre
+    os schemas city_% já provisionados.
+    """
+    if not schema or not schema.replace("_", "").isalnum() or not schema.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema}")
+    return f"""
+ALTER TABLE "{schema}".logistics_schedule_item
+    ADD COLUMN IF NOT EXISTS applicator_user_id VARCHAR;
+ALTER TABLE "{schema}".logistics_schedule_item
+    ADD COLUMN IF NOT EXISTS origem VARCHAR(20) NOT NULL DEFAULT 'manual';
+ALTER TABLE "{schema}".logistics_schedule_item
+    ADD COLUMN IF NOT EXISTS editado_manualmente BOOLEAN NOT NULL DEFAULT false;
+COMMENT ON COLUMN "{schema}".logistics_schedule_item.applicator_user_id IS 'Usuário aplicador. NULL = sem aplicador.';
+COMMENT ON COLUMN "{schema}".logistics_schedule_item.origem IS 'manual: criado no editor. auto: criado pela sincronização da aplicação.';
+COMMENT ON COLUMN "{schema}".logistics_schedule_item.editado_manualmente IS 'Item automático alterado no editor. A sincronização não sobrescreve nem remove.';
+DO $mig$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
+        WHERE n.nspname = '{schema}'
+          AND t.relname = 'logistics_schedule_item'
+          AND c.contype = 'f'
+          AND a.attname = 'applicator_user_id'
+    ) THEN
+        ALTER TABLE "{schema}".logistics_schedule_item
+            ADD CONSTRAINT fk_logistics_item_applicator_user
+            FOREIGN KEY (applicator_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = '{schema}'
+          AND t.relname = 'logistics_schedule_item'
+          AND c.conname = 'ck_logistics_item_origem'
+    ) THEN
+        ALTER TABLE "{schema}".logistics_schedule_item
+            ADD CONSTRAINT ck_logistics_item_origem
+            CHECK (origem IN ('manual', 'auto'));
+    END IF;
+END $mig$;
+CREATE INDEX IF NOT EXISTS idx_logistics_item_applicator_user_id
+    ON "{schema}".logistics_schedule_item (applicator_user_id);
 """
 
 
@@ -2344,4 +2407,4 @@ CREATE TABLE IF NOT EXISTS "{schema}".student_password_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".student_password_log IS 'Log de senhas de alunos (auditoria)';
-""" + get_subturma_tables_ddl(schema) + get_paired_regular_test_id_ddl(schema) + get_estimated_time_column_ddl(schema) + get_logistics_schedule_tables_ddl(schema) + get_notification_tables_ddl(schema)
+""" + get_subturma_tables_ddl(schema) + get_paired_regular_test_id_ddl(schema) + get_estimated_time_column_ddl(schema) + get_logistics_schedule_tables_ddl(schema) + get_logistics_item_applicator_columns_ddl(schema) + get_notification_tables_ddl(schema)

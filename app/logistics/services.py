@@ -21,6 +21,8 @@ from app.logistics import notifications as logistics_notifications
 from app.models.classTest import ClassTest
 from app.models.grades import Grade
 from app.models.logisticsSchedule import (
+    LOGISTICS_ORIGEM_AUTO,
+    LOGISTICS_ORIGEM_MANUAL,
     LOGISTICS_STATUS_CANCELLED,
     LOGISTICS_STATUS_DRAFT,
     LOGISTICS_STATUS_PUBLISHED,
@@ -32,6 +34,7 @@ from app.models.school import School
 from app.models.student import Student
 from app.models.studentClass import Class
 from app.models.test import Test
+from app.models.user import RoleEnum, User
 from app.permissions import get_user_scope
 from app.permissions.roles import Roles
 from app.utils.class_label_helpers import normalize_shift
@@ -136,6 +139,67 @@ def _parse_qty(value: Any, field: str) -> int:
     return qty
 
 
+def parse_applicator_field(raw: Dict[str, Any]) -> tuple:
+    """(informado, valor). Chave ausente mantém o aplicador atual. null ou '' zera."""
+    if "applicator_user_id" not in raw:
+        return False, None
+    value = raw.get("applicator_user_id")
+    if value is None:
+        return True, None
+    text = str(value).strip()
+    return True, (text or None)
+
+
+def _role_value(user: User) -> str:
+    role = getattr(user, "role", None)
+    if isinstance(role, RoleEnum):
+        return role.value
+    return str(role or "")
+
+
+ALUNO_APPLICATOR_ERROR = "Aluno não pode ser aplicador."
+
+
+def user_may_be_applicator(user: User, city_id: str, already_assigned: bool) -> bool:
+    """Perfis do município, admin e quem já está gravado. Aluno nunca."""
+    if _role_value(user) == RoleEnum.ALUNO.value:
+        return False
+    if already_assigned:
+        return True
+    if _role_value(user) == RoleEnum.ADMIN.value:
+        return True
+    return str(user.city_id or "") == str(city_id)
+
+
+def applicator_rejection_message(user: User, city_id: str, already_assigned: bool) -> Optional[str]:
+    if _role_value(user) == RoleEnum.ALUNO.value:
+        return ALUNO_APPLICATOR_ERROR
+    if user_may_be_applicator(user, city_id, already_assigned):
+        return None
+    return "Aplicador não pertence a este município."
+
+
+def mark_auto_item_edited(item: LogisticsScheduleItem, parsed: Dict[str, Any]) -> None:
+    """Marca o item automático quando o editor muda data, turma, insumos, observação ou aplicador."""
+    if (item.origem or LOGISTICS_ORIGEM_MANUAL) != LOGISTICS_ORIGEM_AUTO:
+        return
+    if item.editado_manualmente:
+        return
+    changed = (
+        str(item.class_id) != str(parsed["class_id"])
+        or item.scheduled_date != parsed["scheduled_date"]
+        or int(item.tablets_qty or 0) != int(parsed["tablets_qty"])
+        or int(item.booklets_qty or 0) != int(parsed["booklets_qty"])
+        or (item.notes or None) != parsed["notes"]
+        or (
+            parsed["applicator_set"]
+            and (item.applicator_user_id or None) != parsed["applicator_user_id"]
+        )
+    )
+    if changed:
+        item.editado_manualmente = True
+
+
 def _suggest_supplies(evaluation_mode: Optional[str], students: int) -> Dict[str, int]:
     mode = (evaluation_mode or "virtual").strip().lower()
     if mode == "virtual":
@@ -206,7 +270,14 @@ def _labels_for_items(items: List[LogisticsScheduleItem]) -> Dict[str, Dict[str,
             Grade.id.in_(list(grade_ids))
         ):
             grades[str(gid)] = name
-    return {"classes": classes, "schools": schools, "grades": grades}
+    applicators = {}
+    applicator_ids = {i.applicator_user_id for i in items if i.applicator_user_id}
+    if applicator_ids:
+        for uid, name in db.session.query(User.id, User.name).filter(
+            User.id.in_([str(uid) for uid in applicator_ids])
+        ):
+            applicators[str(uid)] = name
+    return {"classes": classes, "schools": schools, "grades": grades, "applicators": applicators}
 
 
 def _serialize_item(item: LogisticsScheduleItem, labels: Dict[str, Dict]) -> Dict[str, Any]:
@@ -225,6 +296,12 @@ def _serialize_item(item: LogisticsScheduleItem, labels: Dict[str, Dict]) -> Dic
         "tablets_qty": item.tablets_qty,
         "booklets_qty": item.booklets_qty,
         "notes": item.notes,
+        "applicator_user_id": str(item.applicator_user_id) if item.applicator_user_id else None,
+        "applicator_name": (labels.get("applicators") or {}).get(str(item.applicator_user_id))
+        if item.applicator_user_id
+        else None,
+        "origem": item.origem or LOGISTICS_ORIGEM_MANUAL,
+        "editado_manualmente": bool(item.editado_manualmente),
     }
 
 
@@ -407,6 +484,71 @@ def _pair_recreated_classes(
             )
 
 
+_ROLE_LABELS = {
+    "admin": "Administrador",
+    "tecadm": "Técnico",
+    "diretor": "Diretor",
+    "coordenador": "Coordenador",
+    "professor": "Professor",
+    "aplicador": "Aplicador",
+    "aluno": "Aluno",
+}
+
+
+def _validate_applicators(parsed: List[Dict[str, Any]], existing: Dict[Any, LogisticsScheduleItem], city_id: str) -> None:
+    wanted = {
+        p["applicator_user_id"]
+        for p in parsed
+        if p.get("applicator_set") and p.get("applicator_user_id")
+    }
+    if not wanted:
+        return
+    users = {
+        str(user.id): user
+        for user in User.query.filter(User.id.in_(list(wanted))).all()
+    }
+    missing = sorted(wanted - set(users))
+    if missing:
+        raise LogisticsError("Aplicador não encontrado.")
+    for entry in parsed:
+        applicator_id = entry.get("applicator_user_id")
+        if not entry.get("applicator_set") or not applicator_id:
+            continue
+        user = users[applicator_id]
+        current = existing.get(entry["id"]) if entry.get("id") else None
+        already = bool(
+            current
+            and current.applicator_user_id
+            and str(current.applicator_user_id) == applicator_id
+        )
+        rejection = applicator_rejection_message(user, city_id, already)
+        if rejection:
+            raise LogisticsError(rejection)
+
+
+def list_applicator_users(city_id: str) -> List[Dict[str, str]]:
+    """Usuários do município para o select do editor, exceto aluno. Qualquer outro perfil."""
+    rows = (
+        User.query.filter(
+            User.city_id == str(city_id),
+            User.role != RoleEnum.ALUNO,
+        )
+        .order_by(func.lower(func.coalesce(User.name, "")).asc(), User.id.asc())
+        .all()
+    )
+    result = []
+    for user in rows:
+        role = _role_value(user)
+        result.append(
+            {
+                "id": str(user.id),
+                "nome": user.name or "Sem nome",
+                "perfil": _ROLE_LABELS.get(role, role),
+            }
+        )
+    return result
+
+
 def _apply_items(
     schedule: LogisticsSchedule, items_payload: Any, city_id: str
 ) -> Dict[str, List[Dict[str, Any]]]:
@@ -446,6 +588,7 @@ def _apply_items(
             )
         seen_keys.add(key)
         notes = raw.get("notes")
+        applicator_set, applicator_user_id = parse_applicator_field(raw)
         parsed.append(
             {
                 "id": item_id,
@@ -454,6 +597,8 @@ def _apply_items(
                 "tablets_qty": _parse_qty(raw.get("tablets_qty"), f"items[{idx}].tablets_qty"),
                 "booklets_qty": _parse_qty(raw.get("booklets_qty"), f"items[{idx}].booklets_qty"),
                 "notes": (str(notes).strip() or None) if notes is not None else None,
+                "applicator_set": applicator_set,
+                "applicator_user_id": applicator_user_id,
             }
         )
 
@@ -468,6 +613,7 @@ def _apply_items(
 
     counts = _student_count_by_class(class_info.keys())
     existing = {item.id: item for item in schedule.items}
+    _validate_applicators(parsed, existing, city_id)
     keep_ids = {p["id"] for p in parsed if p["id"] in existing}
 
     removed = [item for item_id, item in existing.items() if item_id not in keep_ids]
@@ -485,11 +631,17 @@ def _apply_items(
         info = class_info[str(p["class_id"])]
         item = existing.get(p["id"]) if p["id"] in keep_ids else None
         if item is None:
-            item = LogisticsScheduleItem(schedule_id=schedule.id)
+            item = LogisticsScheduleItem(
+                schedule_id=schedule.id,
+                origem=LOGISTICS_ORIGEM_MANUAL,
+                editado_manualmente=False,
+            )
             schedule.items.append(item)
             added.append(item)
-        elif item.scheduled_date != p["scheduled_date"]:
-            changed.append((item, item.scheduled_date))
+        else:
+            if item.scheduled_date != p["scheduled_date"]:
+                changed.append((item, item.scheduled_date))
+            mark_auto_item_edited(item, p)
         item.class_id = p["class_id"]
         item.school_id = info["school_id"]
         item.grade_id = info["grade_id"]
@@ -498,6 +650,8 @@ def _apply_items(
         item.tablets_qty = p["tablets_qty"]
         item.booklets_qty = p["booklets_qty"]
         item.notes = p["notes"]
+        if p["applicator_set"]:
+            item.applicator_user_id = p["applicator_user_id"]
     db.session.flush()
 
     if not (removed_items or added or changed):

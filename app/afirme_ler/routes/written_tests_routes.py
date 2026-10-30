@@ -348,6 +348,36 @@ def correct_written_test_answer_sheets(written_test_id):
         return _handle_service_error(error)
 
 
+@bp.route(
+    "/written-tests/<written_test_id>/answer-sheet-corrections/<student_id>/crops/<int:number>",
+    methods=["GET"],
+)
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def download_written_test_crop(written_test_id, student_id, number):
+    """Devolve o PNG do recorte para o professor ver a letra."""
+    from app.afirme_ler.services.written_test_answer_sheet_correction import load_crop_png
+
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        WrittenTestService.get(written_test_id)
+        png = load_crop_png(written_test_id, student_id, number)
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+    return send_file(
+        io.BytesIO(png),
+        mimetype="image/png",
+        as_attachment=False,
+        download_name=f"recorte_q{int(number):02d}.png",
+        max_age=0,
+    )
+
+
 @bp.route("/written-tests/<written_test_id>/answer-sheet-corrections", methods=["GET"])
 @jwt_required()
 @require_feature("afirme_reading")
@@ -386,10 +416,130 @@ def save_written_test_writing_correction(written_test_id):
     if not student_id or not str(student_id).strip():
         return _error_response("studentId é obrigatório.", 400)
     try:
-        return jsonify(save_manual_writing(written_test_id, str(student_id).strip(), data)), 200
+        return jsonify(save_manual_writing(
+            written_test_id, str(student_id).strip(), data, reviewer_id=user.get("id"),
+        )), 200
     except Exception as error:
         db.session.rollback()
         return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/writing-reviews", methods=["POST"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*WRITE_ROLES)
+@requires_city_context
+def review_written_test_writing(written_test_id):
+    """O professor confirma a transcrição e a nota é recalculada em cima desse texto."""
+    from app.afirme_ler.services.written_test_writing_grade import confirm_writing
+
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _error_response("Corpo da requisição inválido.", 400)
+    student_id = data.get("studentId")
+    if not student_id or not str(student_id).strip():
+        return _error_response("studentId é obrigatório.", 400)
+    try:
+        return jsonify(confirm_writing(
+            written_test_id, str(student_id).strip(), data, str(user.get("id") or ""),
+        )), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/writing-release", methods=["POST"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*WRITE_ROLES)
+@requires_city_context
+def release_written_test_writing(written_test_id):
+    """Libera a nota. Questão ainda pendente não é publicada."""
+    from app.afirme_ler.services.written_test_writing_grade import release_writing
+
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _error_response("Corpo da requisição inválido.", 400)
+    student_id = data.get("studentId")
+    if not student_id or not str(student_id).strip():
+        return _error_response("studentId é obrigatório.", 400)
+    try:
+        return jsonify(release_writing(
+            written_test_id, str(student_id).strip(), str(user.get("id") or ""),
+        )), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/ica-dashboard", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def written_test_ica_dashboard(written_test_id):
+    """Participação, IAD e o recorte município, escola, série, turma ou aluno."""
+    from app.afirme_ler.services.written_test_ica_service import ica_dashboard
+
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        return jsonify(ica_dashboard(written_test_id, request.args.to_dict())), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/skill-map", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def written_test_skill_map(written_test_id):
+    """Aproveitamento por habilidade no mesmo recorte do painel."""
+    from app.afirme_ler.services.written_test_ica_service import skill_map
+
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        return jsonify(skill_map(written_test_id, request.args.to_dict())), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/results.csv", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*AFIRME_LER_ROLES)
+@requires_city_context
+def written_test_ica_csv(written_test_id):
+    """CSV dos alunos finalizados no recorte atual."""
+    from app.afirme_ler.services.written_test_ica_service import ica_csv
+
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        content, filename = ica_csv(written_test_id, request.args.to_dict())
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+    return send_file(
+        io.BytesIO(content),
+        mimetype="text/csv; charset=utf-8",
+        as_attachment=True,
+        download_name=filename,
+        max_age=0,
+    )
 
 
 @bp.route("/written-tests/<written_test_id>/publish", methods=["POST"])

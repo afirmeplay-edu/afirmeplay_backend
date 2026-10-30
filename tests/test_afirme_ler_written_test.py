@@ -333,6 +333,25 @@ def test_total_score_and_counts_by_type(flask_app):
 # Publicação
 # ---------------------------------------------------------------------------
 
+def test_publish_requires_image_description(flask_app):
+    written_test = _create(questions=_items(PDF_ORDER))
+    question = db.session.get(Question, "dict-1")
+    question.writing_stimulus = "image"
+    question.correct_answer = None
+    question.writing_reference = None
+    db.session.commit()
+
+    with pytest.raises(ValueError, match="sem descrição"):
+        WrittenTestService.publish(PROFESSOR, written_test.id)
+    db.session.rollback()
+
+    question = db.session.get(Question, "dict-1")
+    question.writing_reference = "cinto de roupa"
+    db.session.commit()
+    published = WrittenTestService.publish(PROFESSOR, written_test.id)
+    assert published.status == "publicada"
+
+
 def test_publish_requires_the_written_pattern(flask_app):
     written_test = _create(questions=_items(MC_IDS[:18]))
     with pytest.raises(
@@ -855,6 +874,10 @@ def test_pdf_data_order_numbers_and_letters(flask_app):
 
 
 def test_pdf_data_has_no_answer_key(flask_app):
+    question = db.session.get(Question, "dict-2")
+    question.writing_stimulus = "image"
+    question.writing_reference = "cinto de roupa secreto"
+    db.session.commit()
     data = pdf_svc.build_pdf_data(_published_for_pdf())
     dictations = data["questions"][16:18]
     production = data["questions"][18]
@@ -871,7 +894,7 @@ def test_pdf_data_has_no_answer_key(flask_app):
     assert all(set(q) == expected_keys for q in data["questions"])
 
     dumped = json.dumps(data, ensure_ascii=False, default=str)
-    for forbidden in ("sapato", "borboleta", "isCorrect", "correct", "solution", "SOLUCAO-SECRETA", "value"):
+    for forbidden in ("sapato", "borboleta", "cinto de roupa secreto", "isCorrect", "correct", "solution", "SOLUCAO-SECRETA", "value"):
         assert forbidden not in dumped
 
 
@@ -1400,8 +1423,30 @@ def test_correction_saves_letters_and_three_images(flask_app):
     assert saved["missingPages"] == []
     assert [item["number"] for item in saved["crops"]] == [17, 18, 19]
     assert all(item["saved"] for item in saved["crops"])
+    assert saved["crops"][0]["imageUrl"] == (
+        f"/afirme-reading/written-tests/{written_test.id}"
+        "/answer-sheet-corrections/st-caio/crops/17"
+    )
     assert len(uploaded) == 3
     assert all(body.startswith(b"\x89PNG") for body in uploaded.values())
+
+    class ReadingMinio(FakeMinio):
+        def download_file(self, bucket, name):
+            return uploaded[(bucket, name)]
+
+    with patch("app.services.storage.minio_service.MinIOService", ReadingMinio):
+        response = _call_view(
+            "download_written_test_crop",
+            PROFESSOR,
+            written_test.id,
+            "st-caio",
+            17,
+            method="GET",
+        )
+    assert response.status_code == 200
+    assert response.mimetype == "image/png"
+    response.direct_passthrough = False
+    assert response.get_data().startswith(b"\x89PNG")
 
     stored = ReadingWrittenTestCorrection.query.filter_by(student_id="st-caio").one()
     assert stored.answers["q1"]["letter"] == "A"
@@ -1558,8 +1603,22 @@ class _FakeChoice:
         self.message = type("Message", (), {"content": content})()
 
 
+def _reading_payload(word_18):
+    return {
+        "questoes": [
+            {"numero": 17, "transcricao_literal": "sapato", "situacao": "legivel",
+             "trechos_duvidosos": []},
+            {"numero": 18, "transcricao_literal": word_18, "situacao": "legivel",
+             "trechos_duvidosos": []},
+            {"numero": 19, "transcricao_literal": "MAMAE AMANHA", "situacao": "legivel",
+             "trechos_duvidosos": []},
+        ]
+    }
+
+
 class _FakeOpenAI:
     calls = []
+    second_word = "borb"
 
     def __init__(self, api_key=None, timeout=None):
         self.api_key = api_key
@@ -1569,13 +1628,26 @@ class _FakeOpenAI:
             @staticmethod
             def create(**kwargs):
                 _FakeOpenAI.calls.append(kwargs)
-                return type("Response", (), {"choices": [_FakeChoice(json.dumps(_ai_payload()))]})()
+                system = kwargs["messages"][0]["content"]
+                if "TRANSCRICAO_LITERAL" in system:
+                    word = _FakeOpenAI.second_word if kwargs.get("model") != "gpt-4o" else "borb"
+                    content = json.dumps(_reading_payload(word))
+                else:
+                    content = json.dumps(_ai_payload())
+                return type("Response", (), {"choices": [_FakeChoice(content)]})()
+
+
+def _message_text(call):
+    parts = call["messages"][1]["content"]
+    return "\n".join(part.get("text", "") for part in parts if part.get("type") == "text")
 
 
 def test_objective_score_uses_the_answer_key_and_ai_grades_only_the_writing(flask_app, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+    monkeypatch.setenv("OPENAI_MODEL_RELEITURA", "gpt-4o-mini")
     _FakeOpenAI.calls = []
+    _FakeOpenAI.second_word = "borb"
 
     from app.afirme_ler.services import written_test_answer_sheet_correction as reading
     from app.afirme_ler.services.written_test_writing_grade import grade_scanned_writing
@@ -1623,17 +1695,28 @@ def test_objective_score_uses_the_answer_key_and_ai_grades_only_the_writing(flas
     with patch("openai.OpenAI", _FakeOpenAI):
         writing = grade_scanned_writing(written_test.id, "st-caio", [page])
 
-    assert len(_FakeOpenAI.calls) == 1
-    sent = _FakeOpenAI.calls[0]
-    assert sent["model"] == "gpt-4o"
-    assert sent["messages"][0]["role"] == "system"
-    assert "Questões 17 e 18" in sent["messages"][0]["content"]
-    user_parts = sent["messages"][1]["content"]
-    user_text = user_parts[0]["text"]
-    assert "sapato" in user_text and "borboleta" in user_text
-    assert "mc-img" not in user_text
-    assert sum(1 for part in user_parts if part["type"] == "image_url") == 3
+    assert len(_FakeOpenAI.calls) == 3
+    assert [call["model"] for call in _FakeOpenAI.calls] == ["gpt-4o", "gpt-4o-mini", "gpt-4o"]
+    for call in _FakeOpenAI.calls[:2]:
+        assert "TRANSCRICAO_LITERAL" in call["messages"][0]["content"]
+        assert len(call["messages"]) == 2
+        user_text = _message_text(call)
+        assert "sapato" not in user_text and "borboleta" not in user_text
+        assert "st-caio" not in user_text
+        assert sum(1 for part in call["messages"][1]["content"] if part["type"] == "image_url") == 3
+    scoring = _FakeOpenAI.calls[2]
+    assert "AVALIACAO_PEDAGOGICA" in scoring["messages"][0]["content"]
+    assert "Questões 17 e 18" in scoring["messages"][0]["content"]
+    score_text = _message_text(scoring)
+    assert "sapato" in score_text and "borboleta" in score_text
+    assert "st-caio" not in score_text
+    assert sum(1 for part in scoring["messages"][1]["content"] if part["type"] == "image_url") == 1
     assert writing["source"] == "ia"
+    assert writing["models"]["leitura"] == "gpt-4o"
+    assert writing["models"]["releitura"] == "gpt-4o-mini"
+    assert writing["words"][0]["transcription"] == "sapato"
+    assert len(writing["words"][0]["readings"]) == 2
+    assert _FakeOpenAI.calls[0]["messages"] == _FakeOpenAI.calls[1]["messages"]
     assert writing["status"] == "PENDENTE_REVISAO"
     assert writing["wordPoints"] == 3
     assert writing["textPoints"] == 11
@@ -1645,6 +1728,184 @@ def test_objective_score_uses_the_answer_key_and_ai_grades_only_the_writing(flas
     stored = ReadingWrittenTestCorrection.query.filter_by(student_id="st-caio").one()
     assert stored.objective["points"] == 14
     assert stored.writing["source"] == "ia"
+
+
+def test_readings_agree_on_case_and_diverge_on_spelling_or_lines(flask_app):
+    from app.afirme_ler.services.written_test_writing_grade import readings_agree
+
+    legible = {"situation": "legivel", "uncertain": []}
+    assert readings_agree(
+        {**legible, "transcription": "BOBOLETA"},
+        {**legible, "transcription": "boboleta"},
+        "word",
+    )
+    assert not readings_agree(
+        {**legible, "transcription": "BOBOLETA"},
+        {**legible, "transcription": "BORBOLETA"},
+        "word",
+    )
+    assert not readings_agree(
+        {**legible, "transcription": "MAMAE\nAMANHA"},
+        {**legible, "transcription": "MAMAE AMANHA"},
+        "text",
+    )
+    assert readings_agree(
+        {"situation": "em_branco", "uncertain": [], "transcription": ""},
+        {"situation": "em_branco", "uncertain": [], "transcription": ""},
+        "word",
+    )
+    assert not readings_agree(
+        {**legible, "transcription": "sapato", "uncertain": ["p"]},
+        {**legible, "transcription": "sapato"},
+        "word",
+    )
+
+
+def test_divergent_reading_stays_pending_and_skips_that_score(flask_app, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+    monkeypatch.setenv("OPENAI_MODEL_RELEITURA", "gpt-4o-mini")
+    _FakeOpenAI.calls = []
+    _FakeOpenAI.second_word = "casa"
+
+    from app.afirme_ler.services.written_test_writing_grade import grade_scanned_writing
+
+    written_test = _published_for_pdf()
+    links = (
+        ReadingWrittenTestQuestion.query
+        .filter_by(written_test_id=written_test.id)
+        .all()
+    )
+    png = b"\x89PNG\r\n\x1a\nfake"
+    crops = {
+        link.question_id: {"number": link.order, "type": "writing", "png": png}
+        for link in links
+        if link.order >= 17
+    }
+    with patch("openai.OpenAI", _FakeOpenAI):
+        writing = grade_scanned_writing(written_test.id, "st-caio", [{"crops": crops}])
+
+    assert len(_FakeOpenAI.calls) == 3
+    score_text = _message_text(_FakeOpenAI.calls[2])
+    assert "sapato" in score_text
+    assert "Questão 18" not in score_text
+    assert "borboleta" not in score_text
+    pending = writing["words"][1]
+    assert pending["points"] is None
+    assert pending["needsReview"] is True
+    assert pending["status"] == "PENDENTE"
+    assert pending["transcription"] == "borb"
+    assert pending["secondTranscription"] == "casa"
+    assert writing["words"][0]["points"] == 2
+    assert writing["wordPoints"] is None
+    assert writing["textPoints"] == 11
+    assert writing["status"] == "PENDENTE_REVISAO"
+    assert writing["published"] is False
+
+
+def _writing_crops(written_test):
+    links = ReadingWrittenTestQuestion.query.filter_by(written_test_id=written_test.id).all()
+    png = b"\x89PNG\r\n\x1a\nfake"
+    return {
+        link.question_id: {"number": link.order, "type": "writing", "png": png}
+        for link in links
+        if link.order >= 17
+    }
+
+
+def test_image_reference_is_used_only_when_scoring(flask_app, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+    monkeypatch.setenv("OPENAI_MODEL_RELEITURA", "gpt-4o-mini")
+    _FakeOpenAI.calls = []
+    _FakeOpenAI.second_word = "borb"
+    question = db.session.get(Question, "dict-1")
+    question.writing_stimulus = "image"
+    question.writing_reference = "cinto de roupa"
+    question.correct_answer = None
+    db.session.commit()
+
+    from app.afirme_ler.services.written_test_writing_grade import grade_scanned_writing
+
+    written_test = _published_for_pdf()
+    with patch("openai.OpenAI", _FakeOpenAI):
+        writing = grade_scanned_writing(
+            written_test.id, "st-caio", [{"crops": _writing_crops(written_test)}],
+        )
+
+    for call in _FakeOpenAI.calls[:2]:
+        assert "cinto de roupa" not in _message_text(call)
+    score_text = _message_text(_FakeOpenAI.calls[2])
+    assert "descricao_da_imagem: cinto de roupa" in score_text
+    assert "tipo_estimulo: IMAGEM" in score_text
+    assert writing["words"][0]["stimulus"] == "IMAGEM"
+    assert writing["words"][0]["expected"] == "cinto de roupa"
+    assert writing["published"] is False
+    assert writing["audit"][0]["action"] == "leitura"
+    assert writing["promptVersions"]["leitura"] == "transcricao-escrita-1"
+
+
+def test_teacher_confirms_transcription_before_release(flask_app, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+    monkeypatch.setenv("OPENAI_MODEL_RELEITURA", "gpt-4o-mini")
+    _FakeOpenAI.calls = []
+    _FakeOpenAI.second_word = "casa"
+
+    from app.afirme_ler.services.written_test_writing_grade import grade_scanned_writing
+
+    written_test = _published_for_pdf()
+    with patch("openai.OpenAI", _FakeOpenAI):
+        grade_scanned_writing(written_test.id, "st-caio", [{"crops": _writing_crops(written_test)}])
+
+    blocked, status = _call_view(
+        "release_written_test_writing",
+        PROFESSOR,
+        written_test.id,
+        method="POST",
+        json={"studentId": "st-caio"},
+    )
+    assert status == 400
+    assert "pendente" in blocked.get_json()["error"]
+
+    _FakeOpenAI.calls = []
+    with patch("openai.OpenAI", _FakeOpenAI):
+        response, status = _call_view(
+            "review_written_test_writing",
+            PROFESSOR,
+            written_test.id,
+            method="POST",
+            json={
+                "studentId": "st-caio",
+                "words": [{"number": 18, "transcription": "borb"}],
+            },
+        )
+    assert status == 200
+    body = response.get_json()["writing"]
+    assert body["published"] is False
+    assert body["words"][1]["transcription"] == "borb"
+    assert body["words"][1]["points"] == 1
+    score_text = _message_text(_FakeOpenAI.calls[0])
+    assert "transcricao_conferida: borb" in score_text
+    assert "palavra_esperada: borboleta" in score_text
+    assert "Questão 17" not in score_text
+    assert "st-caio" not in score_text
+    assert body["audit"][-1]["action"] == "revisao"
+    assert body["audit"][-1]["actorId"] == PROFESSOR["id"]
+
+    released, status = _call_view(
+        "release_written_test_writing",
+        PROFESSOR,
+        written_test.id,
+        method="POST",
+        json={"studentId": "st-caio"},
+    )
+    assert status == 200
+    writing = released.get_json()["writing"]
+    assert writing["published"] is True
+    assert writing["status"] == "CONCLUIDA"
+    assert writing["review"]["decision"] == "liberada"
+    assert writing["review"]["reviewerId"] == PROFESSOR["id"]
 
 
 def test_writing_without_a_card_is_manual_and_skips_openai(flask_app, monkeypatch):
@@ -1703,3 +1964,207 @@ def test_writing_without_a_card_is_manual_and_skips_openai(flask_app, monkeypatc
     assert listed[0]["studentId"] == "st-caio"
     assert listed[0]["writing"]["source"] == "manual"
     assert listed[0]["answers"] == []
+
+
+# ---------------------------------------------------------------------------
+# Painel ICA
+# ---------------------------------------------------------------------------
+
+def _objective(points):
+    items = []
+    for number in range(1, 17):
+        value = points.get(number, 0)
+        items.append({"number": number, "points": value, "status": "CORRIGIDA"})
+    return {"items": items, "points": sum(points.get(number, 0) for number in range(1, 17)), "maxPoints": 16}
+
+
+def _writing(word_a, word_b, text, published=True):
+    return {
+        "published": published,
+        "wordPoints": word_a + word_b,
+        "textPoints": text,
+        "words": [
+            {"number": 17, "points": word_a, "status": "CORRIGIDA"},
+            {"number": 18, "points": word_b, "status": "CORRIGIDA"},
+        ],
+        "production": {"number": 19, "points": text, "status": "CORRIGIDA"},
+    }
+
+
+def _ica_test():
+    written_test = _create(questions=_items(_pattern_ids()))
+    full = {number: 1 for number in range(1, 17)}
+    caio = {number: 1 for number in range(2, 12)}
+    db.session.add_all([
+        ReadingWrittenTestCorrection(
+            written_test_id=written_test.id, student_id="st-ana",
+            objective=_objective(full), writing=_writing(2, 2, 14),
+        ),
+        ReadingWrittenTestCorrection(
+            written_test_id=written_test.id, student_id="st-caio",
+            objective=_objective(caio), writing=_writing(0, 0, 0),
+        ),
+        ReadingWrittenTestCorrection(
+            written_test_id=written_test.id, student_id="st-bia",
+            objective=_objective(full), writing=_writing(2, 2, 14, published=False),
+        ),
+        ReadingWrittenTestCorrection(
+            written_test_id=written_test.id, student_id="st-davi",
+            objective=_objective(full), writing=_writing(2, 2, 14),
+        ),
+    ])
+    db.session.commit()
+    return written_test
+
+
+def test_ica_dashboard_scopes_and_one_decimal(flask_app):
+    from app.afirme_ler.services.written_test_ica_service import ica_dashboard
+
+    written_test = _ica_test()
+    municipal = ica_dashboard(written_test.id, {})
+    assert municipal["scope"]["level"] == "municipio"
+    assert municipal["participation"] == {
+        "expected": 4, "evaluated_diagnostic": 3, "percentage": 75.0,
+    }
+    assert municipal["diagnostic"] == {"valid": 3, "apt": 2, "iad_percentage": 66.7}
+    assert municipal["proficiency_inep"] == {
+        "imported_valid": 0, "ica_percentage": None, "status": "SEM_DADOS",
+    }
+    assert [row["name"] for row in municipal["rows"]] == ["Escola A", "Escola B"]
+    school_a = municipal["rows"][0]
+    assert school_a["rowLevel"] == "escola"
+    assert school_a["expected"] == 3
+    assert school_a["evaluated_diagnostic"] == 2
+    assert school_a["percentage"] == 66.7
+    assert school_a["apt"] == 1
+    assert school_a["iad_percentage"] == 50.0
+    assert school_a["score"] == 64.7
+
+    school = ica_dashboard(written_test.id, {"escolaId": SCHOOL_A})
+    assert school["scope"]["level"] == "escola"
+    assert [row["rowLevel"] for row in school["rows"]] == ["serie"]
+    assert school["rows"][0]["name"] == "1º ano"
+    assert school["rows"][0]["serieId"] == str(GRADE_1)
+
+    grade = ica_dashboard(written_test.id, {"serieId": str(GRADE_1)})
+    assert grade["scope"]["level"] == "serie"
+    assert [row["name"] for row in grade["rows"]] == ["1º A", "1º B"]
+    assert grade["rows"][0]["rowLevel"] == "turma"
+
+    classroom = ica_dashboard(written_test.id, {"turmaId": str(CLASS_A1)})
+    assert classroom["scope"]["level"] == "turma"
+    assert [row["student_name"] for row in classroom["rows"]] == ["Ana", "Caio"]
+    ana = classroom["rows"][0]
+    assert ana["reading"] == 16
+    assert ana["words"] == 4
+    assert ana["text"] == 14
+    assert ana["score"] == 100.0
+    assert ana["apt"] is True
+    caio = classroom["rows"][1]
+    assert caio["reading"] == 10
+    assert caio["words"] == 0
+    assert caio["text"] == 0
+    assert caio["score"] == 29.4
+    assert caio["apt"] is False
+
+    pending = ica_dashboard(written_test.id, {"estudanteId": "st-bia"})
+    assert pending["participation"]["expected"] == 1
+    assert pending["participation"]["evaluated_diagnostic"] == 0
+    assert pending["participation"]["percentage"] == 0.0
+    assert pending["diagnostic"]["iad_percentage"] is None
+    assert pending["student"]["finalized"] is False
+    assert pending["student"]["reading"] is None
+    assert pending["student"]["apt"] is False
+    assert pending["rows"][0]["score"] is None
+
+    detail = ica_dashboard(written_test.id, {"estudanteId": "st-ana"})
+    assert detail["scope"]["level"] == "aluno"
+    assert detail["student"]["finalized"] is True
+    assert len(detail["student"]["items"]) == 19
+    assert detail["student"]["items"][0]["code"] == "Q1"
+    assert detail["student"]["items"][0]["points"] == 1
+    assert detail["student"]["items"][18]["code"] == "Q19"
+    assert detail["student"]["items"][18]["points"] == 14
+
+    with pytest.raises(ValueError, match="não faz parte"):
+        ica_dashboard(written_test.id, {"escolaId": "escola-fora"})
+
+
+def test_ica_skill_map_and_csv_follow_the_scope(flask_app):
+    from app.models.skill import Skill, skill_grade
+    from app.afirme_ler.services.written_test_ica_service import ica_csv, skill_map
+
+    db.metadata.create_all(db.engine, tables=[Skill.__table__, skill_grade])
+    reading_skill = uuid.UUID("f1f1f1f1-0000-4000-8000-0000000000f1")
+    production_skill = uuid.UUID("f2f2f2f2-0000-4000-8000-0000000000f2")
+    db.session.add_all([
+        Skill(id=reading_skill, code="LEIT01", description="Leitura de palavra", subject_id=SUBJECT_ID),
+        Skill(id=production_skill, code="PRO01", description="Produção textual", subject_id=SUBJECT_ID),
+    ])
+    db.session.get(Question, "mc-01").skill = str(reading_skill)
+    db.session.get(Question, "prod-1").skill = str(production_skill)
+    db.session.commit()
+
+    written_test = _ica_test()
+    payload = skill_map(written_test.id, {})
+    by_code = {item["skill_code"]: item for item in payload["skills"]}
+    assert payload["max_points"] == 34
+    assert payload["valid_attempts"] == 3
+    assert by_code["LEIT01"]["items"] == ["Q1"]
+    assert by_code["LEIT01"]["max_points_student"] == 1
+    assert by_code["LEIT01"]["relative_weight_percentage"] == 2.9
+    assert by_code["LEIT01"]["performance_percentage"] == 66.7
+    assert by_code["PRO01"]["items"] == ["Q19"]
+    assert by_code["PRO01"]["max_points_student"] == 14
+    assert by_code["PRO01"]["relative_weight_percentage"] == 41.2
+    assert by_code["PRO01"]["performance_percentage"] == 66.7
+    assert "dict-1" not in str(payload["skills"])
+
+    one = skill_map(written_test.id, {"estudanteId": "st-caio"})
+    caio_skills = {item["skill_code"]: item for item in one["skills"]}
+    assert one["valid_attempts"] == 1
+    assert caio_skills["LEIT01"]["performance_percentage"] == 0.0
+    assert caio_skills["PRO01"]["performance_percentage"] == 0.0
+
+    empty = skill_map(written_test.id, {"estudanteId": "st-bia"})
+    assert empty["valid_attempts"] == 0
+    assert empty["skills"][0]["performance_percentage"] is None
+
+    content, filename = ica_csv(written_test.id, {"escolaId": SCHOOL_B})
+    assert filename == "resultados_ica.csv"
+    lines = content.decode("utf-8").strip().split("\n")
+    assert lines[0] == "aluno_id;aluno;turma;leitura;palavras;texto;total;nota_100;apto_diagnostico"
+    assert lines[1] == "st-davi;Davi;1º B;16;4;14;34;100.0;SIM"
+    assert len(lines) == 2
+
+
+def test_ica_routes_return_dashboard_and_csv(flask_app):
+    written_test = _ica_test()
+    response, status = _call_view(
+        "written_test_ica_dashboard", PROFESSOR, written_test.id,
+        path=f"/afirme-reading/written-tests/{written_test.id}/ica-dashboard?turmaId={CLASS_A1}",
+    )
+    assert status == 200
+    body = response.get_json()
+    assert body["scope"]["level"] == "turma"
+    assert body["participation"]["evaluated_diagnostic"] == 2
+
+    response, status = _call_view(
+        "written_test_ica_dashboard", PROFESSOR, written_test.id,
+        path=f"/afirme-reading/written-tests/{written_test.id}/ica-dashboard?escolaId=fora",
+    )
+    assert status == 400
+    assert response.get_json()["error"] == "A escola não faz parte desta avaliação."
+
+    response = _call_view(
+        "written_test_ica_csv", PROFESSOR, written_test.id,
+        path=f"/afirme-reading/written-tests/{written_test.id}/results.csv",
+    )
+    assert response.status_code == 200
+    assert response.mimetype == "text/csv"
+    response.direct_passthrough = False
+    text = response.get_data(as_text=True)
+    assert text.split("\n")[0].startswith("aluno_id;aluno;turma;")
+    assert "st-bia" not in text
+    assert "st-ana" in text
+    assert "29.4" in text

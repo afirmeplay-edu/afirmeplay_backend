@@ -5,6 +5,11 @@ Nota da avaliação escrita.
 As 16 objetivas saem do gabarito, a partir da letra lida no cartão. O ditado e o
 bilhete vão para a OpenAI somente quando o cartão trouxe a imagem. Sem cartão,
 o professor lança essas três questões na mão.
+
+A escrita passa por duas leituras independentes, na mesma conta da OpenAI e com
+modelos diferentes (OPENAI_MODEL e OPENAI_MODEL_RELEITURA). Nenhuma das duas
+recebe a palavra esperada. Se elas concordam, uma terceira chamada avalia a
+transcrição conferida. Divergência fica para o professor, sem nota inventada.
 """
 from __future__ import annotations
 
@@ -13,6 +18,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,9 +32,13 @@ from app.models.question import Question
 
 logger = logging.getLogger(__name__)
 
-PROMPT_PATH = (
-    Path(__file__).resolve().parents[1] / "prompts" / "correcao_escrita_ditado_bilhete.txt"
-)
+_PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
+PROMPT_PATH = _PROMPTS / "correcao_escrita_ditado_bilhete.txt"
+READING_PROMPT_PATH = _PROMPTS / "transcricao_escrita.txt"
+READING_TASK = "TAREFA: TRANSCRICAO_LITERAL"
+EVALUATION_TASK = "TAREFA: AVALIACAO_PEDAGOGICA"
+READING_PROMPT_VERSION = "transcricao-escrita-1"
+EVALUATION_PROMPT_VERSION = "avaliacao-escrita-1"
 WORD_NUMBERS = (17, 18)
 TEXT_NUMBER = 19
 MC_MAX = 16
@@ -59,8 +69,26 @@ def _prompt_text() -> str:
     return PROMPT_PATH.read_text(encoding="utf-8")
 
 
+def _reading_prompt() -> str:
+    return f"{READING_TASK}\n\n{READING_PROMPT_PATH.read_text(encoding='utf-8')}"
+
+
+def _evaluation_prompt() -> str:
+    return f"{EVALUATION_TASK}\n\n{_prompt_text()}"
+
+
 def _model_name() -> str:
     return os.getenv("OPENAI_MODEL") or "gpt-4o"
+
+
+def _reread_model() -> str:
+    configured = os.getenv("OPENAI_MODEL_RELEITURA") or "gpt-4o-mini"
+    if configured == _model_name():
+        logger.warning(
+            "OPENAI_MODEL e OPENAI_MODEL_RELEITURA são o mesmo modelo (%s).",
+            configured,
+        )
+    return configured
 
 
 def _links(written_test_id: str) -> List[Dict[str, Any]]:
@@ -173,6 +201,23 @@ def public_objective(stored: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any
     }
 
 
+def _stimulus(question: Any) -> str:
+    if getattr(question, "question_type", None) != "dictation":
+        return "word"
+    value = getattr(question, "writing_stimulus", None) or "word"
+    return value if value in ("word", "image") else "word"
+
+
+def _stimulus_label(question: Any) -> str:
+    return "IMAGEM" if _stimulus(question) == "image" else "DITADO"
+
+
+def _reference(question: Any) -> str:
+    if _stimulus(question) == "image":
+        return _text(getattr(question, "writing_reference", None))
+    return _text(getattr(question, "correct_answer", None))
+
+
 def _writing_question(entry: Dict[str, Any]) -> Optional[str]:
     question = entry["question"]
     if entry["number"] in WORD_NUMBERS and question.question_type == "dictation":
@@ -248,8 +293,8 @@ def _normalize_word(raw: Dict[str, Any], entry: Dict[str, Any]) -> Dict[str, Any
     return {
         "number": entry["number"],
         "questionId": str(question.id),
-        "stimulus": "DITADO",
-        "expected": _text(question.correct_answer),
+        "stimulus": _stimulus_label(question),
+        "expected": _reference(question),
         "transcription": _text(raw.get("transcricao_original", raw.get("transcription"))),
         "points": points,
         "classification": classification,
@@ -324,8 +369,22 @@ def _totals(words: List[Dict[str, Any]], production: Optional[Dict[str, Any]]) -
     }
 
 
+def _public_readings(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    readings = []
+    for reading in item.get("readings") or []:
+        if not isinstance(reading, dict):
+            continue
+        readings.append({
+            "model": reading.get("model"),
+            "transcription": reading.get("transcription") or "",
+            "situation": reading.get("situation"),
+            "uncertain": list(reading.get("uncertain") or []),
+        })
+    return readings
+
+
 def _public_word(item: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    payload = {
         "number": item.get("number"),
         "questionId": item.get("questionId"),
         "stimulus": item.get("stimulus"),
@@ -338,12 +397,17 @@ def _public_word(item: Dict[str, Any]) -> Dict[str, Any]:
         "needsReview": bool(item.get("needsReview")),
         "status": item.get("status"),
     }
+    readings = _public_readings(item)
+    if readings:
+        payload["readings"] = readings
+        payload["secondTranscription"] = item.get("secondTranscription") or ""
+    return payload
 
 
 def _public_production(item: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not item:
         return None
-    return {
+    payload = {
         "number": item.get("number"),
         "questionId": item.get("questionId"),
         "genre": item.get("genre") or "BILHETE",
@@ -355,12 +419,17 @@ def _public_production(item: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any
         "needsReview": bool(item.get("needsReview")),
         "status": item.get("status"),
     }
+    readings = _public_readings(item)
+    if readings:
+        payload["readings"] = readings
+        payload["secondTranscription"] = item.get("secondTranscription") or ""
+    return payload
 
 
 def public_writing(stored: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not stored or not stored.get("source"):
         return None
-    return {
+    payload = {
         "source": stored.get("source"),
         "status": stored.get("status"),
         "model": stored.get("model"),
@@ -371,6 +440,21 @@ def public_writing(stored: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]
         "textPoints": stored.get("textPoints"),
         "feedback": stored.get("feedback") or {},
     }
+    if stored.get("models"):
+        payload["models"] = stored["models"]
+    if "published" in stored:
+        payload["published"] = bool(stored.get("published"))
+    elif stored.get("source") == "manual":
+        payload["published"] = True
+    else:
+        payload["published"] = False
+    if stored.get("review"):
+        payload["review"] = stored["review"]
+    if stored.get("audit"):
+        payload["audit"] = stored["audit"]
+    if stored.get("promptVersions"):
+        payload["promptVersions"] = stored["promptVersions"]
+    return payload
 
 
 def _parse_model_json(content: str) -> Dict[str, Any]:
@@ -441,36 +525,173 @@ def _apply_model_result(
     }
 
 
-def _user_content(
-    written_test_id: str,
-    student_id: str,
-    series: str,
-    sent: Dict[int, Dict[str, Any]],
-    images: Dict[int, bytes],
-) -> List[Dict[str, Any]]:
-    lines = [
-        f"avaliacao_id: {written_test_id}",
-        f"estudante_id: {student_id}",
-        f"serie: {series or 'não informada'}",
-        "Corrija somente as questões que têm imagem anexada.",
-        "Questão sem imagem nesta chamada não recebe nota.",
-    ]
-    for number in (*WORD_NUMBERS, TEXT_NUMBER):
-        entry = sent.get(number)
-        if entry is None:
+def _fold_word(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def _fold_text(text: str) -> str:
+    lines = []
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        folded = " ".join(line.casefold().split())
+        if folded:
+            lines.append(folded)
+    return "\n".join(lines)
+
+
+def _situation(value: Any) -> str:
+    text = _text(value).lower().replace("í", "i").replace("é", "e").replace(" ", "_")
+    if text in ("legivel", "duvidosa", "ilegivel", "em_branco"):
+        return text
+    return "duvidosa"
+
+
+def _parse_reading_items(payload: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    raw_items = payload.get("questoes") or payload.get("items") or []
+    if not isinstance(raw_items, list):
+        raw_items = []
+    found: Dict[int, Dict[str, Any]] = {}
+    for raw in raw_items:
+        if not isinstance(raw, dict):
             continue
-        question = entry["question"]
-        if _writing_question(entry) == "word":
-            lines.append(
-                f"Questão {number}. tipo_estimulo: DITADO. "
-                f"palavra_esperada: {_text(question.correct_answer) or 'AUSENTE'}."
-            )
-        else:
-            lines.append(f"Questão {number}. genero: BILHETE. enunciado: {_text(question.text) or 'AUSENTE'}.")
-        if number not in images:
-            lines.append(f"Questão {number} está sem imagem.")
-    content: List[Dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
-    for number in (*WORD_NUMBERS, TEXT_NUMBER):
+        number = raw.get("numero", raw.get("number"))
+        try:
+            number = int(number)
+        except (TypeError, ValueError):
+            continue
+        uncertain = raw.get("trechos_duvidosos", raw.get("uncertain")) or []
+        if not isinstance(uncertain, list):
+            uncertain = []
+        found[number] = {
+            "transcription": _text(raw.get("transcricao_literal", raw.get("transcription"))),
+            "situation": _situation(raw.get("situacao", raw.get("situation"))),
+            "uncertain": [str(item).strip() for item in uncertain if str(item or "").strip()],
+        }
+    return found
+
+
+def _reading_of(parsed: Dict[int, Dict[str, Any]], number: int, model: str) -> Dict[str, Any]:
+    item = parsed.get(number) or {
+        "transcription": "",
+        "situation": "duvidosa",
+        "uncertain": [],
+    }
+    return {**item, "model": model}
+
+
+def readings_agree(first: Dict[str, Any], second: Dict[str, Any], kind: str) -> bool:
+    """Duas leituras concordam quando a situação e o texto literal batem."""
+    if first.get("situation") != second.get("situation"):
+        return False
+    if first.get("uncertain") or second.get("uncertain"):
+        return False
+    if first.get("situation") == "em_branco":
+        return True
+    if first.get("situation") != "legivel":
+        return False
+    fold = _fold_text if kind == "text" else _fold_word
+    left = fold(_text(first.get("transcription")))
+    right = fold(_text(second.get("transcription")))
+    return bool(left) and left == right
+
+
+def _review_reason(first: Dict[str, Any], second: Dict[str, Any]) -> str:
+    if first.get("situation") != second.get("situation"):
+        return "As duas leituras discordaram sobre a situação da resposta."
+    if first.get("uncertain") or second.get("uncertain"):
+        return "Há trecho duvidoso na leitura."
+    if first.get("situation") != "legivel":
+        return "A leitura não ficou legível."
+    return "As duas leituras divergiram."
+
+
+def _public_reading(reading: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "model": reading.get("model"),
+        "transcription": reading.get("transcription") or "",
+        "situation": reading.get("situation"),
+        "uncertain": list(reading.get("uncertain") or []),
+    }
+
+
+def _with_readings(item: Dict[str, Any], first: Dict[str, Any], second: Dict[str, Any]) -> Dict[str, Any]:
+    item["transcription"] = first.get("transcription") or ""
+    item["secondTranscription"] = second.get("transcription") or ""
+    item["readings"] = [_public_reading(first), _public_reading(second)]
+    return item
+
+
+def _review_word(
+    entry: Dict[str, Any],
+    first: Dict[str, Any],
+    second: Dict[str, Any],
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    question = entry["question"]
+    return _with_readings({
+        "number": entry["number"],
+        "questionId": str(question.id),
+        "stimulus": _stimulus_label(question),
+        "expected": _reference(question),
+        "points": None,
+        "classification": "",
+        "justification": reason or _review_reason(first, second),
+        "confidence": "BAIXA",
+        "needsReview": True,
+        "status": "PENDENTE",
+    }, first, second)
+
+
+def _blank_word(entry: Dict[str, Any], first: Dict[str, Any], second: Dict[str, Any]) -> Dict[str, Any]:
+    question = entry["question"]
+    return _with_readings({
+        "number": entry["number"],
+        "questionId": str(question.id),
+        "stimulus": _stimulus_label(question),
+        "expected": _reference(question),
+        "points": 0,
+        "classification": "INCORRETA",
+        "justification": "Resposta em branco.",
+        "confidence": "ALTA",
+        "needsReview": False,
+        "status": "EM_BRANCO",
+    }, first, second)
+
+
+def _review_text(entry: Dict[str, Any], first: Dict[str, Any], second: Dict[str, Any]) -> Dict[str, Any]:
+    question = entry["question"]
+    return _with_readings({
+        "number": TEXT_NUMBER,
+        "questionId": str(question.id),
+        "genre": "BILHETE",
+        "criteria": {name: None for name in CRITERIA},
+        "justifications": {name: "" for name in CRITERIA},
+        "points": None,
+        "confidence": "BAIXA",
+        "needsReview": True,
+        "status": "PENDENTE",
+        "prompt": _text(question.text),
+    }, first, second)
+
+
+def _blank_text(entry: Dict[str, Any], first: Dict[str, Any], second: Dict[str, Any]) -> Dict[str, Any]:
+    question = entry["question"]
+    return _with_readings({
+        "number": TEXT_NUMBER,
+        "questionId": str(question.id),
+        "genre": "BILHETE",
+        "criteria": {name: 0 for name in CRITERIA},
+        "justifications": {name: "Resposta em branco." for name in CRITERIA},
+        "points": 0,
+        "confidence": "ALTA",
+        "needsReview": False,
+        "status": "EM_BRANCO",
+        "prompt": _text(question.text),
+    }, first, second)
+
+
+def _image_parts(images: Dict[int, bytes], numbers: List[int]) -> List[Dict[str, Any]]:
+    content: List[Dict[str, Any]] = []
+    for number in numbers:
         png = images.get(number)
         if not png:
             continue
@@ -483,25 +704,96 @@ def _user_content(
     return content
 
 
-def _ask_openai(content: List[Dict[str, Any]]) -> Dict[str, Any]:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY não configurada.")
-    from openai import OpenAI
+def _reading_content(
+    written_test_id: str,
+    series: str,
+    sent: Dict[int, Dict[str, Any]],
+    images: Dict[int, bytes],
+) -> List[Dict[str, Any]]:
+    lines = [
+        f"avaliacao_id: {written_test_id}",
+        f"serie: {series or 'não informada'}",
+        "Transcreva somente as questões com imagem anexada.",
+        "Não avalie e não atribua nota.",
+    ]
+    numbers = []
+    for number in (*WORD_NUMBERS, TEXT_NUMBER):
+        entry = sent.get(number)
+        if entry is None or number not in images:
+            continue
+        numbers.append(number)
+        if _writing_question(entry) == "word":
+            lines.append(f"Questão {number}. Área de uma palavra.")
+        else:
+            lines.append(f"Questão {number}. Área de produção de texto. Preserve as quebras de linha.")
+    return [{"type": "text", "text": "\n".join(lines)}, *_image_parts(images, numbers)]
 
-    client = OpenAI(api_key=api_key, timeout=90)
-    model = _model_name()
+
+def _evaluation_content(
+    written_test_id: str,
+    series: str,
+    sent: Dict[int, Dict[str, Any]],
+    images: Dict[int, bytes],
+    agreed: Dict[int, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    lines = [
+        f"avaliacao_id: {written_test_id}",
+        f"serie: {series or 'não informada'}",
+        "A transcrição abaixo já foi conferida. Não a substitua.",
+        "Avalie somente as questões desta chamada.",
+    ]
+    image_numbers = []
+    for number in (*WORD_NUMBERS, TEXT_NUMBER):
+        entry = sent.get(number)
+        reading = agreed.get(number)
+        if entry is None or reading is None:
+            continue
+        question = entry["question"]
+        transcription = reading.get("transcription") or ""
+        if _writing_question(entry) == "word":
+            if _stimulus(question) == "image":
+                lines.append(
+                    f"Questão {number}. tipo_estimulo: IMAGEM. "
+                    f"descricao_da_imagem: {_reference(question) or 'AUSENTE'}. "
+                    f"transcricao_conferida: {transcription}."
+                )
+            else:
+                lines.append(
+                    f"Questão {number}. tipo_estimulo: DITADO. "
+                    f"palavra_esperada: {_reference(question) or 'AUSENTE'}. "
+                    f"transcricao_conferida: {transcription}."
+                )
+        else:
+            lines.append(
+                f"Questão {number}. genero: BILHETE. "
+                f"enunciado: {_text(question.text) or 'AUSENTE'}. "
+                f"transcricao_conferida: {transcription}."
+            )
+            image_numbers.append(number)
+    return [{"type": "text", "text": "\n".join(lines)}, *_image_parts(images, image_numbers)]
+
+
+def _ask_openai(client: Any, model: str, system: str, content: List[Dict[str, Any]]) -> Dict[str, Any]:
     response = client.chat.completions.create(
         model=model,
         temperature=0,
         response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": _prompt_text()},
+            {"role": "system", "content": system},
             {"role": "user", "content": content},
         ],
     )
     message = response.choices[0].message.content or ""
     return _parse_model_json(message)
+
+
+def _openai_client():
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY não configurada.")
+    from openai import OpenAI
+
+    return OpenAI(api_key=api_key, timeout=90)
 
 
 def _correction_row(written_test_id: str, student_id: str) -> ReadingWrittenTestCorrection:
@@ -517,12 +809,120 @@ def _correction_row(written_test_id: str, student_id: str) -> ReadingWrittenTest
     return row
 
 
+def _pair_readings(
+    sent: Dict[int, Dict[str, Any]],
+    first_parsed: Dict[int, Dict[str, Any]],
+    second_parsed: Dict[int, Dict[str, Any]],
+    first_model: str,
+    second_model: str,
+) -> Dict[int, Dict[str, Any]]:
+    paired = {}
+    for number, entry in sent.items():
+        kind = _writing_question(entry)
+        first = _reading_of(first_parsed, number, first_model)
+        second = _reading_of(second_parsed, number, second_model)
+        if readings_agree(first, second, kind or "word"):
+            decision = "blank" if first["situation"] == "em_branco" else "score"
+        else:
+            decision = "review"
+        reason = None
+        question = entry["question"]
+        if (
+            decision == "score"
+            and kind == "word"
+            and _stimulus(question) == "image"
+            and not _reference(question)
+        ):
+            decision = "review"
+            reason = "A figura não tem descrição. Gere a descrição da imagem na questão."
+        paired[number] = {
+            "first": first,
+            "second": second,
+            "decision": decision,
+            "kind": kind,
+            "reason": reason,
+        }
+    return paired
+
+
+def _assemble_writing(
+    previous: Dict[str, Any],
+    sent: Dict[int, Dict[str, Any]],
+    paired: Dict[int, Dict[str, Any]],
+    payload: Optional[Dict[str, Any]],
+    models: Dict[str, Optional[str]],
+) -> Dict[str, Any]:
+    score_sent = {
+        number: sent[number]
+        for number, item in paired.items()
+        if item["decision"] == "score"
+    }
+    scored = (
+        _apply_model_result({}, payload or {}, score_sent, models.get("avaliacao") or "")
+        if payload is not None
+        else {"words": [], "production": None, "feedback": {}}
+    )
+    scored_words = {item["number"]: item for item in scored.get("words") or []}
+    previous_words = {
+        int(item["number"]): item
+        for item in previous.get("words") or []
+        if item.get("number")
+    }
+
+    words = []
+    for number in WORD_NUMBERS:
+        if number not in sent:
+            if number in previous_words:
+                words.append(previous_words[number])
+            continue
+        pair = paired[number]
+        first, second = pair["first"], pair["second"]
+        if pair["decision"] == "review":
+            words.append(_review_word(sent[number], first, second, pair.get("reason")))
+        elif pair["decision"] == "blank":
+            words.append(_blank_word(sent[number], first, second))
+        elif number in scored_words:
+            words.append(_with_readings(scored_words[number], first, second))
+        else:
+            pending = _review_word(sent[number], first, second)
+            pending["justification"] = "A avaliação pedagógica não devolveu esta questão."
+            words.append(pending)
+
+    production = previous.get("production")
+    if TEXT_NUMBER in sent:
+        pair = paired[TEXT_NUMBER]
+        first, second = pair["first"], pair["second"]
+        if pair["decision"] == "review":
+            production = _review_text(sent[TEXT_NUMBER], first, second)
+        elif pair["decision"] == "blank":
+            production = _blank_text(sent[TEXT_NUMBER], first, second)
+        elif scored.get("production"):
+            production = _with_readings(scored["production"], first, second)
+        else:
+            production = _review_text(sent[TEXT_NUMBER], first, second)
+            production["justification"] = "A avaliação pedagógica não devolveu o bilhete."
+
+    totals = _totals(words, production)
+    return {
+        "source": "ia",
+        "status": totals["status"],
+        "model": models.get("avaliacao") or models.get("leitura"),
+        "models": models,
+        "message": None,
+        "words": words,
+        "production": production,
+        "wordPoints": totals["wordPoints"],
+        "textPoints": totals["textPoints"],
+        "feedback": scored.get("feedback") or {},
+    }
+
+
 def grade_scanned_writing(
     written_test_id: str,
     student_id: str,
     pages: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Corrige ditado e bilhete com a imagem do cartão. Sem imagem, não chama a IA."""
+    """Lê o ditado e o bilhete duas vezes e só então avalia o que coincidiu."""
     available = _images_by_question(pages)
     sent: Dict[int, Dict[str, Any]] = {}
     images: Dict[int, bytes] = {}
@@ -540,23 +940,74 @@ def grade_scanned_writing(
 
     row = _correction_row(written_test_id, student_id)
     previous = dict(row.writing or {})
-    model = _model_name()
+    primary = _model_name()
+    second_model = _reread_model()
+    models = {"leitura": primary, "releitura": second_model, "avaliacao": None}
     try:
-        payload = _ask_openai(_user_content(
-            written_test_id, student_id, _series_name(written_test_id), sent, images,
-        ))
-        stored = _apply_model_result(previous, payload, sent, model)
+        client = _openai_client()
+        series = _series_name(written_test_id)
+        reading_content = _reading_content(written_test_id, series, sent, images)
+        system = _reading_prompt()
+        first_payload = _ask_openai(client, primary, system, reading_content)
+        second_payload = _ask_openai(client, second_model, system, reading_content)
+        paired = _pair_readings(
+            sent, _parse_reading_items(first_payload), _parse_reading_items(second_payload),
+            primary, second_model,
+        )
     except Exception:
         logger.exception(
-            "Falha na correção da escrita por IA test=%s student=%s", written_test_id, student_id,
+            "Falha na leitura da escrita por IA test=%s student=%s", written_test_id, student_id,
         )
         stored = dict(previous)
         stored.update({
             "source": "ia",
             "status": "ERRO",
-            "model": model,
+            "model": primary,
+            "models": models,
             "message": "A correção da escrita não foi concluída.",
         })
+        row.writing = stored
+        db.session.commit()
+        return public_writing(stored)
+
+    agreed = {
+        number: item["first"]
+        for number, item in paired.items()
+        if item["decision"] == "score"
+    }
+    payload = None
+    evaluation_failed = False
+    if agreed:
+        models["avaliacao"] = primary
+        try:
+            payload = _ask_openai(
+                client,
+                primary,
+                _evaluation_prompt(),
+                _evaluation_content(written_test_id, series, sent, images, agreed),
+            )
+        except Exception:
+            logger.exception(
+                "Falha na avaliação da escrita por IA test=%s student=%s",
+                written_test_id,
+                student_id,
+            )
+            evaluation_failed = True
+    stored = _assemble_writing(previous, sent, paired, payload, models)
+    if evaluation_failed:
+        stored["status"] = "ERRO"
+        stored["message"] = "A avaliação pedagógica não foi concluída."
+    stored["published"] = False
+    stored["promptVersions"] = {
+        "leitura": READING_PROMPT_VERSION,
+        "avaliacao": EVALUATION_PROMPT_VERSION if models.get("avaliacao") else None,
+    }
+    stored["audit"] = _append_audit(previous.get("audit"), _audit_entry(
+        "leitura",
+        None,
+        stored,
+        decision=None,
+    ))
     row.writing = stored
     db.session.commit()
     return public_writing(stored)
@@ -584,8 +1035,8 @@ def _manual_words(payload: Dict[str, Any], entries: Dict[int, Dict[str, Any]]) -
         words.append({
             "number": number,
             "questionId": str(entry["question"].id),
-            "stimulus": "DITADO",
-            "expected": _text(entry["question"].correct_answer),
+            "stimulus": _stimulus_label(entry["question"]),
+            "expected": _reference(entry["question"]),
             "transcription": _text(raw.get("transcription", raw.get("transcricao"))),
             "points": points,
             "classification": {2: "CORRETA", 1: "PARCIAL", 0: "INCORRETA"}[points],
@@ -637,7 +1088,271 @@ def _manual_production(payload: Dict[str, Any], entry: Dict[str, Any]) -> Dict[s
     }
 
 
-def save_manual_writing(written_test_id: str, student_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _audit_items(stored: Dict[str, Any]) -> List[Dict[str, Any]]:
+    items = []
+    for word in stored.get("words") or []:
+        items.append({
+            "number": word.get("number"),
+            "transcription": word.get("transcription") or "",
+            "points": word.get("points"),
+            "status": word.get("status"),
+            "evidence": word.get("justification") or "",
+        })
+    production = stored.get("production") or {}
+    if production:
+        items.append({
+            "number": TEXT_NUMBER,
+            "transcription": production.get("transcription") or "",
+            "points": production.get("points"),
+            "status": production.get("status"),
+            "evidence": production.get("justifications") or {},
+        })
+    return items
+
+
+def _audit_entry(
+    action: str,
+    actor_id: Optional[str],
+    stored: Dict[str, Any],
+    decision: Optional[str],
+) -> Dict[str, Any]:
+    return {
+        "at": _now_iso(),
+        "action": action,
+        "actorId": actor_id,
+        "decision": decision,
+        "promptVersions": stored.get("promptVersions"),
+        "models": stored.get("models"),
+        "items": _audit_items(stored),
+    }
+
+
+def _append_audit(previous: Any, entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    audit = list(previous) if isinstance(previous, list) else []
+    audit.append(entry)
+    return audit
+
+
+def _ready_to_release(stored: Dict[str, Any]) -> bool:
+    if not stored or stored.get("status") == "ERRO" or stored.get("source") not in ("ia", "manual"):
+        return False
+    words = stored.get("words") or []
+    production = stored.get("production")
+    if len(words) < len(WORD_NUMBERS) or not production:
+        return False
+    for item in (*words, production):
+        if item.get("points") is None or item.get("status") in ("PENDENTE", "NÃO_APLICADA"):
+            return False
+    return True
+
+
+def _student_result(row: ReadingWrittenTestCorrection, student: Any) -> Dict[str, Any]:
+    from app.socioeconomic_forms.services.answer_sheet_correction import student_display_name
+
+    return {
+        "correctionId": row.id,
+        "studentId": str(student.id),
+        "studentName": student_display_name(student),
+        "objective": public_objective(row.objective),
+        "writing": public_writing(row.writing),
+    }
+
+
+def _confirmed_numbers(payload: Dict[str, Any]) -> Dict[int, str]:
+    found: Dict[int, str] = {}
+    raw_items = payload.get("words")
+    if raw_items is None:
+        raw_items = payload.get("palavras")
+    if raw_items is not None:
+        if not isinstance(raw_items, list):
+            raise ValueError("words deve ser uma lista de {number, transcription}.")
+        for item in raw_items:
+            if not isinstance(item, dict) or item.get("number") is None and item.get("numero") is None:
+                raise ValueError("Cada palavra conferida precisa de number e transcription.")
+            number = int(item.get("number", item.get("numero")))
+            if number not in WORD_NUMBERS:
+                raise ValueError("A conferência de palavra aceita as questões 17 e 18.")
+            found[number] = _text(item.get("transcription", item.get("transcricao")))
+    raw_text = payload.get("production")
+    if raw_text is None:
+        raw_text = payload.get("producaoTextual") or payload.get("producao_textual")
+    if raw_text is not None:
+        if not isinstance(raw_text, dict):
+            raise ValueError("production deve trazer a transcription conferida.")
+        found[TEXT_NUMBER] = _text(raw_text.get("transcription", raw_text.get("transcricao")))
+    if not found:
+        raise ValueError("Informe a transcrição conferida de ao menos uma questão.")
+    return found
+
+
+def confirm_writing(
+    written_test_id: str,
+    student_id: str,
+    payload: Dict[str, Any],
+    reviewer_id: str,
+) -> Dict[str, Any]:
+    """Troca a transcrição pendente pela do professor e avalia de novo só esse texto."""
+    from app.models.student import Student
+
+    if not isinstance(payload, dict):
+        raise ValueError("Corpo da requisição inválido.")
+    student = db.session.get(Student, str(student_id))
+    if student is None:
+        raise LookupError("Aluno não encontrado.")
+    if db.session.get(ReadingWrittenTest, str(written_test_id)) is None:
+        raise LookupError("Avaliação escrita não encontrada.")
+    row = ReadingWrittenTestCorrection.query.filter_by(
+        written_test_id=str(written_test_id), student_id=str(student_id),
+    ).first()
+    if row is None or not (row.writing or {}).get("words"):
+        raise ValueError("Não há leitura do cartão para conferir.")
+    if (row.writing or {}).get("source") != "ia":
+        raise ValueError("O lançamento manual não usa conferência de transcrição.")
+
+    confirmed = _confirmed_numbers(payload)
+    entries = {entry["number"]: entry for entry in _links(written_test_id)}
+    stored = dict(row.writing or {})
+    words = [dict(item) for item in stored.get("words") or []]
+    by_number = {int(item["number"]): item for item in words if item.get("number")}
+    production = dict(stored.get("production") or {})
+    agreed: Dict[int, Dict[str, Any]] = {}
+    sent: Dict[int, Dict[str, Any]] = {}
+
+    for number, transcription in confirmed.items():
+        entry = entries.get(number)
+        if entry is None:
+            raise ValueError(f"A avaliação não tem a questão {number}.")
+        if not transcription:
+            if number == TEXT_NUMBER:
+                production = _blank_text(entry, {"transcription": "", "model": "professor", "situation": "em_branco", "uncertain": []}, {"transcription": "", "model": "professor", "situation": "em_branco", "uncertain": []})
+            else:
+                blank = _blank_word(entry, {"transcription": "", "model": "professor", "situation": "em_branco", "uncertain": []}, {"transcription": "", "model": "professor", "situation": "em_branco", "uncertain": []})
+                previous = by_number.get(number) or {}
+                if previous.get("readings"):
+                    blank["readings"] = previous["readings"]
+                by_number[number] = blank
+            continue
+        agreed[number] = {"transcription": transcription, "situation": "legivel", "uncertain": []}
+        sent[number] = entry
+
+    payload_model = None
+    if agreed:
+        client = _openai_client()
+        primary = _model_name()
+        images = _confirmed_images(row, sent)
+        payload_model = _ask_openai(
+            client,
+            primary,
+            _evaluation_prompt(),
+            _evaluation_content(written_test_id, _series_name(written_test_id), sent, images, agreed),
+        )
+        scored = _apply_model_result({}, payload_model, sent, primary)
+        for item in scored.get("words") or []:
+            number = int(item["number"])
+            previous = by_number.get(number) or {}
+            item["transcription"] = agreed[number]["transcription"]
+            if previous.get("readings"):
+                item["readings"] = previous["readings"]
+                item["secondTranscription"] = previous.get("secondTranscription") or ""
+            by_number[number] = item
+        if TEXT_NUMBER in agreed and scored.get("production"):
+            production = scored["production"]
+            production["transcription"] = agreed[TEXT_NUMBER]["transcription"]
+            previous_production = stored.get("production") or {}
+            if previous_production.get("readings"):
+                production["readings"] = previous_production["readings"]
+                production["secondTranscription"] = previous_production.get("secondTranscription") or ""
+
+    words_out = [by_number[number] for number in WORD_NUMBERS if number in by_number]
+    totals = _totals(words_out, production)
+    models = dict(stored.get("models") or {})
+    models["avaliacao"] = models.get("avaliacao") or _model_name()
+    stored.update({
+        "status": totals["status"],
+        "words": words_out,
+        "production": production,
+        "wordPoints": totals["wordPoints"],
+        "textPoints": totals["textPoints"],
+        "published": False,
+        "review": None,
+        "models": models,
+        "promptVersions": {
+            "leitura": READING_PROMPT_VERSION,
+            "avaliacao": EVALUATION_PROMPT_VERSION,
+        },
+    })
+    if payload_model:
+        stored["feedback"] = _feedback(payload_model)
+    stored["audit"] = _append_audit(stored.get("audit"), _audit_entry(
+        "revisao", reviewer_id, stored, decision="transcricao_conferida",
+    ))
+    row.writing = stored
+    db.session.commit()
+    return _student_result(row, student)
+
+
+def _confirmed_images(
+    row: ReadingWrittenTestCorrection,
+    sent: Dict[int, Dict[str, Any]],
+) -> Dict[int, bytes]:
+    images: Dict[int, bytes] = {}
+    entry = sent.get(TEXT_NUMBER)
+    if entry is None:
+        return images
+    crop = (row.crops or {}).get(str(entry["question"].id)) or {}
+    bucket = crop.get("bucket")
+    object_name = crop.get("objectName")
+    if not bucket or not object_name:
+        return images
+    try:
+        from app.services.storage.minio_service import MinIOService
+
+        png = MinIOService().download_file(bucket, object_name)
+    except Exception:
+        logger.exception("Falha ao ler o recorte do bilhete para a revisão.")
+        return images
+    if png:
+        images[TEXT_NUMBER] = png
+    return images
+
+
+def release_writing(written_test_id: str, student_id: str, reviewer_id: str) -> Dict[str, Any]:
+    """Libera a nota do ditado e do bilhete depois que não há item pendente."""
+    from app.models.student import Student
+
+    student = db.session.get(Student, str(student_id))
+    if student is None:
+        raise LookupError("Aluno não encontrado.")
+    if db.session.get(ReadingWrittenTest, str(written_test_id)) is None:
+        raise LookupError("Avaliação escrita não encontrada.")
+    row = ReadingWrittenTestCorrection.query.filter_by(
+        written_test_id=str(written_test_id), student_id=str(student_id),
+    ).first()
+    stored = dict(row.writing or {}) if row is not None else {}
+    if not _ready_to_release(stored):
+        raise ValueError(
+            "A correção ainda tem questão pendente. Confira a transcrição antes de liberar."
+        )
+    stored["published"] = True
+    stored["status"] = "CONCLUIDA"
+    stored["review"] = {
+        "reviewerId": reviewer_id,
+        "reviewedAt": _now_iso(),
+        "decision": "liberada",
+    }
+    stored["audit"] = _append_audit(stored.get("audit"), _audit_entry(
+        "liberacao", reviewer_id, stored, decision="liberada",
+    ))
+    row.writing = stored
+    db.session.commit()
+    return _student_result(row, student)
+
+
+def save_manual_writing(written_test_id: str, student_id: str, payload: Dict[str, Any], reviewer_id: Optional[str] = None) -> Dict[str, Any]:
     """Lançamento do professor para o ditado e o bilhete. Não altera a nota das objetivas."""
     from app.models.student import Student
     from app.socioeconomic_forms.services.answer_sheet_correction import student_display_name
@@ -667,7 +1382,14 @@ def save_manual_writing(written_test_id: str, student_id: str, payload: Dict[str
         "wordPoints": totals["wordPoints"],
         "textPoints": totals["textPoints"],
         "feedback": {},
+        "published": True,
+        "review": {
+            "reviewerId": reviewer_id,
+            "reviewedAt": _now_iso(),
+            "decision": "lancamento_manual",
+        },
     }
+    stored["audit"] = [_audit_entry("lancamento_manual", reviewer_id, stored, "lancamento_manual")]
     row = _correction_row(written_test_id, student_id)
     row.writing = stored
     db.session.commit()
@@ -705,7 +1427,7 @@ def list_corrections(written_test_id: str) -> Dict[str, Any]:
             "answers": _public_answers(row.answers or {}),
             "blank": list(row.blank or []),
             "invalid": list(row.invalid or []),
-            "crops": _public_crops(row.crops or {}),
+            "crops": _public_crops(row.crops or {}, written_test_id, row.student_id),
             "pages": list(row.pages or []),
             "objective": public_objective(row.objective),
             "writing": public_writing(row.writing),

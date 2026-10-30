@@ -50,6 +50,11 @@ class Question(db.Model):
     approved_by = db.Column(db.String, db.ForeignKey('public.users.id'))  # Quem aprovou para uso global
     approved_at = db.Column(db.TIMESTAMP)  # Data de aprovação para uso global
 
+    # Ditado do Afirme Ler: 'word' (palavra falada) ou 'image' (figura).
+    # writing_reference guarda a descrição da figura gerada pela IA.
+    writing_stimulus = db.Column(db.String(16), nullable=True)
+    writing_reference = db.Column(db.Text, nullable=True)
+
     # Produto que criou a questão: 'afirme_play' ou 'afirme_ler'.
     # Questões 'afirme_ler' não aparecem no Afirme Play.
     origin = db.Column(

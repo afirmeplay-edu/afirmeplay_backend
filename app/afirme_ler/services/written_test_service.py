@@ -221,6 +221,17 @@ def _assert_publish_pattern(links: List[ReadingWrittenTestQuestion], found: Dict
                 )
 
 
+def _assert_image_descriptions(found: Dict[str, Question]) -> None:
+    for question in found.values():
+        if question.question_type != "dictation" or question.writing_stimulus != "image":
+            continue
+        if not str(question.writing_reference or "").strip():
+            raise ValueError(
+                f"A questão {question.id} é uma figura sem descrição. "
+                "Gere a descrição da imagem antes de publicar."
+            )
+
+
 def _assert_allowed_type(question: Question) -> None:
     if question.question_type not in ALLOWED_QUESTION_DB_TYPES:
         raise ValueError(
@@ -616,6 +627,7 @@ class WrittenTestService:
                 )
             _assert_allowed_type(question)
         _assert_publish_pattern(links, found)
+        _assert_image_descriptions(found)
 
         written_test.status = WRITTEN_TEST_STATUS_PUBLISHED
         written_test.published_at = db.func.now()

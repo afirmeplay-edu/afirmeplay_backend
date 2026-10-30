@@ -5,6 +5,7 @@ Banco de questões do Afirme Ler (public.question, origin = 'afirme_ler').
 Roda em SQLite em memória (schema "public" anexado); não conecta no Postgres.
 Execução: python -m pytest tests/test_afirme_ler_question_bank.py -q
 """
+import base64
 import inspect
 import uuid
 from unittest.mock import patch
@@ -336,6 +337,169 @@ def test_ler_create_dictation_stores_word_as_answer(flask_app):
 def test_ler_rejects_invalid_dictation(overrides, message):
     with pytest.raises(ValueError, match=message):
         bank.parse_create_payload(_dictation_payload(**overrides))
+
+
+def test_ler_image_dictation_waits_for_the_description(flask_app):
+    payload = _dictation_payload(stimulus="imagem", text="Escreva o nome do objeto.")
+    del payload["dictatedWord"]
+    question = QuestionBankService.create(PROFESSOR, payload)
+
+    stored = db.session.get(Question, question.id)
+    assert stored.writing_stimulus == "image"
+    assert stored.correct_answer is None
+    assert stored.writing_reference is None
+    body = bank.to_response(question)
+    assert body["stimulus"] == "image"
+    assert body["dictatedWord"] is None
+    assert body["imageDescription"] is None
+    assert body["correct_answer"] == ""
+
+    with pytest.raises(ValueError, match="não recebe dictatedWord"):
+        bank.parse_create_payload(_dictation_payload(stimulus="image", dictatedWord="cinto"))
+
+
+def test_ler_describe_image_saves_the_reference(flask_app, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+    payload = _dictation_payload(stimulus="image")
+    del payload["dictatedWord"]
+    question = QuestionBankService.create(PROFESSOR, payload)
+    question.images = [{
+        "id": "img-cinto",
+        "type": "image/png",
+        "minio_bucket": "question-images",
+        "minio_object_name": "q/cinto.png",
+    }]
+    db.session.commit()
+
+    class _Choice:
+        def __init__(self):
+            self.message = type("Message", (), {"content": '{"descricao": "cinto de roupa"}'})()
+
+    class _Client:
+        def __init__(self, api_key=None, timeout=None):
+            pass
+
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    _Client.calls.append(kwargs)
+                    return type("Response", (), {"choices": [_Choice()]})()
+
+    _Client.calls = []
+    with patch("app.services.storage.minio_service.MinIOService") as minio, patch("openai.OpenAI", _Client):
+        minio.return_value.download_file.return_value = b"\x89PNG"
+        described = QuestionBankService.describe_image(PROFESSOR, question.id)
+
+    assert described.writing_reference == "cinto de roupa"
+    body = bank.to_response(described)
+    assert body["imageDescription"] == "cinto de roupa"
+    assert body["dictatedWord"] is None
+    sent = _Client.calls[0]
+    assert "DESCRICAO_IMAGEM" in sent["messages"][0]["content"]
+    user_text = sent["messages"][1]["content"][0]["text"]
+    assert "cinto" not in user_text
+    assert sent["messages"][1]["content"][1]["type"] == "image_url"
+
+    updated = QuestionBankService.update(PROFESSOR, question.id, {"formattedText": "<p>Olhe de novo.</p>"})
+    assert updated.writing_reference is None
+
+
+def _png_html():
+    encoded = base64.b64encode(b"\x89PNG").decode("ascii")
+    return f'<p>Escreva o nome.</p><img src="data:image/png;base64,{encoded}" />'
+
+
+class _DescriptionClient:
+    calls = []
+
+    def __init__(self, api_key=None, timeout=None):
+        pass
+
+    class chat:
+        class completions:
+            @staticmethod
+            def create(**kwargs):
+                _DescriptionClient.calls.append(kwargs)
+                message = type("Message", (), {"content": '{"descricao": "cinto de roupa"}'})()
+                choice = type("Choice", (), {"message": message})()
+                return type("Response", (), {"choices": [choice]})()
+
+
+def test_ler_preview_describes_without_creating_a_question(flask_app, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    before = Question.query.count()
+    _DescriptionClient.calls = []
+    with patch("openai.OpenAI", _DescriptionClient):
+        description = QuestionBankService.preview_image_description(
+            PROFESSOR, {"formattedText": _png_html()},
+        )
+    assert description == "cinto de roupa"
+    assert Question.query.count() == before
+    sent = _DescriptionClient.calls[0]["messages"][1]["content"]
+    assert sent[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    with pytest.raises(ValueError, match="Anexe a imagem"):
+        QuestionBankService.preview_image_description(PROFESSOR, {"formattedText": "<p>Sem foto.</p>"})
+
+
+def test_ler_create_saves_the_accepted_image_description(flask_app):
+    payload = _dictation_payload(
+        stimulus="image",
+        text="Escreva o nome do objeto.",
+        formattedText=_png_html(),
+        imageDescription="  cinto de roupa  ",
+    )
+    del payload["dictatedWord"]
+    question = QuestionBankService.create(PROFESSOR, payload)
+    assert question.writing_reference == "cinto de roupa"
+    assert bank.to_response(question)["imageDescription"] == "cinto de roupa"
+
+    with pytest.raises(ValueError, match="só vale para ditado com stimulus image"):
+        bank.parse_create_payload(_dictation_payload(imageDescription="cinto de roupa"))
+
+
+def test_ler_update_keeps_a_new_description_sent_with_the_photo(flask_app):
+    payload = _dictation_payload(stimulus="image", imageDescription="cinto de roupa")
+    del payload["dictatedWord"]
+    question = QuestionBankService.create(PROFESSOR, payload)
+
+    replaced = QuestionBankService.update(PROFESSOR, question.id, {
+        "formattedText": _png_html(),
+        "imageDescription": "cinto marrom",
+    })
+    assert replaced.writing_reference == "cinto marrom"
+
+    cleared = QuestionBankService.update(PROFESSOR, question.id, {
+        "formattedText": "<p><img src=\"/questions/x/images/1\" /></p>",
+    })
+    assert cleared.writing_reference is None
+
+
+def test_ler_preview_route_returns_only_the_text(flask_app, monkeypatch):
+    from app.afirme_ler.routes import questions_routes
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    before = Question.query.count()
+    _DescriptionClient.calls = []
+    with patch("openai.OpenAI", _DescriptionClient):
+        response, status = _call_play_view(
+            questions_routes, "preview_bank_question_image", PROFESSOR,
+            path="/afirme-reading/questions/image-description", method="POST",
+            json={"formattedText": _png_html()},
+        )
+    assert status == 200
+    assert response.get_json() == {"imageDescription": "cinto de roupa"}
+    assert Question.query.count() == before
+
+    response, status = _call_play_view(
+        questions_routes, "preview_bank_question_image", PROFESSOR,
+        path="/afirme-reading/questions/image-description", method="POST",
+        json={"formattedText": "<p>Sem foto.</p>"},
+    )
+    assert status == 400
+    assert response.get_json()["error"] == "Anexe a imagem do objeto antes de gerar a descrição."
 
 
 def test_ler_dictation_without_word_key_is_rejected():

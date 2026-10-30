@@ -307,15 +307,56 @@ def _upload_crops(written_test_id: str, student_id: str, crops: Dict[str, Dict[s
     return stored
 
 
-def _public_crops(crops: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+def crop_image_path(written_test_id: str, student_id: str, number: int) -> str:
+    return (
+        f"/afirme-reading/written-tests/{written_test_id}"
+        f"/answer-sheet-corrections/{student_id}/crops/{int(number)}"
+    )
+
+
+def _public_crops(
+    crops: Dict[str, Dict[str, Any]],
+    written_test_id: str,
+    student_id: str,
+) -> List[Dict[str, Any]]:
     items = []
     for question_id, crop in crops.items():
+        number = crop.get("number")
+        saved = bool(crop.get("saved"))
         items.append({
-            "number": crop.get("number"),
+            "number": number,
             "questionId": question_id,
-            "saved": bool(crop.get("saved")),
+            "saved": saved,
+            "imageUrl": (
+                crop_image_path(written_test_id, student_id, int(number))
+                if saved and number is not None
+                else None
+            ),
         })
     return sorted(items, key=lambda item: item["number"] or 0)
+
+
+def load_crop_png(written_test_id: str, student_id: str, number: int) -> bytes:
+    """PNG do recorte da questão, para o professor ver a letra."""
+    row = ReadingWrittenTestCorrection.query.filter_by(
+        written_test_id=str(written_test_id),
+        student_id=str(student_id),
+    ).first()
+    if row is None:
+        raise LookupError("Correção não encontrada.")
+    crop = None
+    for item in (row.crops or {}).values():
+        if item.get("number") is not None and int(item["number"]) == int(number):
+            crop = item
+            break
+    if not crop or not crop.get("saved") or not crop.get("bucket") or not crop.get("objectName"):
+        raise LookupError("Recorte não encontrado.")
+    from app.services.storage.minio_service import MinIOService
+
+    data = MinIOService().download_file(crop["bucket"], crop["objectName"])
+    if not data:
+        raise LookupError("Recorte não encontrado.")
+    return data
 
 
 def _public_answers(answers: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -393,7 +434,7 @@ def save_student_pages(
         "answers": _public_answers(stored["answers"]),
         "blank": sorted(stored["blank"], key=lambda item: item["number"]),
         "invalid": sorted(stored["invalid"], key=lambda item: item["number"]),
-        "crops": _public_crops(stored["crops"]),
+        "crops": _public_crops(stored["crops"], written_test_id, str(student.id)),
         "pages": present,
         "missingPages": [number for number in range(1, page_count + 1) if number not in present],
         "objective": public_objective(objective),

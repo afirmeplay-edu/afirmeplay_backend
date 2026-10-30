@@ -100,3 +100,40 @@ def update_bank_question(question_id):
     except Exception as error:
         db.session.rollback()
         return _handle_service_error(error)
+
+
+@bp.route("/questions/image-description", methods=["POST"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*WRITE_ROLES)
+def preview_bank_question_image():
+    """Descreve a foto do formulário e devolve o texto, sem gravar a questão."""
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not data:
+        return _error_response("Corpo da requisição inválido.", 400)
+    try:
+        description = QuestionBankService.preview_image_description(user, data)
+        return jsonify({"imageDescription": description}), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/questions/<question_id>/image-description", methods=["POST"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*WRITE_ROLES)
+def describe_bank_question_image(question_id):
+    """O professor pede a descrição da figura já anexada na questão de ditado."""
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        question = QuestionBankService.describe_image(user, question_id)
+        return jsonify(to_response(question)), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)

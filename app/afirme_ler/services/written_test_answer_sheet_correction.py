@@ -425,6 +425,9 @@ def save_student_pages(
     row.crops = stored["crops"]
     row.pages = stored["pages"]
     row.objective = objective
+    from app.afirme_ler.services.written_test_ica_service import refresh_correction_ica
+
+    refresh_correction_ica(row)
     db.session.commit()
 
     present = stored["pages"]

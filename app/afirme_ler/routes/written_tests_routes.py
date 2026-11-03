@@ -484,7 +484,7 @@ def release_written_test_writing(written_test_id):
 @role_required(*AFIRME_LER_ROLES)
 @requires_city_context
 def written_test_ica_dashboard(written_test_id):
-    """Participação, IAD e o recorte município, escola, série, turma ou aluno."""
+    """Painel ICA com KPIs, níveis, grupos e alunos já calculados."""
     from app.afirme_ler.services.written_test_ica_service import ica_dashboard
 
     user = get_current_user_from_token()
@@ -492,6 +492,28 @@ def written_test_ica_dashboard(written_test_id):
         return _error_response("Usuário não encontrado.", 401)
     try:
         return jsonify(ica_dashboard(written_test_id, request.args.to_dict())), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/written-tests/<written_test_id>/ica-proficiency", methods=["POST"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*WRITE_ROLES)
+@requires_city_context
+def written_test_ica_proficiency(written_test_id):
+    """Importa/atualiza a proficiência por aluno e recalcula o ICA gravado."""
+    from app.afirme_ler.services.written_test_ica_service import upsert_proficiency
+
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    data = _json_body()
+    if data is None:
+        return _error_response("Corpo da requisição inválido.", 400)
+    try:
+        return jsonify(upsert_proficiency(written_test_id, data)), 200
     except Exception as error:
         db.session.rollback()
         return _handle_service_error(error)
@@ -522,7 +544,7 @@ def written_test_skill_map(written_test_id):
 @role_required(*AFIRME_LER_ROLES)
 @requires_city_context
 def written_test_ica_csv(written_test_id):
-    """CSV dos alunos finalizados no recorte atual."""
+    """CSV do painel ICA no recorte atual (inclui não avaliados)."""
     from app.afirme_ler.services.written_test_ica_service import ica_csv
 
     user = get_current_user_from_token()

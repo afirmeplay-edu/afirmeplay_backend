@@ -1316,7 +1316,9 @@ def test_ddl_print_run_table():
     assert "UNIQUE (written_test_id, student_id)" in ddl
     assert "objective JSON NOT NULL DEFAULT '{}'::json" in ddl
     assert "writing JSON NOT NULL DEFAULT '{}'::json" in ddl
+    assert "ica JSON NOT NULL DEFAULT '{}'::json" in ddl
     assert "ADD COLUMN IF NOT EXISTS writing JSON" in ddl
+    assert "ADD COLUMN IF NOT EXISTS ica JSON" in ddl
     assert 'class_id UUID REFERENCES "city_teste".class(id) ON DELETE CASCADE' in ddl
 
 
@@ -2030,6 +2032,11 @@ def test_ica_dashboard_scopes_and_one_decimal(flask_app):
     assert municipal["proficiency_inep"] == {
         "imported_valid": 0, "ica_percentage": None, "status": "SEM_DADOS",
     }
+    assert municipal["kpis"]["previstos"] == 4
+    assert municipal["kpis"]["avaliados"] == 3
+    assert municipal["kpis"]["nota_tct_media"] == 7.65
+    assert municipal["niveis"]["validos"] == 0
+    assert len(municipal["students"]) == 4
     assert [row["name"] for row in municipal["rows"]] == ["Escola A", "Escola B"]
     school_a = municipal["rows"][0]
     assert school_a["rowLevel"] == "escola"
@@ -2039,6 +2046,8 @@ def test_ica_dashboard_scopes_and_one_decimal(flask_app):
     assert school_a["apt"] == 1
     assert school_a["iad_percentage"] == 50.0
     assert school_a["score"] == 64.7
+    assert school_a["previstos"] == 3
+    assert school_a["niveis"]["Adequado"] == 0
 
     school = ica_dashboard(written_test.id, {"escolaId": SCHOOL_A})
     assert school["scope"]["level"] == "escola"
@@ -2053,19 +2062,30 @@ def test_ica_dashboard_scopes_and_one_decimal(flask_app):
 
     classroom = ica_dashboard(written_test.id, {"turmaId": str(CLASS_A1)})
     assert classroom["scope"]["level"] == "turma"
-    assert [row["student_name"] for row in classroom["rows"]] == ["Ana", "Caio"]
+    assert [row["aluno"] for row in classroom["rows"]] == ["Ana", "Bia", "Caio"]
     ana = classroom["rows"][0]
-    assert ana["reading"] == 16
-    assert ana["words"] == 4
-    assert ana["text"] == 14
-    assert ana["score"] == 100.0
-    assert ana["apt"] is True
-    caio = classroom["rows"][1]
-    assert caio["reading"] == 10
-    assert caio["words"] == 0
-    assert caio["text"] == 0
-    assert caio["score"] == 29.4
-    assert caio["apt"] is False
+    assert ana["leitura_16"] == 16
+    assert ana["palavras_4"] == 4
+    assert ana["texto_14"] == 14
+    assert ana["pontos_34"] == 34
+    assert ana["nota_tct_0_10"] == 10.0
+    assert ana["nota_100"] == 100.0
+    assert ana["apto_diagnostico"] is True
+    assert ana["status"] == "Proficiência indisponível"
+    assert ana["escola"] == "Escola A"
+    assert ana["serie"] == "1º ano"
+    bia = classroom["rows"][1]
+    assert bia["finalized"] is False
+    assert bia["avaliado"] is False
+    assert bia["status"] == "Não avaliado"
+    assert bia["leitura_16"] is None
+    caio = classroom["rows"][2]
+    assert caio["leitura_16"] == 10
+    assert caio["palavras_4"] == 0
+    assert caio["texto_14"] == 0
+    assert caio["nota_100"] == 29.4
+    assert caio["nota_tct_0_10"] == 2.94
+    assert caio["apto_diagnostico"] is False
 
     pending = ica_dashboard(written_test.id, {"estudanteId": "st-bia"})
     assert pending["participation"]["expected"] == 1
@@ -2073,9 +2093,9 @@ def test_ica_dashboard_scopes_and_one_decimal(flask_app):
     assert pending["participation"]["percentage"] == 0.0
     assert pending["diagnostic"]["iad_percentage"] is None
     assert pending["student"]["finalized"] is False
-    assert pending["student"]["reading"] is None
-    assert pending["student"]["apt"] is False
-    assert pending["rows"][0]["score"] is None
+    assert pending["student"]["leitura_16"] is None
+    assert pending["student"]["apto_diagnostico"] is False
+    assert pending["rows"][0]["nota_100"] is None
 
     detail = ica_dashboard(written_test.id, {"estudanteId": "st-ana"})
     assert detail["scope"]["level"] == "aluno"
@@ -2088,6 +2108,55 @@ def test_ica_dashboard_scopes_and_one_decimal(flask_app):
 
     with pytest.raises(ValueError, match="não faz parte"):
         ica_dashboard(written_test.id, {"escolaId": "escola-fora"})
+
+
+def test_ica_proficiency_is_saved_and_drives_status(flask_app):
+    from app.afirme_ler.services.written_test_ica_service import (
+        ica_dashboard,
+        upsert_proficiency,
+    )
+
+    written_test = _ica_test()
+    result = upsert_proficiency(written_test.id, {
+        "students": [
+            {"studentId": "st-ana", "proficiencia": 765.4},
+            {"studentId": "st-caio", "proficiencia": 742.9},
+            {"studentId": "st-bia", "proficiencia": None},
+        ],
+    })
+    assert result["updated"] == 3
+
+    ana_row = ReadingWrittenTestCorrection.query.filter_by(
+        written_test_id=written_test.id, student_id="st-ana",
+    ).one()
+    assert ana_row.ica["proficiencia"] == 765.4
+    assert ana_row.ica["nota_prof_0_10"] == 7.44
+    assert ana_row.ica["nivel_aprendizagem"] == "Adequado"
+    assert ana_row.ica["status"] == "Alfabetizado"
+    assert ana_row.ica["nota_tct_0_10"] == 10.0
+
+    caio_row = ReadingWrittenTestCorrection.query.filter_by(
+        written_test_id=written_test.id, student_id="st-caio",
+    ).one()
+    assert caio_row.ica["nota_prof_0_10"] == 6.99
+    assert caio_row.ica["nivel_aprendizagem"] == "Básico"
+    assert caio_row.ica["status"] == "Não alfabetizado"
+
+    panel = ica_dashboard(written_test.id, {"turmaId": str(CLASS_A1)})
+    assert panel["kpis"]["alfabetizados"] == 1
+    assert panel["kpis"]["nao_alfabetizados"] == 1
+    assert panel["kpis"]["sem_proficiencia"] == 1
+    assert panel["kpis"]["percentual_ge_743"] == 50.0
+    assert panel["proficiency_inep"]["imported_valid"] == 2
+    assert panel["proficiency_inep"]["status"] == "COM_DADOS"
+    assert panel["niveis"]["items"][1]["name"] == "Básico"
+    assert panel["niveis"]["items"][1]["count"] == 1
+    assert panel["niveis"]["items"][2]["name"] == "Adequado"
+    assert panel["niveis"]["items"][2]["count"] == 1
+    by_name = {row["aluno"]: row for row in panel["students"]}
+    assert by_name["Ana"]["status"] == "Alfabetizado"
+    assert by_name["Caio"]["status"] == "Não alfabetizado"
+    assert by_name["Bia"]["status"] == "Não avaliado"
 
 
 def test_ica_skill_map_and_csv_follow_the_scope(flask_app):
@@ -2133,8 +2202,14 @@ def test_ica_skill_map_and_csv_follow_the_scope(flask_app):
     content, filename = ica_csv(written_test.id, {"escolaId": SCHOOL_B})
     assert filename == "resultados_ica.csv"
     lines = content.decode("utf-8").strip().split("\n")
-    assert lines[0] == "aluno_id;aluno;turma;leitura;palavras;texto;total;nota_100;apto_diagnostico"
-    assert lines[1] == "st-davi;Davi;1º B;16;4;14;34;100.0;SIM"
+    assert lines[0] == (
+        "aluno_id;aluno;serie;turma;escola;municipio;leitura_16;palavras_4;texto_14;"
+        "pontos_34;nota_tct_0_10;nota_100;apto_diagnostico;proficiencia;nota_prof_0_10;"
+        "nivel_aprendizagem;status;avaliado"
+    )
+    assert lines[1].startswith("st-davi;Davi;1º ano;1º B;Escola B;")
+    assert ";16;4;14;34;10.0;100.0;SIM;;" in lines[1]
+    assert lines[1].endswith(";Proficiência indisponível;SIM")
     assert len(lines) == 2
 
 
@@ -2148,6 +2223,8 @@ def test_ica_routes_return_dashboard_and_csv(flask_app):
     body = response.get_json()
     assert body["scope"]["level"] == "turma"
     assert body["participation"]["evaluated_diagnostic"] == 2
+    assert body["kpis"]["previstos"] == 3
+    assert len(body["students"]) == 3
 
     response, status = _call_view(
         "written_test_ica_dashboard", PROFESSOR, written_test.id,
@@ -2155,6 +2232,15 @@ def test_ica_routes_return_dashboard_and_csv(flask_app):
     )
     assert status == 400
     assert response.get_json()["error"] == "A escola não faz parte desta avaliação."
+
+    response, status = _call_view(
+        "written_test_ica_proficiency", PROFESSOR, written_test.id,
+        method="POST",
+        json={"students": [{"studentId": "st-ana", "proficiencia": 800}]},
+        path=f"/afirme-reading/written-tests/{written_test.id}/ica-proficiency",
+    )
+    assert status == 200
+    assert response.get_json()["updated"] == 1
 
     response = _call_view(
         "written_test_ica_csv", PROFESSOR, written_test.id,
@@ -2164,7 +2250,8 @@ def test_ica_routes_return_dashboard_and_csv(flask_app):
     assert response.mimetype == "text/csv"
     response.direct_passthrough = False
     text = response.get_data(as_text=True)
-    assert text.split("\n")[0].startswith("aluno_id;aluno;turma;")
-    assert "st-bia" not in text
+    assert text.split("\n")[0].startswith("aluno_id;aluno;serie;turma;escola;")
+    assert "st-bia" in text
     assert "st-ana" in text
     assert "29.4" in text
+    assert "Alfabetizado" in text

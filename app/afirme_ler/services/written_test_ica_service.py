@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """Painel do Indicador Criança Alfabetizada da avaliação escrita.
 
-Lê as correções já gravadas. O município é o da sessão. O recorte desce
-escola → série → turma → aluno. Percentuais e a nota saem com uma casa.
+Calcula, grava e devolve pronto: TCT, nota da proficiência, nível, situação
+e os agregados do painel. O município é o da sessão. O recorte desce
+escola → série → turma → aluno.
 """
 from __future__ import annotations
 
 import csv
 import io
+import math
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
@@ -27,27 +30,54 @@ from app.models.student import Student
 from app.models.studentClass import Class
 
 ONE = Decimal("0.1")
+TWO = Decimal("0.01")
 TOTAL_MAX = 34
 SCORE_MIN = 70
 READING_MIN = 11
 WORDS_MIN = 2
 TEXT_MIN = 7
 TEXT_QUESTION_MAX = 14
+PROF_CUT = 743
+LEVEL_BASIC = 700
+LEVEL_ADEQUADO = 800
+LEVEL_NAMES = (
+    "Abaixo do Básico",
+    "Básico",
+    "Adequado",
+    "Avançado",
+)
+STATUS_ALFABETIZADO = "Alfabetizado"
+STATUS_NAO_ALFABETIZADO = "Não alfabetizado"
+STATUS_SEM_PROF = "Proficiência indisponível"
+STATUS_NAO_AVALIADO = "Não avaliado"
 CSV_HEADER = (
     "aluno_id",
     "aluno",
+    "serie",
     "turma",
-    "leitura",
-    "palavras",
-    "texto",
-    "total",
+    "escola",
+    "municipio",
+    "leitura_16",
+    "palavras_4",
+    "texto_14",
+    "pontos_34",
+    "nota_tct_0_10",
     "nota_100",
     "apto_diagnostico",
+    "proficiencia",
+    "nota_prof_0_10",
+    "nivel_aprendizagem",
+    "status",
+    "avaliado",
 )
 
 
 def _one(value: Decimal) -> float:
     return float(value.quantize(ONE, rounding=ROUND_HALF_UP))
+
+
+def _two(value: Decimal) -> float:
+    return float(value.quantize(TWO, rounding=ROUND_HALF_UP))
 
 
 def _pct(part: int, whole: int) -> Optional[float]:
@@ -60,11 +90,18 @@ def _score(total: int) -> float:
     return _one(Decimal(total) * Decimal(100) / Decimal(TOTAL_MAX))
 
 
-def _mean(values: List[float]) -> Optional[float]:
+def _mean_one(values: List[float]) -> Optional[float]:
     if not values:
         return None
     total = sum((Decimal(str(value)) for value in values), Decimal(0))
     return _one(total / Decimal(len(values)))
+
+
+def _mean_two(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    total = sum((Decimal(str(value)) for value in values), Decimal(0))
+    return _two(total / Decimal(len(values)))
 
 
 def _param(filters: Dict[str, Any], *keys: str) -> Optional[str]:
@@ -92,6 +129,22 @@ def _as_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", ".")
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _max_points(number: int) -> int:
@@ -133,7 +186,7 @@ def _scope_level(escola_id, serie_id, turma_id, estudante_id) -> str:
     return "municipio"
 
 
-def _item_points(stored: Dict[str, Any]) -> Dict[int, int]:
+def _item_points(stored: ReadingWrittenTestCorrection) -> Dict[int, int]:
     points: Dict[int, int] = {}
     objective = stored.objective or {}
     for item in objective.get("items") or []:
@@ -162,6 +215,114 @@ def _is_finalized(row: ReadingWrittenTestCorrection) -> bool:
     words = _as_int(writing.get("wordPoints"))
     text = _as_int(writing.get("textPoints"))
     return reading is not None and words is not None and text is not None
+
+
+def _tct_grade(points: Optional[int]) -> Optional[float]:
+    if points is None:
+        return None
+    return _two(Decimal(points) * Decimal(10) / Decimal(TOTAL_MAX))
+
+
+def _prof_grade_exact(proficiency: Optional[float]) -> Optional[float]:
+    if proficiency is None:
+        return None
+    raw = 7 + (float(proficiency) - PROF_CUT) / 50
+    return max(0.0, min(10.0, raw))
+
+
+def _prof_grade(proficiency: Optional[float]) -> Optional[float]:
+    exact = _prof_grade_exact(proficiency)
+    if exact is None:
+        return None
+    return math.floor((exact + 1e-10) * 100) / 100
+
+
+def _learning_level(proficiency: Optional[float]) -> str:
+    if proficiency is None:
+        return "Sem proficiência"
+    if proficiency < LEVEL_BASIC:
+        return "Abaixo do Básico"
+    if proficiency < PROF_CUT:
+        return "Básico"
+    if proficiency < LEVEL_ADEQUADO:
+        return "Adequado"
+    return "Avançado"
+
+
+def _status(avaliado: bool, proficiency: Optional[float]) -> str:
+    if proficiency is None:
+        return STATUS_SEM_PROF if avaliado else STATUS_NAO_AVALIADO
+    if proficiency >= PROF_CUT:
+        return STATUS_ALFABETIZADO
+    return STATUS_NAO_ALFABETIZADO
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def compute_ica_result(
+    reading: Optional[int],
+    words: Optional[int],
+    text: Optional[int],
+    proficiency: Optional[float],
+    finalized: bool,
+) -> Dict[str, Any]:
+    """Monta o bloco ICA já pronto para gravar e devolver."""
+    points = None
+    score = None
+    apt = False
+    if finalized and reading is not None and words is not None and text is not None:
+        points = reading + words + text
+        score = _score(points)
+        apt = (
+            Decimal(str(score)) >= Decimal(SCORE_MIN)
+            and reading >= READING_MIN
+            and words >= WORDS_MIN
+            and text >= TEXT_MIN
+        )
+    else:
+        reading = None
+        words = None
+        text = None
+
+    nota_tct = _tct_grade(points)
+    nota_prof_exact = _prof_grade_exact(proficiency)
+    nota_prof = _prof_grade(proficiency)
+    avaliado = points is not None or proficiency is not None
+    return {
+        "leitura_16": reading,
+        "palavras_4": words,
+        "texto_14": text,
+        "pontos_34": points,
+        "nota_100": score,
+        "nota_tct_0_10": nota_tct,
+        "apto_diagnostico": apt,
+        "proficiencia": proficiency,
+        "nota_prof_0_10": nota_prof,
+        "nota_prof_exata": nota_prof_exact,
+        "nivel_aprendizagem": _learning_level(proficiency),
+        "status": _status(avaliado, proficiency),
+        "avaliado": avaliado,
+        "finalized": finalized,
+        "computed_at": _now_iso(),
+    }
+
+
+def refresh_correction_ica(row: ReadingWrittenTestCorrection) -> Dict[str, Any]:
+    """Recalcula e grava o bloco ICA da correção. Não faz commit."""
+    stored = dict(row.ica or {})
+    proficiency = _as_float(stored.get("proficiencia"))
+    finalized = _is_finalized(row)
+    reading = words = text = None
+    if finalized:
+        reading = _as_int((row.objective or {}).get("points"))
+        writing = row.writing or {}
+        words = _as_int(writing.get("wordPoints"))
+        text = _as_int(writing.get("textPoints"))
+    result = compute_ica_result(reading, words, text, proficiency, finalized)
+    row.ica = result
+    return result
 
 
 def _skills_by_id(skill_ids: List[str]) -> Dict[str, Skill]:
@@ -203,6 +364,32 @@ def _question_catalog(written_test_id: str) -> List[Dict[str, Any]]:
             item["skill_code"] = skill.code
             item["skill_label"] = skill.description
     return catalog
+
+
+def _municipio_context() -> Dict[str, Optional[str]]:
+    from app.afirme_ler.services.written_test_pdf_service import resolve_context_city
+
+    city = resolve_context_city()
+    if city is None:
+        return {"municipio": None, "uf": None, "municipio_id": None}
+    return {
+        "municipio": city.name or None,
+        "uf": city.state or None,
+        "municipio_id": str(city.id),
+    }
+
+
+def _ensure_ica(person: Dict[str, Any], correction: Optional[ReadingWrittenTestCorrection]) -> Dict[str, Any]:
+    if correction is None:
+        return compute_ica_result(None, None, None, None, False)
+    stored = correction.ica or {}
+    if stored.get("computed_at") and "status" in stored and "nota_tct_0_10" in stored:
+        result = dict(stored)
+        if "apto_diagnostico" not in result and "apto" in result:
+            result["apto_diagnostico"] = bool(result.get("apto"))
+        return result
+    result = refresh_correction_ica(correction)
+    return result
 
 
 def _load(written_test_id: str, filters: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -275,12 +462,19 @@ def _load(written_test_id: str, filters: Optional[Dict[str, Any]]) -> Dict[str, 
         )
         corrections = {str(row.student_id): row for row in rows}
 
+    city = _municipio_context()
+    municipio_name = city["municipio"]
     people = []
+    dirty = False
     for student in students:
         klass = by_class.get(str(student.class_id))
         school = schools.get(str(klass.school_id)) if klass and klass.school_id else None
         grade = grades.get(str(klass.grade_id)) if klass and klass.grade_id else None
         correction = corrections.get(str(student.id))
+        before = dict(correction.ica or {}) if correction is not None else None
+        ica = _ensure_ica({}, correction)
+        if correction is not None and before != (correction.ica or {}):
+            dirty = True
         person = {
             "student_id": str(student.id),
             "student_name": student.name or "",
@@ -290,34 +484,21 @@ def _load(written_test_id: str, filters: Optional[Dict[str, Any]]) -> Dict[str, 
             "school_name": (school.name if school else "") or "",
             "serie_id": str(klass.grade_id) if klass and klass.grade_id else None,
             "serie_name": (grade.name if grade else "") or "",
-            "finalized": False,
-            "reading": None,
-            "words": None,
-            "text": None,
-            "score": None,
-            "apt": False,
-            "item_points": {},
+            "municipio": municipio_name,
+            "uf": city["uf"],
+            "finalized": bool(ica.get("finalized")),
+            "reading": ica.get("leitura_16"),
+            "words": ica.get("palavras_4"),
+            "text": ica.get("texto_14"),
+            "score": ica.get("nota_100"),
+            "apt": bool(ica.get("apto_diagnostico")),
+            "item_points": _item_points(correction) if correction is not None and ica.get("finalized") else {},
+            "ica": ica,
         }
-        if correction is not None and _is_finalized(correction):
-            reading = _as_int((correction.objective or {}).get("points"))
-            words = _as_int((correction.writing or {}).get("wordPoints"))
-            text = _as_int((correction.writing or {}).get("textPoints"))
-            score = _score(reading + words + text)
-            person.update({
-                "finalized": True,
-                "reading": reading,
-                "words": words,
-                "text": text,
-                "score": score,
-                "apt": (
-                    Decimal(str(score)) >= Decimal(SCORE_MIN)
-                    and reading >= READING_MIN
-                    and words >= WORDS_MIN
-                    and text >= TEXT_MIN
-                ),
-                "item_points": _item_points(correction),
-            })
         people.append(person)
+
+    if dirty:
+        db.session.commit()
 
     people.sort(key=lambda row: (row["student_name"].casefold(), row["student_id"]))
     scope = {
@@ -331,72 +512,217 @@ def _load(written_test_id: str, filters: Optional[Dict[str, Any]]) -> Dict[str, 
         "estudanteId": estudante_id,
         "estudanteName": by_student[estudante_id].name if estudante_id and estudante_id in by_student else None,
     }
-    return {"written_test": written_test, "people": people, "scope": scope}
+    return {
+        "written_test": written_test,
+        "people": people,
+        "scope": scope,
+        "municipio": municipio_name,
+        "uf": city["uf"],
+    }
+
+
+def _filter_people(people: List[Dict[str, Any]], filters: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    filters = filters or {}
+    status = _param(filters, "status")
+    nivel = _param(filters, "nivel", "nivel_aprendizagem", "nivelAprendizagem")
+    query = (_param(filters, "q", "busca", "search") or "").casefold()
+    out = []
+    for person in people:
+        ica = person["ica"]
+        if status and ica.get("status") != status:
+            continue
+        if nivel and ica.get("nivel_aprendizagem") != nivel:
+            continue
+        if query:
+            hay = " ".join([
+                person.get("student_name") or "",
+                person.get("school_name") or "",
+                person.get("class_name") or "",
+                person.get("municipio") or "",
+            ]).casefold()
+            if query not in hay:
+                continue
+        out.append(person)
+    return out
+
+
+def _stats(people: List[Dict[str, Any]]) -> Dict[str, Any]:
+    previstos = len(people)
+    avaliados = sum(1 for row in people if row["ica"].get("avaliado"))
+    with_prof = [row for row in people if row["ica"].get("proficiencia") is not None]
+    alpha = [row for row in with_prof if float(row["ica"]["proficiencia"]) >= PROF_CUT]
+    tct_values = [
+        float(row["ica"]["nota_tct_0_10"])
+        for row in people
+        if row["ica"].get("nota_tct_0_10") is not None
+    ]
+    prof_values = [float(row["ica"]["proficiencia"]) for row in with_prof]
+    nota_exact = [
+        float(row["ica"]["nota_prof_exata"])
+        for row in with_prof
+        if row["ica"].get("nota_prof_exata") is not None
+    ]
+    finalized = [row for row in people if row["ica"].get("finalized")]
+    apt = sum(1 for row in finalized if row["ica"].get("apto_diagnostico"))
+    level_counts = {name: 0 for name in LEVEL_NAMES}
+    for row in with_prof:
+        name = row["ica"].get("nivel_aprendizagem")
+        if name in level_counts:
+            level_counts[name] += 1
+    return {
+        "previstos": previstos,
+        "avaliados": avaliados,
+        "participacao_percentual": _pct(avaliados, previstos),
+        "com_proficiencia": len(with_prof),
+        "alfabetizados": len(alpha),
+        "nao_alfabetizados": len(with_prof) - len(alpha),
+        "sem_proficiencia": previstos - len(with_prof),
+        "percentual_ge_743": _pct(len(alpha), len(with_prof)),
+        "proficiencia_media": _mean_one(prof_values),
+        "nota_prof_media": _mean_two(nota_exact),
+        "nota_tct_media": _mean_two(tct_values),
+        "diagnostic_valid": len(finalized),
+        "diagnostic_apt": apt,
+        "iad_percentage": _pct(apt, len(finalized)),
+        "score_media": _mean_one([
+            float(row["ica"]["nota_100"])
+            for row in finalized
+            if row["ica"].get("nota_100") is not None
+        ]),
+        "level_counts": level_counts,
+    }
+
+
+def _kpis(stats: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "previstos": stats["previstos"],
+        "avaliados": stats["avaliados"],
+        "participacao_percentual": stats["participacao_percentual"],
+        "alfabetizados": stats["alfabetizados"],
+        "nao_alfabetizados": stats["nao_alfabetizados"],
+        "sem_proficiencia": stats["sem_proficiencia"],
+        "percentual_ge_743": stats["percentual_ge_743"],
+        "proficiencia_media": stats["proficiencia_media"],
+        "nota_prof_media": stats["nota_prof_media"],
+        "nota_tct_media": stats["nota_tct_media"],
+    }
+
+
+def _levels_payload(stats: Dict[str, Any]) -> Dict[str, Any]:
+    validos = stats["com_proficiencia"]
+    items = []
+    for name in LEVEL_NAMES:
+        count = stats["level_counts"].get(name, 0)
+        items.append({
+            "name": name,
+            "count": count,
+            "percentage": _pct(count, validos),
+        })
+    return {"validos": validos, "items": items}
 
 
 def _cards(people: List[Dict[str, Any]]) -> Dict[str, Any]:
-    finalized = [row for row in people if row["finalized"]]
-    expected = len(people)
-    evaluated = len(finalized)
-    apt = sum(1 for row in finalized if row["apt"])
+    stats = _stats(people)
+    imported = stats["com_proficiencia"]
+    ica_percentage = stats["percentual_ge_743"]
+    if imported <= 0:
+        proficiency_status = "SEM_DADOS"
+    else:
+        proficiency_status = "COM_DADOS"
     return {
         "participation": {
-            "expected": expected,
-            "evaluated_diagnostic": evaluated,
-            "percentage": _pct(evaluated, expected),
+            "expected": stats["previstos"],
+            "evaluated_diagnostic": stats["diagnostic_valid"],
+            "percentage": _pct(stats["diagnostic_valid"], stats["previstos"]),
         },
         "diagnostic": {
-            "valid": evaluated,
-            "apt": apt,
-            "iad_percentage": _pct(apt, evaluated),
+            "valid": stats["diagnostic_valid"],
+            "apt": stats["diagnostic_apt"],
+            "iad_percentage": stats["iad_percentage"],
         },
         "proficiency_inep": {
-            "imported_valid": 0,
-            "ica_percentage": None,
-            "status": "SEM_DADOS",
+            "imported_valid": imported,
+            "ica_percentage": ica_percentage,
+            "status": proficiency_status,
         },
+        "kpis": _kpis(stats),
+        "niveis": _levels_payload(stats),
+        "_stats": stats,
+    }
+
+
+def _student_public(person: Dict[str, Any]) -> Dict[str, Any]:
+    ica = person["ica"]
+    return {
+        "id": person["student_id"],
+        "rowLevel": "aluno",
+        "student_id": person["student_id"],
+        "aluno": person["student_name"],
+        "student_name": person["student_name"],
+        "serie_id": person["serie_id"],
+        "serie": person["serie_name"],
+        "serie_name": person["serie_name"],
+        "class_id": person["class_id"],
+        "turma": person["class_name"],
+        "class_name": person["class_name"],
+        "school_id": person["school_id"],
+        "escola": person["school_name"],
+        "school_name": person["school_name"],
+        "municipio": person.get("municipio"),
+        "uf": person.get("uf"),
+        "leitura_16": ica.get("leitura_16"),
+        "palavras_4": ica.get("palavras_4"),
+        "texto_14": ica.get("texto_14"),
+        "pontos_34": ica.get("pontos_34"),
+        "reading": ica.get("leitura_16"),
+        "words": ica.get("palavras_4"),
+        "text": ica.get("texto_14"),
+        "score": ica.get("nota_100"),
+        "nota_100": ica.get("nota_100"),
+        "nota_tct_0_10": ica.get("nota_tct_0_10"),
+        "nota_prof_0_10": ica.get("nota_prof_0_10"),
+        "nota_prof_exata": ica.get("nota_prof_exata"),
+        "proficiencia": ica.get("proficiencia"),
+        "nivel_aprendizagem": ica.get("nivel_aprendizagem"),
+        "status": ica.get("status"),
+        "avaliado": bool(ica.get("avaliado")),
+        "finalized": bool(ica.get("finalized")),
+        "apto": bool(ica.get("apto_diagnostico")),
+        "apto_diagnostico": bool(ica.get("apto_diagnostico")),
     }
 
 
 def _group_row(people: List[Dict[str, Any]], row_id: str, name: str, row_level: str, **extra) -> Dict[str, Any]:
-    cards = _cards(people)
-    finalized = [row for row in people if row["finalized"]]
+    stats = _stats(people)
     payload = {
         "id": row_id,
         "name": name,
         "rowLevel": row_level,
-        "expected": cards["participation"]["expected"],
-        "evaluated_diagnostic": cards["participation"]["evaluated_diagnostic"],
-        "percentage": cards["participation"]["percentage"],
-        "apt": cards["diagnostic"]["apt"],
-        "iad_percentage": cards["diagnostic"]["iad_percentage"],
-        "score": _mean([row["score"] for row in finalized if row["score"] is not None]),
+        "expected": stats["previstos"],
+        "evaluated_diagnostic": stats["diagnostic_valid"],
+        "percentage": _pct(stats["diagnostic_valid"], stats["previstos"]),
+        "apt": stats["diagnostic_apt"],
+        "iad_percentage": stats["iad_percentage"],
+        "score": stats["score_media"],
+        "previstos": stats["previstos"],
+        "avaliados": stats["avaliados"],
+        "participacao_percentual": stats["participacao_percentual"],
+        "alfabetizados": stats["alfabetizados"],
+        "percentual_ge_743": stats["percentual_ge_743"],
+        "niveis": dict(stats["level_counts"]),
+        "nota_tct_media": stats["nota_tct_media"],
+        "nota_prof_media": stats["nota_prof_media"],
+        "proficiencia_media": stats["proficiencia_media"],
     }
     payload.update(extra)
     return payload
 
 
-def _student_row(person: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "id": person["student_id"],
-        "rowLevel": "aluno",
-        "student_id": person["student_id"],
-        "student_name": person["student_name"],
-        "class_id": person["class_id"],
-        "class_name": person["class_name"],
-        "reading": person["reading"],
-        "words": person["words"],
-        "text": person["text"],
-        "score": person["score"],
-        "apt": person["apt"] if person["finalized"] else False,
-    }
-
-
 def _rows(level: str, people: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if level == "aluno":
-        return [_student_row(people[0])] if people else []
+        return [_student_public(people[0])] if people else []
     if level == "turma":
-        return [_student_row(row) for row in people if row["finalized"]]
+        return [_student_public(row) for row in people]
 
     if level == "municipio":
         key_name = "school_id"
@@ -432,9 +758,8 @@ def _rows(level: str, people: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _student_detail(person: Dict[str, Any], catalog: List[Dict[str, Any]]) -> Dict[str, Any]:
-    detail = _student_row(person)
+    detail = _student_public(person)
     detail.update({
-        "finalized": person["finalized"],
         "school_id": person["school_id"],
         "school_name": person["school_name"],
         "serie_id": person["serie_id"],
@@ -456,16 +781,24 @@ def _student_detail(person: Dict[str, Any], catalog: List[Dict[str, Any]]) -> Di
 
 def ica_dashboard(written_test_id: str, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     loaded = _load(written_test_id, filters)
-    people = loaded["people"]
+    people = _filter_people(loaded["people"], filters)
     scope = loaded["scope"]
-    payload = _cards(people)
-    payload.update({
+    cards = _cards(people)
+    payload = {
         "writtenTestId": str(loaded["written_test"].id),
         "title": loaded["written_test"].title,
         "scope": scope,
+        "municipio": loaded["municipio"],
+        "uf": loaded["uf"],
+        "participation": cards["participation"],
+        "diagnostic": cards["diagnostic"],
+        "proficiency_inep": cards["proficiency_inep"],
+        "kpis": cards["kpis"],
+        "niveis": cards["niveis"],
         "rows": _rows(scope["level"], people),
+        "students": [_student_public(row) for row in people],
         "student": None,
-    })
+    }
     if scope["level"] == "aluno" and people:
         payload["student"] = _student_detail(people[0], _question_catalog(written_test_id))
     return payload
@@ -520,22 +853,118 @@ def skill_map(written_test_id: str, filters: Optional[Dict[str, Any]] = None) ->
 
 def ica_csv(written_test_id: str, filters: Optional[Dict[str, Any]] = None) -> tuple:
     loaded = _load(written_test_id, filters)
+    people = _filter_people(loaded["people"], filters)
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";", lineterminator="\n")
     writer.writerow(CSV_HEADER)
-    for person in loaded["people"]:
-        if not person["finalized"]:
-            continue
+    for person in people:
+        ica = person["ica"]
+
+        def cell(value: Any) -> str:
+            if value is None:
+                return ""
+            if value is True:
+                return "SIM"
+            if value is False:
+                return "NAO"
+            return value
+
         writer.writerow([
             person["student_id"],
             person["student_name"],
+            person["serie_name"],
             person["class_name"],
-            person["reading"],
-            person["words"],
-            person["text"],
-            person["reading"] + person["words"] + person["text"],
-            f"{person['score']:.1f}",
-            "SIM" if person["apt"] else "NAO",
+            person["school_name"],
+            person.get("municipio") or "",
+            cell(ica.get("leitura_16")),
+            cell(ica.get("palavras_4")),
+            cell(ica.get("texto_14")),
+            cell(ica.get("pontos_34")),
+            cell(ica.get("nota_tct_0_10")),
+            cell(ica.get("nota_100")),
+            "SIM" if ica.get("apto_diagnostico") else "NAO",
+            cell(ica.get("proficiencia")),
+            cell(ica.get("nota_prof_0_10")),
+            cell(ica.get("nivel_aprendizagem")),
+            cell(ica.get("status")),
+            "SIM" if ica.get("avaliado") else "NAO",
         ])
-    filename = "resultados_ica.csv"
-    return buffer.getvalue().encode("utf-8"), filename
+    return buffer.getvalue().encode("utf-8"), "resultados_ica.csv"
+
+
+def _correction_row(written_test_id: str, student_id: str) -> ReadingWrittenTestCorrection:
+    row = ReadingWrittenTestCorrection.query.filter_by(
+        written_test_id=str(written_test_id), student_id=str(student_id),
+    ).first()
+    if row is None:
+        row = ReadingWrittenTestCorrection(
+            written_test_id=str(written_test_id),
+            student_id=str(student_id),
+            answers={},
+            blank=[],
+            invalid=[],
+            crops={},
+            pages=[],
+            objective={},
+            writing={},
+            ica={},
+        )
+        db.session.add(row)
+    return row
+
+
+def upsert_proficiency(
+    written_test_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Grava a proficiência por aluno, recalcula o ICA e devolve o resumo."""
+    written_test = db.session.get(ReadingWrittenTest, str(written_test_id))
+    if written_test is None:
+        raise LookupError("Avaliação escrita não encontrada.")
+    if not isinstance(payload, dict):
+        raise ValueError("Corpo da requisição inválido.")
+    items = payload.get("students")
+    if not isinstance(items, list) or not items:
+        raise ValueError("students é obrigatório e deve ser uma lista.")
+
+    class_ids = set(_class_ids(written_test))
+    updated = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"students[{index}] deve ser um objeto.")
+        student_id = str(item.get("studentId") or item.get("student_id") or "").strip()
+        if not student_id:
+            raise ValueError(f"students[{index}].studentId é obrigatório.")
+        student = db.session.get(Student, student_id)
+        if student is None:
+            raise LookupError(f"Aluno não encontrado: {student_id}")
+        if str(student.class_id) not in class_ids:
+            raise ValueError(f"O aluno {student_id} não está no recorte desta avaliação.")
+        if "proficiencia" not in item and "proficiency" not in item:
+            raise ValueError(f"students[{index}].proficiencia é obrigatório.")
+        raw = item.get("proficiencia", item.get("proficiency"))
+        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+            proficiency = None
+        else:
+            proficiency = _as_float(raw)
+            if proficiency is None:
+                raise ValueError(f"students[{index}].proficiencia inválida.")
+        row = _correction_row(written_test_id, student_id)
+        stored = dict(row.ica or {})
+        stored["proficiencia"] = proficiency
+        row.ica = stored
+        result = refresh_correction_ica(row)
+        updated.append({
+            "student_id": student_id,
+            "aluno": student.name or "",
+            "proficiencia": result.get("proficiencia"),
+            "nota_prof_0_10": result.get("nota_prof_0_10"),
+            "nivel_aprendizagem": result.get("nivel_aprendizagem"),
+            "status": result.get("status"),
+        })
+    db.session.commit()
+    return {
+        "writtenTestId": str(written_test.id),
+        "updated": len(updated),
+        "students": updated,
+    }

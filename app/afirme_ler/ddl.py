@@ -426,6 +426,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_correction (
     pages JSON NOT NULL DEFAULT '[]'::json,
     objective JSON NOT NULL DEFAULT '{{}}'::json,
     writing JSON NOT NULL DEFAULT '{{}}'::json,
+    ica JSON NOT NULL DEFAULT '{{}}'::json,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_reading_written_test_correction UNIQUE (written_test_id, student_id)
@@ -434,6 +435,8 @@ ALTER TABLE "{schema}".reading_written_test_correction
     ADD COLUMN IF NOT EXISTS objective JSON NOT NULL DEFAULT '{{}}'::json;
 ALTER TABLE "{schema}".reading_written_test_correction
     ADD COLUMN IF NOT EXISTS writing JSON NOT NULL DEFAULT '{{}}'::json;
+ALTER TABLE "{schema}".reading_written_test_correction
+    ADD COLUMN IF NOT EXISTS ica JSON NOT NULL DEFAULT '{{}}'::json;
 CREATE INDEX IF NOT EXISTS ix_reading_written_test_correction_test
     ON "{schema}".reading_written_test_correction(written_test_id);
 COMMENT ON TABLE "{schema}".reading_written_test_correction IS 'Leitura do cartão-resposta da avaliação escrita: letras das objetivas, imagens e nota do ditado e do bilhete';
@@ -441,4 +444,5 @@ COMMENT ON COLUMN "{schema}".reading_written_test_correction.answers IS 'Letra m
 COMMENT ON COLUMN "{schema}".reading_written_test_correction.crops IS 'Recortes PNG do ditado e do bilhete no MinIO, por question_id';
 COMMENT ON COLUMN "{schema}".reading_written_test_correction.objective IS 'Nota das 16 objetivas calculada pelo gabarito, sem participação da IA';
 COMMENT ON COLUMN "{schema}".reading_written_test_correction.writing IS 'Nota do ditado e do bilhete: IA quando há cartão, ou lançamento manual do professor';
+COMMENT ON COLUMN "{schema}".reading_written_test_correction.ica IS 'Resultado do painel ICA já calculado: TCT, proficiência, nível e situação';
 """

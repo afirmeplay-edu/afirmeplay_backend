@@ -172,6 +172,8 @@ class ReadingWrittenTestCorrection(db.Model):
     objective = db.Column(db.JSON, nullable=False, default=dict)
     # Nota do ditado e do bilhete: IA quando o cartão foi enviado, ou lançamento do professor.
     writing = db.Column(db.JSON, nullable=False, default=dict)
+    # Resultado do painel ICA já calculado (TCT, proficiência, nível, situação).
+    ica = db.Column(db.JSON, nullable=False, default=dict)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text("CURRENT_TIMESTAMP"))
     updated_at = db.Column(
         db.TIMESTAMP,

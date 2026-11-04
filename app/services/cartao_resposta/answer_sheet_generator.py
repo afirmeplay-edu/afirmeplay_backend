@@ -1240,8 +1240,9 @@ class AnswerSheetGenerator:
             # Linhas: font-size 7pt. O X do valor é a largura real do rótulo em negrito.
             # ========================================================================
             
-            # X do valor = início do rótulo + largura real do rótulo em negrito + um espaço.
-            # O rótulo no HTML é Helvetica 7pt bold. O valor fica colado, como ESTADO e MUNICÍPIO.
+            # X do valor = início do rótulo + largura real do rótulo em negrito + 5pt.
+            # Espelha .header-info-line .label { margin-right: 5pt } do answer_sheet.html.
+            # NÃO usar X fixo único (quebrava rótulos longos como NOME COMPLETO).
             # Base: padding(56.69) + border(0.75) + padding_header(3) = 60.44pt
             from reportlab.pdfbase.pdfmetrics import stringWidth
 
@@ -1249,19 +1250,19 @@ class AnswerSheetGenerator:
             FONT_NAME = 'Helvetica'
             LABEL_FONT = 'Helvetica-Bold'
             FONT_SIZE = 7            # 7pt (mesmo do CSS)
-            SCHOOL_MIN_SIZE = 5.5
+            LABEL_VALUE_GAP = 5.0     # pt — mesmo margin-right do CSS do rótulo
+            VALUE_MIN_SIZE = 5.5
             FONT_COLOR = HexColor('#374151')
 
             def _x_after_label(label: str) -> float:
-                gap = stringWidth(' ', FONT_NAME, FONT_SIZE)
-                return X_BASE + stringWidth(label, LABEL_FONT, FONT_SIZE) + gap
+                return X_BASE + stringWidth(label, LABEL_FONT, FONT_SIZE) + LABEL_VALUE_GAP
 
             X_NOME = _x_after_label('NOME COMPLETO:')
             X_ESCOLA = _x_after_label('ESCOLA:')
             X_TURMA = _x_after_label('TURMA:')
             X_TURNO = _x_after_label('TURNO:')
             
-            # COORDENADAS Y (validadas das provas físicas)
+            # COORDENADAS Y (validadas das provas físicas) — NÃO alterar (OMR/leitura)
             Y_PDF_NAME = 780.16      # Baseline do NOME COMPLETO (linha 2)
             Y_PDF_SCHOOL = 744.31    # Baseline da ESCOLA (linha 5, após ESTADO e MUNICÍPIO)
             Y_PDF_TURMA = 732.36     # Baseline da TURMA (linha 6, 1 linha abaixo de ESCOLA)
@@ -1287,8 +1288,8 @@ class AnswerSheetGenerator:
                     trimmed = trimmed[:-1]
                 return (trimmed.rstrip() + ell) if trimmed else ell
 
-            def _fit_school_line(text: str, max_width: float):
-                """Uma linha só: reduz a fonte até 5,5 pt e só então corta."""
+            def _fit_value_line(text: str, max_width: float):
+                """Uma linha: reduz fonte até 5,5 pt; se ainda não couber, abrevia com '...'."""
                 text = (text or '').strip()
                 if not text:
                     return '', FONT_SIZE
@@ -1296,21 +1297,18 @@ class AnswerSheetGenerator:
                 while True:
                     if max_width > 0 and stringWidth(text, FONT_NAME, size) <= max_width:
                         return text, size
-                    if size <= SCHOOL_MIN_SIZE:
-                        return _clip_to_width(text, FONT_NAME, SCHOOL_MIN_SIZE, max_width), SCHOOL_MIN_SIZE
+                    if size <= VALUE_MIN_SIZE:
+                        return _clip_to_width(text, FONT_NAME, VALUE_MIN_SIZE, max_width), VALUE_MIN_SIZE
                     size = round(size - 0.25, 2)
-                    if size < SCHOOL_MIN_SIZE:
-                        size = SCHOOL_MIN_SIZE
+                    if size < VALUE_MIN_SIZE:
+                        size = VALUE_MIN_SIZE
 
             # ========================================================================
             # EXTRAIR E FORMATAR DADOS DO ALUNO
             # ========================================================================
             
-            # Nome do aluno (NOME COMPLETO) — 7 pt, corta só se for invadir o QR
-            student_name = _clip_to_width(
+            student_name, name_size = _fit_value_line(
                 (student.get('name') or student.get('nome') or '').upper(),
-                FONT_NAME,
-                FONT_SIZE,
                 TEXT_RIGHT - X_NOME,
             )
             
@@ -1319,7 +1317,7 @@ class AnswerSheetGenerator:
             if school_name_is_missing(raw_school):
                 school_text, school_size = '', FONT_SIZE
             else:
-                school_text, school_size = _fit_school_line(
+                school_text, school_size = _fit_value_line(
                     raw_school.upper(),
                     TEXT_RIGHT - X_ESCOLA,
                 )
@@ -1337,24 +1335,28 @@ class AnswerSheetGenerator:
                 turma_raw = grade_name
             else:
                 turma_raw = class_name
-            turma_display = _clip_to_width(
+            turma_display, turma_size = _fit_value_line(
                 turma_raw.upper(),
-                FONT_NAME,
-                FONT_SIZE,
                 TEXT_RIGHT - X_TURMA,
             )
             # Texto do cadastro (Manhã, Tarde, Integral, Noturno). Vazio = não desenha.
-            shift_display = (student.get('shift') or '').strip()
+            shift_raw = (student.get('shift') or '').strip()
+            if shift_raw:
+                shift_display, shift_size = _fit_value_line(
+                    shift_raw.upper(),
+                    TEXT_RIGHT - X_TURNO,
+                )
+            else:
+                shift_display, shift_size = '', FONT_SIZE
 
             # ========================================================================
             # DESENHAR TEXTOS NO OVERLAY
             # ========================================================================
             
-            c.setFont(FONT_NAME, FONT_SIZE)
             c.setFillColor(FONT_COLOR)
             
             if student_name:
-                c.setFont(FONT_NAME, FONT_SIZE)
+                c.setFont(FONT_NAME, name_size)
                 c.drawString(X_NOME, Y_PDF_NAME, student_name)
             
             if school_text:
@@ -1362,11 +1364,11 @@ class AnswerSheetGenerator:
                 c.drawString(X_ESCOLA, Y_PDF_SCHOOL, school_text)
             
             if turma_display:
-                c.setFont(FONT_NAME, FONT_SIZE)
+                c.setFont(FONT_NAME, turma_size)
                 c.drawString(X_TURMA, Y_PDF_TURMA, turma_display)
 
             if shift_display:
-                c.setFont(FONT_NAME, FONT_SIZE)
+                c.setFont(FONT_NAME, shift_size)
                 c.drawString(X_TURNO, Y_PDF_TURNO, shift_display)
 
             # ========================================================================

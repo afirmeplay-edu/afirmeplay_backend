@@ -1790,70 +1790,97 @@ class InstitutionalTestWeasyPrintGenerator:
             # Coordenadas em pt derivadas do CSS do template (institutional_test_hybrid.html)
             # Origem ReportLab: canto inferior esquerdo da página A4 (595.28 x 841.89 pt)
             #
-            # Cálculo base:
-            #   @page answer-sheet-omr { margin: 0 }
-            #   .answer-sheet { padding: 1.2cm 2cm ... }  → conteúdo começa em x=56.69pt, y_top=34.02pt
-            #   .answer-sheet-header { border:1px; padding:4px } → conteúdo em x=60.44pt, y_top=37.77pt
-            #   .header-info-line { font-size:7pt; line-height:1.6 } → linha=11.2pt, margem=0.375pt
-            #   .header-info-line .label { min-width:120px=90pt; display:inline-block }
-            #     → valor começa sempre em x = 60.44 + 90 = 150.44pt ≈ X_TEXT
-            #
-            # Linha 1 (NOME DA PROVA)  : baseline ≈ 48.7pt do topo  → ~793pt do rodapé
-            # Linha 2 (NOME COMPLETO)  : baseline ≈ 61.7pt do topo  → Y_PDF_NAME
-            # Linha 3 (ESTADO)         : baseline ≈ 73.7pt do topo  → estático, não sobreposto
-            # Linha 4 (MUNICÍPIO)      : baseline ≈ 85.6pt do topo  → estático, não sobreposto
-            # Linha 5 (ESCOLA)         : baseline ≈ 97.6pt do topo  → Y_PDF_SCHOOL
-            # Linha 6 (TURMA)          : baseline ≈ 109.5pt do topo → Y_PDF_TURMA
-            #
-            # QR: .header-right (width=140px=105pt, padding-left=10px, border-left=1px)
-            #     .qr-code-box (120px=90pt, box-sizing:border-box, border:1px) centralizado
-            # X_TEXT: conteúdo começa em 60.44pt (left padding+border+padding do header)
-            #         + min-width do label: 100px = 75pt → X_TEXT = 60.44 + 75 = 135.44pt
-            X_TEXT = 135.44
+            # X do valor = X_BASE + largura real do rótulo (Helvetica-Bold 7pt) + 5pt
+            # (mesmo margin-right do .header-info-line .label). Sem X fixo de coluna.
+            # Y/QR inalterados — não mexer na leitura OMR.
+            from reportlab.pdfbase.pdfmetrics import stringWidth
+
+            X_BASE = 60.44
+            LABEL_VALUE_GAP = 5.0
+            FONT_NAME = 'Helvetica'
+            LABEL_FONT = 'Helvetica-Bold'
+            FONT_SIZE = 7
+            VALUE_MIN_SIZE = 5.5
+            FONT_COLOR = HexColor('#374151')
+
+            def _x_after_label(label: str) -> float:
+                return X_BASE + stringWidth(label, LABEL_FONT, FONT_SIZE) + LABEL_VALUE_GAP
+
+            X_NOME = _x_after_label('NOME COMPLETO:')
+            X_ESCOLA = _x_after_label('ESCOLA:')
+            X_TURMA = _x_after_label('TURMA:')
+
             Y_PDF_NAME   = 780.16  # baseline NOME COMPLETO  (linha 2)
             Y_PDF_SCHOOL = 744.31  # baseline ESCOLA          (linha 5, após ESTADO e MUNICÍPIO)
             Y_PDF_TURMA  = 732.36  # baseline TURMA           (linha 6, 1 linha abaixo de ESCOLA)
             QR_X = 441.46          # borda esquerda do qr-code-box
             QR_Y = 680.77          # borda inferior do qr-code-box
             QR_SIZE = 90
+            TEXT_RIGHT = QR_X - 6
 
-            FONT_NAME = 'Helvetica'
-            FONT_SIZE = 7
-            FONT_COLOR = HexColor('#374151')
-            MAX_TEXT_WIDTH_CHARS = 50
+            def _clip_to_width(text: str, font: str, size: float, max_width: float) -> str:
+                text = (text or '').strip()
+                if not text or max_width <= 0:
+                    return ''
+                if stringWidth(text, font, size) <= max_width:
+                    return text
+                ell = '...'
+                if stringWidth(ell, font, size) > max_width:
+                    return ''
+                trimmed = text
+                while trimmed and stringWidth(trimmed + ell, font, size) > max_width:
+                    trimmed = trimmed[:-1]
+                return (trimmed.rstrip() + ell) if trimmed else ell
 
-            def _truncate(s: str, max_chars: int = MAX_TEXT_WIDTH_CHARS) -> str:
-                s = (s or '').strip()
-                if len(s) <= max_chars:
-                    return s
-                return s[: max_chars - 1] + '…'
+            def _fit_value_line(text: str, max_width: float):
+                text = (text or '').strip()
+                if not text:
+                    return '', FONT_SIZE
+                size = float(FONT_SIZE)
+                while True:
+                    if max_width > 0 and stringWidth(text, FONT_NAME, size) <= max_width:
+                        return text, size
+                    if size <= VALUE_MIN_SIZE:
+                        return _clip_to_width(text, FONT_NAME, VALUE_MIN_SIZE, max_width), VALUE_MIN_SIZE
+                    size = round(size - 0.25, 2)
+                    if size < VALUE_MIN_SIZE:
+                        size = VALUE_MIN_SIZE
 
-            student_name = _truncate(student.get('name') or student.get('nome') or '')
+            student_name, name_size = _fit_value_line(
+                (student.get('name') or student.get('nome') or '').upper(),
+                TEXT_RIGHT - X_NOME,
+            )
             raw_school = (student.get('school_name') or '').strip()
             upper_school = raw_school.upper()
             if raw_school and 'NÃO INFORMADO' not in upper_school:
-                school_name = _truncate(raw_school)
+                school_name, school_size = _fit_value_line(upper_school, TEXT_RIGHT - X_ESCOLA)
             else:
-                school_name = ''
+                school_name, school_size = '', FONT_SIZE
             class_name = (student.get('class_name') or student.get('turma') or '').strip()
             grade_name = ((test_data or {}).get('grade_name') or '').strip()
             # Monta o valor completo de TURMA idêntico ao template:
             # "grade_name - class_name" → espelha {{ test_data.grade_name }} - {{ student.class_name }}
             if grade_name and class_name:
-                turma_display = _truncate(f"{grade_name} - {class_name}")
+                turma_raw = f"{grade_name} - {class_name}"
             elif grade_name:
-                turma_display = _truncate(grade_name)
+                turma_raw = grade_name
             else:
-                turma_display = _truncate(class_name)
+                turma_raw = class_name
+            turma_display, turma_size = _fit_value_line(
+                turma_raw.upper(),
+                TEXT_RIGHT - X_TURMA,
+            )
 
-            c.setFont(FONT_NAME, FONT_SIZE)
             c.setFillColor(FONT_COLOR)
             if student_name:
-                c.drawString(X_TEXT, Y_PDF_NAME, student_name.upper())
+                c.setFont(FONT_NAME, name_size)
+                c.drawString(X_NOME, Y_PDF_NAME, student_name)
             if school_name:
-                c.drawString(X_TEXT, Y_PDF_SCHOOL, school_name.upper())
+                c.setFont(FONT_NAME, school_size)
+                c.drawString(X_ESCOLA, Y_PDF_SCHOOL, school_name)
             if turma_display:
-                c.drawString(X_TEXT, Y_PDF_TURMA, turma_display.upper())
+                c.setFont(FONT_NAME, turma_size)
+                c.drawString(X_TURMA, Y_PDF_TURMA, turma_display)
 
             # Prova física é a avaliação: só student_id e test_id, 12 primeiros caracteres.
             student_id = str(student.get('id', ''))[:12]

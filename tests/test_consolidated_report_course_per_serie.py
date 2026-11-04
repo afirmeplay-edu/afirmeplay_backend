@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """Curso por série e ordem estável no Relatório Geral (consolidado)."""
 
+from types import SimpleNamespace
+
 from app.services.consolidated_report_service import (
     _annotate_proficiency_level_labels,
     _course_name_for_serie,
     _order_rows_by_requested_ids,
+    _turma_para_nota_do_consolidado,
     _unique_course_names_from_series_colunas,
 )
 from app.services.evaluation_calculator import EvaluationCalculator
@@ -112,3 +115,21 @@ def test_grade_formula_differs_by_serie_course():
     )
     assert nota_iniciais != nota_finais
     assert _course_name_for_serie("9º Ano") == "Anos Finais"
+
+
+def test_quem_saiu_entra_na_turma_do_snapshot():
+    escopo = {"turma-a", "turma-b"}
+    saiu = SimpleNamespace(id="maria", class_id=None)
+    assert _turma_para_nota_do_consolidado(saiu, escopo, ["turma-a"]) == "turma-a"
+
+
+def test_quem_ainda_esta_na_turma_nao_muda_de_lugar():
+    escopo = {"turma-a", "turma-b"}
+    atual = SimpleNamespace(id="ana", class_id="turma-b")
+    assert _turma_para_nota_do_consolidado(atual, escopo, ["turma-a"]) == "turma-b"
+
+
+def test_snapshot_fora_da_prova_nao_entra():
+    escopo = {"turma-a"}
+    saiu = SimpleNamespace(id="joao", class_id=None)
+    assert _turma_para_nota_do_consolidado(saiu, escopo, ["outra-escola"]) is None

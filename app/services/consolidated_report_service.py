@@ -2250,6 +2250,50 @@ def _fetch_digital_class_tests(
     return q.options(joinedload(ClassTest.class_).joinedload(Class.grade)).all()
 
 
+def _turma_para_nota_do_consolidado(
+    student: Any,
+    scope_classes: Set[str],
+    snapshot_classes: List[str],
+) -> Optional[str]:
+    """Turma da nota: a atual, se ainda está na prova; senão a do snapshot.
+
+    Quem saiu da escola continua na turma em que fez a prova. Quem ainda está
+    numa turma do recorte permanece nela, uma vez só.
+    """
+    current = str(getattr(student, "class_id", "") or "")
+    if current and current in scope_classes:
+        return current
+    for snap in sorted({str(item) for item in snapshot_classes if item}):
+        if snap in scope_classes:
+            return snap
+    return None
+
+
+def _snapshots_de_turma_no_escopo(
+    test_ids: List[str],
+    student_ids: List[Any],
+    scope_classes: Set[str],
+) -> Dict[str, List[str]]:
+    """class_id_snapshot das provas, só das turmas que aplicaram o recorte."""
+    if not test_ids or not student_ids or not scope_classes:
+        return {}
+    rows = (
+        db.session.query(EvaluationResult.student_id, EvaluationResult.class_id_snapshot)
+        .filter(EvaluationResult.test_id.in_(test_ids))
+        .filter(EvaluationResult.student_id.in_(student_ids))
+        .filter(EvaluationResult.class_id_snapshot.isnot(None))
+        .all()
+    )
+    out: Dict[str, List[str]] = defaultdict(list)
+    for student_id, snap_class in rows:
+        sid = str(student_id or "")
+        snap = str(snap_class or "")
+        if not sid or snap not in scope_classes or snap in out[sid]:
+            continue
+        out[sid].append(snap)
+    return out
+
+
 def _students_by_class_for_digital(
     test_ids: List[str],
     escopo: Dict[str, Any],
@@ -2257,7 +2301,8 @@ def _students_by_class_for_digital(
 ) -> Dict[str, List[Student]]:
     base_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
     base_ids = {str(s.id) for s in base_students}
-    merged_ids = merge_participant_student_ids([str(t) for t in test_ids], escopo, class_ids, base_ids)
+    test_id_list = [str(t) for t in test_ids if t]
+    merged_ids = merge_participant_student_ids(test_id_list, escopo, class_ids, base_ids)
     all_students = (
         Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
         .filter(Student.id.in_(merged_ids))
@@ -2265,10 +2310,26 @@ def _students_by_class_for_digital(
         if merged_ids
         else []
     )
+    scope_classes = {str(cid) for cid in class_ids if cid}
+    sem_turma_no_escopo: List[Student] = []
+    for st in all_students:
+        current = str(st.class_id) if st.class_id else ""
+        if not current or current not in scope_classes:
+            sem_turma_no_escopo.append(st)
+    snapshots = _snapshots_de_turma_no_escopo(
+        test_id_list,
+        [st.id for st in sem_turma_no_escopo],
+        scope_classes,
+    )
     students_by_class: Dict[str, List[Student]] = defaultdict(list)
     for st in all_students:
-        if st.class_id:
-            students_by_class[str(st.class_id)].append(st)
+        turma = _turma_para_nota_do_consolidado(
+            st,
+            scope_classes,
+            snapshots.get(str(st.id), []),
+        )
+        if turma:
+            students_by_class[turma].append(st)
     return students_by_class
 
 

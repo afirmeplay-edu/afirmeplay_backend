@@ -1348,6 +1348,9 @@ def release_writing(written_test_id: str, student_id: str, reviewer_id: str) -> 
         "liberacao", reviewer_id, stored, decision="liberada",
     ))
     row.writing = stored
+    from app.afirme_ler.services.written_test_ica_service import refresh_correction_ica
+
+    refresh_correction_ica(row)
     db.session.commit()
     return _student_result(row, student)
 
@@ -1392,6 +1395,9 @@ def save_manual_writing(written_test_id: str, student_id: str, payload: Dict[str
     stored["audit"] = [_audit_entry("lancamento_manual", reviewer_id, stored, "lancamento_manual")]
     row = _correction_row(written_test_id, student_id)
     row.writing = stored
+    from app.afirme_ler.services.written_test_ica_service import refresh_correction_ica
+
+    refresh_correction_ica(row)
     db.session.commit()
     return {
         "correctionId": row.id,

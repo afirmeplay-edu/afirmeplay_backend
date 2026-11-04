@@ -484,7 +484,7 @@ def release_written_test_writing(written_test_id):
 @role_required(*AFIRME_LER_ROLES)
 @requires_city_context
 def written_test_ica_dashboard(written_test_id):
-    """Participação, IAD e o recorte município, escola, série, turma ou aluno."""
+    """Painel ICA com KPIs, níveis, grupos e alunos já calculados."""
     from app.afirme_ler.services.written_test_ica_service import ica_dashboard
 
     user = get_current_user_from_token()
@@ -522,7 +522,7 @@ def written_test_skill_map(written_test_id):
 @role_required(*AFIRME_LER_ROLES)
 @requires_city_context
 def written_test_ica_csv(written_test_id):
-    """CSV dos alunos finalizados no recorte atual."""
+    """CSV do painel ICA no recorte atual (inclui não avaliados)."""
     from app.afirme_ler.services.written_test_ica_service import ica_csv
 
     user = get_current_user_from_token()

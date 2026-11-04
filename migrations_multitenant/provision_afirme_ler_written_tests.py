@@ -143,14 +143,18 @@ def main() -> int:
 
     ok = failed = 0
     for schema, tables, _ in plan:
-        if not tables:
+        # Sempre aplica o DDL: CREATE IF NOT EXISTS + ADD COLUMN IF NOT EXISTS.
+        # Se as tabelas já existem, tables fica vazio na simulação, mas ainda
+        # precisamos rodar os ALTER (ex.: coluna ica).
+        if args.rollback and not tables:
             ok += 1
             continue
         ddl = _drop_ddl(schema) if args.rollback else get_afirme_ler_written_test_tables_ddl(schema)
         try:
             with engine.begin() as conn:
                 conn.exec_driver_sql(ddl)
-            print(f"OK: {schema}")
+            detail = ", ".join(tables) if tables else "DDL/ALTER aplicado"
+            print(f"OK: {schema} ({detail})")
             ok += 1
         except Exception as exc:
             failed += 1

@@ -497,28 +497,6 @@ def written_test_ica_dashboard(written_test_id):
         return _handle_service_error(error)
 
 
-@bp.route("/written-tests/<written_test_id>/ica-proficiency", methods=["POST"])
-@jwt_required()
-@require_feature("afirme_reading")
-@role_required(*WRITE_ROLES)
-@requires_city_context
-def written_test_ica_proficiency(written_test_id):
-    """Importa/atualiza a proficiência por aluno e recalcula o ICA gravado."""
-    from app.afirme_ler.services.written_test_ica_service import upsert_proficiency
-
-    user = get_current_user_from_token()
-    if not user:
-        return _error_response("Usuário não encontrado.", 401)
-    data = _json_body()
-    if data is None:
-        return _error_response("Corpo da requisição inválido.", 400)
-    try:
-        return jsonify(upsert_proficiency(written_test_id, data)), 200
-    except Exception as error:
-        db.session.rollback()
-        return _handle_service_error(error)
-
-
 @bp.route("/written-tests/<written_test_id>/skill-map", methods=["GET"])
 @jwt_required()
 @require_feature("afirme_reading")

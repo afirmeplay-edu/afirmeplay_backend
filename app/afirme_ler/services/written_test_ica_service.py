@@ -48,7 +48,6 @@ LEVEL_NAMES = (
 )
 STATUS_ALFABETIZADO = "Alfabetizado"
 STATUS_NAO_ALFABETIZADO = "Não alfabetizado"
-STATUS_SEM_PROF = "Proficiência indisponível"
 STATUS_NAO_AVALIADO = "Não avaliado"
 CSV_HEADER = (
     "aluno_id",
@@ -223,6 +222,13 @@ def _tct_grade(points: Optional[int]) -> Optional[float]:
     return _two(Decimal(points) * Decimal(10) / Decimal(TOTAL_MAX))
 
 
+def _proficiency_from_points(points: Optional[int]) -> Optional[float]:
+    """(pontos ÷ 34) × 1000, sempre com 1 casa decimal."""
+    if points is None:
+        return None
+    return round((points / TOTAL_MAX) * 1000, 1)
+
+
 def _prof_grade_exact(proficiency: Optional[float]) -> Optional[float]:
     if proficiency is None:
         return None
@@ -250,8 +256,8 @@ def _learning_level(proficiency: Optional[float]) -> str:
 
 
 def _status(avaliado: bool, proficiency: Optional[float]) -> str:
-    if proficiency is None:
-        return STATUS_SEM_PROF if avaliado else STATUS_NAO_AVALIADO
+    if not avaliado or proficiency is None:
+        return STATUS_NAO_AVALIADO
     if proficiency >= PROF_CUT:
         return STATUS_ALFABETIZADO
     return STATUS_NAO_ALFABETIZADO
@@ -265,7 +271,6 @@ def compute_ica_result(
     reading: Optional[int],
     words: Optional[int],
     text: Optional[int],
-    proficiency: Optional[float],
     finalized: bool,
 ) -> Dict[str, Any]:
     """Monta o bloco ICA já pronto para gravar e devolver."""
@@ -286,10 +291,11 @@ def compute_ica_result(
         words = None
         text = None
 
+    proficiency = _proficiency_from_points(points)
     nota_tct = _tct_grade(points)
     nota_prof_exact = _prof_grade_exact(proficiency)
     nota_prof = _prof_grade(proficiency)
-    avaliado = points is not None or proficiency is not None
+    avaliado = points is not None
     return {
         "leitura_16": reading,
         "palavras_4": words,
@@ -311,8 +317,6 @@ def compute_ica_result(
 
 def refresh_correction_ica(row: ReadingWrittenTestCorrection) -> Dict[str, Any]:
     """Recalcula e grava o bloco ICA da correção. Não faz commit."""
-    stored = dict(row.ica or {})
-    proficiency = _as_float(stored.get("proficiencia"))
     finalized = _is_finalized(row)
     reading = words = text = None
     if finalized:
@@ -320,7 +324,7 @@ def refresh_correction_ica(row: ReadingWrittenTestCorrection) -> Dict[str, Any]:
         writing = row.writing or {}
         words = _as_int(writing.get("wordPoints"))
         text = _as_int(writing.get("textPoints"))
-    result = compute_ica_result(reading, words, text, proficiency, finalized)
+    result = compute_ica_result(reading, words, text, finalized)
     row.ica = result
     return result
 
@@ -381,15 +385,9 @@ def _municipio_context() -> Dict[str, Optional[str]]:
 
 def _ensure_ica(person: Dict[str, Any], correction: Optional[ReadingWrittenTestCorrection]) -> Dict[str, Any]:
     if correction is None:
-        return compute_ica_result(None, None, None, None, False)
-    stored = correction.ica or {}
-    if stored.get("computed_at") and "status" in stored and "nota_tct_0_10" in stored:
-        result = dict(stored)
-        if "apto_diagnostico" not in result and "apto" in result:
-            result["apto_diagnostico"] = bool(result.get("apto"))
-        return result
-    result = refresh_correction_ica(correction)
-    return result
+        return compute_ica_result(None, None, None, False)
+    # Sempre recalcula a partir dos pontos (proficiência = pontos/34×1000).
+    return refresh_correction_ica(correction)
 
 
 def _load(written_test_id: str, filters: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -471,9 +469,12 @@ def _load(written_test_id: str, filters: Optional[Dict[str, Any]]) -> Dict[str, 
         school = schools.get(str(klass.school_id)) if klass and klass.school_id else None
         grade = grades.get(str(klass.grade_id)) if klass and klass.grade_id else None
         correction = corrections.get(str(student.id))
-        before = dict(correction.ica or {}) if correction is not None else None
+        before = dict(correction.ica or {}) if correction is not None else {}
+        before.pop("computed_at", None)
         ica = _ensure_ica({}, correction)
-        if correction is not None and before != (correction.ica or {}):
+        after = dict(correction.ica or {}) if correction is not None else {}
+        after.pop("computed_at", None)
+        if correction is not None and before != after:
             dirty = True
         person = {
             "student_id": str(student.id),
@@ -623,12 +624,6 @@ def _levels_payload(stats: Dict[str, Any]) -> Dict[str, Any]:
 
 def _cards(people: List[Dict[str, Any]]) -> Dict[str, Any]:
     stats = _stats(people)
-    imported = stats["com_proficiencia"]
-    ica_percentage = stats["percentual_ge_743"]
-    if imported <= 0:
-        proficiency_status = "SEM_DADOS"
-    else:
-        proficiency_status = "COM_DADOS"
     return {
         "participation": {
             "expected": stats["previstos"],
@@ -639,11 +634,6 @@ def _cards(people: List[Dict[str, Any]]) -> Dict[str, Any]:
             "valid": stats["diagnostic_valid"],
             "apt": stats["diagnostic_apt"],
             "iad_percentage": stats["iad_percentage"],
-        },
-        "proficiency_inep": {
-            "imported_valid": imported,
-            "ica_percentage": ica_percentage,
-            "status": proficiency_status,
         },
         "kpis": _kpis(stats),
         "niveis": _levels_payload(stats),
@@ -792,7 +782,6 @@ def ica_dashboard(written_test_id: str, filters: Optional[Dict[str, Any]] = None
         "uf": loaded["uf"],
         "participation": cards["participation"],
         "diagnostic": cards["diagnostic"],
-        "proficiency_inep": cards["proficiency_inep"],
         "kpis": cards["kpis"],
         "niveis": cards["niveis"],
         "rows": _rows(scope["level"], people),
@@ -891,80 +880,3 @@ def ica_csv(written_test_id: str, filters: Optional[Dict[str, Any]] = None) -> t
         ])
     return buffer.getvalue().encode("utf-8"), "resultados_ica.csv"
 
-
-def _correction_row(written_test_id: str, student_id: str) -> ReadingWrittenTestCorrection:
-    row = ReadingWrittenTestCorrection.query.filter_by(
-        written_test_id=str(written_test_id), student_id=str(student_id),
-    ).first()
-    if row is None:
-        row = ReadingWrittenTestCorrection(
-            written_test_id=str(written_test_id),
-            student_id=str(student_id),
-            answers={},
-            blank=[],
-            invalid=[],
-            crops={},
-            pages=[],
-            objective={},
-            writing={},
-            ica={},
-        )
-        db.session.add(row)
-    return row
-
-
-def upsert_proficiency(
-    written_test_id: str,
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Grava a proficiência por aluno, recalcula o ICA e devolve o resumo."""
-    written_test = db.session.get(ReadingWrittenTest, str(written_test_id))
-    if written_test is None:
-        raise LookupError("Avaliação escrita não encontrada.")
-    if not isinstance(payload, dict):
-        raise ValueError("Corpo da requisição inválido.")
-    items = payload.get("students")
-    if not isinstance(items, list) or not items:
-        raise ValueError("students é obrigatório e deve ser uma lista.")
-
-    class_ids = set(_class_ids(written_test))
-    updated = []
-    for index, item in enumerate(items):
-        if not isinstance(item, dict):
-            raise ValueError(f"students[{index}] deve ser um objeto.")
-        student_id = str(item.get("studentId") or item.get("student_id") or "").strip()
-        if not student_id:
-            raise ValueError(f"students[{index}].studentId é obrigatório.")
-        student = db.session.get(Student, student_id)
-        if student is None:
-            raise LookupError(f"Aluno não encontrado: {student_id}")
-        if str(student.class_id) not in class_ids:
-            raise ValueError(f"O aluno {student_id} não está no recorte desta avaliação.")
-        if "proficiencia" not in item and "proficiency" not in item:
-            raise ValueError(f"students[{index}].proficiencia é obrigatório.")
-        raw = item.get("proficiencia", item.get("proficiency"))
-        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
-            proficiency = None
-        else:
-            proficiency = _as_float(raw)
-            if proficiency is None:
-                raise ValueError(f"students[{index}].proficiencia inválida.")
-        row = _correction_row(written_test_id, student_id)
-        stored = dict(row.ica or {})
-        stored["proficiencia"] = proficiency
-        row.ica = stored
-        result = refresh_correction_ica(row)
-        updated.append({
-            "student_id": student_id,
-            "aluno": student.name or "",
-            "proficiencia": result.get("proficiencia"),
-            "nota_prof_0_10": result.get("nota_prof_0_10"),
-            "nivel_aprendizagem": result.get("nivel_aprendizagem"),
-            "status": result.get("status"),
-        })
-    db.session.commit()
-    return {
-        "writtenTestId": str(written_test.id),
-        "updated": len(updated),
-        "students": updated,
-    }

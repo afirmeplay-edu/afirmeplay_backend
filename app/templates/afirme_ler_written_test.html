@@ -46,6 +46,40 @@
 				vertical-align: middle;
 			}
 
+			.dictation-icon {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				width: 1.05em;
+				height: 1.05em;
+				margin-right: 0.18em;
+				vertical-align: -0.12em;
+				color: #0b5cad;
+			}
+
+			.dictation-icon svg {
+				width: 100%;
+				height: 100%;
+				fill: currentColor;
+			}
+
+			.question-title {
+				font-size: 14pt;
+				font-weight: bold;
+				margin-bottom: 0.15cm;
+			}
+
+			.applicator-banner {
+				border: 1px solid #0b5cad;
+				background: #eef6ff;
+				color: #0b5cad;
+				border-radius: 6px;
+				padding: 0.2cm 0.35cm;
+				margin-bottom: 0.4cm;
+				font-size: 12pt;
+				font-weight: bold;
+			}
+
 			.header {
 				border: 1.5px solid #222;
 				border-radius: 8px;
@@ -245,11 +279,20 @@
 			O ditado e a produção escrita também são respondidos no cartão-resposta.
 		</div>
 
+		{% if applicator_mode %}
+		<div class="applicator-banner">
+			Prova do aplicador — os megafones marcam o que deve ser lido em voz alta.
+		</div>
+		{% endif %}
+
 		{% for question in questions %}
 		<div class="question{% if question.type == 'multipleChoice' or question.answer_on_card %} keep-together{% endif %}">
 			<div class="question-head">
 				<div class="question-number">{{ question.number }}</div>
 				<div class="question-body">
+					{% if question.title %}
+					<div class="question-title">{{ question.title }}</div>
+					{% endif %}
 					<div class="statement">{{ question.statement }}</div>
 					{% if question.support %}
 					<div class="support">{{ question.support }}</div>

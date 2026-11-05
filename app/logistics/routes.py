@@ -5,7 +5,7 @@ Rotas do cronograma de logística de aplicação.
 GET    /logistics/opcoes-filtros
 GET    /logistics/opcoes-grade
 GET    /logistics/aplicadores
-GET    /logistics/itens
+GET    /logistics/itens          (export=1 devolve o recorte completo, com limite)
 GET    /logistics/previa
 GET    /logistics/schedules
 POST   /logistics/schedules
@@ -64,7 +64,7 @@ def _handle(fn, log_label: str):
 @role_required(*_MANAGE_ROLES)
 @requires_city_context
 def opcoes_filtros():
-    """Etapa → Avaliação → Escolas → Séries → Turmas. Params: etapa, avaliacao, escolas, series."""
+    """Avaliação → Escolas → Séries → Turmas. Params: avaliacao, escolas, series (etapa ignorado)."""
     user, err = _current_user()
     if err:
         return err
@@ -143,7 +143,6 @@ def previa():
         data = services.build_preview(
             _city_id(),
             avaliacao,
-            etapa_id=(request.args.get("etapa") or "").strip() or None,
             escola_ids=multi_arg(request.args, "escolas", "escola") or None,
             serie_ids=multi_arg(request.args, "series", "serie") or None,
             turma_ids=multi_arg(request.args, "turmas", "turma") or None,

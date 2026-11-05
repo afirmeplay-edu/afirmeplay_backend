@@ -30,6 +30,7 @@ from app.models.school import School
 from app.models.studentClass import Class
 from app.models.test import EVALUATION_MODES, Test
 from app.models.user import User
+from app.utils.uuid_helpers import ensure_uuid
 
 _ACCENT_FROM = "áàâãäéèêëíìîïóòôõöúùûüç"
 _ACCENT_TO = "aaaaaeeeeiiiiooooouuuuc"
@@ -48,6 +49,7 @@ _SHIFT_ORDER = {name: index for index, (name, _) in enumerate(_SHIFT_GROUPS)}
 _FORMATO_ORDER = {mode: index for index, mode in enumerate(EVALUATION_MODES)}
 _DEFAULT_PER_PAGE = 20
 _MAX_PER_PAGE = 100
+_MAX_EXPORT = 5000
 
 
 def fold_text(value: Any) -> str:
@@ -98,9 +100,16 @@ def _positive_int(raw: Optional[str], default: int, field: str, maximum: Optiona
     return number
 
 
+def _want_export(args) -> bool:
+    raw = (_opt(args, "export") or "").lower()
+    return raw in ("1", "true", "sim")
+
+
 def _base_query() -> Query:
     return (
-        db.session.query(LogisticsScheduleItem, LogisticsSchedule, Test, School, Grade, Class)
+        db.session.query(
+            LogisticsScheduleItem, LogisticsSchedule, Test, School, Grade, Class, User
+        )
         .join(LogisticsSchedule, LogisticsSchedule.id == LogisticsScheduleItem.schedule_id)
         .outerjoin(Test, Test.id == LogisticsSchedule.test_id)
         .outerjoin(School, School.id == LogisticsScheduleItem.school_id)
@@ -127,6 +136,7 @@ def _apply_access(query: Query, user: dict) -> Tuple[Query, Dict[str, Any]]:
 
 
 def _apply_filters(query: Query, args, *, can_manage: bool) -> Query:
+    # ano / etapa / turno / formato: ainda aceitos na API (compat), mas a tela não os envia.
     ano = _opt(args, "ano")
     if ano is not None:
         if not ano.isdigit() or len(ano) != 4:
@@ -135,8 +145,6 @@ def _apply_filters(query: Query, args, *, can_manage: bool) -> Query:
 
     etapa = _opt(args, "etapa")
     if etapa:
-        from app.utils.uuid_helpers import ensure_uuid
-
         etapa_uuid = ensure_uuid(etapa)
         if not etapa_uuid:
             raise LogisticsError("etapa inválida.")
@@ -152,12 +160,17 @@ def _apply_filters(query: Query, args, *, can_manage: bool) -> Query:
 
     serie = _opt(args, "serie")
     if serie:
-        from app.utils.uuid_helpers import ensure_uuid
-
         serie_uuid = ensure_uuid(serie)
         if not serie_uuid:
             raise LogisticsError("serie inválida.")
         query = query.filter(LogisticsScheduleItem.grade_id == serie_uuid)
+
+    turma = _opt(args, "turma")
+    if turma:
+        turma_uuid = ensure_uuid(turma)
+        if not turma_uuid:
+            raise LogisticsError("turma inválida.")
+        query = query.filter(LogisticsScheduleItem.class_id == turma_uuid)
 
     turno = _opt(args, "turno")
     if turno:
@@ -240,6 +253,16 @@ def _cards(query: Query) -> Dict[str, int]:
     }
 
 
+def _ordered_items(query: Query) -> Query:
+    return query.order_by(
+        LogisticsScheduleItem.scheduled_date.asc().nulls_last(),
+        func.lower(func.coalesce(School.name, "")).asc(),
+        func.lower(func.coalesce(Grade.name, "")).asc(),
+        func.lower(func.coalesce(Class.name, "")).asc(),
+        LogisticsScheduleItem.id.asc(),
+    )
+
+
 def _serialize_row(item, schedule, test, school, grade, class_, applicator=None) -> Dict[str, Any]:
     mode = (test.evaluation_mode if test and test.evaluation_mode else None) or "virtual"
     scheduled = item.scheduled_date.isoformat() if isinstance(item.scheduled_date, date) else (
@@ -263,6 +286,7 @@ def _serialize_row(item, schedule, test, school, grade, class_, applicator=None)
         "students_count": int(item.students_count or 0),
         "tablets_qty": int(item.tablets_qty or 0),
         "booklets_qty": int(item.booklets_qty or 0),
+        "notes": item.notes,
         "applicator_user_id": str(item.applicator_user_id) if item.applicator_user_id else None,
         "applicator_name": (applicator.name if applicator and applicator.name else None),
         "origem": item.origem or "manual",
@@ -274,21 +298,26 @@ def list_items(user: dict, args) -> Dict[str, Any]:
     query, access = _apply_access(_base_query(), user)
     query = _apply_filters(query, args, can_manage=access["can_manage"])
     cards = _cards(query)
+    ordered = _ordered_items(query)
+
+    if _want_export(args):
+        total = cards["total_agendamentos"]
+        truncated = total > _MAX_EXPORT
+        rows = ordered.limit(_MAX_EXPORT).all()
+        return {
+            "items": [_serialize_row(*row) for row in rows],
+            "total": total,
+            "page": 1,
+            "per_page": len(rows),
+            "cards": cards,
+            "can_manage": access["can_manage"],
+            "truncated": truncated,
+            "export_limit": _MAX_EXPORT,
+        }
+
     page = _positive_int(_opt(args, "page"), 1, "page")
     per_page = _positive_int(_opt(args, "per_page"), _DEFAULT_PER_PAGE, "per_page", _MAX_PER_PAGE)
-
-    rows = (
-        query.order_by(
-            LogisticsScheduleItem.scheduled_date.asc().nulls_last(),
-            func.lower(func.coalesce(School.name, "")).asc(),
-            func.lower(func.coalesce(Grade.name, "")).asc(),
-            func.lower(func.coalesce(Class.name, "")).asc(),
-            LogisticsScheduleItem.id.asc(),
-        )
-        .offset((page - 1) * per_page)
-        .limit(per_page)
-        .all()
-    )
+    rows = ordered.offset((page - 1) * per_page).limit(per_page).all()
     return {
         "items": [_serialize_row(*row) for row in rows],
         "total": cards["total_agendamentos"],
@@ -296,6 +325,8 @@ def list_items(user: dict, args) -> Dict[str, Any]:
         "per_page": per_page,
         "cards": cards,
         "can_manage": access["can_manage"],
+        "truncated": False,
+        "export_limit": None,
     }
 
 
@@ -306,6 +337,7 @@ def _empty_options(can_manage: bool) -> Dict[str, Any]:
         "avaliacoes": [],
         "escolas": [],
         "series": [],
+        "turmas": [],
         "turnos": [],
         "formatos": [],
         "aplicadores": [],
@@ -314,8 +346,15 @@ def _empty_options(can_manage: bool) -> Dict[str, Any]:
     }
 
 
+def _by_name(pairs: List[Tuple[str, str]]) -> List[Dict[str, str]]:
+    return [
+        {"id": key, "nome": name}
+        for key, name in sorted(pairs, key=lambda pair: (pair[1] or "").lower())
+    ]
+
+
 def grade_filter_options(user: dict) -> Dict[str, Any]:
-    """Opções da grade, no recorte de quem consulta. Não altera /opcoes-filtros."""
+    """Opções encadeadas da grade (avaliação → escola → série → turma), no recorte do usuário."""
     query, access = _apply_access(_base_query(), user)
     query = query.outerjoin(EducationStage, EducationStage.id == Grade.education_stage_id)
     if not access["can_manage"] and not access["school_ids"]:
@@ -332,6 +371,8 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
         Grade.name,
         Grade.education_stage_id,
         EducationStage.name,
+        Class.id,
+        Class.name,
         Class.shift,
         User.id,
         User.name,
@@ -340,8 +381,9 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
     anos = set()
     etapas: Dict[str, str] = {}
     avaliacoes: Dict[str, Dict[str, Any]] = {}
-    escolas: Dict[str, str] = {}
+    escolas: Dict[str, Dict[str, Any]] = {}
     series: Dict[str, Dict[str, Any]] = {}
+    turmas: Dict[str, Dict[str, Any]] = {}
     turnos = set()
     formatos = set()
     aplicadores: Dict[str, str] = {}
@@ -357,6 +399,8 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
         grade_name,
         stage_id,
         stage_name,
+        class_id,
+        class_name,
         shift,
         applicator_id,
         applicator_name,
@@ -366,41 +410,72 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
         stage_key = str(stage_id) if stage_id else None
         if stage_key and stage_name:
             etapas[stage_key] = stage_name
-        if test_id:
+
+        test_key = str(test_id) if test_id else None
+        if test_key:
             entry = avaliacoes.setdefault(
-                str(test_id),
+                test_key,
                 {
-                    "id": str(test_id),
-                    "titulo": title or str(test_id),
+                    "id": test_key,
+                    "titulo": title or test_key,
                     "evaluation_mode": (mode or "virtual"),
                     "etapa_ids": set(),
                 },
             )
             if stage_key:
                 entry["etapa_ids"].add(stage_key)
-        if school_id and school_name:
-            escolas[str(school_id)] = school_name
-        if grade_id and grade_name:
+
+        school_key = str(school_id) if school_id else None
+        if school_key and school_name:
+            escola = escolas.setdefault(
+                school_key,
+                {"id": school_key, "nome": school_name, "avaliacao_ids": set()},
+            )
+            if test_key:
+                escola["avaliacao_ids"].add(test_key)
+
+        grade_key = str(grade_id) if grade_id else None
+        if grade_key and grade_name:
             serie = series.setdefault(
-                str(grade_id),
+                grade_key,
                 {
-                    "id": str(grade_id),
+                    "id": grade_key,
                     "nome": grade_name,
                     "etapa_id": stage_key,
+                    "avaliacao_ids": set(),
                     "escola_ids": set(),
                 },
             )
-            if school_id:
-                serie["escola_ids"].add(str(school_id))
+            if test_key:
+                serie["avaliacao_ids"].add(test_key)
+            if school_key:
+                serie["escola_ids"].add(school_key)
+
+        class_key = str(class_id) if class_id else None
+        if class_key:
+            turma = turmas.setdefault(
+                class_key,
+                {
+                    "id": class_key,
+                    "nome": (class_name or "").strip() or f"Turma {class_key}",
+                    "avaliacao_ids": set(),
+                    "escola_ids": set(),
+                    "serie_ids": set(),
+                },
+            )
+            if test_key:
+                turma["avaliacao_ids"].add(test_key)
+            if school_key:
+                turma["escola_ids"].add(school_key)
+            if grade_key:
+                turma["serie_ids"].add(grade_key)
+
         turno = canonical_turno(shift)
         if turno:
             turnos.add(turno)
         formatos.add((mode or "virtual").strip().lower() or "virtual")
         if applicator_id:
             aplicadores[str(applicator_id)] = applicator_name or "Sem nome"
-
-    def _by_name(pairs: List[Tuple[str, str]]) -> List[Dict[str, str]]:
-        return [{"id": key, "nome": name} for key, name in sorted(pairs, key=lambda pair: (pair[1] or "").lower())]
 
     return {
         "anos": sorted(anos, reverse=True),
@@ -417,16 +492,40 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
             ),
             key=lambda item: (item["titulo"] or "").lower(),
         ),
-        "escolas": _by_name(list(escolas.items())),
+        "escolas": sorted(
+            (
+                {
+                    "id": item["id"],
+                    "nome": item["nome"],
+                    "avaliacao_ids": sorted(item["avaliacao_ids"]),
+                }
+                for item in escolas.values()
+            ),
+            key=lambda item: (item["nome"] or "").lower(),
+        ),
         "series": sorted(
             (
                 {
                     "id": item["id"],
                     "nome": item["nome"],
                     "etapa_id": item["etapa_id"],
+                    "avaliacao_ids": sorted(item["avaliacao_ids"]),
                     "escola_ids": sorted(item["escola_ids"]),
                 }
                 for item in series.values()
+            ),
+            key=lambda item: (item["nome"] or "").lower(),
+        ),
+        "turmas": sorted(
+            (
+                {
+                    "id": item["id"],
+                    "nome": item["nome"],
+                    "avaliacao_ids": sorted(item["avaliacao_ids"]),
+                    "escola_ids": sorted(item["escola_ids"]),
+                    "serie_ids": sorted(item["serie_ids"]),
+                }
+                for item in turmas.values()
             ),
             key=lambda item: (item["nome"] or "").lower(),
         ),

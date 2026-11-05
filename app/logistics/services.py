@@ -180,7 +180,7 @@ def applicator_rejection_message(user: User, city_id: str, already_assigned: boo
 
 
 def mark_auto_item_edited(item: LogisticsScheduleItem, parsed: Dict[str, Any]) -> None:
-    """Marca o item automático quando o editor muda data, turma, insumos, observação ou aplicador."""
+    """Marca o item automático quando o editor muda data, turma, alunos, insumos, observação ou aplicador."""
     if (item.origem or LOGISTICS_ORIGEM_MANUAL) != LOGISTICS_ORIGEM_AUTO:
         return
     if item.editado_manualmente:
@@ -191,6 +191,10 @@ def mark_auto_item_edited(item: LogisticsScheduleItem, parsed: Dict[str, Any]) -
         or int(item.tablets_qty or 0) != int(parsed["tablets_qty"])
         or int(item.booklets_qty or 0) != int(parsed["booklets_qty"])
         or (item.notes or None) != parsed["notes"]
+        or (
+            parsed.get("students_set")
+            and int(item.students_count or 0) != int(parsed.get("students_count") or 0)
+        )
         or (
             parsed["applicator_set"]
             and (item.applicator_user_id or None) != parsed["applicator_user_id"]
@@ -282,6 +286,7 @@ def _labels_for_items(items: List[LogisticsScheduleItem]) -> Dict[str, Dict[str,
 
 def _serialize_item(item: LogisticsScheduleItem, labels: Dict[str, Dict]) -> Dict[str, Any]:
     cls = labels["classes"].get(str(item.class_id), {})
+    class_students = (labels.get("class_students") or {}).get(str(item.class_id))
     return {
         "id": str(item.id),
         "school_id": str(item.school_id),
@@ -293,6 +298,9 @@ def _serialize_item(item: LogisticsScheduleItem, labels: Dict[str, Dict]) -> Dic
         "shift": cls.get("shift", ""),
         "scheduled_date": item.scheduled_date.isoformat() if item.scheduled_date else None,
         "students_count": item.students_count,
+        "class_students_count": int(class_students)
+        if class_students is not None
+        else int(item.students_count or 0),
         "tablets_qty": item.tablets_qty,
         "booklets_qty": item.booklets_qty,
         "notes": item.notes,
@@ -343,6 +351,7 @@ def _serialize_schedule(
     }
     if include_items:
         labels = _labels_for_items(items)
+        labels["class_students"] = _student_count_by_class([i.class_id for i in items if i.class_id])
         serialized = [_serialize_item(i, labels) for i in items]
         serialized.sort(
             key=lambda r: (
@@ -371,7 +380,6 @@ def build_preview(
     city_id: str,
     test_id: str,
     *,
-    etapa_id: Optional[str] = None,
     escola_ids: Optional[List[str]] = None,
     serie_ids: Optional[List[str]] = None,
     turma_ids: Optional[List[str]] = None,
@@ -394,11 +402,6 @@ def build_preview(
         .outerjoin(Grade, Grade.id == Class.grade_id)
         .filter(ClassTest.test_id == str(test.id), School.city_id == city_id)
     )
-    if etapa_id:
-        etapa_uuid = ensure_uuid(etapa_id)
-        if not etapa_uuid:
-            raise LogisticsError("etapa inválida.")
-        query = query.filter(Grade.education_stage_id == etapa_uuid)
     if escola_ids:
         query = query.filter(School.id.in_([str(e) for e in escola_ids]))
     if serie_ids:
@@ -589,6 +592,12 @@ def _apply_items(
         seen_keys.add(key)
         notes = raw.get("notes")
         applicator_set, applicator_user_id = parse_applicator_field(raw)
+        students_set = "students_count" in raw
+        students_count = (
+            _parse_qty(raw.get("students_count"), f"items[{idx}].students_count")
+            if students_set
+            else None
+        )
         parsed.append(
             {
                 "id": item_id,
@@ -597,6 +606,8 @@ def _apply_items(
                 "tablets_qty": _parse_qty(raw.get("tablets_qty"), f"items[{idx}].tablets_qty"),
                 "booklets_qty": _parse_qty(raw.get("booklets_qty"), f"items[{idx}].booklets_qty"),
                 "notes": (str(notes).strip() or None) if notes is not None else None,
+                "students_set": students_set,
+                "students_count": students_count,
                 "applicator_set": applicator_set,
                 "applicator_user_id": applicator_user_id,
             }
@@ -630,6 +641,7 @@ def _apply_items(
     for p in parsed:
         info = class_info[str(p["class_id"])]
         item = existing.get(p["id"]) if p["id"] in keep_ids else None
+        live_students = counts.get(str(p["class_id"]), 0)
         if item is None:
             item = LogisticsScheduleItem(
                 schedule_id=schedule.id,
@@ -638,15 +650,20 @@ def _apply_items(
             )
             schedule.items.append(item)
             added.append(item)
+            # Item novo: usa o valor do usuário se veio no payload; senão a contagem real da turma.
+            item.students_count = (
+                int(p["students_count"]) if p["students_set"] and p["students_count"] is not None else live_students
+            )
         else:
             if item.scheduled_date != p["scheduled_date"]:
                 changed.append((item, item.scheduled_date))
             mark_auto_item_edited(item, p)
+            if p["students_set"] and p["students_count"] is not None:
+                item.students_count = int(p["students_count"])
         item.class_id = p["class_id"]
         item.school_id = info["school_id"]
         item.grade_id = info["grade_id"]
         item.scheduled_date = p["scheduled_date"]
-        item.students_count = counts.get(str(p["class_id"]), 0)
         item.tablets_qty = p["tablets_qty"]
         item.booklets_qty = p["booklets_qty"]
         item.notes = p["notes"]

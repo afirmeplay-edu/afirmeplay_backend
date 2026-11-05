@@ -241,6 +241,36 @@ def test_create_rejects_invalid_scope(flask_app, overrides, message):
     assert ReadingWrittenTest.query.count() == 0
 
 
+def test_create_accepts_class_without_grade_and_school_id_case(flask_app):
+    """Turma sem série no cadastro e school_id em maiúsculas não podem impedir o rascunho."""
+    bare = uuid.UUID("c4c4c4c4-0000-4000-8000-0000000000c4")
+    db.session.add(Class(id=bare, name="Turma sem série", school_id=SCHOOL_A.upper(), grade_id=None))
+    db.session.commit()
+
+    written_test = _create(schoolIds=[SCHOOL_A], classIds=[str(bare)])
+
+    assert written_test.class_ids == [str(bare)]
+    assert written_test.school_ids == [SCHOOL_A]
+
+
+def test_set_questions_accepts_image_mark_from_html(flask_app):
+    """Megafone na figura do enunciado vale mesmo quando `question.images` ainda está vazio."""
+    db.session.add(_question(
+        "html-only",
+        formatted_text='<p>Figura</p><img src="https://cdn.example/a.png" alt="" />',
+        images=[],
+    ))
+    db.session.commit()
+
+    written_test = _create(questions=[{
+        "id": "html-only",
+        "order": 1,
+        "dictationMarks": {"images": [0], "statement": True},
+    }])
+
+    assert written_test.questions[0].dictation_marks == {"statement": True, "images": [0]}
+
+
 def test_create_with_multiple_grades(flask_app):
     written_test = _create(
         gradeIds=[str(GRADE_1), str(GRADE_2)], schoolIds=[SCHOOL_A],

@@ -51,9 +51,10 @@ TYPE_LABELS = {
 MAX_DICTATED_WORD_LENGTH = 40
 MAX_IMAGE_DESCRIPTION_LENGTH = 500
 _DATA_IMAGE = re.compile(
-    r'<img[^>]+src="(data:image/[^;]+;base64,[^"]+)"',
+    r"""<img\b[^>]*?\ssrc=["'](data:image/[^;]+;base64,[^"']+)["']""",
     re.IGNORECASE,
 )
+_IMG_TAG = re.compile(r"<img\b", re.IGNORECASE)
 STIMULUS_WORD = "word"
 STIMULUS_IMAGE = "image"
 _STIMULUS_ALIASES = {
@@ -145,13 +146,21 @@ def validate_dictation_marks(value: Any) -> Optional[Dict[str, Any]]:
     return normalized or None
 
 
+def statement_image_count(question: Question) -> int:
+    """Figuras do enunciado. O HTML manda quando a imagem está no meio do texto e ainda não entrou em `images`."""
+    html_count = len(_IMG_TAG.findall(question.formatted_text or ""))
+    if html_count:
+        return html_count
+    images = question.images if isinstance(question.images, list) else []
+    return len(images)
+
+
 def _assert_dictation_marks_fit(question: Question) -> None:
     marks = question.dictation_marks
     if not marks or not isinstance(marks, dict):
         return
-    images = question.images if isinstance(question.images, list) else []
     invalid_image = next(
-        (index for index in marks.get("images") or [] if index >= len(images)),
+        (index for index in marks.get("images") or [] if index >= statement_image_count(question)),
         None,
     )
     if invalid_image is not None:
@@ -373,6 +382,17 @@ def _required_text(data: dict, key: str) -> str:
     return str(value).strip()
 
 
+def _statement_text(data: dict) -> str:
+    """Enunciado. Imagem no HTML vale mesmo sem texto, como no editor do Afirme Play."""
+    text = str(data.get("text") or "").strip()
+    if text:
+        return text
+    html = data.get("formattedText", data.get("formatted_text"))
+    if isinstance(html, str) and _IMG_TAG.search(html):
+        return "Imagem"
+    raise ValueError("text é obrigatório.")
+
+
 def _grade_id(value: Any) -> uuid.UUID:
     if isinstance(value, dict):
         value = value.get("id")
@@ -390,7 +410,7 @@ def parse_create_payload(data: Any) -> Dict[str, Any]:
         raise ValueError("Corpo da requisição inválido.")
 
     fields: Dict[str, Any] = {
-        "text": _required_text(data, "text"),
+        "text": _statement_text(data),
         "question_type": normalize_ler_question_type(data.get("type")),
         "subject_id": _required_text(data, "subjectId"),
         "grade_level": _grade_id(data.get("grade")),
@@ -419,8 +439,12 @@ def apply_update_payload(question: Any, data: Any) -> None:
     if not isinstance(data, dict) or not data:
         raise ValueError("Corpo da requisição inválido.")
 
-    if "text" in data:
-        question.text = _required_text(data, "text")
+    if "text" in data or "formattedText" in data or "formatted_text" in data:
+        incoming = {
+            "text": data.get("text", question.text),
+            "formattedText": data.get("formattedText", data.get("formatted_text", question.formatted_text)),
+        }
+        question.text = _statement_text(incoming)
     if "subjectId" in data:
         question.subject_id = _required_text(data, "subjectId")
     if "grade" in data:
@@ -608,6 +632,7 @@ class QuestionBankService:
             pattern = f"%{_escape_like(term)}%"
             query = query.filter(
                 or_(
+                    Question.title.ilike(pattern, escape="\\"),
                     Question.text.ilike(pattern, escape="\\"),
                     Question.formatted_text.ilike(pattern, escape="\\"),
                 )

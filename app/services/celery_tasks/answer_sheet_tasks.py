@@ -768,7 +768,7 @@ def generate_answer_sheets_batch_async(
             questions_map = generator._build_questions_map(num_questions, questions_options)
             questions_by_block = generator._organize_questions_by_blocks(num_questions, blocks_config, questions_map)
             
-            base_template_data = {
+            base_template_data = generator._with_header_fonts({
                 'test_data': test_data,
                 'student': placeholder_student,
                 'questions_by_block': questions_by_block,
@@ -777,7 +777,7 @@ def generate_answer_sheets_batch_async(
                 'total_questions': num_questions,
                 'datetime': datetime,
                 'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
-            }
+            })
             
             template = generator.env.get_template('answer_sheet.html')
             base_html = template.render(**base_template_data)

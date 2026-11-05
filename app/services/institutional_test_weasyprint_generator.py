@@ -97,6 +97,9 @@ class InstitutionalTestWeasyPrintGenerator:
                 **template_data,
                 'afirme_cover_layout': self._get_afirme_cover_layout(),
             }
+        if 'header_font_bold_url' not in template_data:
+            from app.services.cartao_resposta.header_label_metrics import header_font_template_vars
+            template_data = {**template_data, **header_font_template_vars()}
         template = self.env.get_template(template_name)
         return template.render(**template_data)
 
@@ -1787,28 +1790,23 @@ class InstitutionalTestWeasyPrintGenerator:
             c = Canvas(buffer, pagesize=A4)
             c.setPageSize(A4)
 
-            # Coordenadas em pt derivadas do CSS do template (institutional_test_hybrid.html)
-            # Origem ReportLab: canto inferior esquerdo da página A4 (595.28 x 841.89 pt)
-            #
-            # X do valor = X_BASE + largura real do rótulo (Helvetica-Bold 7pt) + 5pt
-            # (mesmo margin-right do .header-info-line .label). Sem X fixo de coluna.
-            # Y/QR inalterados — não mexer na leitura OMR.
+            # Mesma TTF do HTML (Liberation Sans via header_label_metrics). Y/QR intactos.
             from reportlab.pdfbase.pdfmetrics import stringWidth
+            from app.services.cartao_resposta.header_label_metrics import (
+                LABEL_FONT_SIZE,
+                VALUE_MIN_SIZE,
+                ensure_header_fonts_registered,
+                overlay_value_x_positions,
+            )
 
-            X_BASE = 60.44
-            LABEL_VALUE_GAP = 5.0
-            FONT_NAME = 'Helvetica'
-            LABEL_FONT = 'Helvetica-Bold'
-            FONT_SIZE = 7
-            VALUE_MIN_SIZE = 5.5
+            _, FONT_NAME = ensure_header_fonts_registered()
+            FONT_SIZE = LABEL_FONT_SIZE
             FONT_COLOR = HexColor('#374151')
 
-            def _x_after_label(label: str) -> float:
-                return X_BASE + stringWidth(label, LABEL_FONT, FONT_SIZE) + LABEL_VALUE_GAP
-
-            X_NOME = _x_after_label('NOME COMPLETO:')
-            X_ESCOLA = _x_after_label('ESCOLA:')
-            X_TURMA = _x_after_label('TURMA:')
+            xs = overlay_value_x_positions()
+            X_NOME = xs["nome"]
+            X_ESCOLA = xs["escola"]
+            X_TURMA = xs["turma"]
 
             Y_PDF_NAME   = 780.16  # baseline NOME COMPLETO  (linha 2)
             Y_PDF_SCHOOL = 744.31  # baseline ESCOLA          (linha 5, após ESTADO e MUNICÍPIO)

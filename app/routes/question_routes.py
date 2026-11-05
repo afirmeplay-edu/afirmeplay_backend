@@ -68,7 +68,7 @@ def extract_images_from_html(html_content):
     Retorna lista de dicts com id, type, width, height, data (base64).
     """
     images = []
-    img_pattern = r'<img[^>]+src="(data:image/[^;]+;base64,[^"]+)"[^>]*>'
+    img_pattern = r"""<img\b[^>]*?\ssrc=["'](data:image/[^;]+;base64,[^"']+)["'][^>]*>"""
     for match in re.finditer(img_pattern, html_content or ''):
         base64_data = match.group(1)
         image_type = base64_data.split(';')[0].split(':')[1]
@@ -98,7 +98,7 @@ def _upload_html_base64_images_to_minio(question_id, html_content):
     """
     if not html_content or 'data:image/' not in html_content:
         return html_content, []
-    img_pattern = r'<img[^>]+src="(data:image/[^;]+;base64,[^"]+)"[^>]*>'
+    img_pattern = r"""<img\b[^>]*?\ssrc=["'](data:image/[^;]+;base64,[^"']+)["'][^>]*>"""
     from app.services.storage.minio_service import MinIOService
     minio = MinIOService()
     bucket_name = MinIOService.BUCKETS['QUESTION_IMAGES']

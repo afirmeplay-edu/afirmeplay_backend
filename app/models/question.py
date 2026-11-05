@@ -55,6 +55,9 @@ class Question(db.Model):
     writing_stimulus = db.Column(db.String(16), nullable=True)
     writing_reference = db.Column(db.Text, nullable=True)
 
+    # Megafones do aplicador (Afirme Ler): {title, statement, support, images[], options[]}.
+    dictation_marks = db.Column(JSON, nullable=True)
+
     # Produto que criou a questão: 'afirme_play' ou 'afirme_ler'.
     # Questões 'afirme_ler' não aparecem no Afirme Play.
     origin = db.Column(

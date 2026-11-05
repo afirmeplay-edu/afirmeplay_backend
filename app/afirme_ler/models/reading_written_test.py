@@ -63,6 +63,8 @@ class ReadingWrittenTestQuestion(db.Model):
     # public.question.id sem FK física: uma FK bloquearia a exclusão de questões no Afirme Play.
     question_id = db.Column(db.String, nullable=False)
     order = db.Column(db.Integer, nullable=False)
+    # Override de megafones só nesta prova; None = usa o da questão.
+    dictation_marks = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text("CURRENT_TIMESTAMP"))
 
     written_test = db.relationship("ReadingWrittenTest", back_populates="questions")

@@ -45,6 +45,7 @@ from app.afirme_ler.services.question_bank_service import (
     _parse_positive_int,
     _with_relations,
     to_response,
+    validate_dictation_marks,
 )
 from app.afirme_ler.services.scope_service import apply_visibility_filter
 
@@ -174,14 +175,14 @@ def validate_scope(data: Dict[str, Any]) -> Dict[str, List[str]]:
     return {"grade_ids": grade_ids, "school_ids": school_ids, "class_ids": class_ids}
 
 
-def parse_question_items(raw: Any) -> List[Tuple[str, int]]:
-    """Lista [{id, order}] → [(question_id, order)] ordenada por order (1..N, sem repetição)."""
+def parse_question_items(raw: Any) -> List[Tuple[str, int, Optional[Dict[str, Any]]]]:
+    """Lista [{id, order, dictationMarks?}] ordenada por order."""
     if not isinstance(raw, list):
         raise ValueError("questions deve ser uma lista de {id, order}.")
     if len(raw) > REQUIRED_QUESTIONS:
         raise ValueError(MSG_MAX_QUESTIONS)
 
-    items: List[Tuple[str, int]] = []
+    items: List[Tuple[str, int, Optional[Dict[str, Any]]]] = []
     seen_ids = set()
     for position, item in enumerate(raw, start=1):
         if not isinstance(item, dict):
@@ -199,12 +200,43 @@ def parse_question_items(raw: Any) -> List[Tuple[str, int]]:
             order = position
         elif isinstance(order, bool) or not isinstance(order, int):
             raise ValueError("order deve ser um número inteiro.")
-        items.append((question_id, order))
+        marks = None
+        if "dictationMarks" in item:
+            marks = validate_dictation_marks(item.get("dictationMarks"))
+        items.append((question_id, order, marks))
 
-    orders = sorted(order for _, order in items)
+    orders = sorted(order for _, order, _ in items)
     if orders != list(range(1, len(items) + 1)):
         raise ValueError(f"Os valores de order devem ser únicos e de 1 a {len(items)}.")
     return sorted(items, key=lambda pair: pair[1])
+
+
+def _assert_marks_exist(
+    items: List[Tuple[str, int, Optional[Dict[str, Any]]]],
+    questions: Dict[str, Question],
+) -> None:
+    for question_id, _, marks in items:
+        if not marks or not isinstance(marks, dict):
+            continue
+        question = questions[question_id]
+        images = question.images if isinstance(question.images, list) else []
+        invalid_image = next(
+            (index for index in marks.get("images") or [] if index >= len(images)),
+            None,
+        )
+        if invalid_image is not None:
+            raise ValueError(
+                f"dictationMarks.images contém índice inexistente na questão {question_id}: "
+                f"{invalid_image}."
+            )
+        options = marks.get("options") or []
+        available = [chr(65 + i) for i in range(min(len(question.alternatives or []), 8))]
+        invalid_option = next((letter for letter in options if letter not in available), None)
+        if invalid_option is not None:
+            raise ValueError(
+                f"dictationMarks.options contém alternativa inexistente na questão {question_id}: "
+                f"{invalid_option}."
+            )
 
 
 def _assert_publish_pattern(links: List[ReadingWrittenTestQuestion], found: Dict[str, Question]) -> None:
@@ -254,13 +286,20 @@ def load_visible_questions(user: Dict[str, Any], question_ids: List[str]) -> Dic
     return found
 
 
-def _replace_questions(written_test: ReadingWrittenTest, items: List[Tuple[str, int]]) -> None:
+def _replace_questions(
+    written_test: ReadingWrittenTest,
+    items: List[Tuple[str, int, Optional[Dict[str, Any]]]],
+) -> None:
     # Apaga antes de inserir: as UNIQUE (teste, questão) e (teste, order) não toleram a troca no mesmo flush.
     written_test.questions.clear()
     db.session.flush()
-    for question_id, order in items:
+    for question_id, order, marks in items:
         written_test.questions.append(
-            ReadingWrittenTestQuestion(question_id=question_id, order=order)
+            ReadingWrittenTestQuestion(
+                question_id=question_id,
+                order=order,
+                dictation_marks=marks,
+            )
         )
 
 
@@ -371,6 +410,16 @@ def to_detail(written_test: ReadingWrittenTest) -> Dict[str, Any]:
             continue
         item = to_response(question)
         item["order"] = link.order
+        if link.dictation_marks is not None:
+            effective = link.dictation_marks
+            item["dictationMarks"] = effective
+            item["dictationMarksSource"] = "assessment"
+        elif question.dictation_marks is not None:
+            item["dictationMarks"] = question.dictation_marks
+            item["dictationMarksSource"] = "question"
+        else:
+            item["dictationMarks"] = None
+            item["dictationMarksSource"] = "none"
         items.append(item)
     data["questions"] = items
     data.update(application_summary(list(written_test.applications or [])))
@@ -549,7 +598,8 @@ class WrittenTestService:
         description = _optional_description(data.get("description"))
         scope = validate_scope(data)
         items = parse_question_items(data["questions"]) if data.get("questions") is not None else []
-        load_visible_questions(user, [question_id for question_id, _ in items])
+        found = load_visible_questions(user, [question_id for question_id, _, _ in items])
+        _assert_marks_exist(items, found)
 
         written_test = ReadingWrittenTest(
             title=title,
@@ -596,7 +646,8 @@ class WrittenTestService:
         if "questions" not in data:
             raise ValueError("questions é obrigatório.")
         items = parse_question_items(data.get("questions"))
-        load_visible_questions(user, [question_id for question_id, _ in items])
+        found = load_visible_questions(user, [question_id for question_id, _, _ in items])
+        _assert_marks_exist(items, found)
 
         _replace_questions(written_test, items)
         written_test.updated_at = db.func.now()

@@ -453,6 +453,216 @@ def get_certificates_count():
         return jsonify({"erro": "Erro ao buscar quantidade de certificados", "detalhes": str(e)}), 500
 
 
+# ==================== FORMAÇÃO (formadores / professores) ====================
+
+_FORMATION_ROLES = ("admin", "professor", "coordenador", "diretor", "tecadm")
+
+
+def _formation_service():
+    from app.certification.services.formation_certificate_service import (
+        FormationCertificateService,
+    )
+    return FormationCertificateService
+
+
+@bp.route('/formation/validate/<string:code>', methods=['GET'])
+def validate_formation_certificate(code):
+    """Validação pública do QR Code (sem JWT). Aceita `cityId`/`city` na query."""
+    try:
+        city_id = request.args.get("cityId") or request.args.get("city")
+        if city_id:
+            from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
+
+            set_search_path(city_id_to_schema_name(str(city_id)))
+        return jsonify(_formation_service().validate_code(code)), 200
+    except LookupError as e:
+        return jsonify({"valid": False, "erro": str(e)}), 404
+    except Exception as e:
+        logging.error(f"Erro ao validar certificado de formação: {str(e)}", exc_info=True)
+        return jsonify({"valid": False, "erro": "Erro ao validar certificado"}), 500
+
+
+@bp.route('/formation-events', methods=['GET'])
+@jwt_required()
+@requires_city_context
+@role_required(*_FORMATION_ROLES)
+def list_formation_events():
+    user = get_current_user_from_token()
+    if not user:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+    try:
+        return jsonify({"data": _formation_service().list_events(user)}), 200
+    except Exception as e:
+        logging.error(f"Erro ao listar eventos de formação: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao listar eventos", "detalhes": str(e)}), 500
+
+
+@bp.route('/formation-events', methods=['POST'])
+@jwt_required()
+@requires_city_context
+@role_required(*_FORMATION_ROLES)
+def create_formation_event():
+    user = get_current_user_from_token()
+    if not user:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        event = _formation_service().create_event(user, data)
+        return jsonify(event.to_dict(include_participants=True)), 201
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao criar evento de formação: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao criar evento", "detalhes": str(e)}), 500
+
+
+@bp.route('/formation-events/<string:event_id>', methods=['GET'])
+@jwt_required()
+@requires_city_context
+@role_required(*_FORMATION_ROLES)
+def get_formation_event(event_id):
+    try:
+        event = _formation_service().get_event(event_id)
+        return jsonify(event.to_dict(include_participants=True)), 200
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except Exception as e:
+        logging.error(f"Erro ao buscar evento de formação: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao buscar evento", "detalhes": str(e)}), 500
+
+
+@bp.route('/formation-events/<string:event_id>', methods=['PATCH'])
+@jwt_required()
+@requires_city_context
+@role_required(*_FORMATION_ROLES)
+def update_formation_event(event_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        event = _formation_service().update_event(event_id, data)
+        return jsonify(event.to_dict(include_participants=True)), 200
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao atualizar evento de formação: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao atualizar evento", "detalhes": str(e)}), 500
+
+
+@bp.route('/formation-events/<string:event_id>', methods=['DELETE'])
+@jwt_required()
+@requires_city_context
+@role_required(*_FORMATION_ROLES)
+def delete_formation_event(event_id):
+    try:
+        _formation_service().delete_event(event_id)
+        return jsonify({"message": "Evento removido."}), 200
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao excluir evento de formação: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao excluir evento", "detalhes": str(e)}), 500
+
+
+@bp.route('/formation-events/<string:event_id>/participants', methods=['POST'])
+@jwt_required()
+@requires_city_context
+@role_required(*_FORMATION_ROLES)
+def add_formation_participants(event_id):
+    try:
+        if request.files.get("file"):
+            created = _formation_service().add_participants_from_csv(
+                event_id, request.files["file"]
+            )
+        else:
+            data = request.get_json(silent=True) or {}
+            created = _formation_service().add_participants(event_id, data)
+        return jsonify({"data": [p.to_dict() for p in created]}), 201
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao adicionar participantes: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao adicionar participantes", "detalhes": str(e)}), 500
+
+
+@bp.route('/formation-events/<string:event_id>/participants/from-users', methods=['POST'])
+@jwt_required()
+@requires_city_context
+@role_required(*_FORMATION_ROLES)
+def add_formation_participants_from_users(event_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        created = _formation_service().add_participants_from_users(event_id, data)
+        return jsonify({"data": [p.to_dict() for p in created]}), 201
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao vincular usuários: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao vincular usuários", "detalhes": str(e)}), 500
+
+
+@bp.route('/formation-events/<string:event_id>/participants/<string:participant_id>', methods=['DELETE'])
+@jwt_required()
+@requires_city_context
+@role_required(*_FORMATION_ROLES)
+def remove_formation_participant(event_id, participant_id):
+    try:
+        _formation_service().remove_participant(event_id, participant_id)
+        return jsonify({"message": "Participante removido."}), 200
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao remover participante: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao remover participante", "detalhes": str(e)}), 500
+
+
+@bp.route('/formation-events/<string:event_id>/issue', methods=['POST'])
+@jwt_required()
+@requires_city_context
+@role_required(*_FORMATION_ROLES)
+def issue_formation_certificates(event_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        result = _formation_service().issue(event_id, data.get("participantIds"))
+        return jsonify(result), 200
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao emitir certificados de formação: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao emitir certificados", "detalhes": str(e)}), 500
+
+
+@bp.route('/formation-events/<string:event_id>/batch', methods=['GET'])
+@jwt_required()
+@requires_city_context
+@role_required(*_FORMATION_ROLES)
+def formation_certificates_batch(event_id):
+    try:
+        return jsonify(_formation_service().batch_payload(event_id)), 200
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except Exception as e:
+        logging.error(f"Erro ao montar lote de formação: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao montar lote", "detalhes": str(e)}), 500
+
+
 @bp.route('/<string:certificate_id>', methods=['GET'])
 @jwt_required()
 def get_certificate(certificate_id):

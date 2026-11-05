@@ -481,6 +481,43 @@ Todos os `400` da criação, mais:
 
 ---
 
+## 5. Megafones (`dictationMarks`)
+
+Campo opcional na criação/edição e na resposta:
+
+```json
+{
+  "dictationMarks": {
+    "title": true,
+    "statement": true,
+    "support": false,
+    "images": [0],
+    "options": ["A", "C"]
+  }
+}
+```
+
+- `title` / `statement` / `support`: booleanos (só `true` é persistido).
+- `images`: índices 0-based das imagens da questão.
+- `options`: letras A–H das alternativas a destacar (só `multipleChoice`).
+- Na avaliação escrita, `PUT /written-tests/<id>/questions` aceita override por item
+  (`dictationMarks`) e a resposta traz `dictationMarksSource`: `question` | `assessment` | `none`.
+
+## 6. Importar DOCX
+
+`POST /afirme-reading/questions/import/docx` (multipart)
+
+- `file`: `.docx`
+- `commit`: `false` (prévia) ou `true` (grava)
+- `grade`, `subjectId`: defaults para blocos sem meta
+- `indexes`: lista opcional `1,2,3`
+- `confirmation`: JSON `{ "questions": [{ "index": 1, "dictationMarks": {...} }] }`
+
+Resposta de prévia: `{ mode: "preview", summary, questions }`.
+Resposta de commit: `{ mode: "commit", summary, questions, created, failed }`.
+
+---
+
 ## Efeito no Afirme Play
 
 Questões com `origin = "afirme_ler"`:

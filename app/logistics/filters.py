@@ -2,9 +2,9 @@
 """
 Opções de filtro em cascata para o cronograma de logística.
 
-Hierarquia: Etapa → Avaliação → Escolas → Séries → Turmas (município = tenant atual).
-A etapa é resolvida por Class.grade_id → Grade.education_stage_id (Test.course é texto livre).
+Hierarquia: Avaliação → Escolas → Séries → Turmas (município = tenant atual).
 As turmas de uma avaliação vêm de tenant.class_test (somente leitura).
+O parâmetro etapa ainda é aceito na API por compatibilidade, mas não filtra.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from app.models.school import School
 from app.models.studentClass import Class
 from app.models.test import Test
 from app.utils.class_label_helpers import normalize_shift
-from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
+from app.utils.uuid_helpers import ensure_uuid_list
 
 
 def parse_id_list(*raw_values: Optional[str]) -> List[str]:
@@ -50,18 +50,13 @@ def multi_arg(args, *keys: str) -> List[str]:
     return parse_id_list(*values)
 
 
-def _class_test_scope(query, city_id: str, etapa_id: Optional[str] = None):
-    """Restringe uma query já ligada a Class/School ao município e (opcional) à etapa."""
-    query = query.filter(School.city_id == city_id)
-    if etapa_id:
-        etapa_uuid = ensure_uuid(etapa_id)
-        if not etapa_uuid:
-            return query.filter(False)
-        query = query.filter(Grade.education_stage_id == etapa_uuid)
-    return query
+def _class_test_scope(query, city_id: str):
+    """Restringe uma query já ligada a Class/School ao município."""
+    return query.filter(School.city_id == city_id)
 
 
 def obter_etapas(city_id: str) -> List[Dict[str, Any]]:
+    """Mantido por compatibilidade; a tela do editor não usa mais etapa."""
     rows = (
         db.session.query(EducationStage.id, EducationStage.name)
         .join(Grade, Grade.education_stage_id == EducationStage.id)
@@ -76,15 +71,14 @@ def obter_etapas(city_id: str) -> List[Dict[str, Any]]:
     return [{"id": str(r[0]), "nome": r[1]} for r in rows]
 
 
-def obter_avaliacoes(city_id: str, etapa_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def obter_avaliacoes(city_id: str) -> List[Dict[str, Any]]:
     query = (
         db.session.query(Test.id, Test.title, Test.evaluation_mode)
         .join(ClassTest, ClassTest.test_id == Test.id)
         .join(Class, Class.id == ClassTest.class_id)
         .join(School, School.id == cast(Class.school_id, String))
-        .outerjoin(Grade, Grade.id == Class.grade_id)
     )
-    query = _class_test_scope(query, city_id, etapa_id)
+    query = _class_test_scope(query, city_id)
     rows = query.distinct().order_by(Test.title.asc()).all()
     return [
         {"id": str(r[0]), "titulo": r[1], "evaluation_mode": r[2] or "virtual"}
@@ -92,17 +86,14 @@ def obter_avaliacoes(city_id: str, etapa_id: Optional[str] = None) -> List[Dict[
     ]
 
 
-def obter_escolas(
-    city_id: str, avaliacao_id: str, etapa_id: Optional[str] = None
-) -> List[Dict[str, Any]]:
+def obter_escolas(city_id: str, avaliacao_id: str) -> List[Dict[str, Any]]:
     query = (
         db.session.query(School.id, School.name)
         .join(Class, School.id == cast(Class.school_id, String))
         .join(ClassTest, ClassTest.class_id == Class.id)
-        .outerjoin(Grade, Grade.id == Class.grade_id)
         .filter(ClassTest.test_id == str(avaliacao_id))
     )
-    query = _class_test_scope(query, city_id, etapa_id)
+    query = _class_test_scope(query, city_id)
     rows = query.distinct().order_by(School.name.asc()).all()
     return [{"id": str(r[0]), "nome": r[1]} for r in rows]
 
@@ -110,7 +101,6 @@ def obter_escolas(
 def obter_series(
     city_id: str,
     avaliacao_id: str,
-    etapa_id: Optional[str] = None,
     escola_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     query = (
@@ -120,7 +110,7 @@ def obter_series(
         .join(School, School.id == cast(Class.school_id, String))
         .filter(ClassTest.test_id == str(avaliacao_id))
     )
-    query = _class_test_scope(query, city_id, etapa_id)
+    query = _class_test_scope(query, city_id)
     if escola_ids:
         query = query.filter(School.id.in_([str(e) for e in escola_ids]))
     rows = query.distinct().order_by(Grade.name.asc()).all()
@@ -130,7 +120,6 @@ def obter_series(
 def obter_turmas(
     city_id: str,
     avaliacao_id: str,
-    etapa_id: Optional[str] = None,
     escola_ids: Optional[List[str]] = None,
     serie_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
@@ -143,7 +132,7 @@ def obter_turmas(
         .outerjoin(Grade, Grade.id == Class.grade_id)
         .filter(ClassTest.test_id == str(avaliacao_id))
     )
-    query = _class_test_scope(query, city_id, etapa_id)
+    query = _class_test_scope(query, city_id)
     if escola_ids:
         query = query.filter(School.id.in_([str(e) for e in escola_ids]))
     if serie_ids:
@@ -167,28 +156,29 @@ def obter_turmas(
 
 
 def build_filter_options(city_id: str, args) -> Dict[str, Any]:
-    """Resposta incremental: cada nível só aparece quando o anterior foi informado."""
-    etapa_id = (args.get("etapa") or "").strip() or None
+    """Resposta incremental: cada nível só aparece quando o anterior foi informado.
+
+    O parâmetro etapa é ignorado (compatibilidade com clientes antigos).
+    """
     avaliacao_id = (args.get("avaliacao") or "").strip() or None
     escola_ids = multi_arg(args, "escolas", "escola")
     serie_ids = multi_arg(args, "series", "serie")
 
     response: Dict[str, Any] = {
         "etapas": obter_etapas(city_id),
-        "avaliacoes": obter_avaliacoes(city_id, etapa_id),
+        "avaliacoes": obter_avaliacoes(city_id),
     }
     if not avaliacao_id:
         return response
 
-    response["escolas"] = obter_escolas(city_id, avaliacao_id, etapa_id)
+    response["escolas"] = obter_escolas(city_id, avaliacao_id)
     response["series"] = obter_series(
-        city_id, avaliacao_id, etapa_id, escola_ids=escola_ids or None
+        city_id, avaliacao_id, escola_ids=escola_ids or None
     )
     if escola_ids or serie_ids:
         response["turmas"] = obter_turmas(
             city_id,
             avaliacao_id,
-            etapa_id,
             escola_ids=escola_ids or None,
             serie_ids=serie_ids or None,
         )

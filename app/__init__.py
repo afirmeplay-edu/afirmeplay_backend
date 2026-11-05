@@ -526,7 +526,13 @@ def create_app():
 
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager, MonitoringAction, MonitoringActionHistory
-    from app.certification.models import CertificateTemplate, Certificate, CertificateArtwork
+    from app.certification.models import (
+        CertificateTemplate,
+        Certificate,
+        CertificateArtwork,
+        FormationCertificateEvent,
+        FormationCertificateParticipant,
+    )
     from app.models.coverTemplate import CoverTemplate  # noqa: F401
     from app.models.logisticsSchedule import LogisticsSchedule, LogisticsScheduleItem  # noqa: F401
     from app.models.notification import Notification, NotificationRecipient  # noqa: F401

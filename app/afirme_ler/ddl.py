@@ -353,11 +353,14 @@ CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_question (
         REFERENCES "{schema}".reading_written_test(id) ON DELETE CASCADE,
     question_id VARCHAR NOT NULL,
     "order" INTEGER NOT NULL,
+    dictation_marks JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_reading_written_test_question UNIQUE (written_test_id, question_id),
     CONSTRAINT uq_reading_written_test_order UNIQUE (written_test_id, "order"),
     CONSTRAINT chk_reading_written_test_order CHECK ("order" BETWEEN 1 AND 19)
 );
+ALTER TABLE "{schema}".reading_written_test_question
+    ADD COLUMN IF NOT EXISTS dictation_marks JSON;
 ALTER TABLE "{schema}".reading_written_test_question
     DROP CONSTRAINT IF EXISTS chk_reading_written_test_order;
 ALTER TABLE "{schema}".reading_written_test_question

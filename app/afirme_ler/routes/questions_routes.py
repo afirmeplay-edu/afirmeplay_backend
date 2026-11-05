@@ -102,6 +102,39 @@ def update_bank_question(question_id):
         return _handle_service_error(error)
 
 
+@bp.route("/questions/import/docx", methods=["POST"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*WRITE_ROLES)
+def import_bank_questions_docx():
+    """Prévia (`commit=false`) ou confirmação (`commit=true`) de importação DOCX."""
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    file_storage = request.files.get("file")
+    if file_storage is None:
+        return _error_response("Envie um arquivo .docx.", 400)
+    try:
+        from app.afirme_ler.services.docx_import_service import (
+            import_questions,
+            parse_import_form,
+        )
+
+        form = parse_import_form(request)
+        result = import_questions(
+            file_storage,
+            user,
+            form["defaults"],
+            commit=form["commit"],
+            indexes=form["indexes"],
+            dictation_overrides=form["dictation_overrides"],
+        )
+        return jsonify(result), 200 if form["commit"] else 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
 @bp.route("/questions/image-description", methods=["POST"])
 @jwt_required()
 @require_feature("afirme_reading")

@@ -564,24 +564,27 @@ estar aplicada.
 
 ## 13. PDF da prova (caderno de questões)
 
-`GET /afirme-reading/written-tests/<id>/pdf`
+`GET /afirme-reading/written-tests/<id>/pdf?mode=student|applicator`
 
 Gera o caderno de questões na hora (A4) e devolve o arquivo. Não grava nada (nem no banco nem no
 armazenamento); chamar de novo gera de novo, já com as questões atuais do banco de questões.
+
+- `mode=student` (padrão): prova limpa, sem megafones.
+- `mode=applicator`: inclui ícones de megafone nos campos marcados em `dictationMarks`
+  (override da avaliação, se houver; senão o da questão).
 
 Perfis: todos os do Afirme Ler, **inclusive `aplicador`** (quem imprime/aplica).
 
 ### Resposta `200`
 
 - `Content-Type: application/pdf`
-- `Content-Disposition: attachment; filename=prova_<titulo>.pdf` — título sem acentos, minúsculo, com
-  `_` no lugar de espaços (ex.: `prova_avaliacao_escrita_1o_bimestre.pdf`); título sem letras/números
-  vira `prova_avaliacao.pdf`.
+- `Content-Disposition: attachment; filename=prova_<titulo>.pdf` (aluno) ou
+  `prova_<titulo>_aplicador.pdf` (aplicador).
 
 No frontend, baixar como blob (a rota exige o header `Authorization`):
 
 ```ts
-const res = await api.get(`/afirme-reading/written-tests/${id}/pdf`, { responseType: "blob" });
+const res = await api.get(`/afirme-reading/written-tests/${id}/pdf?mode=applicator`, { responseType: "blob" });
 ```
 
 ### Conteúdo do PDF

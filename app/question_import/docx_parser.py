@@ -62,6 +62,12 @@ META_ALIASES = {
     "number": "number",
     "valor": "value",
     "value": "value",
+    "ditar": "dictationDirective",
+    "ditado": "dictationDirective",
+    "dictation": "dictationDirective",
+    "dictationdirective": "dictationDirective",
+    "megafone": "dictationDirective",
+    "megafones": "dictationDirective",
 }
 
 TYPE_MAP = {
@@ -79,6 +85,12 @@ TYPE_MAP = {
     "aberta": "essay",
     "open": "essay",
     "open_ended": "essay",
+    "dictation": "dictation",
+    "ditado": "dictation",
+    "text_production": "text_production",
+    "producao_textual": "text_production",
+    "produção_textual": "text_production",
+    "bilhete": "text_production",
 }
 
 
@@ -111,7 +123,7 @@ def _normalize_type(raw: str) -> Optional[str]:
     if key2 in TYPE_MAP:
         return TYPE_MAP[key2]
     # accept already-canonical
-    if raw.strip() in ("multipleChoice", "essay"):
+    if raw.strip() in ("multipleChoice", "essay", "dictation", "text_production"):
         return raw.strip()
     return raw.strip()
 

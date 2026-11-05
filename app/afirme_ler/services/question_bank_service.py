@@ -93,6 +93,78 @@ _OPTIONAL_FIELDS = {
     "educationStageId": "education_stage_id",
 }
 
+DICTATION_TEXT_PARTS = ("title", "statement", "support")
+DICTATION_MARK_KEYS = frozenset((*DICTATION_TEXT_PARTS, "images", "options"))
+
+
+def validate_dictation_marks(value: Any) -> Optional[Dict[str, Any]]:
+    """Valida o contrato camelCase e devolve JSON canônico, sem entradas falsas."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("dictationMarks deve ser um objeto ou null.")
+
+    unknown = sorted(set(value.keys()) - DICTATION_MARK_KEYS)
+    if unknown:
+        raise ValueError(f"dictationMarks contém campo inválido: {', '.join(unknown)}.")
+
+    normalized: Dict[str, Any] = {}
+    for key in DICTATION_TEXT_PARTS:
+        if key not in value:
+            continue
+        raw = value.get(key)
+        if not isinstance(raw, bool):
+            raise ValueError(f"dictationMarks.{key} deve ser true ou false.")
+        if raw is True:
+            normalized[key] = True
+
+    if "images" in value:
+        raw = value.get("images")
+        if not isinstance(raw, list) or any(
+            not isinstance(item, int) or isinstance(item, bool) or item < 0 for item in raw
+        ):
+            raise ValueError("dictationMarks.images deve ser uma lista de índices inteiros >= 0.")
+        images = list(dict.fromkeys(raw))
+        if images:
+            normalized["images"] = images
+
+    if "options" in value:
+        raw = value.get("options")
+        if not isinstance(raw, list):
+            raise ValueError("dictationMarks.options deve ser uma lista de letras A a H.")
+        normalized_options: List[str] = []
+        for item in raw:
+            letter = str(item).strip().upper()
+            if letter not in LETTERS:
+                raise ValueError("dictationMarks.options deve ser uma lista de letras A a H.")
+            if letter not in normalized_options:
+                normalized_options.append(letter)
+        if normalized_options:
+            normalized["options"] = normalized_options
+
+    return normalized or None
+
+
+def _assert_dictation_marks_fit(question: Question) -> None:
+    marks = question.dictation_marks
+    if not marks or not isinstance(marks, dict):
+        return
+    images = question.images if isinstance(question.images, list) else []
+    invalid_image = next(
+        (index for index in marks.get("images") or [] if index >= len(images)),
+        None,
+    )
+    if invalid_image is not None:
+        raise ValueError(f"dictationMarks.images contém índice inexistente: {invalid_image}.")
+
+    options = marks.get("options") or []
+    available = LETTERS[: min(len(question.alternatives or []), len(LETTERS))]
+    invalid_option = next((letter for letter in options if letter not in available), None)
+    if invalid_option is not None:
+        raise ValueError(
+            f"dictationMarks.options contém alternativa inexistente: {invalid_option}."
+        )
+
 
 def _user_id(user: Dict[str, Any]) -> Optional[str]:
     uid = user.get("id") or user.get("user_id")
@@ -337,6 +409,8 @@ def parse_create_payload(data: Any) -> Dict[str, Any]:
     for key, column in _OPTIONAL_FIELDS.items():
         if key in data:
             fields[column] = _optional_value(key, data.get(key))
+    if "dictationMarks" in data:
+        fields["dictation_marks"] = validate_dictation_marks(data.get("dictationMarks"))
     return fields
 
 
@@ -358,6 +432,8 @@ def apply_update_payload(question: Any, data: Any) -> None:
     for key, column in _OPTIONAL_FIELDS.items():
         if key in data:
             setattr(question, column, _optional_value(key, data.get(key)))
+    if "dictationMarks" in data:
+        question.dictation_marks = validate_dictation_marks(data.get("dictationMarks"))
 
     previous_type = question.question_type
     final_type = normalize_ler_question_type(
@@ -447,6 +523,7 @@ def to_response(question: Question) -> Dict[str, Any]:
     data = format_question_response(question)
     data["origin"] = question.origin
     data["scopeType"] = question.scope_type
+    data["dictationMarks"] = question.dictation_marks
     stimulus = (
         question.writing_stimulus
         if question.question_type == QUESTION_TYPE_DICTATION
@@ -553,7 +630,8 @@ class QuestionBankService:
         }
 
     @staticmethod
-    def create(user: Dict[str, Any], data: Any) -> Question:
+    def create_pending(user: Dict[str, Any], data: Any) -> Question:
+        """Cria na sessão atual sem commit, para importações atômicas do Afirme Ler."""
         assert_can_write(user)
         fields = parse_create_payload(data)
         _assert_references_exist(
@@ -574,6 +652,12 @@ class QuestionBankService:
         db.session.add(question)
         db.session.flush()
         _apply_images(question)
+        _assert_dictation_marks_fit(question)
+        return question
+
+    @staticmethod
+    def create(user: Dict[str, Any], data: Any) -> Question:
+        question = QuestionBankService.create_pending(user, data)
         db.session.commit()
         return QuestionBankService._get_visible_question(user, question.id)
 
@@ -596,6 +680,7 @@ class QuestionBankService:
         )
         if any(key in data for key in ("type", "formattedText", "formattedSolution", "options")):
             _apply_images(question)
+        _assert_dictation_marks_fit(question)
 
         question.last_modified_by = _user_id(user)
         question.version = (question.version or 0) + 1

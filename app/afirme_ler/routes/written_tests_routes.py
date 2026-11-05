@@ -227,9 +227,12 @@ def download_written_test_pdf(written_test_id):
     user = get_current_user_from_token()
     if not user:
         return _error_response("Usuário não encontrado.", 401)
+    mode = request.args.get("mode", "student")
     try:
         written_test = WrittenTestService.get(written_test_id)
-        pdf_bytes = WrittenTestPdfService().generate_pdf(written_test, resolve_context_city())
+        pdf_bytes = WrittenTestPdfService().generate_pdf(
+            written_test, resolve_context_city(), mode=mode
+        )
     except Exception as error:
         db.session.rollback()
         return _handle_service_error(error)
@@ -237,7 +240,7 @@ def download_written_test_pdf(written_test_id):
         io.BytesIO(pdf_bytes),
         mimetype="application/pdf",
         as_attachment=True,
-        download_name=pdf_filename(written_test.title),
+        download_name=pdf_filename(written_test.title, mode=mode),
         max_age=0,
     )
 

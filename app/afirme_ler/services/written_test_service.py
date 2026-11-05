@@ -44,6 +44,7 @@ from app.afirme_ler.services.question_bank_service import (
     _escape_like,
     _parse_positive_int,
     _with_relations,
+    statement_image_count,
     to_response,
     validate_dictation_marks,
 )
@@ -118,6 +119,14 @@ def _optional_description(value: Any) -> Optional[str]:
     return value.strip() or None
 
 
+def _norm_uuid(value: Any) -> str:
+    text = "" if value is None else str(value).strip()
+    try:
+        return str(uuid.UUID(text))
+    except (ValueError, AttributeError):
+        return text
+
+
 def _uuid_list(values: Any, field_name: str) -> List[str]:
     if values is None:
         return []
@@ -167,9 +176,10 @@ def validate_scope(data: Dict[str, Any]) -> Dict[str, List[str]]:
         if not klass:
             raise ValueError(f"Turma não encontrada: {class_id}.")
         label = klass.name or class_id
-        if str(klass.school_id) not in school_ids:
+        if _norm_uuid(klass.school_id) not in school_ids:
             raise ValueError(f"A turma {label} não pertence às escolas escolhidas.")
-        if not klass.grade_id or str(klass.grade_id) not in grade_ids:
+        # Turma sem série no cadastro continua válida: o seletor da tela já a mostrou pela escola.
+        if klass.grade_id and _norm_uuid(klass.grade_id) not in grade_ids:
             raise ValueError(f"A turma {label} não pertence às séries escolhidas.")
 
     return {"grade_ids": grade_ids, "school_ids": school_ids, "class_ids": class_ids}
@@ -219,9 +229,8 @@ def _assert_marks_exist(
         if not marks or not isinstance(marks, dict):
             continue
         question = questions[question_id]
-        images = question.images if isinstance(question.images, list) else []
         invalid_image = next(
-            (index for index in marks.get("images") or [] if index >= len(images)),
+            (index for index in marks.get("images") or [] if index >= statement_image_count(question)),
             None,
         )
         if invalid_image is not None:

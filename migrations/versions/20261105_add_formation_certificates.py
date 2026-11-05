@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tabelas de certificados de formação continuada (tenant).
+"""Tabelas de certificados de formação continuada nos schemas city_%.
 
 Revision ID: 20261105_formation_certs
 Revises: 20261105_dictation_marks
@@ -7,7 +7,6 @@ Create Date: 2026-11-05
 """
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 
 revision = "20261105_formation_certs"
@@ -16,76 +15,77 @@ branch_labels = None
 depends_on = None
 
 
+def _city_schemas_with_school(conn):
+    rows = conn.execute(
+        sa.text(
+            "SELECT table_schema FROM information_schema.tables "
+            "WHERE table_name = 'school' AND table_schema LIKE 'city_%' "
+            "ORDER BY table_schema"
+        )
+    )
+    return [row[0] for row in rows]
+
+
+def _safe_city_schema(schema: str) -> str:
+    if not schema.startswith("city_") or not schema.replace("_", "").isalnum():
+        raise ValueError(f"Nome de schema inválido: {schema}")
+    return schema
+
+
+def _create_sql(schema: str) -> str:
+    schema = _safe_city_schema(schema)
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".formation_certificate_events (
+    id VARCHAR NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    trainer VARCHAR(255) NOT NULL,
+    audience VARCHAR(255) NOT NULL,
+    subtitle TEXT,
+    certificate_text TEXT NOT NULL,
+    year VARCHAR(20) NOT NULL,
+    issued_text VARCHAR(120),
+    signer_role VARCHAR(255),
+    signature_url VARCHAR(500),
+    verify_url VARCHAR(500),
+    topics JSON NOT NULL,
+    municipality_id VARCHAR,
+    status VARCHAR(20) NOT NULL DEFAULT 'draft',
+    created_by VARCHAR NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    FOREIGN KEY (created_by) REFERENCES public.users (id)
+);
+CREATE TABLE IF NOT EXISTS "{schema}".formation_certificate_participants (
+    id VARCHAR NOT NULL,
+    event_id VARCHAR NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    external_ref VARCHAR(120),
+    user_id VARCHAR,
+    certificate_code VARCHAR(64) NOT NULL,
+    issued_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    CONSTRAINT uq_formation_cert_code UNIQUE (event_id, certificate_code),
+    FOREIGN KEY (event_id) REFERENCES "{schema}".formation_certificate_events (id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES public.users (id)
+);
+CREATE INDEX IF NOT EXISTS ix_formation_cert_participants_event
+    ON "{schema}".formation_certificate_participants (event_id);
+CREATE INDEX IF NOT EXISTS ix_formation_cert_participants_code
+    ON "{schema}".formation_certificate_participants (certificate_code);
+"""
+
+
 def upgrade():
-    op.create_table(
-        "formation_certificate_events",
-        sa.Column("id", sa.String(), nullable=False),
-        sa.Column("title", sa.String(length=255), nullable=False),
-        sa.Column("trainer", sa.String(length=255), nullable=False),
-        sa.Column("audience", sa.String(length=255), nullable=False),
-        sa.Column("subtitle", sa.Text(), nullable=True),
-        sa.Column("certificate_text", sa.Text(), nullable=False),
-        sa.Column("year", sa.String(length=20), nullable=False),
-        sa.Column("issued_text", sa.String(length=120), nullable=True),
-        sa.Column("signer_role", sa.String(length=255), nullable=True),
-        sa.Column("signature_url", sa.String(length=500), nullable=True),
-        sa.Column("verify_url", sa.String(length=500), nullable=True),
-        sa.Column("topics", postgresql.JSON(astext_type=sa.Text()), nullable=False),
-        sa.Column("municipality_id", sa.String(), nullable=True),
-        sa.Column("status", sa.String(length=20), nullable=False, server_default="draft"),
-        sa.Column("created_by", sa.String(), nullable=False),
-        sa.Column("created_at", sa.TIMESTAMP(), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=True),
-        sa.Column("updated_at", sa.TIMESTAMP(), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=True),
-        sa.ForeignKeyConstraint(["created_by"], ["public.users.id"]),
-        sa.PrimaryKeyConstraint("id"),
-        schema="tenant",
-    )
-    op.create_table(
-        "formation_certificate_participants",
-        sa.Column("id", sa.String(), nullable=False),
-        sa.Column("event_id", sa.String(), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("external_ref", sa.String(length=120), nullable=True),
-        sa.Column("user_id", sa.String(), nullable=True),
-        sa.Column("certificate_code", sa.String(length=64), nullable=False),
-        sa.Column("issued_at", sa.TIMESTAMP(), nullable=True),
-        sa.Column("created_at", sa.TIMESTAMP(), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=True),
-        sa.ForeignKeyConstraint(
-            ["event_id"],
-            ["tenant.formation_certificate_events.id"],
-            ondelete="CASCADE",
-        ),
-        sa.ForeignKeyConstraint(["user_id"], ["public.users.id"]),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("event_id", "certificate_code", name="uq_formation_cert_code"),
-        schema="tenant",
-    )
-    op.create_index(
-        "ix_formation_cert_participants_event",
-        "formation_certificate_participants",
-        ["event_id"],
-        unique=False,
-        schema="tenant",
-    )
-    op.create_index(
-        "ix_formation_cert_participants_code",
-        "formation_certificate_participants",
-        ["certificate_code"],
-        unique=False,
-        schema="tenant",
-    )
+    bind = op.get_bind()
+    for schema in _city_schemas_with_school(bind):
+        bind.execute(sa.text(_create_sql(schema)))
 
 
 def downgrade():
-    op.drop_index(
-        "ix_formation_cert_participants_code",
-        table_name="formation_certificate_participants",
-        schema="tenant",
-    )
-    op.drop_index(
-        "ix_formation_cert_participants_event",
-        table_name="formation_certificate_participants",
-        schema="tenant",
-    )
-    op.drop_table("formation_certificate_participants", schema="tenant")
-    op.drop_table("formation_certificate_events", schema="tenant")
+    bind = op.get_bind()
+    for schema in _city_schemas_with_school(bind):
+        schema = _safe_city_schema(schema)
+        bind.execute(sa.text(f'DROP TABLE IF EXISTS "{schema}".formation_certificate_participants'))
+        bind.execute(sa.text(f'DROP TABLE IF EXISTS "{schema}".formation_certificate_events'))

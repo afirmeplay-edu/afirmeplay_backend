@@ -16,52 +16,49 @@ branch_labels = None
 depends_on = None
 
 
+def _city_schemas_with_written_question(conn):
+    rows = conn.execute(
+        sa.text(
+            "SELECT table_schema FROM information_schema.tables "
+            "WHERE table_name = 'reading_written_test_question' "
+            "AND table_schema LIKE 'city_%' "
+            "ORDER BY table_schema"
+        )
+    )
+    return [row[0] for row in rows]
+
+
+def _safe_city_schema(schema: str) -> str:
+    if not schema.startswith("city_") or not schema.replace("_", "").isalnum():
+        raise ValueError(f"Nome de schema inválido: {schema}")
+    return schema
+
+
 def upgrade():
     op.add_column(
         "question",
         sa.Column("dictation_marks", postgresql.JSON(astext_type=sa.Text()), nullable=True),
         schema="public",
     )
-    # Tabelas tenant são criadas/atualizadas via ddl por município; este ALTER
-    # cobre o schema tenant ativo da migration (quando aplicável).
     bind = op.get_bind()
-    bind.execute(
-        sa.text(
-            """
-            DO $$
-            BEGIN
-                IF EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = 'tenant'
-                      AND table_name = 'reading_written_test_question'
-                ) THEN
-                    ALTER TABLE tenant.reading_written_test_question
-                        ADD COLUMN IF NOT EXISTS dictation_marks JSON;
-                END IF;
-            END $$;
-            """
+    for schema in _city_schemas_with_written_question(bind):
+        schema = _safe_city_schema(schema)
+        bind.execute(
+            sa.text(
+                f'ALTER TABLE "{schema}".reading_written_test_question '
+                "ADD COLUMN IF NOT EXISTS dictation_marks JSON"
+            )
         )
-    )
 
 
 def downgrade():
     bind = op.get_bind()
-    bind.execute(
-        sa.text(
-            """
-            DO $$
-            BEGIN
-                IF EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema = 'tenant'
-                      AND table_name = 'reading_written_test_question'
-                      AND column_name = 'dictation_marks'
-                ) THEN
-                    ALTER TABLE tenant.reading_written_test_question
-                        DROP COLUMN dictation_marks;
-                END IF;
-            END $$;
-            """
+    for schema in _city_schemas_with_written_question(bind):
+        schema = _safe_city_schema(schema)
+        bind.execute(
+            sa.text(
+                f'ALTER TABLE "{schema}".reading_written_test_question '
+                "DROP COLUMN IF EXISTS dictation_marks"
+            )
         )
-    )
     op.drop_column("question", "dictation_marks", schema="public")

@@ -56,6 +56,7 @@ def _item(**overrides):
         editado_manualmente=False,
         class_id="turma-1",
         scheduled_date=date(2026, 4, 1),
+        students_count=20,
         tablets_qty=10,
         booklets_qty=0,
         notes=None,
@@ -72,6 +73,8 @@ def _parsed(**overrides):
         tablets_qty=10,
         booklets_qty=0,
         notes=None,
+        students_set=False,
+        students_count=None,
         applicator_set=False,
         applicator_user_id=None,
     )
@@ -95,6 +98,20 @@ def test_item_automatico_so_fica_editado_quando_o_editor_muda_algum_campo():
     already = _item(editado_manualmente=True)
     mark_auto_item_edited(already, _parsed())
     assert already.editado_manualmente is True
+
+
+def test_alterar_quantidade_de_alunos_marca_item_automatico():
+    changed = _item(students_count=20)
+    mark_auto_item_edited(changed, _parsed(students_set=True, students_count=15))
+    assert changed.editado_manualmente is True
+
+    same = _item(students_count=20)
+    mark_auto_item_edited(same, _parsed(students_set=True, students_count=20))
+    assert same.editado_manualmente is False
+
+    omitted = _item(students_count=20)
+    mark_auto_item_edited(omitted, _parsed())
+    assert omitted.editado_manualmente is False
 
 
 def test_aplicador_vale_para_qualquer_perfil_do_municipio():

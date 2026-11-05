@@ -862,8 +862,28 @@
 			overflow: hidden; /* ✅ Evita que conteúdo ultrapasse */
 		}
 
+		/* Mesma TTF do overlay ReportLab (header_label_metrics.py). */
+		{% if header_font_regular_url %}
+		@font-face {
+			font-family: "AfirmeHeaderSans";
+			src: url("{{ header_font_regular_url }}");
+			font-weight: 400;
+			font-style: normal;
+		}
+		{% endif %}
+		{% if header_font_bold_url %}
+		@font-face {
+			font-family: "AfirmeHeaderSans";
+			src: url("{{ header_font_bold_url }}");
+			font-weight: 700;
+			font-style: normal;
+		}
+		{% endif %}
+
 		.header-info-line {
+			font-family: "AfirmeHeaderSans", Helvetica, Arial, sans-serif;
 			font-size: 7pt;
+			letter-spacing: normal;
 			margin: 0.5px 0;
 			text-transform: uppercase;
 			overflow: hidden; /* ✅ Evita que texto ultrapasse */
@@ -872,13 +892,15 @@
 		}
 
 			.header-info-line .label {
-				font-weight: bold;
-				/* X do valor = largura real do rótulo + 5pt (sem coluna X fixa). */
-				margin-right: 5pt;
+				font-family: "AfirmeHeaderSans", Helvetica, Arial, sans-serif;
+				font-weight: 700;
+				/* Igual LABEL_VALUE_GAP do overlay (header_label_metrics). */
+				margin-right: 8pt;
 			}
 
 			.header-info-line .value {
-				font-weight: normal;
+				font-family: "AfirmeHeaderSans", Helvetica, Arial, sans-serif;
+				font-weight: 400;
 			}
 
 		.student-name-grid {

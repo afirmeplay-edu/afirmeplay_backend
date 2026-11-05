@@ -181,6 +181,14 @@ class AnswerSheetGenerator:
         # Adicionar filtros personalizados
         self.env.filters['safe'] = lambda x: x
 
+    @staticmethod
+    def _with_header_fonts(template_data: Dict) -> Dict:
+        """Injeta URLs das TTFs do cabeçalho (mesmas medidas do overlay ReportLab)."""
+        from app.services.cartao_resposta.header_label_metrics import header_font_template_vars
+        merged = dict(template_data)
+        merged.update(header_font_template_vars())
+        return merged
+
     def generate_answer_sheets_arch4(self, class_id: str, test_data: Dict, 
                               num_questions: int, use_blocks: bool,
                               blocks_config: Dict, correct_answers: Dict,
@@ -300,7 +308,7 @@ class AnswerSheetGenerator:
             }
             
             # Preparar dados para template base
-            base_template_data = {
+            base_template_data = self._with_header_fonts({
                 'test_data': test_data,
                 'student': placeholder_student,
                 'questions_by_block': questions_by_block,
@@ -309,7 +317,7 @@ class AnswerSheetGenerator:
                 'total_questions': num_questions,
                 'datetime': datetime,
                 'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
-            }
+            })
 
             # Renderizar template HTML base
             template = self.env.get_template('answer_sheet.html')
@@ -580,7 +588,7 @@ class AnswerSheetGenerator:
                     student_with_qr['qr_code'] = qr_code_base64
 
                     # Preparar dados para template
-                    template_data = {
+                    template_data = self._with_header_fonts({
                         'test_data': test_data,
                         'student': student_with_qr,
                         'questions_by_block': questions_by_block,
@@ -589,7 +597,7 @@ class AnswerSheetGenerator:
                         'total_questions': num_questions,
                         'datetime': datetime,
                         'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
-                    }
+                    })
 
                     # Renderizar template HTML
                     template = self.env.get_template('answer_sheet.html')
@@ -780,7 +788,7 @@ class AnswerSheetGenerator:
                     'qr_code': self._get_placeholder_qr_base64()
                 }
                 
-                base_template_data = {
+                base_template_data = self._with_header_fonts({
                     'test_data': test_data,
                     'student': placeholder_student,
                     'questions_by_block': questions_by_block,
@@ -789,7 +797,7 @@ class AnswerSheetGenerator:
                     'total_questions': num_questions,
                     'datetime': datetime,
                     'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
-                }
+                })
                 
                 template = self.env.get_template('answer_sheet.html')
                 base_html = template.render(**base_template_data)
@@ -924,7 +932,7 @@ class AnswerSheetGenerator:
             student_with_qr['qr_code'] = qr_code_base64
 
             # Preparar dados para o template
-            template_data = {
+            template_data = self._with_header_fonts({
                 'test_data': test_data,
                 'student': student_with_qr,
                 'questions_by_block': questions_by_block,
@@ -933,7 +941,7 @@ class AnswerSheetGenerator:
                 'total_questions': num_questions,
                 'datetime': datetime,
                 'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
-            }
+            })
 
             # Renderizar template HTML
             template = self.env.get_template('answer_sheet.html')
@@ -1240,27 +1248,25 @@ class AnswerSheetGenerator:
             # Linhas: font-size 7pt. O X do valor é a largura real do rótulo em negrito.
             # ========================================================================
             
-            # X do valor = início do rótulo + largura real do rótulo em negrito + 5pt.
-            # Espelha .header-info-line .label { margin-right: 5pt } do answer_sheet.html.
-            # NÃO usar X fixo único (quebrava rótulos longos como NOME COMPLETO).
-            # Base: padding(56.69) + border(0.75) + padding_header(3) = 60.44pt
+            # X do valor = largura REAL do rótulo na mesma TTF do HTML (Liberation Sans Bold
+            # via header_label_metrics) + 5pt. Helvetica-Bold subestimava "NOME COMPLETO:".
             from reportlab.pdfbase.pdfmetrics import stringWidth
+            from app.services.cartao_resposta.header_label_metrics import (
+                LABEL_FONT_SIZE,
+                VALUE_MIN_SIZE,
+                ensure_header_fonts_registered,
+                overlay_value_x_positions,
+            )
 
-            X_BASE = 60.44
-            FONT_NAME = 'Helvetica'
-            LABEL_FONT = 'Helvetica-Bold'
-            FONT_SIZE = 7            # 7pt (mesmo do CSS)
-            LABEL_VALUE_GAP = 5.0     # pt — mesmo margin-right do CSS do rótulo
-            VALUE_MIN_SIZE = 5.5
+            LABEL_FONT, FONT_NAME = ensure_header_fonts_registered()
+            FONT_SIZE = LABEL_FONT_SIZE
             FONT_COLOR = HexColor('#374151')
 
-            def _x_after_label(label: str) -> float:
-                return X_BASE + stringWidth(label, LABEL_FONT, FONT_SIZE) + LABEL_VALUE_GAP
-
-            X_NOME = _x_after_label('NOME COMPLETO:')
-            X_ESCOLA = _x_after_label('ESCOLA:')
-            X_TURMA = _x_after_label('TURMA:')
-            X_TURNO = _x_after_label('TURNO:')
+            xs = overlay_value_x_positions()
+            X_NOME = xs["nome"]
+            X_ESCOLA = xs["escola"]
+            X_TURMA = xs["turma"]
+            X_TURNO = xs["turno"]
             
             # COORDENADAS Y (validadas das provas físicas) — NÃO alterar (OMR/leitura)
             Y_PDF_NAME = 780.16      # Baseline do NOME COMPLETO (linha 2)

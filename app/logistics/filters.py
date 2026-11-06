@@ -155,11 +155,76 @@ def obter_turmas(
     ]
 
 
+def obter_escolas_municipio(city_id: str) -> List[Dict[str, Any]]:
+    rows = (
+        db.session.query(School.id, School.name)
+        .join(Class, School.id == cast(Class.school_id, String))
+        .filter(School.city_id == city_id)
+        .distinct()
+        .order_by(School.name.asc())
+        .all()
+    )
+    return [{"id": str(r[0]), "nome": r[1]} for r in rows]
+
+
+def obter_series_municipio(
+    city_id: str, escola_ids: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
+    query = (
+        db.session.query(Grade.id, Grade.name)
+        .join(Class, Class.grade_id == Grade.id)
+        .join(School, School.id == cast(Class.school_id, String))
+        .filter(School.city_id == city_id)
+    )
+    if escola_ids:
+        query = query.filter(School.id.in_([str(e) for e in escola_ids]))
+    rows = query.distinct().order_by(Grade.name.asc()).all()
+    return [{"id": str(r[0]), "nome": r[1]} for r in rows]
+
+
+def obter_turmas_municipio(
+    city_id: str,
+    escola_ids: Optional[List[str]] = None,
+    serie_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    query = (
+        db.session.query(
+            Class.id, Class.name, Class.shift, School.id, School.name, Grade.id, Grade.name
+        )
+        .join(School, School.id == cast(Class.school_id, String))
+        .outerjoin(Grade, Grade.id == Class.grade_id)
+        .filter(School.city_id == city_id)
+    )
+    if escola_ids:
+        query = query.filter(School.id.in_([str(e) for e in escola_ids]))
+    if serie_ids:
+        serie_uuids = ensure_uuid_list(serie_ids)
+        if not serie_uuids:
+            return []
+        query = query.filter(Grade.id.in_(serie_uuids))
+    rows = query.distinct().order_by(School.name.asc(), Grade.name.asc(), Class.name.asc()).all()
+    return [
+        {
+            "id": str(r[0]),
+            "name": (r[1] or "").strip() or f"Turma {r[0]}",
+            "shift": normalize_shift(r[2]) or "",
+            "school_id": str(r[3]),
+            "school_name": r[4],
+            "grade_id": str(r[5]) if r[5] else None,
+            "grade_name": r[6],
+        }
+        for r in rows
+    ]
+
+
 def build_filter_options(city_id: str, args) -> Dict[str, Any]:
     """Resposta incremental: cada nível só aparece quando o anterior foi informado.
 
     O parâmetro etapa é ignorado (compatibilidade com clientes antigos).
+    Com source=cartao_resposta|personalizada, a cascata usa todas as turmas do município.
     """
+    source = (args.get("source") or args.get("origem") or "").strip().lower() or None
+    municipal = source in ("cartao_resposta", "personalizada", "cartao", "municipal")
     avaliacao_id = (args.get("avaliacao") or "").strip() or None
     escola_ids = multi_arg(args, "escolas", "escola")
     serie_ids = multi_arg(args, "series", "serie")
@@ -167,7 +232,20 @@ def build_filter_options(city_id: str, args) -> Dict[str, Any]:
     response: Dict[str, Any] = {
         "etapas": obter_etapas(city_id),
         "avaliacoes": obter_avaliacoes(city_id),
+        "source": source,
     }
+
+    if municipal:
+        response["escolas"] = obter_escolas_municipio(city_id)
+        response["series"] = obter_series_municipio(city_id, escola_ids=escola_ids or None)
+        if escola_ids or serie_ids:
+            response["turmas"] = obter_turmas_municipio(
+                city_id,
+                escola_ids=escola_ids or None,
+                serie_ids=serie_ids or None,
+            )
+        return response
+
     if not avaliacao_id:
         return response
 

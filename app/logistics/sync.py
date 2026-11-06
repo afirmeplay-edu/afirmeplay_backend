@@ -16,6 +16,7 @@ from app.logistics.services import _student_count_by_class, _suggest_supplies
 from app.models.classTest import ClassTest
 from app.models.logisticsSchedule import (
     LOGISTICS_ORIGEM_AUTO,
+    LOGISTICS_SOURCE_AVALIACAO,
     LOGISTICS_STATUS_CANCELLED,
     LOGISTICS_STATUS_DRAFT,
     LogisticsSchedule,
@@ -146,6 +147,7 @@ def _sync_schedule_from_class_tests(test_id: str, actor_user_id: Optional[str]) 
 
     schedules = (
         LogisticsSchedule.query.filter(
+            LogisticsSchedule.source == LOGISTICS_SOURCE_AVALIACAO,
             LogisticsSchedule.test_id == str(test.id),
             LogisticsSchedule.status != LOGISTICS_STATUS_CANCELLED,
         )
@@ -179,7 +181,10 @@ def _sync_schedule_from_class_tests(test_id: str, actor_user_id: Optional[str]) 
 
     if decision == "create":
         schedule = LogisticsSchedule(
+            source=LOGISTICS_SOURCE_AVALIACAO,
             test_id=str(test.id),
+            gabarito_id=None,
+            evaluation_mode=None,
             status=LOGISTICS_STATUS_DRAFT,
             title=(test.title or "Cronograma")[:200],
             created_by=actor_id,

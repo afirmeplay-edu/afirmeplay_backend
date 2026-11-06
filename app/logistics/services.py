@@ -12,7 +12,7 @@ Rascunho não gera notificação; publicar, editar publicado e cancelar publicad
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import String, cast, func
 
@@ -20,9 +20,16 @@ from app import db
 from app.logistics import notifications as logistics_notifications
 from app.models.classTest import ClassTest
 from app.models.grades import Grade
+from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.logisticsSchedule import (
+    LOGISTICS_EVAL_MODES,
+    LOGISTICS_EVAL_PHYSICAL,
     LOGISTICS_ORIGEM_AUTO,
     LOGISTICS_ORIGEM_MANUAL,
+    LOGISTICS_SOURCE_AVALIACAO,
+    LOGISTICS_SOURCE_CARTAO,
+    LOGISTICS_SOURCE_PERSONALIZADA,
+    LOGISTICS_SOURCES,
     LOGISTICS_STATUS_CANCELLED,
     LOGISTICS_STATUS_DRAFT,
     LOGISTICS_STATUS_PUBLISHED,
@@ -35,6 +42,20 @@ from app.models.student import Student
 from app.models.studentClass import Class
 from app.models.test import Test
 from app.models.user import RoleEnum, User
+from app.logistics.sources import (
+    SOURCE_LABELS,
+    build_cartao_preview,
+    build_personalizada_preview,
+    city_classes_info,
+    get_gabarito_or_error,
+    instrument_key,
+    list_municipality_gabaritos,
+    normalize_source,
+    schedule_display_label,
+    schedule_evaluation_mode,
+    schedule_source,
+    source_badge,
+)
 from app.permissions import get_user_scope
 from app.permissions.roles import Roles
 from app.utils.class_label_helpers import normalize_shift
@@ -324,12 +345,26 @@ def _serialize_schedule(
     *,
     include_items: bool,
     can_manage: bool,
+    gabarito: Optional[AnswerSheetGabarito] = None,
 ) -> Dict[str, Any]:
+    source = schedule_source(schedule)
+    label = schedule_display_label(schedule, test=test, gabarito=gabarito)
+    mode = schedule_evaluation_mode(schedule, test=test)
     data: Dict[str, Any] = {
         "id": str(schedule.id),
+        "source": source,
+        "source_label": SOURCE_LABELS.get(source, source),
+        "source_badge": source_badge(schedule),
+        "instrument_key": instrument_key(schedule),
         "test_id": schedule.test_id,
-        "test_title": test.title if test else None,
-        "evaluation_mode": (test.evaluation_mode if test else None) or "virtual",
+        "test_title": label if source == LOGISTICS_SOURCE_AVALIACAO else (test.title if test else None),
+        "gabarito_id": str(schedule.gabarito_id) if schedule.gabarito_id else None,
+        "gabarito_title": (
+            (gabarito.title if gabarito else None)
+            or (schedule.title if source == LOGISTICS_SOURCE_CARTAO else None)
+        ),
+        "display_title": label,
+        "evaluation_mode": mode,
         "education_stage_id": str(schedule.education_stage_id) if schedule.education_stage_id else None,
         "title": schedule.title,
         "status": schedule.status,
@@ -613,14 +648,25 @@ def _apply_items(
             }
         )
 
-    class_info = _test_classes_in_city(
-        schedule.test_id, city_id, [p["class_id"] for p in parsed]
-    )
-    missing = [str(p["class_id"]) for p in parsed if str(p["class_id"]) not in class_info]
-    if missing:
-        raise LogisticsError(
-            "Turmas não vinculadas a esta avaliação no município: " + ", ".join(sorted(set(missing)))
-        )
+    source = schedule_source(schedule)
+    class_ids = [p["class_id"] for p in parsed]
+    if source == LOGISTICS_SOURCE_AVALIACAO:
+        if not schedule.test_id:
+            raise LogisticsError("Cronograma de avaliação sem test_id.")
+        class_info = _test_classes_in_city(schedule.test_id, city_id, class_ids)
+        missing = [str(p["class_id"]) for p in parsed if str(p["class_id"]) not in class_info]
+        if missing:
+            raise LogisticsError(
+                "Turmas não vinculadas a esta avaliação no município: "
+                + ", ".join(sorted(set(missing)))
+            )
+    else:
+        class_info = city_classes_info(city_id, class_ids)
+        missing = [str(p["class_id"]) for p in parsed if str(p["class_id"]) not in class_info]
+        if missing:
+            raise LogisticsError(
+                "Turmas fora do município: " + ", ".join(sorted(set(missing)))
+            )
 
     counts = _student_count_by_class(class_info.keys())
     existing = {item.id: item for item in schedule.items}
@@ -688,7 +734,13 @@ def _apply_items(
     return {"date_changes": date_changes, "added_items": added_items, "removed_items": removed_items}
 
 
-def _apply_header(schedule: LogisticsSchedule, data: Dict[str, Any], test: Test) -> None:
+def _apply_header(
+    schedule: LogisticsSchedule,
+    data: Dict[str, Any],
+    *,
+    fallback_title: Optional[str] = None,
+    require_title: bool = False,
+) -> None:
     if "education_stage_id" in data:
         raw = data.get("education_stage_id")
         if raw in (None, ""):
@@ -699,11 +751,36 @@ def _apply_header(schedule: LogisticsSchedule, data: Dict[str, Any], test: Test)
                 raise LogisticsError("education_stage_id inválido.")
             schedule.education_stage_id = stage
     if "title" in data or not schedule.title:
-        title = (str(data.get("title") or "").strip() or (test.title or "Cronograma"))[:200]
+        title = (str(data.get("title") or "").strip() or (fallback_title or "Cronograma"))[:200]
+        if require_title and not (str(data.get("title") or "").strip()):
+            raise LogisticsError("title é obrigatório para cronograma personalizado.")
         schedule.title = title
     if "notes" in data:
         notes = data.get("notes")
         schedule.notes = (str(notes).strip() or None) if notes is not None else None
+
+
+def _load_related(
+    schedules: List[LogisticsSchedule],
+) -> Tuple[Dict[str, Test], Dict[str, AnswerSheetGabarito]]:
+    tests: Dict[str, Test] = {}
+    gabaritos: Dict[str, AnswerSheetGabarito] = {}
+    test_ids = {str(s.test_id) for s in schedules if s.test_id}
+    gabarito_ids = {str(s.gabarito_id) for s in schedules if s.gabarito_id}
+    if test_ids:
+        tests = {str(t.id): t for t in Test.query.filter(Test.id.in_(list(test_ids))).all()}
+    if gabarito_ids:
+        gabaritos = {
+            str(g.id): g
+            for g in AnswerSheetGabarito.query.filter(
+                AnswerSheetGabarito.id.in_(list(gabarito_ids))
+            ).all()
+        }
+    return tests, gabaritos
+
+
+def _notify_title(schedule: LogisticsSchedule, test: Optional[Test], gabarito: Optional[AnswerSheetGabarito]) -> str:
+    return schedule_display_label(schedule, test=test, gabarito=gabarito)
 
 
 def _validate_publishable(schedule: LogisticsSchedule) -> None:
@@ -725,6 +802,11 @@ def list_schedules(user: dict, args) -> List[Dict[str, Any]]:
     test_id = (args.get("test_id") or "").strip()
     if test_id:
         query = query.filter(LogisticsSchedule.test_id == test_id)
+    source = (args.get("source") or "").strip().lower()
+    if source:
+        if source not in LOGISTICS_SOURCES:
+            raise LogisticsError("source inválido.")
+        query = query.filter(LogisticsSchedule.source == source)
 
     if access["can_manage"]:
         status = (args.get("status") or "").strip().lower()
@@ -741,18 +823,16 @@ def list_schedules(user: dict, args) -> List[Dict[str, Any]]:
         )
 
     schedules = query.order_by(LogisticsSchedule.created_at.desc()).all()
-    tests = {}
-    test_ids = {s.test_id for s in schedules}
-    if test_ids:
-        tests = {str(t.id): t for t in Test.query.filter(Test.id.in_(list(test_ids))).all()}
+    tests, gabaritos = _load_related(schedules)
 
     return [
         _serialize_schedule(
             s,
-            tests.get(str(s.test_id)),
+            tests.get(str(s.test_id)) if s.test_id else None,
             _visible_items(s, school_ids),
             include_items=False,
             can_manage=access["can_manage"],
+            gabarito=gabaritos.get(str(s.gabarito_id)) if s.gabarito_id else None,
         )
         for s in schedules
     ]
@@ -766,22 +846,72 @@ def get_schedule(user: dict, schedule_id: Any) -> Dict[str, Any]:
         schedule.status != LOGISTICS_STATUS_PUBLISHED or not items
     ):
         raise LogisticsNotFound("Cronograma não encontrado.")
-    test = Test.query.get(schedule.test_id)
+    tests, gabaritos = _load_related([schedule])
     return _serialize_schedule(
-        schedule, test, items, include_items=True, can_manage=access["can_manage"]
+        schedule,
+        tests.get(str(schedule.test_id)) if schedule.test_id else None,
+        items,
+        include_items=True,
+        can_manage=access["can_manage"],
+        gabarito=gabaritos.get(str(schedule.gabarito_id)) if schedule.gabarito_id else None,
     )
 
 
 def create_schedule(user: dict, city_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     require_manager(user)
-    test = _get_test_or_error(data.get("test_id"))
+    try:
+        source = normalize_source(data.get("source") or LOGISTICS_SOURCE_AVALIACAO)
+    except ValueError as exc:
+        raise LogisticsError(str(exc)) from exc
+
+    test: Optional[Test] = None
+    gabarito: Optional[AnswerSheetGabarito] = None
+    evaluation_mode: Optional[str] = None
+    test_id = None
+    gabarito_id = None
+    fallback_title = "Cronograma"
+    require_title = False
+
+    if source == LOGISTICS_SOURCE_AVALIACAO:
+        test = _get_test_or_error(data.get("test_id"))
+        test_id = str(test.id)
+        fallback_title = test.title or "Cronograma"
+    elif source == LOGISTICS_SOURCE_CARTAO:
+        try:
+            gabarito = get_gabarito_or_error(data.get("gabarito_id"))
+        except ValueError as exc:
+            raise LogisticsError(str(exc)) from exc
+        except LookupError as exc:
+            raise LogisticsNotFound(str(exc)) from exc
+        gabarito_id = str(gabarito.id)
+        fallback_title = (gabarito.title or "").strip() or f"Gabarito {gabarito.id}"
+    else:
+        require_title = True
+        mode = (str(data.get("evaluation_mode") or "").strip().lower())
+        if mode not in LOGISTICS_EVAL_MODES:
+            raise LogisticsError("evaluation_mode deve ser 'virtual' ou 'physical'.")
+        evaluation_mode = mode
+        fallback_title = (str(data.get("title") or "").strip() or "Personalizada")
+
     try:
         schedule = LogisticsSchedule(
-            test_id=str(test.id),
+            source=source,
+            test_id=test_id,
+            gabarito_id=gabarito_id,
+            evaluation_mode=evaluation_mode,
             status=LOGISTICS_STATUS_DRAFT,
             created_by=str(user["id"]),
         )
-        _apply_header(schedule, data, test)
+        _apply_header(
+            schedule,
+            data,
+            fallback_title=fallback_title,
+            require_title=require_title,
+        )
+        if source == LOGISTICS_SOURCE_CARTAO:
+            schedule.title = (fallback_title)[:200]
+            if data.get("title"):
+                schedule.title = (str(data.get("title")).strip() or fallback_title)[:200]
         db.session.add(schedule)
         db.session.flush()
         _apply_items(schedule, data.get("items") or [], city_id)
@@ -789,7 +919,9 @@ def create_schedule(user: dict, city_id: str, data: Dict[str, Any]) -> Dict[str,
     except Exception:
         db.session.rollback()
         raise
-    return _serialize_schedule(schedule, test, list(schedule.items), include_items=True, can_manage=True)
+    return _serialize_schedule(
+        schedule, test, list(schedule.items), include_items=True, can_manage=True, gabarito=gabarito
+    )
 
 
 def update_schedule(
@@ -799,16 +931,40 @@ def update_schedule(
     Atualiza cabeçalho e (se 'items' vier no payload) substitui os itens.
     Em cronograma publicado, result traz date_changes, added_items e removed_items
     e as escolas afetadas são notificadas na mesma transação.
+    Origem e vínculos (test_id/gabarito_id) não mudam depois de criado.
     """
     require_manager(user)
     schedule = _get_schedule_or_404(schedule_id)
     if schedule.status == LOGISTICS_STATUS_CANCELLED:
         raise LogisticsConflict("Cronograma cancelado não pode ser editado.")
-    test = Test.query.get(schedule.test_id)
+    if "source" in data and normalize_source(data.get("source")) != schedule_source(schedule):
+        raise LogisticsError("A origem do cronograma não pode ser alterada.")
+    if "test_id" in data and str(data.get("test_id") or "") != str(schedule.test_id or ""):
+        raise LogisticsError("O vínculo com a avaliação não pode ser alterado.")
+    if "gabarito_id" in data and str(data.get("gabarito_id") or "") != str(schedule.gabarito_id or ""):
+        raise LogisticsError("O vínculo com o gabarito não pode ser alterado.")
+
+    source = schedule_source(schedule)
+    tests, gabaritos = _load_related([schedule])
+    test = tests.get(str(schedule.test_id)) if schedule.test_id else None
+    gabarito = gabaritos.get(str(schedule.gabarito_id)) if schedule.gabarito_id else None
     is_published = schedule.status == LOGISTICS_STATUS_PUBLISHED
     changes = _empty_changes()
     try:
-        _apply_header(schedule, data, test)
+        if source == LOGISTICS_SOURCE_PERSONALIZADA and "evaluation_mode" in data:
+            mode = (str(data.get("evaluation_mode") or "").strip().lower())
+            if mode not in LOGISTICS_EVAL_MODES:
+                raise LogisticsError("evaluation_mode deve ser 'virtual' ou 'physical'.")
+            schedule.evaluation_mode = mode
+        fallback = schedule_display_label(schedule, test=test, gabarito=gabarito)
+        _apply_header(
+            schedule,
+            data,
+            fallback_title=fallback,
+            require_title=source == LOGISTICS_SOURCE_PERSONALIZADA and "title" in data,
+        )
+        if source == LOGISTICS_SOURCE_CARTAO and gabarito and not (schedule.title or "").strip():
+            schedule.title = ((gabarito.title or "").strip() or f"Gabarito {gabarito.id}")[:200]
         if "items" in data:
             changes = _apply_items(schedule, data.get("items"), city_id)
         if is_published:
@@ -817,7 +973,7 @@ def update_schedule(
         if is_published and any(changes.values()):
             logistics_notifications.notify_changes(
                 schedule,
-                test.title if test else None,
+                _notify_title(schedule, test, gabarito),
                 changes,
                 [{"school_id": str(i.school_id)} for i in schedule.items],
                 city_id,
@@ -827,7 +983,9 @@ def update_schedule(
     except Exception:
         db.session.rollback()
         raise
-    result = _serialize_schedule(schedule, test, list(schedule.items), include_items=True, can_manage=True)
+    result = _serialize_schedule(
+        schedule, test, list(schedule.items), include_items=True, can_manage=True, gabarito=gabarito
+    )
     result.update(changes if is_published else _empty_changes())
     return result
 
@@ -858,20 +1016,28 @@ def publish_schedule(user: dict, city_id: str, schedule_id: Any) -> Dict[str, An
     if schedule.status != LOGISTICS_STATUS_DRAFT:
         raise LogisticsConflict("Só rascunhos podem ser publicados.")
     _validate_publishable(schedule)
-    test = Test.query.get(schedule.test_id)
+    tests, gabaritos = _load_related([schedule])
+    test = tests.get(str(schedule.test_id)) if schedule.test_id else None
+    gabarito = gabaritos.get(str(schedule.gabarito_id)) if schedule.gabarito_id else None
     try:
         now = datetime.utcnow()
         schedule.status = LOGISTICS_STATUS_PUBLISHED
         schedule.published_at = now
         schedule.updated_at = now
         logistics_notifications.notify_published(
-            schedule, test.title if test else None, _serialized_items(schedule), city_id, user.get("id")
+            schedule,
+            _notify_title(schedule, test, gabarito),
+            _serialized_items(schedule),
+            city_id,
+            user.get("id"),
         )
         db.session.commit()
     except Exception:
         db.session.rollback()
         raise
-    return _serialize_schedule(schedule, test, list(schedule.items), include_items=True, can_manage=True)
+    return _serialize_schedule(
+        schedule, test, list(schedule.items), include_items=True, can_manage=True, gabarito=gabarito
+    )
 
 
 def cancel_schedule(user: dict, city_id: str, schedule_id: Any) -> Dict[str, Any]:
@@ -881,7 +1047,9 @@ def cancel_schedule(user: dict, city_id: str, schedule_id: Any) -> Dict[str, Any
     if schedule.status == LOGISTICS_STATUS_CANCELLED:
         raise LogisticsConflict("Cronograma já está cancelado.")
     was_published = schedule.status == LOGISTICS_STATUS_PUBLISHED
-    test = Test.query.get(schedule.test_id)
+    tests, gabaritos = _load_related([schedule])
+    test = tests.get(str(schedule.test_id)) if schedule.test_id else None
+    gabarito = gabaritos.get(str(schedule.gabarito_id)) if schedule.gabarito_id else None
     try:
         now = datetime.utcnow()
         schedule.status = LOGISTICS_STATUS_CANCELLED
@@ -889,10 +1057,63 @@ def cancel_schedule(user: dict, city_id: str, schedule_id: Any) -> Dict[str, Any
         schedule.updated_at = now
         if was_published:
             logistics_notifications.notify_cancelled(
-                schedule, test.title if test else None, _serialized_items(schedule), city_id, user.get("id")
+                schedule,
+                _notify_title(schedule, test, gabarito),
+                _serialized_items(schedule),
+                city_id,
+                user.get("id"),
             )
         db.session.commit()
     except Exception:
         db.session.rollback()
         raise
-    return _serialize_schedule(schedule, test, list(schedule.items), include_items=True, can_manage=True)
+    return _serialize_schedule(
+        schedule, test, list(schedule.items), include_items=True, can_manage=True, gabarito=gabarito
+    )
+
+
+def list_gabaritos_preview(user: dict) -> Dict[str, Any]:
+    require_manager(user)
+    return {"gabaritos": list_municipality_gabaritos(user)}
+
+
+def preview_cartao(
+    city_id: str,
+    gabarito_id: str,
+    *,
+    escola_ids: Optional[List[str]] = None,
+    serie_ids: Optional[List[str]] = None,
+    turma_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    try:
+        return build_cartao_preview(
+            city_id,
+            gabarito_id,
+            escola_ids=escola_ids,
+            serie_ids=serie_ids,
+            turma_ids=turma_ids,
+        )
+    except ValueError as exc:
+        raise LogisticsError(str(exc)) from exc
+    except LookupError as exc:
+        raise LogisticsNotFound(str(exc)) from exc
+
+
+def preview_personalizada(
+    city_id: str,
+    evaluation_mode: str,
+    *,
+    escola_ids: Optional[List[str]] = None,
+    serie_ids: Optional[List[str]] = None,
+    turma_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    try:
+        return build_personalizada_preview(
+            city_id,
+            evaluation_mode,
+            escola_ids=escola_ids,
+            serie_ids=serie_ids,
+            turma_ids=turma_ids,
+        )
+    except ValueError as exc:
+        raise LogisticsError(str(exc)) from exc

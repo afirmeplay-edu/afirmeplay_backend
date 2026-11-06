@@ -124,12 +124,16 @@ class _Dispatcher:
         return [r for r in recipients if r["user_id"] != self.actor_id]
 
     def _base_payload(self, event: str) -> Dict[str, Any]:
+        source = getattr(self.schedule, "source", None) or "avaliacao"
         return {
             "event": event,
             "schedule_id": str(self.schedule.id),
             "schedule_title": self.schedule.title,
+            "source": source,
+            # test_id pode ser null (cartão/personalizada); clientes antigos já toleram ausência.
             "test_id": self.schedule.test_id,
             "test_title": self.test_title,
+            "gabarito_id": getattr(self.schedule, "gabarito_id", None),
         }
 
     def _send(self, title: str, message: str, payload: Dict[str, Any], recipients: List[Dict[str, Any]]):

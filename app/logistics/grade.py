@@ -9,7 +9,7 @@ import unicodedata
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Query
 
 from app import db
@@ -21,6 +21,9 @@ from app.logistics.services import (
 from app.models.educationStage import EducationStage
 from app.models.grades import Grade
 from app.models.logisticsSchedule import (
+    LOGISTICS_SOURCE_AVALIACAO,
+    LOGISTICS_SOURCE_CARTAO,
+    LOGISTICS_SOURCE_PERSONALIZADA,
     LOGISTICS_STATUS_PUBLISHED,
     LOGISTICS_STATUSES,
     LogisticsSchedule,
@@ -30,6 +33,14 @@ from app.models.school import School
 from app.models.studentClass import Class
 from app.models.test import EVALUATION_MODES, Test
 from app.models.user import User
+from app.logistics.sources import (
+    instrument_key,
+    parse_instrument_key,
+    schedule_display_label,
+    schedule_evaluation_mode,
+    schedule_source,
+    source_badge,
+)
 from app.utils.uuid_helpers import ensure_uuid
 
 _ACCENT_FROM = "áàâãäéèêëíìîïóòôõöúùûüç"
@@ -152,7 +163,37 @@ def _apply_filters(query: Query, args, *, can_manage: bool) -> Query:
 
     avaliacao = _opt(args, "avaliacao")
     if avaliacao:
-        query = query.filter(LogisticsSchedule.test_id == avaliacao)
+        parsed = parse_instrument_key(avaliacao)
+        if parsed:
+            kind, value = parsed
+            if kind == "avaliacao":
+                query = query.filter(
+                    LogisticsSchedule.source == LOGISTICS_SOURCE_AVALIACAO,
+                    LogisticsSchedule.test_id == value,
+                )
+            elif kind == "cartao":
+                query = query.filter(
+                    LogisticsSchedule.source == LOGISTICS_SOURCE_CARTAO,
+                    LogisticsSchedule.gabarito_id == value,
+                )
+            elif kind == "cartao-schedule":
+                sid = ensure_uuid(value)
+                query = query.filter(
+                    LogisticsSchedule.source == LOGISTICS_SOURCE_CARTAO,
+                    LogisticsSchedule.id == sid,
+                )
+            elif kind == "personalizada":
+                sid = ensure_uuid(value)
+                query = query.filter(
+                    LogisticsSchedule.source == LOGISTICS_SOURCE_PERSONALIZADA,
+                    LogisticsSchedule.id == sid,
+                )
+        else:
+            # Compat: UUID puro = avaliação do sistema
+            query = query.filter(
+                LogisticsSchedule.source == LOGISTICS_SOURCE_AVALIACAO,
+                LogisticsSchedule.test_id == avaliacao,
+            )
 
     escola = _opt(args, "escola")
     if escola:
@@ -187,15 +228,46 @@ def _apply_filters(query: Query, args, *, can_manage: bool) -> Query:
         formato = formato.lower()
         if formato not in EVALUATION_MODES:
             raise LogisticsError("formato inválido.")
+        # Avaliação → Test; cartão → physical; personalizada → schedule.evaluation_mode
+        is_avaliacao = or_(
+            LogisticsSchedule.source == LOGISTICS_SOURCE_AVALIACAO,
+            LogisticsSchedule.source.is_(None),
+        )
+        is_cartao = LogisticsSchedule.source == LOGISTICS_SOURCE_CARTAO
+        is_personalizada = LogisticsSchedule.source == LOGISTICS_SOURCE_PERSONALIZADA
         if formato == "virtual":
             query = query.filter(
                 or_(
-                    func.lower(func.coalesce(Test.evaluation_mode, "virtual")) == "virtual",
-                    Test.evaluation_mode.is_(None),
+                    and_(
+                        is_avaliacao,
+                        or_(
+                            func.lower(func.coalesce(Test.evaluation_mode, "virtual")) == "virtual",
+                            Test.evaluation_mode.is_(None),
+                        ),
+                    ),
+                    and_(
+                        is_personalizada,
+                        func.lower(func.coalesce(LogisticsSchedule.evaluation_mode, "physical"))
+                        == "virtual",
+                    ),
+                )
+            )
+        elif formato == "physical":
+            query = query.filter(
+                or_(
+                    and_(is_avaliacao, func.lower(Test.evaluation_mode) == "physical"),
+                    is_cartao,
+                    and_(
+                        is_personalizada,
+                        func.lower(func.coalesce(LogisticsSchedule.evaluation_mode, "physical"))
+                        == "physical",
+                    ),
                 )
             )
         else:
-            query = query.filter(func.lower(Test.evaluation_mode) == formato)
+            query = query.filter(
+                and_(is_avaliacao, func.lower(Test.evaluation_mode) == formato)
+            )
 
     data_inicio = _parse_date(_opt(args, "data_inicio"), "data_inicio") if _opt(args, "data_inicio") else None
     data_fim = _parse_date(_opt(args, "data_fim"), "data_fim") if _opt(args, "data_fim") else None
@@ -227,12 +299,16 @@ def _apply_filters(query: Query, args, *, can_manage: bool) -> Query:
         folded_class = _folded_column(Class.name)
         folded_grade = _folded_column(Grade.name)
         folded_applicator = _folded_column(User.name)
+        folded_title = _folded_column(LogisticsSchedule.title)
+        folded_test = _folded_column(Test.title)
         query = query.filter(
             or_(
                 folded_school.like(pattern, escape="\\"),
                 folded_class.like(pattern, escape="\\"),
                 folded_grade.like(pattern, escape="\\"),
                 folded_applicator.like(pattern, escape="\\"),
+                folded_title.like(pattern, escape="\\"),
+                folded_test.like(pattern, escape="\\"),
             )
         )
     return query
@@ -264,7 +340,9 @@ def _ordered_items(query: Query) -> Query:
 
 
 def _serialize_row(item, schedule, test, school, grade, class_, applicator=None) -> Dict[str, Any]:
-    mode = (test.evaluation_mode if test and test.evaluation_mode else None) or "virtual"
+    mode = schedule_evaluation_mode(schedule, test=test)
+    label = schedule_display_label(schedule, test=test)
+    source = schedule_source(schedule)
     scheduled = item.scheduled_date.isoformat() if isinstance(item.scheduled_date, date) else (
         item.scheduled_date.isoformat() if item.scheduled_date else None
     )
@@ -272,8 +350,13 @@ def _serialize_row(item, schedule, test, school, grade, class_, applicator=None)
         "id": str(item.id),
         "schedule_id": str(item.schedule_id),
         "status": schedule.status,
+        "source": source,
+        "source_badge": source_badge(schedule),
+        "instrument_key": instrument_key(schedule),
         "test_id": schedule.test_id,
-        "test_title": test.title if test else None,
+        "gabarito_id": str(schedule.gabarito_id) if schedule.gabarito_id else None,
+        "test_title": label,
+        "display_title": label,
         "evaluation_mode": mode,
         "scheduled_date": scheduled,
         "school_id": str(item.school_id) if item.school_id else None,
@@ -354,17 +437,16 @@ def _by_name(pairs: List[Tuple[str, str]]) -> List[Dict[str, str]]:
 
 
 def grade_filter_options(user: dict) -> Dict[str, Any]:
-    """Opções encadeadas da grade (avaliação → escola → série → turma), no recorte do usuário."""
+    """Opções encadeadas da grade (instrumento → escola → série → turma), no recorte do usuário."""
     query, access = _apply_access(_base_query(), user)
     query = query.outerjoin(EducationStage, EducationStage.id == Grade.education_stage_id)
     if not access["can_manage"] and not access["school_ids"]:
         return _empty_options(False)
 
     rows = query.with_entities(
+        LogisticsSchedule,
+        Test,
         LogisticsScheduleItem.scheduled_date,
-        LogisticsSchedule.test_id,
-        Test.title,
-        Test.evaluation_mode,
         LogisticsScheduleItem.school_id,
         School.name,
         LogisticsScheduleItem.grade_id,
@@ -389,10 +471,9 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
     aplicadores: Dict[str, str] = {}
 
     for (
+        schedule,
+        test,
         scheduled,
-        test_id,
-        title,
-        mode,
         school_id,
         school_name,
         grade_id,
@@ -411,19 +492,23 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
         if stage_key and stage_name:
             etapas[stage_key] = stage_name
 
-        test_key = str(test_id) if test_id else None
-        if test_key:
-            entry = avaliacoes.setdefault(
-                test_key,
-                {
-                    "id": test_key,
-                    "titulo": title or test_key,
-                    "evaluation_mode": (mode or "virtual"),
-                    "etapa_ids": set(),
-                },
-            )
-            if stage_key:
-                entry["etapa_ids"].add(stage_key)
+        key = instrument_key(schedule)
+        mode = schedule_evaluation_mode(schedule, test=test)
+        label = schedule_display_label(schedule, test=test)
+        source = schedule_source(schedule)
+        entry = avaliacoes.setdefault(
+            key,
+            {
+                "id": key,
+                "titulo": label,
+                "evaluation_mode": mode,
+                "source": source,
+                "source_badge": source_badge(schedule),
+                "etapa_ids": set(),
+            },
+        )
+        if stage_key:
+            entry["etapa_ids"].add(stage_key)
 
         school_key = str(school_id) if school_id else None
         if school_key and school_name:
@@ -431,8 +516,7 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
                 school_key,
                 {"id": school_key, "nome": school_name, "avaliacao_ids": set()},
             )
-            if test_key:
-                escola["avaliacao_ids"].add(test_key)
+            escola["avaliacao_ids"].add(key)
 
         grade_key = str(grade_id) if grade_id else None
         if grade_key and grade_name:
@@ -446,8 +530,7 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
                     "escola_ids": set(),
                 },
             )
-            if test_key:
-                serie["avaliacao_ids"].add(test_key)
+            serie["avaliacao_ids"].add(key)
             if school_key:
                 serie["escola_ids"].add(school_key)
 
@@ -463,8 +546,7 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
                     "serie_ids": set(),
                 },
             )
-            if test_key:
-                turma["avaliacao_ids"].add(test_key)
+            turma["avaliacao_ids"].add(key)
             if school_key:
                 turma["escola_ids"].add(school_key)
             if grade_key:
@@ -486,6 +568,8 @@ def grade_filter_options(user: dict) -> Dict[str, Any]:
                     "id": item["id"],
                     "titulo": item["titulo"],
                     "evaluation_mode": item["evaluation_mode"],
+                    "source": item.get("source"),
+                    "source_badge": item.get("source_badge"),
                     "etapa_ids": sorted(item["etapa_ids"]),
                 }
                 for item in avaliacoes.values()

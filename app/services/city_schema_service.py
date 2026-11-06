@@ -1413,7 +1413,10 @@ def get_logistics_schedule_tables_ddl(schema: str) -> str:
     return f"""
 CREATE TABLE IF NOT EXISTS "{schema}".logistics_schedule (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    test_id VARCHAR NOT NULL REFERENCES "{schema}".test(id) ON DELETE CASCADE,
+    source VARCHAR(30) NOT NULL DEFAULT 'avaliacao',
+    test_id VARCHAR REFERENCES "{schema}".test(id) ON DELETE CASCADE,
+    gabarito_id VARCHAR(36) REFERENCES "{schema}".answer_sheet_gabaritos(id) ON DELETE SET NULL,
+    evaluation_mode VARCHAR(20),
     education_stage_id UUID REFERENCES public.education_stage(id) ON DELETE SET NULL,
     title VARCHAR(200) NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'rascunho',
@@ -1423,10 +1426,29 @@ CREATE TABLE IF NOT EXISTS "{schema}".logistics_schedule (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     published_at TIMESTAMP,
     cancelled_at TIMESTAMP,
-    CONSTRAINT ck_logistics_schedule_status CHECK (status IN ('rascunho', 'publicado', 'cancelado'))
+    CONSTRAINT ck_logistics_schedule_status CHECK (status IN ('rascunho', 'publicado', 'cancelado')),
+    CONSTRAINT ck_logistics_schedule_source CHECK (source IN ('avaliacao', 'cartao_resposta', 'personalizada')),
+    CONSTRAINT ck_logistics_schedule_source_links CHECK (
+        (source = 'avaliacao' AND test_id IS NOT NULL)
+        OR (source = 'cartao_resposta' AND test_id IS NULL)
+        OR (
+            source = 'personalizada'
+            AND test_id IS NULL
+            AND gabarito_id IS NULL
+            AND title IS NOT NULL
+            AND btrim(title) <> ''
+        )
+    ),
+    CONSTRAINT ck_logistics_schedule_evaluation_mode CHECK (
+        evaluation_mode IS NULL OR evaluation_mode IN ('virtual', 'physical')
+    )
 );
-COMMENT ON TABLE "{schema}".logistics_schedule IS 'Cronograma de logística de aplicação de uma avaliação.';
+COMMENT ON TABLE "{schema}".logistics_schedule IS 'Cronograma de logística (avaliação, cartão-resposta ou personalizada).';
+COMMENT ON COLUMN "{schema}".logistics_schedule.source IS 'avaliacao | cartao_resposta | personalizada';
+COMMENT ON COLUMN "{schema}".logistics_schedule.gabarito_id IS 'Gabarito do cartão-resposta. SET NULL se o gabarito for excluído.';
+COMMENT ON COLUMN "{schema}".logistics_schedule.evaluation_mode IS 'Formato da personalizada: virtual | physical. NULL nas demais origens.';
 CREATE INDEX IF NOT EXISTS idx_logistics_schedule_test_id ON "{schema}".logistics_schedule (test_id);
+CREATE INDEX IF NOT EXISTS idx_logistics_schedule_gabarito_id ON "{schema}".logistics_schedule (gabarito_id);
 CREATE INDEX IF NOT EXISTS idx_logistics_schedule_status ON "{schema}".logistics_schedule (status);
 
 CREATE TABLE IF NOT EXISTS "{schema}".logistics_schedule_item (
@@ -1515,6 +1537,106 @@ BEGIN
 END $mig$;
 CREATE INDEX IF NOT EXISTS idx_logistics_item_applicator_user_id
     ON "{schema}".logistics_schedule_item (applicator_user_id);
+"""
+
+
+def get_logistics_schedule_source_columns_ddl(schema: str) -> str:
+    """ALTER idempotente: origens avaliacao/cartao/personalizada em logistics_schedule.
+
+    CREATE TABLE IF NOT EXISTS não altera tabela que já existe. Esta função cobre
+    os schemas city_% já provisionados.
+    """
+    if not schema or not schema.replace("_", "").isalnum() or not schema.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema}")
+    return f"""
+ALTER TABLE "{schema}".logistics_schedule
+    ADD COLUMN IF NOT EXISTS source VARCHAR(30) NOT NULL DEFAULT 'avaliacao';
+ALTER TABLE "{schema}".logistics_schedule
+    ADD COLUMN IF NOT EXISTS gabarito_id VARCHAR(36);
+ALTER TABLE "{schema}".logistics_schedule
+    ADD COLUMN IF NOT EXISTS evaluation_mode VARCHAR(20);
+ALTER TABLE "{schema}".logistics_schedule
+    ALTER COLUMN test_id DROP NOT NULL;
+UPDATE "{schema}".logistics_schedule
+SET source = 'avaliacao'
+WHERE source IS NULL OR btrim(source) = '';
+COMMENT ON COLUMN "{schema}".logistics_schedule.source IS 'avaliacao | cartao_resposta | personalizada';
+COMMENT ON COLUMN "{schema}".logistics_schedule.gabarito_id IS 'Gabarito do cartão-resposta. SET NULL se o gabarito for excluído.';
+COMMENT ON COLUMN "{schema}".logistics_schedule.evaluation_mode IS 'Formato da personalizada: virtual | physical. NULL nas demais origens.';
+DO $mig$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
+        WHERE n.nspname = '{schema}'
+          AND t.relname = 'logistics_schedule'
+          AND c.contype = 'f'
+          AND a.attname = 'gabarito_id'
+    ) THEN
+        ALTER TABLE "{schema}".logistics_schedule
+            ADD CONSTRAINT fk_logistics_schedule_gabarito
+            FOREIGN KEY (gabarito_id)
+            REFERENCES "{schema}".answer_sheet_gabaritos(id)
+            ON DELETE SET NULL;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = '{schema}'
+          AND t.relname = 'logistics_schedule'
+          AND c.conname = 'ck_logistics_schedule_source'
+    ) THEN
+        ALTER TABLE "{schema}".logistics_schedule
+            ADD CONSTRAINT ck_logistics_schedule_source
+            CHECK (source IN ('avaliacao', 'cartao_resposta', 'personalizada'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = '{schema}'
+          AND t.relname = 'logistics_schedule'
+          AND c.conname = 'ck_logistics_schedule_source_links'
+    ) THEN
+        ALTER TABLE "{schema}".logistics_schedule
+            ADD CONSTRAINT ck_logistics_schedule_source_links
+            CHECK (
+                (source = 'avaliacao' AND test_id IS NOT NULL)
+                OR (source = 'cartao_resposta' AND test_id IS NULL)
+                OR (
+                    source = 'personalizada'
+                    AND test_id IS NULL
+                    AND gabarito_id IS NULL
+                    AND title IS NOT NULL
+                    AND btrim(title) <> ''
+                )
+            );
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = '{schema}'
+          AND t.relname = 'logistics_schedule'
+          AND c.conname = 'ck_logistics_schedule_evaluation_mode'
+    ) THEN
+        ALTER TABLE "{schema}".logistics_schedule
+            ADD CONSTRAINT ck_logistics_schedule_evaluation_mode
+            CHECK (evaluation_mode IS NULL OR evaluation_mode IN ('virtual', 'physical'));
+    END IF;
+END $mig$;
+CREATE INDEX IF NOT EXISTS idx_logistics_schedule_gabarito_id
+    ON "{schema}".logistics_schedule (gabarito_id);
 """
 
 
@@ -2407,4 +2529,4 @@ CREATE TABLE IF NOT EXISTS "{schema}".student_password_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".student_password_log IS 'Log de senhas de alunos (auditoria)';
-""" + get_subturma_tables_ddl(schema) + get_paired_regular_test_id_ddl(schema) + get_estimated_time_column_ddl(schema) + get_logistics_schedule_tables_ddl(schema) + get_logistics_item_applicator_columns_ddl(schema) + get_notification_tables_ddl(schema)
+""" + get_subturma_tables_ddl(schema) + get_paired_regular_test_id_ddl(schema) + get_estimated_time_column_ddl(schema) + get_logistics_schedule_tables_ddl(schema) + get_logistics_item_applicator_columns_ddl(schema) + get_logistics_schedule_source_columns_ddl(schema) + get_notification_tables_ddl(schema)

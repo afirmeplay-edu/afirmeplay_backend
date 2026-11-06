@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Cronograma de logística de aplicação de avaliação.
 
-Só referencia Test, School e Class; não altera ClassTest (janela online da prova).
+Pode referenciar Test (avaliação do sistema), AnswerSheetGabarito (cartão-resposta)
+ou só um título/formato (personalizada). Não altera ClassTest.
 """
 import uuid
 from datetime import datetime
@@ -23,6 +24,19 @@ LOGISTICS_ORIGEM_MANUAL = "manual"
 LOGISTICS_ORIGEM_AUTO = "auto"
 LOGISTICS_ORIGINS = (LOGISTICS_ORIGEM_MANUAL, LOGISTICS_ORIGEM_AUTO)
 
+LOGISTICS_SOURCE_AVALIACAO = "avaliacao"
+LOGISTICS_SOURCE_CARTAO = "cartao_resposta"
+LOGISTICS_SOURCE_PERSONALIZADA = "personalizada"
+LOGISTICS_SOURCES = (
+    LOGISTICS_SOURCE_AVALIACAO,
+    LOGISTICS_SOURCE_CARTAO,
+    LOGISTICS_SOURCE_PERSONALIZADA,
+)
+
+LOGISTICS_EVAL_VIRTUAL = "virtual"
+LOGISTICS_EVAL_PHYSICAL = "physical"
+LOGISTICS_EVAL_MODES = (LOGISTICS_EVAL_VIRTUAL, LOGISTICS_EVAL_PHYSICAL)
+
 
 class LogisticsSchedule(db.Model):
     __tablename__ = "logistics_schedule"
@@ -31,13 +45,43 @@ class LogisticsSchedule(db.Model):
             "status IN ('rascunho', 'publicado', 'cancelado')",
             name="ck_logistics_schedule_status",
         ),
+        db.CheckConstraint(
+            "source IN ('avaliacao', 'cartao_resposta', 'personalizada')",
+            name="ck_logistics_schedule_source",
+        ),
+        db.CheckConstraint(
+            "("
+            " (source = 'avaliacao' AND test_id IS NOT NULL)"
+            " OR (source = 'cartao_resposta' AND test_id IS NULL)"
+            " OR (source = 'personalizada' AND test_id IS NULL AND gabarito_id IS NULL"
+            "     AND title IS NOT NULL AND btrim(title) <> '')"
+            ")",
+            name="ck_logistics_schedule_source_links",
+        ),
+        db.CheckConstraint(
+            "evaluation_mode IS NULL OR evaluation_mode IN ('virtual', 'physical')",
+            name="ck_logistics_schedule_evaluation_mode",
+        ),
+        db.Index("idx_logistics_schedule_gabarito_id", "gabarito_id"),
         {"schema": "tenant"},
     )
 
     id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    test_id = db.Column(
-        db.String, db.ForeignKey("tenant.test.id", ondelete="CASCADE"), nullable=False
+    source = db.Column(
+        db.String(30),
+        nullable=False,
+        default=LOGISTICS_SOURCE_AVALIACAO,
+        server_default=LOGISTICS_SOURCE_AVALIACAO,
     )
+    test_id = db.Column(
+        db.String, db.ForeignKey("tenant.test.id", ondelete="CASCADE"), nullable=True
+    )
+    gabarito_id = db.Column(
+        db.String(36),
+        db.ForeignKey("tenant.answer_sheet_gabaritos.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    evaluation_mode = db.Column(db.String(20), nullable=True)
     education_stage_id = db.Column(
         UUID(as_uuid=True),
         db.ForeignKey("public.education_stage.id", ondelete="SET NULL"),

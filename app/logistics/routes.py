@@ -7,6 +7,9 @@ GET    /logistics/opcoes-grade
 GET    /logistics/aplicadores
 GET    /logistics/itens          (export=1 devolve o recorte completo, com limite)
 GET    /logistics/previa
+GET    /logistics/gabaritos
+GET    /logistics/previa-cartao
+GET    /logistics/previa-personalizada
 GET    /logistics/schedules
 POST   /logistics/schedules
 GET    /logistics/schedules/<id>
@@ -150,6 +153,76 @@ def previa():
         return jsonify(data), 200
 
     return _handle(run, "/logistics/previa")
+
+
+@bp.route("/gabaritos", methods=["GET"])
+@jwt_required()
+@role_required(*_MANAGE_ROLES)
+@requires_city_context
+def listar_gabaritos():
+    """Gabaritos do município para o editor (id, título, última geração)."""
+    user, err = _current_user()
+    if err:
+        return err
+
+    def run():
+        return jsonify(services.list_gabaritos_preview(user)), 200
+
+    return _handle(run, "GET /logistics/gabaritos")
+
+
+@bp.route("/previa-cartao", methods=["GET"])
+@jwt_required()
+@role_required(*_MANAGE_ROLES)
+@requires_city_context
+def previa_cartao():
+    """Turmas sugeridas do cartão-resposta (última geração ou cadastro do gabarito)."""
+    user, err = _current_user()
+    if err:
+        return err
+
+    def run():
+        services.require_manager(user)
+        gabarito = (request.args.get("gabarito") or request.args.get("gabarito_id") or "").strip()
+        if not gabarito:
+            raise services.LogisticsError("Parâmetro obrigatório: gabarito")
+        data = services.preview_cartao(
+            _city_id(),
+            gabarito,
+            escola_ids=multi_arg(request.args, "escolas", "escola") or None,
+            serie_ids=multi_arg(request.args, "series", "serie") or None,
+            turma_ids=multi_arg(request.args, "turmas", "turma") or None,
+        )
+        return jsonify(data), 200
+
+    return _handle(run, "/logistics/previa-cartao")
+
+
+@bp.route("/previa-personalizada", methods=["GET"])
+@jwt_required()
+@role_required(*_MANAGE_ROLES)
+@requires_city_context
+def previa_personalizada():
+    """Turmas do município para cronograma personalizado (sem class_test)."""
+    user, err = _current_user()
+    if err:
+        return err
+
+    def run():
+        services.require_manager(user)
+        mode = (request.args.get("evaluation_mode") or request.args.get("formato") or "").strip()
+        if not mode:
+            raise services.LogisticsError("Parâmetro obrigatório: evaluation_mode")
+        data = services.preview_personalizada(
+            _city_id(),
+            mode,
+            escola_ids=multi_arg(request.args, "escolas", "escola") or None,
+            serie_ids=multi_arg(request.args, "series", "serie") or None,
+            turma_ids=multi_arg(request.args, "turmas", "turma") or None,
+        )
+        return jsonify(data), 200
+
+    return _handle(run, "/logistics/previa-personalizada")
 
 
 @bp.route("/schedules", methods=["GET"])

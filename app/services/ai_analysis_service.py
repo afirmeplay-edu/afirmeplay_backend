@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Serviço para análise de relatórios usando Google AI Studio (Gemini).
+Serviço para análise de relatórios.
+
+Provedor de analyze_report_data e analyze_intervention_plan_json:
+AI_ANALYSIS_PROVIDER=gemini (padrão) ou openai.
 """
 
 import logging
 import os
 import json
 import re
+import time
 import unicodedata
-from typing import Dict, Any, Optional, Mapping
+from typing import Dict, Any, Optional, Mapping, List, Tuple
 from app.services.special_education import special_education_label_from_course_text
 import google.generativeai as genai
 from app.openai_config.openai_config import (
@@ -24,25 +28,285 @@ from app.openai_config.openai_config import (
     NOTA_ANALYSIS_PROMPT_TEMPLATE
 )
 
+_DEFAULT_OPENAI_ANALYSIS_MODEL = "gpt-4o-mini"
+_DEFAULT_OPENAI_ANALYSIS_TIMEOUT_SEC = 150
+_DEFAULT_OPENAI_ANALYSIS_MAX_RETRIES = 1
+_DEFAULT_OPENAI_ANALYSIS_TEMPERATURE = 0.4
+_OPENAI_SECTION_KEYS = (
+    "participacao",
+    "proficiencia",
+    "notas",
+    "niveis_aprendizagem",
+    "habilidades",
+)
+_OPENAI_NESTED_SECTION_ALIASES = {
+    "participacao": "participacao",
+    "participação": "participacao",
+    "proficiencia": "proficiencia",
+    "proficiência": "proficiencia",
+    "notas": "notas",
+    "nota": "notas",
+    "niveis_aprendizagem": "niveis_aprendizagem",
+    "niveis": "niveis_aprendizagem",
+    "níveis_aprendizagem": "niveis_aprendizagem",
+    "habilidades": "habilidades",
+    "acertos_por_habilidade": "habilidades",
+}
+
+_OPENAI_REPORT_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "participacao",
+        "proficiencia",
+        "notas",
+        "niveis_aprendizagem",
+        "habilidades",
+    ],
+    "properties": {
+        "participacao": {"type": "string"},
+        "notas": {"type": "string"},
+        "proficiencia": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["disciplina", "texto"],
+                "properties": {
+                    "disciplina": {"type": "string"},
+                    "texto": {"type": "string"},
+                },
+            },
+        },
+        "niveis_aprendizagem": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["disciplina", "texto"],
+                "properties": {
+                    "disciplina": {"type": "string"},
+                    "texto": {"type": "string"},
+                },
+            },
+        },
+        "habilidades": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["disciplina", "texto"],
+                "properties": {
+                    "disciplina": {"type": "string"},
+                    "texto": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+# Structured Outputs — Relatório Escolar (por disciplina) e Mapa de Habilidades.
+# Listas dinâmicas usam arrays; o serviço converte para analises_por_disciplina dict.
+_OPENAI_ESCOLAR_HABILIDADE_ITEM: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["codigo", "descricao", "reflexao"],
+    "properties": {
+        "codigo": {"type": "string"},
+        "descricao": {"type": "string"},
+        "reflexao": {"type": "string"},
+    },
+}
+
+_OPENAI_ESCOLAR_NIVEL_ITEM: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "nivel_identificado",
+        "significado_e_impacto",
+        "quantidade_alunos",
+        "habilidades_analisadas",
+    ],
+    "properties": {
+        "nivel_identificado": {"type": "string"},
+        "significado_e_impacto": {"type": "string"},
+        "quantidade_alunos": {"type": "integer"},
+        "habilidades_analisadas": {
+            "type": "array",
+            "items": _OPENAI_ESCOLAR_HABILIDADE_ITEM,
+        },
+    },
+}
+
+_OPENAI_ESCOLAR_DISC_ITEM: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "disciplina",
+        "panorama_geral",
+        "reflexao_niveis",
+        "encaminhamentos_cultura_digital",
+    ],
+    "properties": {
+        "disciplina": {"type": "string"},
+        "panorama_geral": {"type": "string"},
+        "reflexao_niveis": {
+            "type": "array",
+            "items": _OPENAI_ESCOLAR_NIVEL_ITEM,
+        },
+        "encaminhamentos_cultura_digital": {"type": "string"},
+    },
+}
+
+_OPENAI_ESCOLAR_POR_DISC_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["analises", "metadados_gerais"],
+    "properties": {
+        "analises": {
+            "type": "array",
+            "items": _OPENAI_ESCOLAR_DISC_ITEM,
+        },
+        "metadados_gerais": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["titulo_avaliacao"],
+            "properties": {
+                "titulo_avaliacao": {"type": "string"},
+            },
+        },
+    },
+}
+
+_OPENAI_ESCOLAR_FLAT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "panorama_geral",
+        "reflexao_niveis",
+        "encaminhamentos_cultura_digital",
+        "metadados_entrada",
+    ],
+    "properties": {
+        "panorama_geral": {"type": "string"},
+        "reflexao_niveis": {
+            "type": "array",
+            "items": _OPENAI_ESCOLAR_NIVEL_ITEM,
+        },
+        "encaminhamentos_cultura_digital": {"type": "string"},
+        "metadados_entrada": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["titulo_avaliacao"],
+            "properties": {
+                "titulo_avaliacao": {"type": "string"},
+            },
+        },
+    },
+}
+
+_OPENAI_MAPA_MATRIZ_ITEM: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "codigo",
+        "habilidade",
+        "faixa",
+        "conteudo_estruturante",
+        "dificuldade_observada",
+        "como_trabalhar",
+    ],
+    "properties": {
+        "codigo": {"type": "string"},
+        "habilidade": {"type": "string"},
+        "faixa": {"type": "string"},
+        "conteudo_estruturante": {"type": "string"},
+        "dificuldade_observada": {"type": "string"},
+        "como_trabalhar": {"type": "string"},
+    },
+}
+
+_OPENAI_MAPA_DISC_ITEM: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "disciplina",
+        "foco_analitico",
+        "matriz_acao_por_habilidade",
+        "dinamica_sala_recomposicao",
+    ],
+    "properties": {
+        "disciplina": {"type": "string"},
+        "foco_analitico": {"type": "string"},
+        "matriz_acao_por_habilidade": {
+            "type": "array",
+            "items": _OPENAI_MAPA_MATRIZ_ITEM,
+        },
+        "dinamica_sala_recomposicao": {"type": "string"},
+    },
+}
+
+_OPENAI_MAPA_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["document_title", "analises"],
+    "properties": {
+        "document_title": {"type": "string"},
+        "analises": {
+            "type": "array",
+            "items": _OPENAI_MAPA_DISC_ITEM,
+        },
+    },
+}
+
+
 class AIAnalysisService:
-    """Serviço para análise de relatórios (Google AI Studio / Gemini)."""
+    """Serviço para análise de relatórios (Gemini padrão; OpenAI opcional via AI_ANALYSIS_PROVIDER)."""
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
 
+        provider = self._report_analysis_provider()
         google_key_set = bool(os.getenv("GOOGLE_AI_STUDIO_API_KEY"))
         google_model = os.getenv("GOOGLE_AI_STUDIO_MODEL", "gemini-1.5-pro")
+        openai_key_set = bool(os.getenv("OPENAI_API_KEY"))
+        openai_model = os.getenv("OPENAI_ANALYSIS_MODEL") or _DEFAULT_OPENAI_ANALYSIS_MODEL
         print(
-            f"[AIAnalysisService] init | GOOGLE_AI_STUDIO_API_KEY set? {google_key_set} | "
-            f"GOOGLE_AI_STUDIO_MODEL={google_model}"
+            f"[AIAnalysisService] init | AI_ANALYSIS_PROVIDER={provider} | "
+            f"GOOGLE_AI_STUDIO_API_KEY set? {google_key_set} | "
+            f"GOOGLE_AI_STUDIO_MODEL={google_model} | "
+            f"OPENAI_API_KEY set? {openai_key_set} | "
+            f"OPENAI_ANALYSIS_MODEL={openai_model} | "
+            f"OPENAI_ANALYSIS_TIMEOUT={self._openai_analysis_timeout_sec()} | "
+            f"OPENAI_ANALYSIS_MAX_RETRIES={self._openai_analysis_max_retries()} | "
+            f"OPENAI_ANALYSIS_TEMPERATURE={self._openai_analysis_temperature()}"
         )
-        print("[AIAnalysisService] init | Provedor esperado para análise: Google AI Studio (Gemini)")
+        if provider == "openai":
+            print(
+                "[AIAnalysisService] init | analyze_report_data e "
+                "analyze_intervention_plan_json usarão OpenAI"
+            )
+        else:
+            print(
+                "[AIAnalysisService] init | analyze_report_data e "
+                "analyze_intervention_plan_json usarão Google AI Studio (Gemini)"
+            )
+
+    @staticmethod
+    def _report_analysis_provider() -> str:
+        """Provedor de análises: 'openai' ou 'gemini' (padrão)."""
+        raw = (os.getenv("AI_ANALYSIS_PROVIDER") or "gemini").strip().lower()
+        if raw in ("openai", "gemini"):
+            return raw
+        return "gemini"
     
     def analyze_report_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Analisa dados do relatório e gera textos usando OpenAI em UMA ÚNICA chamada.
+        Analisa dados do relatório e gera textos em UMA ÚNICA chamada.
         OTIMIZAÇÃO: Consolida todas as análises (participação, proficiência, notas, níveis) 
         em uma única requisição à API para reduzir custos e latência.
+
+        Provedor: AI_ANALYSIS_PROVIDER=gemini (padrão) ou openai.
         
         Args:
             report_data: Dados do relatório completo
@@ -79,13 +343,16 @@ class AIAnalysisService:
             
             # Construir prompt unificado com todos os dados
             unified_prompt = self._build_unified_prompt(report_data, analysis_data, avaliacao_titulo, scope_type)
-            
-            
-            # Fazer UMA ÚNICA chamada à IA
-            unified_response = self._call_openai(unified_prompt)
-            
-            # Processar resposta e extrair as diferentes seções
-            analysis_texts = self._parse_unified_response(unified_response, report_data)
+
+            provider = self._report_analysis_provider()
+            self.logger.info("analyze_report_data | provider=%s", provider)
+
+            if provider == "openai":
+                analysis_texts = self._analyze_report_data_via_openai(unified_prompt, report_data)
+            else:
+                # Gemini (padrão): texto com marcadores → parse legado
+                unified_response = self._call_openai(unified_prompt)
+                analysis_texts = self._parse_unified_response(unified_response, report_data)
             
             # Validação final: garantir que todas as seções esperadas foram geradas
             self._validate_analysis_completeness(analysis_texts, report_data)
@@ -1091,6 +1358,456 @@ e recomendações práticas para a escola.
         
         return formatted
     
+    @staticmethod
+    def _openai_analysis_timeout_sec() -> float:
+        try:
+            return float(
+                os.getenv("OPENAI_ANALYSIS_TIMEOUT") or _DEFAULT_OPENAI_ANALYSIS_TIMEOUT_SEC
+            )
+        except (TypeError, ValueError):
+            return float(_DEFAULT_OPENAI_ANALYSIS_TIMEOUT_SEC)
+
+    @staticmethod
+    def _openai_analysis_max_retries() -> int:
+        try:
+            return int(
+                os.getenv("OPENAI_ANALYSIS_MAX_RETRIES") or _DEFAULT_OPENAI_ANALYSIS_MAX_RETRIES
+            )
+        except (TypeError, ValueError):
+            return int(_DEFAULT_OPENAI_ANALYSIS_MAX_RETRIES)
+
+    @staticmethod
+    def _openai_analysis_temperature() -> float:
+        try:
+            return float(
+                os.getenv("OPENAI_ANALYSIS_TEMPERATURE") or _DEFAULT_OPENAI_ANALYSIS_TEMPERATURE
+            )
+        except (TypeError, ValueError):
+            return float(_DEFAULT_OPENAI_ANALYSIS_TEMPERATURE)
+
+    def _openai_analysis_client(self):
+        """
+        Cliente OpenAI para analyze_report_data e analyze_intervention_plan_json.
+        Reusa OPENAI_API_KEY; timeout/retries só deste caminho (não afetam Gemini).
+        """
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            self.logger.error("OPENAI_API_KEY não configurada no ambiente")
+            raise RuntimeError("OPENAI_API_KEY não configurada.")
+        from openai import OpenAI
+
+        timeout_sec = self._openai_analysis_timeout_sec()
+        max_retries = self._openai_analysis_max_retries()
+        return OpenAI(api_key=api_key, timeout=timeout_sec, max_retries=max_retries)
+
+    def _expected_disciplines_for_openai(
+        self, report_data: Dict[str, Any]
+    ) -> Dict[str, List[str]]:
+        """Disciplinas esperadas por seção, a partir do payload agregado."""
+        prof = [
+            d
+            for d in (report_data.get("proficiencia", {}) or {}).get("por_disciplina", {}).keys()
+            if d != "GERAL"
+        ]
+        niveis = list((report_data.get("niveis_aprendizagem", {}) or {}).keys())
+        habilidades = list((report_data.get("acertos_por_habilidade", {}) or {}).keys())
+        return {
+            "proficiencia": prof,
+            "niveis_aprendizagem": niveis,
+            "habilidades": habilidades,
+        }
+
+    def _prompt_for_openai_json(
+        self, unified_prompt: str, report_data: Dict[str, Any]
+    ) -> str:
+        """
+        Mantém o conteúdo analítico do prompt unificado e troca só o formato
+        de resposta para Structured Outputs (listas por disciplina).
+        """
+        expected = self._expected_disciplines_for_openai(report_data)
+        marker = "===========================================\nFORMATO DA RESPOSTA\n==========================================="
+        json_format = f"""===========================================
+FORMATO DA RESPOSTA
+===========================================
+
+Responda APENAS com um JSON válido conforme o schema estruturado.
+Chaves obrigatórias de primeiro nível (nunca aninhe uma seção dentro de outra):
+- participacao (string)
+- notas (string)
+- proficiencia (array de objetos {{"disciplina": string, "texto": string}})
+- niveis_aprendizagem (array de objetos {{"disciplina": string, "texto": string}})
+- habilidades (array de objetos {{"disciplina": string, "texto": string}})
+
+Disciplinas esperadas (use estes nomes exatamente; um item por disciplina):
+- proficiencia: {expected["proficiencia"] or ["(nenhuma)"]}
+- niveis_aprendizagem: {expected["niveis_aprendizagem"] or ["(nenhuma)"]}
+- habilidades: {expected["habilidades"] or ["(nenhuma)"]}
+
+PROFUNDIDADE E TOM (OBRIGATÓRIO — alinhar ao parecer técnico pedagógico completo):
+- Tom formal de parecer técnico pedagógico (como um relatório institucional), sem markdown.
+- participacao: 3 a 5 parágrafos (panorama, classificação, confiabilidade, destaques e recomendações).
+- notas: 3 a 5 parágrafos (classificação da média, comparação, radiografia por disciplina, recomendações).
+- Cada item de proficiencia: 3 a 4 parágrafos (classificação, posição vs meta/municipal, diagnóstico pedagógico, leitura por unidade).
+- Cada item de niveis_aprendizagem: 2 a 4 parágrafos (conceito dos níveis, diagnóstico com %, conclusão do gargalo).
+- Cada item de habilidades: 3 a 5 parágrafos (mapa de calor em texto, diagnóstico cognitivo, intervenção, síntese).
+- Não entregue resumos de uma frase; desenvolva o parecer com números do relatório.
+
+Regras:
+- Textos puros (sem #, ##, *, **); títulos em MAIÚSCULAS seguidos de dois pontos.
+- Nunca coloque "notas", "niveis_aprendizagem" ou "habilidades" dentro de "proficiencia".
+- Se não houver base para uma disciplina, ainda assim inclua o item com texto curto explicando a ausência.
+"""
+        idx = unified_prompt.find(marker)
+        if idx >= 0:
+            return unified_prompt[:idx] + json_format
+        return unified_prompt + "\n\n" + json_format
+
+    def _analyze_report_data_via_openai(
+        self, unified_prompt: str, report_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Chama OpenAI com Structured Outputs (json_schema strict),
+        normaliza para o mesmo shape do Gemini e aplica fallback por seção.
+        Se a resposta inteira for inválida, tenta 1 vez a mais; depois propaga.
+        """
+        model_name = (os.getenv("OPENAI_ANALYSIS_MODEL") or _DEFAULT_OPENAI_ANALYSIS_MODEL).strip()
+        if not model_name:
+            model_name = _DEFAULT_OPENAI_ANALYSIS_MODEL
+
+        timeout_sec = self._openai_analysis_timeout_sec()
+        max_retries = self._openai_analysis_max_retries()
+        temperature = self._openai_analysis_temperature()
+        prompt = self._prompt_for_openai_json(unified_prompt, report_data)
+        system_prompt = (
+            "Você atua como um Doutor em Análise de Dados Educacionais e Especialista em "
+            "Avaliação Educacional. Responda APENAS com o JSON do schema solicitado. "
+            "Gere textos longos, humanizados e profissionais (parecer técnico pedagógico), "
+            "SEM formatação markdown (sem #, ##, *, **). Use parágrafos e títulos em maiúsculas "
+            "seguidos de dois pontos. Nunca aninhe seções umas nas outras. "
+            "Respeite rigorosamente as regras de série, segmento e nomenclatura do prompt do usuário."
+        )
+
+        self.logger.info(
+            "analyze_report_data | OpenAI | model=%s | timeout=%ss | max_retries=%s | temperature=%s",
+            model_name,
+            timeout_sec,
+            max_retries,
+            temperature,
+        )
+        print(
+            f"[AIAnalysisService] call | OpenAI | model={model_name} | "
+            f"timeout={timeout_sec}s | max_retries={max_retries} | temperature={temperature}"
+        )
+
+        client = self._openai_analysis_client()
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "analise_relatorio_avaliacoes",
+                "strict": True,
+                "schema": _OPENAI_REPORT_JSON_SCHEMA,
+            },
+        }
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+        last_error: Optional[Exception] = None
+        # Tentativa inicial + 1 nova se a validação da resposta inteira falhar.
+        for attempt in (1, 2):
+            try:
+                t0 = time.time()
+                response = client.chat.completions.create(
+                    model=model_name,
+                    temperature=temperature,
+                    max_tokens=OPENROUTER_MAX_TOKENS,
+                    response_format=response_format,
+                    messages=messages,
+                )
+                elapsed = time.time() - t0
+                usage = getattr(response, "usage", None)
+                usage_info = {
+                    "prompt_tokens": getattr(usage, "prompt_tokens", None) if usage else None,
+                    "completion_tokens": getattr(usage, "completion_tokens", None) if usage else None,
+                    "total_tokens": getattr(usage, "total_tokens", None) if usage else None,
+                }
+                self.logger.info(
+                    "analyze_report_data | OpenAI | attempt=%s | duration=%.2fs | tokens=%s",
+                    attempt,
+                    elapsed,
+                    usage_info,
+                )
+                print(
+                    f"[AIAnalysisService] OpenAI attempt={attempt} duration={elapsed:.2f}s "
+                    f"tokens={usage_info}"
+                )
+
+                raw = (response.choices[0].message.content or "").strip()
+                if not raw:
+                    raise RuntimeError("OpenAI retornou resposta vazia para analyze_report_data")
+
+                parsed = self._parse_openai_report_json(raw, report_data)
+                if not self._openai_whole_response_ok(parsed, report_data):
+                    raise RuntimeError(
+                        "Resposta OpenAI inválida após normalização (seções críticas vazias)"
+                    )
+                return parsed
+            except Exception as exc:
+                last_error = exc
+                self.logger.warning(
+                    "analyze_report_data | OpenAI | tentativa %s falhou: %s",
+                    attempt,
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+                if attempt >= 2:
+                    break
+
+        raise RuntimeError(
+            f"OpenAI falhou após 2 tentativas: {type(last_error).__name__}: {last_error}"
+        ) from last_error
+
+    def _openai_whole_response_ok(
+        self, parsed: Dict[str, Any], report_data: Dict[str, Any]
+    ) -> bool:
+        """
+        True se a resposta tem estrutura mínima utilizável (não só fallbacks globais).
+        Falha total → dispara nova tentativa no caller.
+        """
+        if not isinstance(parsed, dict):
+            return False
+        part = self._strip_html_for_openai_check(parsed.get("participacao") or "")
+        notas = self._strip_html_for_openai_check(parsed.get("notas") or "")
+        part_ok = bool(part) and "não disponível" not in part.lower()
+        notas_ok = bool(notas) and "não disponível" not in notas.lower()
+        expected = self._expected_disciplines_for_openai(report_data)
+        prof_map = parsed.get("proficiencia") if isinstance(parsed.get("proficiencia"), dict) else {}
+        prof_ok = False
+        for disc in expected["proficiencia"] or list(prof_map.keys()):
+            txt = self._strip_html_for_openai_check(prof_map.get(disc) or "")
+            if txt and "não disponível" not in txt.lower():
+                prof_ok = True
+                break
+        # Aceita se ao menos 2 das 3 seções-base (participacao/notas/proficiencia) forem reais.
+        return sum(1 for x in (part_ok, notas_ok, prof_ok) if x) >= 2
+
+    @staticmethod
+    def _strip_html_for_openai_check(text: str) -> str:
+        return re.sub(r"<[^>]+>", " ", text or "").strip()
+
+    def _normalize_openai_payload_shape(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalizador defensivo: puxa seções aninhadas para o topo e
+        converte listas {disciplina,texto} / dicts legados em estrutura canônica.
+        """
+        out: Dict[str, Any] = {k: payload.get(k) for k in _OPENAI_SECTION_KEYS}
+
+        # Se alguma seção veio aninhada em outra (bug observado no cartão), promover.
+        for container_key in list(_OPENAI_SECTION_KEYS):
+            container = out.get(container_key)
+            if isinstance(container, dict):
+                for nested_key, nested_val in list(container.items()):
+                    alias = _OPENAI_NESTED_SECTION_ALIASES.get(str(nested_key).strip().lower())
+                    if not alias or alias == container_key:
+                        continue
+                    current = out.get(alias)
+                    current_empty = (
+                        current is None
+                        or current == ""
+                        or current == {}
+                        or current == []
+                    )
+                    if current_empty and nested_val not in (None, "", {}, []):
+                        self.logger.warning(
+                            "OpenAI: seção '%s' veio aninhada em '%s'; promovendo ao topo",
+                            alias,
+                            container_key,
+                        )
+                        out[alias] = nested_val
+                        container.pop(nested_key, None)
+                out[container_key] = container
+            elif isinstance(container, list):
+                # Itens espúrios tipo {"disciplina":"notas","texto":"..."} → promover
+                kept: List[Any] = []
+                for item in container:
+                    if not isinstance(item, dict):
+                        kept.append(item)
+                        continue
+                    disc = str(item.get("disciplina") or "").strip()
+                    alias = _OPENAI_NESTED_SECTION_ALIASES.get(disc.lower())
+                    if alias and alias != container_key:
+                        current = out.get(alias)
+                        current_empty = (
+                            current is None
+                            or current == ""
+                            or current == {}
+                            or current == []
+                        )
+                        if current_empty:
+                            self.logger.warning(
+                                "OpenAI: item disciplina='%s' em '%s' tratado como seção '%s'",
+                                disc,
+                                container_key,
+                                alias,
+                            )
+                            out[alias] = item.get("texto") or item
+                        continue
+                    kept.append(item)
+                out[container_key] = kept
+
+        return out
+
+    def _discipline_entries_to_map(
+        self, value: Any, report_data: Dict[str, Any]
+    ) -> Dict[str, str]:
+        """Converte array [{disciplina,texto}] ou dict legado em {disciplina: texto}."""
+        out: Dict[str, str] = {}
+
+        def _put(name: Any, text: Any) -> None:
+            raw_name = str(name or "").strip()
+            if not raw_name:
+                return
+            # Ignorar nomes que são seções do schema (ex.: disciplina="notas")
+            if raw_name.lower() in _OPENAI_NESTED_SECTION_ALIASES:
+                return
+            key = self._normalize_discipline_name(raw_name, report_data)
+            if not key:
+                return
+            txt = ""
+            if isinstance(text, str):
+                txt = text.strip()
+            elif text is not None:
+                txt = str(text).strip()
+            if txt:
+                out[key] = txt
+
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    _put(item.get("disciplina") or "", item.get("texto"))
+        elif isinstance(value, dict):
+            for raw_name, text in value.items():
+                if str(raw_name).strip().lower() in _OPENAI_NESTED_SECTION_ALIASES:
+                    continue
+                _put(raw_name, text)
+        return out
+
+    def _parse_openai_report_json(
+        self, raw: str, report_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Converte JSON da OpenAI no mesmo dict produzido por _parse_unified_response."""
+        json_str = self._extract_json_object(raw) or raw
+        try:
+            payload = json.loads(json_str)
+        except json.JSONDecodeError as exc:
+            self.logger.error(
+                "OpenAI devolveu JSON inválido para analyze_report_data (len=%s)",
+                len(raw or ""),
+            )
+            raise RuntimeError("OpenAI devolveu JSON inválido para analyze_report_data") from exc
+
+        if not isinstance(payload, dict):
+            raise RuntimeError("OpenAI devolveu JSON que não é um objeto")
+
+        payload = self._normalize_openai_payload_shape(payload)
+
+        def _as_text(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                return value.strip()
+            if isinstance(value, dict) and "texto" in value:
+                return str(value.get("texto") or "").strip()
+            if isinstance(value, list):
+                # Se notas/participacao vieram como lista por engano, juntar textos
+                parts = []
+                for item in value:
+                    if isinstance(item, dict) and item.get("texto"):
+                        parts.append(str(item.get("texto")).strip())
+                    elif isinstance(item, str) and item.strip():
+                        parts.append(item.strip())
+                return "\n\n".join(parts)
+            return str(value).strip()
+
+        result = {
+            "participacao": _as_text(payload.get("participacao")),
+            "proficiencia": self._discipline_entries_to_map(
+                payload.get("proficiencia"), report_data
+            ),
+            "notas": _as_text(payload.get("notas")),
+            "niveis_aprendizagem": self._discipline_entries_to_map(
+                payload.get("niveis_aprendizagem"), report_data
+            ),
+            "habilidades": self._discipline_entries_to_map(
+                payload.get("habilidades"), report_data
+            ),
+        }
+
+        expected = self._expected_disciplines_for_openai(report_data)
+
+        # Fallback por seção (não derruba o relatório inteiro).
+        if not result["participacao"] or "não disponível" in result["participacao"].lower():
+            if not result["participacao"]:
+                self.logger.warning("OpenAI: seção participacao vazia/faltando — fallback local")
+                result["participacao"] = "Análise de participação não disponível no momento."
+
+        if not result["notas"] or "não disponível" in result["notas"].lower():
+            if not result["notas"]:
+                self.logger.warning("OpenAI: seção notas vazia/faltando — fallback local")
+                result["notas"] = "Análise de notas não disponível no momento."
+
+        for disciplina in expected["proficiencia"]:
+            txt = (result["proficiencia"].get(disciplina) or "").strip()
+            if not txt:
+                self.logger.warning(
+                    "OpenAI: proficiencia faltando para disciplina=%s — fallback local",
+                    disciplina,
+                )
+                result["proficiencia"][disciplina] = (
+                    f"Análise de proficiência não disponível para {disciplina}."
+                )
+
+        for disciplina in expected["niveis_aprendizagem"]:
+            txt = (result["niveis_aprendizagem"].get(disciplina) or "").strip()
+            if not txt:
+                self.logger.warning(
+                    "OpenAI: niveis_aprendizagem faltando para disciplina=%s — fallback local",
+                    disciplina,
+                )
+                result["niveis_aprendizagem"][disciplina] = (
+                    f"Análise de níveis não disponível para {disciplina}."
+                )
+
+        for disciplina in expected["habilidades"]:
+            txt = (result["habilidades"].get(disciplina) or "").strip()
+            if not txt:
+                self.logger.warning(
+                    "OpenAI: habilidades faltando para disciplina=%s — fallback local",
+                    disciplina,
+                )
+                result["habilidades"][disciplina] = (
+                    f"Análise de habilidades não disponível para {disciplina}."
+                )
+
+        # HTML no mesmo padrão do caminho Gemini (_format_ai_text).
+        result["participacao"] = self._format_ai_text(result["participacao"])
+        result["notas"] = self._format_ai_text(result["notas"])
+        for disciplina in list(result["proficiencia"].keys()):
+            result["proficiencia"][disciplina] = self._format_ai_text(
+                result["proficiencia"][disciplina]
+            )
+        for disciplina in list(result["niveis_aprendizagem"].keys()):
+            result["niveis_aprendizagem"][disciplina] = self._format_ai_text(
+                result["niveis_aprendizagem"][disciplina]
+            )
+        for disciplina in list(result["habilidades"].keys()):
+            result["habilidades"][disciplina] = self._format_ai_text(
+                result["habilidades"][disciplina]
+            )
+
+        return result
+
     def _call_openai(self, prompt: str) -> str:
         """
         Chama a API do Google AI Studio (Gemini) para gerar análise.
@@ -1267,11 +1984,574 @@ e recomendações práticas para a escola.
                     return s[start : i + 1].strip()
         return ""
 
+    @staticmethod
+    def _intervention_consumer_kind(prompt: str) -> str:
+        """
+        Detecta o consumidor pelo prompt:
+        - mapa: ESTRATÉGIAS DE INTERVENÇÃO
+        - escolar_por_disciplina: Relatório Escolar com analises_por_disciplina
+        - escolar_flat: variante inline (panorama_geral no root)
+        """
+        p = prompt or ""
+        p_norm = unicodedata.normalize("NFKD", p)
+        p_ascii = "".join(ch for ch in p_norm if not unicodedata.combining(ch)).upper()
+        if "ESTRATEGIAS DE INTERVENCAO" in p_ascii or "ESTRATÉGIAS DE INTERVENÇÃO" in p:
+            return "mapa"
+        if "analises_por_disciplina" in p:
+            return "escolar_por_disciplina"
+        return "escolar_flat"
+
+    def _intervention_openai_schema_bundle(
+        self, kind: str
+    ) -> Tuple[str, Dict[str, Any], str]:
+        """Retorna (schema_name, schema, system_prompt_extra) por consumidor."""
+        if kind == "mapa":
+            return (
+                "estrategias_intervencao_mapa",
+                _OPENAI_MAPA_SCHEMA,
+                (
+                    "Gere estratégias de intervenção detalhadas (foco_analitico, "
+                    "matriz_acao_por_habilidade e dinamica_sala_recomposicao) com o mesmo "
+                    "nível de detalhe de um plano pedagógico aplicável em sala. "
+                    "document_title deve ser exatamente 'ESTRATÉGIAS DE INTERVENÇÃO'. "
+                    "Use a lista 'analises' (um item por disciplina)."
+                ),
+            )
+        if kind == "escolar_flat":
+            return (
+                "relatorio_escolar_flat",
+                _OPENAI_ESCOLAR_FLAT_SCHEMA,
+                (
+                    "Gere Relatório Escolar Analítico com panorama_geral (texto longo), "
+                    "reflexao_niveis (lista) e encaminhamentos_cultura_digital. "
+                    "Tom formal de parecer pedagógico; textos desenvolvidos, sem markdown."
+                ),
+            )
+        return (
+            "relatorio_escolar_por_disciplina",
+            _OPENAI_ESCOLAR_POR_DISC_SCHEMA,
+            (
+                "Gere Relatório Escolar Analítico por disciplina: use a lista 'analises' "
+                "(um item por disciplina) com panorama_geral, reflexao_niveis e "
+                "encaminhamentos_cultura_digital. Tom formal de parecer pedagógico; "
+                "textos longos e humanizados, sem markdown."
+            ),
+        )
+
+    @staticmethod
+    def _norm_disc_key(name: str) -> str:
+        s = unicodedata.normalize("NFKD", name or "")
+        s = "".join(ch for ch in s if not unicodedata.combining(ch))
+        return re.sub(r"\s+", " ", s).strip().lower()
+
+    def _expected_disciplinas_from_intervention_prompt(self, prompt: str) -> List[str]:
+        """Extrai nomes de disciplina das chaves do dict de entrada no prompt."""
+        skip = {
+            "analises_por_disciplina",
+            "metadados_gerais",
+            "metadados_entrada",
+            "codigo",
+            "descricao",
+            "habilidade",
+            "serie_ano_avaliado",
+            "componente_curricular",
+            "niveis_proficiencia_alcancados",
+            "habilidades_foco",
+            "habilidades_criticas",
+            "ano_serie",
+            "disciplina",
+            "avaliacao_referencia",
+            "media_proficiencia",
+            "media_nota",
+            "distribuicao_classificacao",
+            "document_title",
+        }
+        names: List[str] = []
+        for m in re.finditer(r"['\"]([^'\"]{2,80})['\"]\s*:\s*\{", prompt or ""):
+            name = m.group(1).strip()
+            if not name or self._norm_disc_key(name) in skip:
+                continue
+            # ignora chaves claramente não-disciplina
+            nk = self._norm_disc_key(name)
+            if nk in {"geral", "todas", "all"}:
+                continue
+            if any(
+                tok in nk
+                for tok in (
+                    "serie",
+                    "componente",
+                    "niveis",
+                    "habilidade",
+                    "media_",
+                    "distribuicao",
+                    "avaliacao",
+                    "metadado",
+                    "titulo",
+                )
+            ):
+                continue
+            if name not in names:
+                names.append(name)
+        return names
+
+    def _remap_disciplina_to_expected(
+        self, raw_name: str, expected: List[str]
+    ) -> str:
+        """Alinha nome devolvido pelo modelo ao nome usado no frontend/dados."""
+        disc = (raw_name or "").strip() or "Outras"
+        if not expected:
+            return disc
+        n_raw = self._norm_disc_key(disc)
+        for exp in expected:
+            if self._norm_disc_key(exp) == n_raw:
+                return exp
+        # aliases comuns PT
+        alias_groups = [
+            ("portugues", "lingua portuguesa", "lp", "lingua port"),
+            ("matematica", "mat", "matem"),
+        ]
+        raw_group = None
+        for gi, aliases in enumerate(alias_groups):
+            if any(a in n_raw for a in aliases):
+                raw_group = gi
+                break
+        if raw_group is not None:
+            for exp in expected:
+                n_exp = self._norm_disc_key(exp)
+                if any(a in n_exp for a in alias_groups[raw_group]):
+                    return exp
+        # fallback: contains
+        for exp in expected:
+            n_exp = self._norm_disc_key(exp)
+            if n_raw in n_exp or n_exp in n_raw:
+                return exp
+        return disc
+
+    def _prompt_for_intervention_openai(self, prompt: str, kind: str) -> str:
+        """Mantém o prompt atual e só ajusta o formato para Structured Outputs."""
+        expected = self._expected_disciplinas_from_intervention_prompt(prompt)
+        expected_line = (
+            f"Disciplinas esperadas (use estes nomes EXATAMENTE no campo 'disciplina'): {expected}\n"
+            if expected
+            else ""
+        )
+        depth = (
+            "PROFUNDIDADE (obrigatório): panorama_geral / foco_analitico com 2 a 4 parágrafos; "
+            "cada significado_e_impacto / como_trabalhar com análise pedagógica desenvolvida "
+            "(não resuma em uma frase); reflexao_niveis deve cobrir os níveis presentes nos dados; "
+            "matriz_acao_por_habilidade deve cobrir as habilidades críticas informadas.\n"
+        )
+        if kind == "mapa":
+            fmt = (
+                "\n\n[FORMATO STRUCTURED OUTPUT — MAPA DE HABILIDADES]\n"
+                "Responda APENAS conforme o schema. Use 'analises' (array) com um objeto "
+                "por disciplina contendo: disciplina, foco_analitico, "
+                "matriz_acao_por_habilidade (lista com codigo, habilidade, faixa, "
+                "conteudo_estruturante, dificuldade_observada, como_trabalhar) e "
+                "dinamica_sala_recomposicao. document_title = 'ESTRATÉGIAS DE INTERVENÇÃO'.\n"
+                f"{expected_line}"
+                f"{depth}"
+                "Desenvolva textos longos e aplicáveis (mesmo tom/detalhe do briefing). "
+                "Não inclua nomes ou dados pessoais de alunos.\n"
+            )
+        elif kind == "escolar_flat":
+            fmt = (
+                "\n\n[FORMATO STRUCTURED OUTPUT — RELATÓRIO ESCOLAR]\n"
+                "Responda APENAS conforme o schema com panorama_geral (string longa), "
+                "reflexao_niveis (lista de níveis com habilidades_analisadas), "
+                "encaminhamentos_cultura_digital e metadados_entrada.titulo_avaliacao.\n"
+                f"{depth}"
+                "Desenvolva textos longos no tom do briefing. "
+                "Não inclua nomes ou dados pessoais de alunos.\n"
+            )
+        else:
+            fmt = (
+                "\n\n[FORMATO STRUCTURED OUTPUT — RELATÓRIO ESCOLAR POR DISCIPLINA]\n"
+                "Responda APENAS conforme o schema. Use 'analises' (array) com um objeto "
+                "por disciplina: disciplina, panorama_geral, reflexao_niveis "
+                "(nivel_identificado, significado_e_impacto, quantidade_alunos, "
+                "habilidades_analisadas[{codigo,descricao,reflexao}]) e "
+                "encaminhamentos_cultura_digital; mais metadados_gerais.titulo_avaliacao.\n"
+                f"{expected_line}"
+                f"{depth}"
+                "Desenvolva textos longos no tom do briefing. "
+                "Não inclua nomes ou dados pessoais de alunos.\n"
+            )
+        return (prompt or "") + fmt
+
+    @staticmethod
+    def _normalize_escolar_nivel_item(item: Mapping[str, Any]) -> Dict[str, Any]:
+        nivel = str(item.get("nivel_identificado") or item.get("nivel") or "").strip()
+        significado = str(
+            item.get("significado_e_impacto")
+            or item.get("significado_pedagogico")
+            or item.get("descricao_desempenho")
+            or ""
+        ).strip()
+        try:
+            qtd = int(item.get("quantidade_alunos") or 0)
+        except (TypeError, ValueError):
+            qtd = 0
+        habs_raw = item.get("habilidades_analisadas")
+        if not isinstance(habs_raw, list):
+            habs_raw = item.get("analise_habilidades") or []
+        habilidades: List[Dict[str, str]] = []
+        analise_habilidades: List[Dict[str, str]] = []
+        if isinstance(habs_raw, list):
+            for h in habs_raw:
+                if not isinstance(h, Mapping):
+                    continue
+                codigo = str(h.get("codigo") or "").strip()
+                descricao = str(h.get("descricao") or "").strip()
+                reflexao = str(
+                    h.get("reflexao") or h.get("reflexao_pedagogica") or ""
+                ).strip()
+                foco = str(h.get("habilidade_foco") or "").strip()
+                if not codigo and foco:
+                    codigo = foco
+                if not (codigo or descricao or reflexao):
+                    continue
+                habilidades.append(
+                    {"codigo": codigo, "descricao": descricao, "reflexao": reflexao}
+                )
+                analise_habilidades.append(
+                    {
+                        "habilidade_foco": foco or (f"{codigo} — {descricao}".strip(" —")),
+                        "reflexao_pedagogica": reflexao,
+                    }
+                )
+        return {
+            "nivel_identificado": nivel,
+            "significado_e_impacto": significado,
+            "quantidade_alunos": qtd,
+            "habilidades_analisadas": habilidades,
+            "analise_habilidades": analise_habilidades,
+        }
+
+    def _convert_openai_escolar_disc(self, item: Mapping[str, Any]) -> Dict[str, Any]:
+        niveis_raw = item.get("reflexao_niveis")
+        niveis: List[Dict[str, Any]] = []
+        if isinstance(niveis_raw, list):
+            for n in niveis_raw:
+                if isinstance(n, Mapping):
+                    niveis.append(self._normalize_escolar_nivel_item(n))
+        return {
+            "panorama_geral": str(item.get("panorama_geral") or "").strip(),
+            "reflexao_niveis": niveis,
+            "encaminhamentos_cultura_digital": str(
+                item.get("encaminhamentos_cultura_digital") or ""
+            ).strip(),
+        }
+
+    def _normalize_intervention_openai_payload(
+        self,
+        kind: str,
+        payload: Dict[str, Any],
+        expected_disciplinas: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Converte arrays do schema strict para o formato consumido pelo frontend."""
+        expected = expected_disciplinas or []
+        if kind == "mapa":
+            title = str(payload.get("document_title") or "ESTRATÉGIAS DE INTERVENÇÃO").strip()
+            if not title:
+                title = "ESTRATÉGIAS DE INTERVENÇÃO"
+            analises_raw = payload.get("analises")
+            if not isinstance(analises_raw, list):
+                # Já no formato final?
+                apd = payload.get("analises_por_disciplina")
+                if isinstance(apd, dict):
+                    remapped = {
+                        self._remap_disciplina_to_expected(str(k), expected): v
+                        for k, v in apd.items()
+                    }
+                    return {
+                        "document_title": title,
+                        "analises_por_disciplina": remapped,
+                    }
+                analises_raw = []
+            out_apd: Dict[str, Any] = {}
+            for it in analises_raw:
+                if not isinstance(it, Mapping):
+                    continue
+                disc = self._remap_disciplina_to_expected(
+                    str(it.get("disciplina") or "").strip() or "Outras", expected
+                )
+                matriz_raw = it.get("matriz_acao_por_habilidade")
+                matriz: List[Dict[str, str]] = []
+                if isinstance(matriz_raw, list):
+                    for m in matriz_raw:
+                        if not isinstance(m, Mapping):
+                            continue
+                        matriz.append(
+                            {
+                                "codigo": str(m.get("codigo") or "").strip(),
+                                "habilidade": str(m.get("habilidade") or "").strip(),
+                                "faixa": str(m.get("faixa") or "").strip(),
+                                "conteudo_estruturante": str(
+                                    m.get("conteudo_estruturante") or ""
+                                ).strip(),
+                                "dificuldade_observada": str(
+                                    m.get("dificuldade_observada") or ""
+                                ).strip(),
+                                "como_trabalhar": str(m.get("como_trabalhar") or "").strip(),
+                            }
+                        )
+                # Ignora "GERAL"/aliases se houver disciplinas esperadas reais
+                if expected and self._norm_disc_key(disc) in {"geral", "todas", "all"}:
+                    continue
+                out_apd[disc] = {
+                    "foco_analitico": str(it.get("foco_analitico") or "").strip(),
+                    "matriz_acao_por_habilidade": matriz,
+                    "dinamica_sala_recomposicao": str(
+                        it.get("dinamica_sala_recomposicao") or ""
+                    ).strip(),
+                }
+            return {
+                "document_title": title,
+                "analises_por_disciplina": out_apd,
+            }
+
+        if kind == "escolar_flat":
+            niveis_raw = payload.get("reflexao_niveis")
+            niveis: List[Dict[str, Any]] = []
+            if isinstance(niveis_raw, list):
+                for n in niveis_raw:
+                    if isinstance(n, Mapping):
+                        niveis.append(self._normalize_escolar_nivel_item(n))
+            meta = payload.get("metadados_entrada")
+            if not isinstance(meta, dict):
+                meta = {"titulo_avaliacao": "Avaliação aplicada"}
+            else:
+                meta = {
+                    "titulo_avaliacao": str(
+                        meta.get("titulo_avaliacao") or "Avaliação aplicada"
+                    ).strip()
+                    or "Avaliação aplicada"
+                }
+            return {
+                "panorama_geral": str(payload.get("panorama_geral") or "").strip(),
+                "reflexao_niveis": niveis,
+                "encaminhamentos_cultura_digital": str(
+                    payload.get("encaminhamentos_cultura_digital") or ""
+                ).strip(),
+                "metadados_entrada": meta,
+            }
+
+        # escolar_por_disciplina
+        analises_raw = payload.get("analises")
+        if not isinstance(analises_raw, list):
+            apd_existing = payload.get("analises_por_disciplina")
+            if isinstance(apd_existing, dict):
+                meta_g = payload.get("metadados_gerais")
+                if not isinstance(meta_g, dict):
+                    meta_g = {"titulo_avaliacao": "Avaliação aplicada"}
+                remapped = {
+                    self._remap_disciplina_to_expected(str(k), expected): v
+                    for k, v in apd_existing.items()
+                }
+                return {
+                    "analises_por_disciplina": remapped,
+                    "metadados_gerais": meta_g,
+                }
+            analises_raw = []
+        out_apd = {}
+        for it in analises_raw:
+            if not isinstance(it, Mapping):
+                continue
+            disc = self._remap_disciplina_to_expected(
+                str(it.get("disciplina") or "").strip() or "Outras", expected
+            )
+            if expected and self._norm_disc_key(disc) in {"geral", "todas", "all"}:
+                continue
+            out_apd[disc] = self._convert_openai_escolar_disc(it)
+        meta_g = payload.get("metadados_gerais")
+        if not isinstance(meta_g, dict):
+            meta_g = {"titulo_avaliacao": "Avaliação aplicada"}
+        else:
+            meta_g = {
+                "titulo_avaliacao": str(
+                    meta_g.get("titulo_avaliacao") or "Avaliação aplicada"
+                ).strip()
+                or "Avaliação aplicada"
+            }
+        return {
+            "analises_por_disciplina": out_apd,
+            "metadados_gerais": meta_g,
+        }
+
+    def _intervention_openai_response_ok(self, kind: str, data: Dict[str, Any]) -> bool:
+        """Validação mínima: estrutura utilizável e sem campos críticos vazios."""
+        if not isinstance(data, dict) or data.get("error"):
+            return False
+        if kind == "mapa":
+            apd = data.get("analises_por_disciplina")
+            if not isinstance(apd, dict) or not apd:
+                return False
+            ok_count = 0
+            for disc_payload in apd.values():
+                if not isinstance(disc_payload, dict):
+                    continue
+                foco = str(disc_payload.get("foco_analitico") or "").strip()
+                matriz = disc_payload.get("matriz_acao_por_habilidade")
+                dinamica = str(disc_payload.get("dinamica_sala_recomposicao") or "").strip()
+                if foco and isinstance(matriz, list) and len(matriz) > 0 and dinamica:
+                    ok_count += 1
+            return ok_count >= 1
+
+        if kind == "escolar_flat":
+            pan = str(data.get("panorama_geral") or "").strip()
+            niveis = data.get("reflexao_niveis")
+            return bool(pan) and isinstance(niveis, list) and len(niveis) > 0
+
+        apd = data.get("analises_por_disciplina")
+        if not isinstance(apd, dict) or not apd:
+            return False
+        ok_count = 0
+        for disc_payload in apd.values():
+            if not isinstance(disc_payload, dict):
+                continue
+            pan = str(disc_payload.get("panorama_geral") or "").strip()
+            niveis = disc_payload.get("reflexao_niveis")
+            if pan and isinstance(niveis, list) and len(niveis) > 0:
+                ok_count += 1
+        return ok_count >= 1
+
+    def _analyze_intervention_plan_via_openai(self, prompt: str) -> Dict[str, Any]:
+        """
+        OpenAI Structured Outputs (json_schema strict) por consumidor.
+        Em falha após 1 retry, propaga exceção para o caller devolver {error, details}.
+        """
+        kind = self._intervention_consumer_kind(prompt)
+        schema_name, schema, system_extra = self._intervention_openai_schema_bundle(kind)
+        expected_disciplinas = self._expected_disciplinas_from_intervention_prompt(prompt)
+        model_name = (os.getenv("OPENAI_ANALYSIS_MODEL") or _DEFAULT_OPENAI_ANALYSIS_MODEL).strip()
+        if not model_name:
+            model_name = _DEFAULT_OPENAI_ANALYSIS_MODEL
+        timeout_sec = self._openai_analysis_timeout_sec()
+        max_retries = self._openai_analysis_max_retries()
+        temperature = self._openai_analysis_temperature()
+        user_prompt = self._prompt_for_intervention_openai(prompt, kind)
+
+        system_prompt = (
+            "Você atua como Especialista em Avaliação Educacional e Gestor Pedagógico "
+            "Orientado a Dados. Responda APENAS com o JSON do schema solicitado. "
+            "Textos longos, humanizados e profissionais, SEM markdown. "
+            "Não inclua nomes ou dados pessoais de alunos. "
+            + system_extra
+        )
+
+        self.logger.info(
+            "analyze_intervention_plan_json | OpenAI | kind=%s | model=%s | "
+            "timeout=%ss | max_retries=%s | temperature=%s",
+            kind,
+            model_name,
+            timeout_sec,
+            max_retries,
+            temperature,
+        )
+        print(
+            f"[AIAnalysisService] intervention | OpenAI | kind={kind} | model={model_name} | "
+            f"timeout={timeout_sec}s | max_retries={max_retries} | temperature={temperature}"
+        )
+
+        client = self._openai_analysis_client()
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "strict": True,
+                "schema": schema,
+            },
+        }
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        last_error: Optional[Exception] = None
+        for attempt in (1, 2):
+            try:
+                t0 = time.time()
+                response = client.chat.completions.create(
+                    model=model_name,
+                    temperature=temperature,
+                    max_tokens=OPENROUTER_MAX_TOKENS,
+                    response_format=response_format,
+                    messages=messages,
+                )
+                elapsed = time.time() - t0
+                usage = getattr(response, "usage", None)
+                usage_info = {
+                    "prompt_tokens": getattr(usage, "prompt_tokens", None) if usage else None,
+                    "completion_tokens": getattr(usage, "completion_tokens", None)
+                    if usage
+                    else None,
+                    "total_tokens": getattr(usage, "total_tokens", None) if usage else None,
+                }
+                self.logger.info(
+                    "analyze_intervention_plan_json | OpenAI | kind=%s | attempt=%s | "
+                    "duration=%.2fs | tokens=%s",
+                    kind,
+                    attempt,
+                    elapsed,
+                    usage_info,
+                )
+                print(
+                    f"[AIAnalysisService] intervention OpenAI kind={kind} attempt={attempt} "
+                    f"duration={elapsed:.2f}s tokens={usage_info}"
+                )
+
+                raw = (response.choices[0].message.content or "").strip()
+                if not raw:
+                    raise RuntimeError(
+                        "OpenAI retornou resposta vazia para analyze_intervention_plan_json"
+                    )
+                parsed_raw = json.loads(raw)
+                if not isinstance(parsed_raw, dict):
+                    raise RuntimeError("OpenAI retornou JSON que não é objeto")
+                normalized = self._normalize_intervention_openai_payload(
+                    kind, parsed_raw, expected_disciplinas=expected_disciplinas
+                )
+                if not self._intervention_openai_response_ok(kind, normalized):
+                    raise RuntimeError(
+                        "Resposta OpenAI inválida após normalização "
+                        f"(kind={kind}, campos críticos vazios)"
+                    )
+                return normalized
+            except Exception as exc:
+                last_error = exc
+                self.logger.warning(
+                    "analyze_intervention_plan_json | OpenAI | kind=%s | tentativa %s falhou: %s",
+                    kind,
+                    attempt,
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+                if attempt >= 2:
+                    break
+
+        raise RuntimeError(
+            f"OpenAI falhou após 2 tentativas (kind={kind}): "
+            f"{type(last_error).__name__}: {last_error}"
+        ) from last_error
+
     def analyze_intervention_plan_json(self, prompt: str) -> Dict[str, Any]:
         """
-        Gera um plano de intervenção seguindo o prompt do usuário e devolve JSON (dict).
+        Gera análise JSON (Relatório Escolar / Mapa de Habilidades) a partir do prompt.
+        Provedor: AI_ANALYSIS_PROVIDER=gemini (padrão) ou openai.
+        Em falha devolve {error, details} (a tela não quebra).
         """
+        provider = self._report_analysis_provider()
+        self.logger.info(
+            "analyze_intervention_plan_json | provider=%s | kind=%s",
+            provider,
+            self._intervention_consumer_kind(prompt),
+        )
         try:
+            if provider == "openai":
+                return self._analyze_intervention_plan_via_openai(prompt)
+
+            # Gemini (padrão) — comportamento inalterado
             raw = self._call_openai_json(prompt)
             json_str = self._extract_json_object(raw)
             if not json_str:

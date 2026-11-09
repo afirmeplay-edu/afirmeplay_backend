@@ -206,3 +206,5 @@ cython_debug/
 .cursorindexingignore
 
 .python-version
+
+tmp_teste_ia/

@@ -90,6 +90,8 @@ TYPE_MAP = {
     "text_production": "text_production",
     "producao_textual": "text_production",
     "produção_textual": "text_production",
+    "producao_escrita": "text_production",
+    "produção_escrita": "text_production",
     "bilhete": "text_production",
 }
 

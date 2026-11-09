@@ -503,7 +503,22 @@ Campo opcional na criação/edição e na resposta:
 - Na avaliação escrita, `PUT /written-tests/<id>/questions` aceita override por item
   (`dictationMarks`) e a resposta traz `dictationMarksSource`: `question` | `assessment` | `none`.
 
-## 6. Importar DOCX
+## 6. Modelo e importação DOCX
+
+### 6.1 Baixar modelo
+
+`GET /afirme-reading/questions/import/template`
+
+Query:
+
+- `grade` (obrigatório): UUID da série
+- `subjectId` (obrigatório): UUID da disciplina
+- `count` (opcional): quantidade de blocos vazios, 1–100 (padrão 10)
+
+Resposta: arquivo `.docx` com instruções, 3 exemplos (múltipla escolha, ditado, produção escrita)
+e `count` blocos vazios pré-preenchidos com série/disciplina.
+
+### 6.2 Importar arquivo
 
 `POST /afirme-reading/questions/import/docx` (multipart)
 

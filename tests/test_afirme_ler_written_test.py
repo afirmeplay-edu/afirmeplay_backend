@@ -2281,3 +2281,61 @@ def test_ica_routes_return_dashboard_and_csv(flask_app):
     assert "29.4" in text
     assert "1000.0" in text
     assert "Alfabetizado" in text
+
+
+# ---------------------------------------------------------------------------
+# Acertos e Níveis (rota geral, fonte ICA)
+# ---------------------------------------------------------------------------
+
+def test_acertos_niveis_report_from_ica(flask_app):
+    from app.afirme_ler.services import acertos_niveis_service
+
+    written_test = _ica_test()
+    payload = acertos_niveis_service.report(
+        {"fonte": "escrita", "avaliacaoId": written_test.id}
+    )
+    assert payload["fonte"] == "escrita"
+    assert payload["meta"]["avaliacao_id"] == written_test.id
+    assert payload["meta"]["total_itens"] == 34
+    assert payload["niveis"] == [
+        "Abaixo do Básico", "Básico", "Adequado", "Avançado",
+    ]
+    # Ana + Davi (1000) Avançado; Caio (294.1) Abaixo do Básico; Bia pendente fora
+    assert payload["indicadores"]["alunos_avaliados"] == 3
+    assert payload["indicadores"]["adequado_avancado"]["quantidade"] == 2
+    assert payload["indicadores"]["abaixo_do_basico"]["quantidade"] == 1
+    assert payload["distribuicao"]["Avançado"]["quantidade"] == 2
+    assert {a["nome"] for a in payload["alunos"]} == {"Ana", "Caio", "Davi"}
+
+    filtered = acertos_niveis_service.report(
+        {
+            "fonte": "escrita",
+            "avaliacaoId": written_test.id,
+            "turmaId": str(CLASS_A1),
+            "nivel": "Abaixo do Básico",
+        }
+    )
+    assert filtered["nivel_granularidade"] == "turma"
+    assert len(filtered["alunos"]) == 1
+    assert filtered["alunos"][0]["nome"] == "Caio"
+
+
+def test_acertos_niveis_route(flask_app):
+    from flask import current_app
+    from app.afirme_ler.routes import acertos_niveis_routes as module
+
+    written_test = _ica_test()
+    path = (
+        f"/afirme-reading/acertos-niveis"
+        f"?fonte=escrita&avaliacaoId={written_test.id}&turmaId={CLASS_A1}"
+    )
+    raw = inspect.unwrap(module.get_acertos_niveis)
+    with current_app.test_request_context(path):
+        with patch.object(module, "get_current_user_from_token", return_value=PROFESSOR):
+            response, status = raw()
+    assert status == 200
+    body = response.get_json()
+    assert body["fonte"] == "escrita"
+    assert body["indicadores"]["alunos_avaliados"] == 2  # Ana + Caio (Bia pendente)
+    assert "por_turma" in body
+    assert "habilidades" in body

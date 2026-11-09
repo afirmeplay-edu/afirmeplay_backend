@@ -35,7 +35,10 @@ def _handle_service_error(error: Exception):
     if isinstance(error, ValueError):
         return _error_response(str(error), 400)
     logging.error("Erro Afirme Ler (written-tests): %s", error, exc_info=True)
-    return _error_response("Erro interno ao processar a solicitação.", 500)
+    return _error_response(
+        "Não foi possível salvar a avaliação no servidor. Tente de novo; se continuar, avise o suporte.",
+        500,
+    )
 
 
 def _json_body():

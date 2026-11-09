@@ -200,13 +200,11 @@ def canonical_ler_question_type(value: Any) -> Optional[str]:
 
 def normalize_ler_question_type(value: Any) -> str:
     if value is None or not str(value).strip():
-        raise ValueError("type é obrigatório.")
+        raise ValueError("Informe o tipo da questão.")
     canonical = canonical_ler_question_type(value)
     if canonical is None:
         raise ValueError(
-            "Tipo de questão inválido no Afirme Ler. Tipos permitidos: "
-            "multipleChoice (múltipla escolha), dictation (ditado) e "
-            "text_production (produção escrita)."
+            "Tipo de questão inválido. Use múltipla escolha, ditado ou produção escrita."
         )
     return canonical
 
@@ -270,15 +268,15 @@ def validate_ler_alternatives(options: Any) -> Tuple[List[Dict[str, Any]], str]:
 
 def parse_dictated_word(value: Any) -> str:
     if value is None or (isinstance(value, str) and not value.strip()):
-        raise ValueError("dictatedWord é obrigatório para questões de ditado (dictation).")
+        raise ValueError("Informe a palavra que o aplicador vai ditar.")
     if not isinstance(value, str):
-        raise ValueError("dictatedWord deve ser um texto.")
+        raise ValueError("A palavra ditada deve ser um texto.")
     word = value.strip()
     if any(char.isspace() for char in word):
-        raise ValueError("dictatedWord deve ser uma única palavra, sem espaços.")
+        raise ValueError("A palavra ditada deve ser uma única palavra, sem espaços.")
     if len(word) > MAX_DICTATED_WORD_LENGTH:
         raise ValueError(
-            f"dictatedWord deve ter no máximo {MAX_DICTATED_WORD_LENGTH} caracteres."
+            f"A palavra ditada deve ter no máximo {MAX_DICTATED_WORD_LENGTH} caracteres."
         )
     return word
 
@@ -286,8 +284,12 @@ def parse_dictated_word(value: Any) -> str:
 def _assert_without_options(question_type: str, options: Any) -> None:
     if options is None or options == [] or options == "":
         return
+    label = {
+        QUESTION_TYPE_DICTATION: "ditado",
+        QUESTION_TYPE_TEXT_PRODUCTION: "produção escrita",
+    }.get(question_type, TYPE_LABELS.get(question_type, question_type))
     raise ValueError(
-        f"Questão de {TYPE_LABELS[question_type]} não tem alternativas. Não envie options."
+        f"Questão de {label} não tem alternativas. Remova as alternativas ou troque o tipo."
     )
 
 
@@ -296,14 +298,14 @@ def parse_stimulus(value: Any, question_type: str, default: Optional[str] = None
     if question_type != QUESTION_TYPE_DICTATION:
         if value is None or (isinstance(value, str) and not str(value).strip()):
             return None
-        raise ValueError("stimulus só vale para questão de ditado (dictation).")
+        raise ValueError("O modo palavra/figura só vale para questão de ditado.")
     if value is None or (isinstance(value, str) and not str(value).strip()):
         value = default or STIMULUS_WORD
     if not isinstance(value, str):
-        raise ValueError("stimulus deve ser word ou image.")
+        raise ValueError("O modo do ditado deve ser palavra ou figura.")
     stimulus = _STIMULUS_ALIASES.get(value.strip().lower())
     if stimulus is None:
-        raise ValueError("stimulus deve ser word ou image.")
+        raise ValueError("O modo do ditado deve ser palavra ou figura.")
     return stimulus
 
 
@@ -332,7 +334,7 @@ def resolve_answer_fields(
             word = data.get("dictatedWord")
             if isinstance(word, str) and word.strip():
                 raise ValueError(
-                    "Questão com imagem não recebe dictatedWord. "
+                    "Questão com figura não recebe palavra ditada. "
                     "Gere a descrição da figura."
                 )
             return [], None
@@ -345,13 +347,13 @@ def parse_value(value: Any) -> float:
     if value is None or value == "":
         return 1.0
     if isinstance(value, bool):
-        raise ValueError("value deve ser um número maior que zero.")
+        raise ValueError("O valor deve ser um número maior que zero.")
     try:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError("value deve ser um número maior que zero.") from exc
+        raise ValueError("O valor deve ser um número maior que zero.") from exc
     if not math.isfinite(parsed) or parsed <= 0:
-        raise ValueError("value deve ser um número maior que zero.")
+        raise ValueError("O valor deve ser um número maior que zero.")
     return parsed
 
 
@@ -377,8 +379,13 @@ def _optional_value(key: str, value: Any) -> Any:
 
 def _required_text(data: dict, key: str) -> str:
     value = data.get(key)
+    labels = {
+        "subjectId": "disciplina",
+        "text": "enunciado",
+    }
+    label = labels.get(key, key)
     if value is None or not str(value).strip():
-        raise ValueError(f"{key} é obrigatório.")
+        raise ValueError(f"Informe a {label}." if label == "disciplina" else f"Informe o {label}.")
     return str(value).strip()
 
 
@@ -390,18 +397,18 @@ def _statement_text(data: dict) -> str:
     html = data.get("formattedText", data.get("formatted_text"))
     if isinstance(html, str) and _IMG_TAG.search(html):
         return "Imagem"
-    raise ValueError("text é obrigatório.")
+    raise ValueError("Informe o enunciado.")
 
 
 def _grade_id(value: Any) -> uuid.UUID:
     if isinstance(value, dict):
         value = value.get("id")
     if value is None or not str(value).strip():
-        raise ValueError("grade é obrigatório.")
+        raise ValueError("Informe a série.")
     try:
         return uuid.UUID(str(value).strip())
     except ValueError as exc:
-        raise ValueError("grade deve ser o UUID de uma série.") from exc
+        raise ValueError("A série informada é inválida.") from exc
 
 
 def parse_create_payload(data: Any) -> Dict[str, Any]:
@@ -473,7 +480,7 @@ def apply_update_payload(question: Any, data: Any) -> None:
             default=previous_stimulus or STIMULUS_WORD,
         )
     elif "stimulus" in data and str(data.get("stimulus") or "").strip():
-        raise ValueError("stimulus só vale para questão de ditado (dictation).")
+        raise ValueError("O modo palavra/figura só vale para questão de ditado.")
     else:
         stimulus = None
     alternatives, answer = resolve_answer_fields(
@@ -504,17 +511,54 @@ def _assert_references_exist(subject_id: Optional[str], grade_id: Optional[uuid.
     from app.models.subject import Subject
 
     if subject_id and not db.session.get(Subject, subject_id):
-        raise ValueError("Disciplina (subjectId) não encontrada.")
+        raise ValueError("Disciplina não encontrada.")
     if grade_id and not db.session.get(Grade, grade_id):
-        raise ValueError("Série (grade) não encontrada.")
+        raise ValueError("Série não encontrada.")
     if education_stage_id and not db.session.get(EducationStage, education_stage_id):
-        raise ValueError("Etapa de ensino (educationStageId) não encontrada.")
+        raise ValueError("Curso não encontrado.")
+
+
+def _html_has_embedded_image(value: Any) -> bool:
+    return isinstance(value, str) and "data:image/" in value
+
+
+def _needs_image_pipeline(question: Question) -> bool:
+    """Evita abrir MinIO quando o enunciado/solução/alternativas não trazem data-URL."""
+    if _html_has_embedded_image(question.formatted_text) or _html_has_embedded_image(
+        question.formatted_solution
+    ):
+        return True
+    alternatives = question.alternatives if isinstance(question.alternatives, list) else []
+    for alt in alternatives:
+        if not isinstance(alt, dict):
+            continue
+        if _html_has_embedded_image(alt.get("formattedText")) or _html_has_embedded_image(
+            alt.get("formatted_text")
+        ):
+            return True
+        image = alt.get("image")
+        if isinstance(image, str) and image.strip().startswith("data:image/"):
+            return True
+        if isinstance(image, dict) and (image.get("data") or image.get("base64")):
+            return True
+    return False
 
 
 def _apply_images(question: Question) -> None:
+    if not _needs_image_pipeline(question):
+        return
     from app.routes.question_routes import _apply_question_images_pipeline
 
-    _apply_question_images_pipeline(question)
+    try:
+        _apply_question_images_pipeline(question)
+    except ValueError:
+        raise
+    except Exception as exc:
+        logging.exception("Falha no pipeline de imagens da questão %s", question.id)
+        raise ValueError(
+            "Não foi possível salvar as imagens da questão. "
+            "Verifique o arquivo e tente novamente."
+        ) from exc
 
 
 def _with_relations(query):
@@ -683,8 +727,21 @@ class QuestionBankService:
     @staticmethod
     def create(user: Dict[str, Any], data: Any) -> Question:
         question = QuestionBankService.create_pending(user, data)
+        question_id = question.id
         db.session.commit()
-        return QuestionBankService._get_visible_question(user, question.id)
+        try:
+            return QuestionBankService._get_visible_question(user, question_id)
+        except LookupError:
+            # Já gravou: devolve com relações para o cliente não ver falha falsa.
+            loaded = _with_relations(Question.query.filter(Question.id == question_id)).first()
+            if loaded is not None:
+                logging.warning(
+                    "Questão %s criada, mas sumiu do filtro de visibilidade do usuário %s.",
+                    question_id,
+                    _user_id(user),
+                )
+                return loaded
+            raise
 
     @staticmethod
     def update(user: Dict[str, Any], question_id: str, data: Any) -> Question:
@@ -778,7 +835,7 @@ def _accepted_image_description(data: Dict[str, Any], stimulus: Optional[str]) -
         return None
     text = _clean_image_description(_raw_description(data))
     if text and stimulus != STIMULUS_IMAGE:
-        raise ValueError("imageDescription só vale para ditado com stimulus image.")
+        raise ValueError("A descrição da figura só vale para ditado por figura.")
     return text
 
 

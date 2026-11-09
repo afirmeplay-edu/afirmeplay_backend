@@ -22,6 +22,7 @@ from app.afirme_ler.routes import (  # noqa: E402, F401
     fluency_sessions_routes,
     results_routes,
     written_tests_routes,
+    acertos_niveis_routes,
 )
 
 __all__ = ["bp", "AFIRME_LER_ROLES"]

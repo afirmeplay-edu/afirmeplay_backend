@@ -326,12 +326,12 @@ def test_ler_create_dictation_stores_word_as_answer(flask_app):
 @pytest.mark.parametrize(
     "overrides, message",
     [
-        ({"dictatedWord": None}, "dictatedWord é obrigatório"),
-        ({"dictatedWord": "   "}, "dictatedWord é obrigatório"),
-        ({"dictatedWord": 123}, "dictatedWord deve ser um texto"),
+        ({"dictatedWord": None}, "Informe a palavra que o aplicador vai ditar"),
+        ({"dictatedWord": "   "}, "Informe a palavra que o aplicador vai ditar"),
+        ({"dictatedWord": 123}, "A palavra ditada deve ser um texto"),
         ({"dictatedWord": "bola azul"}, "uma única palavra"),
         ({"dictatedWord": "a" * 41}, "no máximo 40 caracteres"),
-        ({"options": _options()}, "ditado \\(dictation\\) não tem alternativas"),
+        ({"options": _options()}, "Questão de ditado não tem alternativas"),
     ],
 )
 def test_ler_rejects_invalid_dictation(overrides, message):
@@ -354,7 +354,7 @@ def test_ler_image_dictation_waits_for_the_description(flask_app):
     assert body["imageDescription"] is None
     assert body["correct_answer"] == ""
 
-    with pytest.raises(ValueError, match="não recebe dictatedWord"):
+    with pytest.raises(ValueError, match="não recebe palavra ditada"):
         bank.parse_create_payload(_dictation_payload(stimulus="image", dictatedWord="cinto"))
 
 
@@ -456,7 +456,7 @@ def test_ler_create_saves_the_accepted_image_description(flask_app):
     assert question.writing_reference == "cinto de roupa"
     assert bank.to_response(question)["imageDescription"] == "cinto de roupa"
 
-    with pytest.raises(ValueError, match="só vale para ditado com stimulus image"):
+    with pytest.raises(ValueError, match="só vale para ditado por figura"):
         bank.parse_create_payload(_dictation_payload(imageDescription="cinto de roupa"))
 
 
@@ -505,7 +505,7 @@ def test_ler_preview_route_returns_only_the_text(flask_app, monkeypatch):
 def test_ler_dictation_without_word_key_is_rejected():
     data = _dictation_payload()
     del data["dictatedWord"]
-    with pytest.raises(ValueError, match="dictatedWord é obrigatório"):
+    with pytest.raises(ValueError, match="Informe a palavra que o aplicador vai ditar"):
         bank.parse_create_payload(data)
 
 
@@ -531,7 +531,7 @@ def test_ler_create_text_production_without_answer(flask_app):
 
 
 def test_ler_rejects_text_production_with_options():
-    with pytest.raises(ValueError, match="produção escrita \\(text_production\\) não tem alternativas"):
+    with pytest.raises(ValueError, match="Questão de produção escrita não tem alternativas"):
         bank.parse_create_payload(_text_production_payload(options=_options()))
 
 
@@ -545,14 +545,14 @@ def test_ler_create_route_returns_400_for_invalid_dictation(flask_app):
     )
     assert status == 400
     assert response.get_json() == {
-        "error": "dictatedWord deve ser uma única palavra, sem espaços."
+        "error": "A palavra ditada deve ser uma única palavra, sem espaços."
     }
 
 
 def test_ler_update_multiple_choice_to_dictation(flask_app):
     question = QuestionBankService.create(PROFESSOR, _payload())
 
-    with pytest.raises(ValueError, match="dictatedWord é obrigatório"):
+    with pytest.raises(ValueError, match="Informe a palavra que o aplicador vai ditar"):
         QuestionBankService.update(PROFESSOR, question.id, {"type": "dictation"})
     db.session.rollback()
 

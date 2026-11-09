@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from flask import jsonify, request
 from flask_jwt_extended import jwt_required
@@ -22,15 +23,50 @@ def _error_response(message: str, status: int):
     return jsonify({"error": message}), status
 
 
+def _schema_outdated_message(error: Exception) -> Optional[str]:
+    """Detecta colunas do Afirme Ler ausentes (migration atrasada)."""
+    text = str(getattr(error, "orig", None) or error).lower()
+    markers = ("dictation_marks", "writing_stimulus", "writing_reference", "origin")
+    if any(marker in text for marker in markers) and (
+        "undefinedcolumn" in text
+        or "does not exist" in text
+        or "não existe" in text
+        or "column" in text
+    ):
+        return (
+            "O banco está desatualizado para o Afirme Educacional. "
+            "Peça ao suporte para aplicar as migrações das questões."
+        )
+    return None
+
+
 def _handle_service_error(error: Exception):
+    from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+
     if isinstance(error, LookupError):
         return _error_response(str(error), 404)
     if isinstance(error, PermissionError):
         return _error_response(str(error), 403)
     if isinstance(error, ValueError):
         return _error_response(str(error), 400)
+
+    schema_message = _schema_outdated_message(error)
+    if schema_message and isinstance(error, (ProgrammingError, OperationalError, IntegrityError)):
+        logging.error("Erro Afirme Ler (questions/schema): %s", error, exc_info=True)
+        return _error_response(schema_message, 500)
+
+    if isinstance(error, IntegrityError):
+        logging.error("Erro Afirme Ler (questions/integrity): %s", error, exc_info=True)
+        return _error_response(
+            "Não foi possível salvar a questão: dados inconsistentes no banco.",
+            500,
+        )
+
     logging.error("Erro Afirme Ler (questions): %s", error, exc_info=True)
-    return _error_response("Erro interno ao processar a solicitação.", 500)
+    return _error_response(
+        "Não foi possível salvar a questão no servidor. Tente de novo; se continuar, avise o suporte.",
+        500,
+    )
 
 
 @bp.route("/questions", methods=["POST"])

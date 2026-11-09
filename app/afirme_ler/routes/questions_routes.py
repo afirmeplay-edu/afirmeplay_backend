@@ -33,10 +33,7 @@ def _schema_outdated_message(error: Exception) -> Optional[str]:
         or "não existe" in text
         or "column" in text
     ):
-        return (
-            "O banco está desatualizado para o Afirme Educacional. "
-            "Peça ao suporte para aplicar as migrações das questões."
-        )
+        return "Não foi possível salvar. Tente de novo ou fale com o suporte."
     return None
 
 
@@ -133,6 +130,51 @@ def update_bank_question(question_id):
     try:
         question = QuestionBankService.update(user, question_id, data)
         return jsonify(to_response(question)), 200
+    except Exception as error:
+        db.session.rollback()
+        return _handle_service_error(error)
+
+
+@bp.route("/questions/import/template", methods=["GET"])
+@jwt_required()
+@require_feature("afirme_reading")
+@role_required(*WRITE_ROLES)
+def download_bank_questions_import_template():
+    """Baixa o modelo DOCX pré-preenchido (série, disciplina e N blocos)."""
+    user = get_current_user_from_token()
+    if not user:
+        return _error_response("Usuário não encontrado.", 401)
+    try:
+        from flask import send_file
+
+        from app.afirme_ler.services.docx_template_service import (
+            DEFAULT_TEMPLATE_COUNT,
+            build_questions_import_template,
+            resolve_template_context,
+        )
+
+        grade = (request.args.get("grade") or request.args.get("gradeId") or "").strip()
+        subject_id = (request.args.get("subjectId") or request.args.get("subject_id") or "").strip()
+        count_raw = (request.args.get("count") or str(DEFAULT_TEMPLATE_COUNT)).strip()
+        try:
+            count = int(count_raw)
+        except ValueError as exc:
+            raise ValueError("Informe uma quantidade válida de questões.") from exc
+
+        context = resolve_template_context(grade, subject_id, count)
+        buffer = build_questions_import_template(context)
+
+        safe_grade = "".join(
+            c if c.isalnum() or c in "-_" else "_" for c in (context["gradeName"] or "serie")
+        )[:40]
+        download_name = f"modelo_questoes_{safe_grade}_{context['count']}q.docx"
+
+        return send_file(
+            buffer,
+            as_attachment=True,
+            download_name=download_name,
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
     except Exception as error:
         db.session.rollback()
         return _handle_service_error(error)

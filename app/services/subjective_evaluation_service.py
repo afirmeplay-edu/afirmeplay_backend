@@ -1797,16 +1797,125 @@ class SubjectiveEvaluationService:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _dashboard_student_location_fields(loc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Campos aditivos de escola/turma para alunos do dashboard."""
+        loc = loc or {}
+        return {
+            "school_id": loc.get("school_id"),
+            "school_name": loc.get("school_name"),
+            "class_id": loc.get("class_id"),
+            "class_name": loc.get("class_name"),
+            "subclass_name": loc.get("subclass_name"),
+        }
+
+    @staticmethod
+    def _build_dashboard_scope(
+        subjective_test: SubjectiveTest,
+        contributing_slices: List[Dict[str, Any]],
+        school_by_id: Dict[str, School],
+    ) -> Dict[str, Any]:
+        """Metadados do recorte atual (avaliação, município, escolas, séries, turmas)."""
+        from app.models.city import City
+        from app.models.grades import Grade
+
+        schools_payload: List[Dict[str, Any]] = []
+        seen_schools: set = set()
+        for item in contributing_slices:
+            sid = str(item.get("school_id") or "")
+            if not sid or sid in seen_schools:
+                continue
+            seen_schools.add(sid)
+            school = school_by_id.get(sid)
+            schools_payload.append({
+                "id": sid,
+                "name": school.name if school else None,
+            })
+        schools_payload.sort(key=lambda row: (row.get("name") or "").lower())
+
+        municipality_name = None
+        municipality_id = None
+        city_ids = {
+            str(school.city_id)
+            for school in school_by_id.values()
+            if getattr(school, "city_id", None)
+        }
+        if city_ids:
+            cities = City.query.filter(City.id.in_(list(city_ids))).all()
+            if len(cities) == 1:
+                municipality_id = str(cities[0].id)
+                municipality_name = cities[0].name
+            elif cities:
+                municipality_name = ", ".join(
+                    sorted({c.name for c in cities if c.name}, key=lambda n: n.lower())
+                )
+
+        grade_ids = set()
+        if getattr(subjective_test, "grade_id", None):
+            grade_ids.add(subjective_test.grade_id)
+        class_ids = [
+            item.get("class_id")
+            for item in contributing_slices
+            if item.get("class_id") is not None
+        ]
+        if class_ids:
+            for cls in Class.query.filter(Class.id.in_(class_ids)).all():
+                if cls.grade_id:
+                    grade_ids.add(cls.grade_id)
+
+        grades_payload: List[Dict[str, Any]] = []
+        if grade_ids:
+            grades = Grade.query.filter(Grade.id.in_(list(grade_ids))).all()
+            grades_payload = [
+                {"id": str(g.id), "name": g.name}
+                for g in sorted(grades, key=lambda g: (g.name or "").lower())
+            ]
+
+        classes_payload: List[Dict[str, Any]] = []
+        seen_class_keys: set = set()
+        for item in contributing_slices:
+            class_id = item.get("class_id")
+            subturma_id = item.get("subturma_id")
+            key = f"{class_id}::{subturma_id or ''}"
+            if key in seen_class_keys:
+                continue
+            seen_class_keys.add(key)
+            classes_payload.append({
+                "id": str(class_id) if class_id is not None else None,
+                "name": item.get("name") or item.get("class_name") or "",
+                "class_name": item.get("class_name") or item.get("name") or "",
+                "subturma_id": str(subturma_id) if subturma_id is not None else None,
+                "school_id": str(item.get("school_id")) if item.get("school_id") else None,
+            })
+        classes_payload.sort(key=lambda row: (
+            (row.get("class_name") or "").lower(),
+            row.get("subturma_id") is not None,
+            (row.get("name") or "").lower(),
+        ))
+
+        return {
+            "evaluation_title": subjective_test.title,
+            "municipality": {
+                "id": municipality_id,
+                "name": municipality_name,
+            },
+            "schools": schools_payload,
+            "grades": grades_payload,
+            "classes": classes_payload,
+        }
+
+    @staticmethod
     def get_dashboard(
         subjective_test_id: str,
         class_id=None,
         allowed_class_ids: Optional[List] = None,
         subturma_id=None,
+        school_id=None,
     ) -> Optional[Dict[str, Any]]:
         """
         Agrega os dados do painel de resultados da avaliação subjetiva.
 
         Escopo: uma turma (`class_id`) ou todas as turmas do escopo da avaliação.
+        `school_id` (opcional) restringe a agregação a uma escola.
         `allowed_class_ids`, se informado (ex.: turmas do professor), restringe o conjunto.
 
         Não usa EvaluationResult/TRI: trabalha só com SubjectiveResult (rubrica) e
@@ -1815,7 +1924,8 @@ class SubjectiveEvaluationService:
         Além das agregações de questões (`saeb_levels` / `per_question`), retorna:
         - `student_saeb_levels` / `students_by_saeb_level`: alunos por faixa SAEB
           (para hover do gráfico e listagens);
-        - `students`: tabelinha individual com rubrica e nível.
+        - `students`: tabelinha individual com rubrica e nível;
+        - `scope`: contexto do recorte (avaliação, município, escolas, séries, turmas).
         """
         subjective_test = SubjectiveTest.query.get(subjective_test_id)
         if not subjective_test:
@@ -1826,8 +1936,16 @@ class SubjectiveEvaluationService:
             allowed_set = {str(item) for item in allowed_class_ids}
             slices = [item for item in slices if str(item.get("class_id")) in allowed_set]
 
+        if school_id is not None:
+            school_id_str = str(school_id)
+            slices = [
+                item for item in slices
+                if str(item.get("school_id") or "") == school_id_str
+            ]
+
         classes_payload = [SubjectiveEvaluationService._slice_brief(item) for item in slices]
 
+        contributing_slices: List[Dict[str, Any]] = []
         if class_id is not None or subturma_id is not None:
             if class_id is None:
                 return {"error": "class_out_of_scope"}
@@ -1843,16 +1961,53 @@ class SubjectiveEvaluationService:
                 }
             if error or chosen is None:
                 return {"error": "class_out_of_scope"}
+            contributing_slices = [chosen]
             students = list(chosen["students"])
         else:
             students = []
             seen_students = set()
             for item in slices:
+                contributing_slices.append(item)
                 for student in item["students"]:
                     if str(student.id) in seen_students:
                         continue
                     seen_students.add(str(student.id))
                     students.append(student)
+
+        school_ids = {
+            str(item.get("school_id"))
+            for item in contributing_slices
+            if item.get("school_id")
+        }
+        school_by_id: Dict[str, School] = {}
+        if school_ids:
+            school_by_id = {
+                str(school.id): school
+                for school in School.query.filter(School.id.in_(list(school_ids))).all()
+            }
+
+        student_location: Dict[str, Dict[str, Any]] = {}
+        for item in contributing_slices:
+            school_key = str(item.get("school_id") or "")
+            school_obj = school_by_id.get(school_key)
+            class_name = item.get("class_name") or item.get("name") or ""
+            subclass_name = item.get("name") if item.get("subturma_id") else None
+            loc = {
+                "school_id": str(item.get("school_id")) if item.get("school_id") else None,
+                "school_name": school_obj.name if school_obj else None,
+                "class_id": str(item.get("class_id")) if item.get("class_id") is not None else None,
+                "class_name": class_name,
+                "subclass_name": subclass_name,
+            }
+            for student in item.get("students") or []:
+                sid = str(student.id)
+                if sid not in student_location:
+                    student_location[sid] = loc
+
+        scope = SubjectiveEvaluationService._build_dashboard_scope(
+            subjective_test, contributing_slices, school_by_id
+        )
+
         student_ids = [s.id for s in students]
         total_students = len(students)
 
@@ -1983,6 +2138,9 @@ class SubjectiveEvaluationService:
             is_present = presence_map.get(sid, True)
             value_by_q = results_by_student.get(sid, {})
             has_results = len(value_by_q) > 0
+            location = SubjectiveEvaluationService._dashboard_student_location_fields(
+                student_location.get(sid)
+            )
 
             score_pct = None
             saeb_info = None
@@ -2000,6 +2158,7 @@ class SubjectiveEvaluationService:
                     "score_percentage": score_pct,
                     "saeb_level": saeb_info['level'],
                     "saeb_label": saeb_info['label'],
+                    **location,
                 }
                 students_by_saeb_level[saeb_info['level']].append(entry)
                 student_saeb_levels[saeb_info['level']] += 1
@@ -2013,6 +2172,7 @@ class SubjectiveEvaluationService:
                 "saeb_level": saeb_info['level'] if saeb_info else None,
                 "saeb_label": saeb_info['label'] if saeb_info else None,
                 "results": value_by_q,
+                **location,
             })
 
         return {
@@ -2027,8 +2187,10 @@ class SubjectiveEvaluationService:
             "filters": {
                 "class_id": str(class_id) if class_id is not None else None,
                 "subturma_id": str(subturma_id) if subturma_id is not None else None,
+                "school_id": str(school_id) if school_id is not None else None,
                 "classes": classes_payload,
             },
+            "scope": scope,
             "kpis": {
                 "total_students": total_students,
                 "respondents": respondents,

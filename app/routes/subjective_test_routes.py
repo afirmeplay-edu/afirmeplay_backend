@@ -438,6 +438,7 @@ def get_subjective_dashboard(subjective_test_id):
     Query params:
       - class_id (opcional): filtra por uma turma; sem ele, agrega todas as turmas do escopo.
       - subturma_id (opcional): recorte ADAP dessa turma.
+      - school_id (opcional): restringe a agregação a uma escola do escopo.
     """
     try:
         user = get_current_user_from_token()
@@ -449,6 +450,7 @@ def get_subjective_dashboard(subjective_test_id):
             return jsonify({"error": "Avaliação não encontrada"}), 404
 
         class_id_param = request.args.get('class_id')
+        school_id_param = request.args.get('school_id')
         subturma_uuid, subturma_error = _subturma_id_from_request()
         if subturma_error:
             return subturma_error
@@ -462,6 +464,14 @@ def get_subjective_dashboard(subjective_test_id):
             if not _user_can_access_class(user, class_uuid):
                 return jsonify({"error": "Acesso negado a esta turma"}), 403
 
+        school_id = None
+        if school_id_param:
+            school_id = str(school_id_param).strip()
+            if not school_id:
+                return jsonify({"error": "ID de escola inválido"}), 400
+            if not School.query.get(school_id):
+                return jsonify({"error": "Escola não encontrada"}), 404
+
         allowed_class_ids = None
         if user.get('role') == 'professor':
             allowed_class_ids = ensure_uuid_list(get_teacher_classes(user['id']) or [])
@@ -471,6 +481,7 @@ def get_subjective_dashboard(subjective_test_id):
             class_id=class_uuid,
             allowed_class_ids=allowed_class_ids,
             subturma_id=subturma_uuid,
+            school_id=school_id,
         )
         if dashboard is None:
             return jsonify({"error": "Avaliação não encontrada"}), 404

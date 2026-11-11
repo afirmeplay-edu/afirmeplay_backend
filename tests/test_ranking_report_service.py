@@ -85,10 +85,49 @@ class TestRankingReportService(unittest.TestCase):
                 with patch("app.services.ranking_report_service.DashboardService.get_school_ranking_card") as school_card_mock:
                     with patch("app.services.ranking_report_service.DashboardService.get_class_ranking_card") as class_mock:
                         with patch("app.services.ranking_report_service.DashboardService.get_ranking_alunos") as ranking_mock:
-                            school_card_mock.return_value = {"ranking": [], "total": 0}
-                            class_mock.return_value = {"ranking": [], "total": 0}
-                            ranking_mock.return_value = {"ranking": [], "total": 123}
-                            payload = RankingReportService.get_report({"role": "admin"}, req)
+                            with patch(
+                                "app.services.ranking_report_service.DashboardService._build_teacher_ranking",
+                                return_value=[],
+                            ):
+                                with patch.object(
+                                    RankingReportService,
+                                    "_build_teacher_student_metrics_map",
+                                    return_value={},
+                                ):
+                                    with patch.object(
+                                        RankingReportService,
+                                        "_pacote_universo_avaliacao",
+                                        return_value=None,
+                                    ):
+                                        with patch.object(
+                                            RankingReportService,
+                                            "_resolve_discipline_options",
+                                            return_value=[],
+                                        ):
+                                            with patch.object(
+                                                RankingReportService,
+                                                "_resolve_grade_options",
+                                                return_value=[],
+                                            ):
+                                                with patch.object(
+                                                    RankingReportService,
+                                                    "_build_school_grade_teacher_map",
+                                                    return_value={},
+                                                ):
+                                                    with patch.object(
+                                                        RankingReportService,
+                                                        "_build_teacher_school_map",
+                                                        return_value={},
+                                                    ):
+                                                        with patch.object(
+                                                            RankingReportService,
+                                                            "_build_teacher_series_class_labels_map",
+                                                            return_value={},
+                                                        ):
+                                                            school_card_mock.return_value = {"ranking": [], "total": 0}
+                                                            class_mock.return_value = {"ranking": [], "total": 0}
+                                                            ranking_mock.return_value = {"ranking": [], "total": 123}
+                                                            payload = RankingReportService.get_report({"role": "admin"}, req)
         ranking_mock.assert_called_once_with({"scope": "municipio"}, limit=500, offset=0, filters={})
         self.assertEqual(payload["totals"]["count"], 1)
         self.assertIn("general_rankings", payload)
@@ -141,12 +180,51 @@ class TestRankingReportService(unittest.TestCase):
                     with patch.object(RankingReportService, "_build_evaluation_class_rows", return_value=[]):
                         with patch("app.services.ranking_report_service.DashboardService.get_ranking_alunos") as ranking_mock:
                             with patch("app.services.ranking_report_service.db.session.query") as grade_query_mock:
-                                school_card_mock.return_value = {"ranking": [], "total": 0}
-                                ranking_mock.return_value = {"ranking": [], "total": 0}
-                                grade_query_mock.return_value.filter.return_value.first.return_value = type(
-                                    "GradeRow", (), {"name": "4º Ano"}
-                                )()
-                                payload = RankingReportService.get_report({"role": "admin"}, req)
+                                with patch(
+                                    "app.services.ranking_report_service.DashboardService._build_teacher_ranking",
+                                    return_value=[],
+                                ):
+                                    with patch.object(
+                                        RankingReportService,
+                                        "_build_teacher_student_metrics_map",
+                                        return_value={},
+                                    ):
+                                        with patch.object(
+                                            RankingReportService,
+                                            "_pacote_universo_avaliacao",
+                                            return_value=None,
+                                        ):
+                                            with patch.object(
+                                                RankingReportService,
+                                                "_resolve_discipline_options",
+                                                return_value=[],
+                                            ):
+                                                with patch.object(
+                                                    RankingReportService,
+                                                    "_resolve_grade_options",
+                                                    return_value=[{"id": "grade-1", "name": "4º Ano"}],
+                                                ):
+                                                    with patch.object(
+                                                        RankingReportService,
+                                                        "_build_school_grade_teacher_map",
+                                                        return_value={},
+                                                    ):
+                                                        with patch.object(
+                                                            RankingReportService,
+                                                            "_build_teacher_school_map",
+                                                            return_value={},
+                                                        ):
+                                                            with patch.object(
+                                                                RankingReportService,
+                                                                "_build_teacher_series_class_labels_map",
+                                                                return_value={},
+                                                            ):
+                                                                school_card_mock.return_value = {"ranking": [], "total": 0}
+                                                                ranking_mock.return_value = {"ranking": [], "total": 0}
+                                                                grade_query_mock.return_value.filter.return_value.first.return_value = type(
+                                                                    "GradeRow", (), {"name": "4º Ano"}
+                                                                )()
+                                                                payload = RankingReportService.get_report({"role": "admin"}, req)
         self.assertEqual(payload["general_rankings"]["visibility"]["schools_by_course"], False)
         self.assertEqual(payload["grade_options"], [{"id": "grade-1", "name": "4º Ano"}])
         self.assertIn("classes_ranking", payload)

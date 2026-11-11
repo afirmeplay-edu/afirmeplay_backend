@@ -441,6 +441,96 @@ class TestClassPeerRankingService(unittest.TestCase):
             serie_name="Suporte 2", course_name=""
         ), "Educação Especial")
 
+    def test_merge_multi_instrument_averages_proficiency_then_grade(self):
+        """LP+MAT: média igual-peso da proficiência; nota via calculate_grade (não AVG das notas)."""
+        from types import SimpleNamespace
+
+        lp = SimpleNamespace(
+            id="r1",
+            student_id="s1",
+            test_id="lp",
+            grade=10.0,
+            proficiency=350.0,
+            classification="Avançado",
+            correct_answers=10,
+            total_questions=10,
+            subject_results={
+                "lp": {
+                    "subject_name": "Português",
+                    "grade": 10.0,
+                    "proficiency": 350.0,
+                    "classification": "Avançado",
+                    "correct_answers": 10,
+                    "total_questions": 10,
+                }
+            },
+            class_id_snapshot="c1",
+            school_id_snapshot="sch1",
+            grade_id_snapshot="g1",
+            calculated_at=None,
+        )
+        mat = SimpleNamespace(
+            id="r2",
+            student_id="s1",
+            test_id="mat",
+            grade=4.0,
+            proficiency=150.0,
+            classification="Básico",
+            correct_answers=4,
+            total_questions=10,
+            subject_results={
+                "mat": {
+                    "subject_name": "Matemática",
+                    "grade": 4.0,
+                    "proficiency": 150.0,
+                    "classification": "Básico",
+                    "correct_answers": 4,
+                    "total_questions": 10,
+                }
+            },
+            class_id_snapshot="c1",
+            school_id_snapshot="sch1",
+            grade_id_snapshot="g1",
+            calculated_at=None,
+        )
+        tests = [
+            SimpleNamespace(id="lp", subject="sub-lp", course=None),
+            SimpleNamespace(id="mat", subject="sub-mat", course=None),
+        ]
+        with patch.object(
+            ClassPeerRankingService,
+            "_resolve_course_names_by_test_id",
+            return_value={"lp": "Anos Iniciais", "mat": "Anos Iniciais"},
+        ), patch.object(
+            ClassPeerRankingService,
+            "_instruments_include_matematica",
+            return_value=True,
+        ), patch(
+            "app.services.class_peer_ranking_service.aggregated_grade_from_proficiency",
+            side_effect=lambda prof, course, subject_name="GERAL", has_matematica=None: round(
+                float(prof) / 50.0, 2
+            ),
+        ), patch.object(
+            ClassPeerRankingService,
+            "_classification",
+            return_value="Adequado",
+        ):
+            merged = ClassPeerRankingService._merge_multi_instrument_student_results(
+                [lp, mat],
+                evaluation_ids=["lp", "mat"],
+                tests=tests,
+            )
+
+        self.assertEqual(len(merged), 1)
+        row = merged[0]
+        self.assertEqual(row.student_id, "s1")
+        self.assertEqual(row.proficiency, 250.0)  # (350+150)/2
+        self.assertEqual(row.grade, 5.0)  # 250/50 via mock
+        # Não deve usar AVG das notas (10 e 4 → 7.0)
+        self.assertNotEqual(row.grade, 7.0)
+        self.assertEqual(row.correct_answers, 14)
+        self.assertEqual(row.total_questions, 20)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -526,6 +526,46 @@ def _empty_matriz() -> Dict[str, Any]:
     return {"linhas": [], "medias_da_rede": {"por_serie": [], "taxa_geral": None}}
 
 
+def _override_geral_taxa_municipal_from_results(
+    notas_section: Dict[str, Any],
+    prof_section: Dict[str, Any],
+    results_rede: List[Any],
+    series_colunas: List[Dict[str, str]],
+    has_matematica: Optional[bool],
+) -> None:
+    """
+    Sobrescreve ``GERAL.medias_da_rede.taxa_geral`` (nota e proficiência) com o
+    mesmo ``hierarchical_mean_grade_and_proficiency(..., municipio)`` usado em
+    ``GET /evaluation-results/avaliacoes``.
+
+    A matriz (células / por_serie / taxa_geral_escola) permanece para detalhe.
+    Com um único course_name na rede; se misturar Iniciais+Finais, não sobrescreve.
+    """
+    if not isinstance(notas_section, dict) or not isinstance(prof_section, dict):
+        return
+    if not results_rede:
+        return
+    courses = _unique_course_names_from_series_colunas(series_colunas or [])
+    if len(courses) != 1:
+        return
+    mg, mp = hierarchical_mean_grade_and_proficiency(
+        results_rede,
+        "municipio",
+        course_name=courses[0],
+        subject_name=GERAL_KEY,
+        has_matematica=has_matematica,
+    )
+    for section, value in (
+        (notas_section.get(GERAL_KEY), round_to_two_decimals(mg)),
+        (prof_section.get(GERAL_KEY), round_to_two_decimals(mp)),
+    ):
+        if not isinstance(section, dict):
+            continue
+        rede = section.setdefault("medias_da_rede", {})
+        if isinstance(rede, dict):
+            rede["taxa_geral"] = value
+
+
 def _build_numeric_matriz(
     scope_linhas: ScopeIndex,
     cell_fn: Callable[[str, str], Optional[float]],
@@ -535,18 +575,17 @@ def _build_numeric_matriz(
     series_colunas: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """
-    ⚠️ HIERARQUIA CORRETA PARA TAXA_GERAL MUNICIPAL ⚠️
-    
-    Constrói matriz numérica (nota/proficiência) com hierarquia:
-    
+    Constrói matriz numérica (nota/proficiência) com hierarquia canônica (§7):
+
     1. CÉLULA (escola × série) → cell_fn retorna média da turma/célula
     2. LINHA (escola) → taxa_geral_escola = média das séries (peso igual por série)
     3. COLUNA (série) → por_serie = média das escolas (peso igual por escola)
-    4. REDE → taxa_geral = MÉDIA DAS COLUNAS (por_serie), NÃO das linhas
-    
-    CORRETO: taxa_geral = média de por_serie (hierarquia série → município)
-    ERRADO:  taxa_geral = média das escolas (hierarquia escola → município)
-              ↑ daria mais peso a escolas com mais séries (média ponderada)
+    4. REDE → taxa_geral = MÉDIA DAS MÉDIAS ESCOLARES (peso igual por escola)
+
+    Alinhado a ``GET /evaluation-results/avaliacoes`` e
+    ``docs/FONTE_DA_VERDADE_CALCULOS_RESULTADOS.md`` §7.
+    Não usar média das colunas de série como taxa_geral municipal
+    (divergia do KPI de Resultados Gerais quando escolas cobrem séries de forma desigual).
 
     ⚠️ PARTICIPAÇÃO / FREQUÊNCIA NÃO USA ESTA FUNÇÃO.
     Use `_build_participation_matriz` (ratio canônico avaliados/matriculados).
@@ -558,34 +597,36 @@ def _build_numeric_matriz(
     if not scope_linhas.escolas or not cols:
         return _empty_matriz()
 
-    linhas: List[Dict[str, Any]] = []
-    for esc in scope_linhas.escolas:
-        eid = esc["escola_id"]
+    def _school_row_mean(scope: ScopeIndex, fn: Callable[[str, str], Optional[float]], eid: str) -> Tuple[List[Optional[float]], Optional[float]]:
         valores: List[Optional[float]] = []
         row_nums: List[float] = []
         for col in cols:
             sid = col["serie_id"]
-            if (eid, sid) not in scope_linhas.classes_by_cell:
+            if (eid, sid) not in scope.classes_by_cell:
                 valores.append(None)
                 continue
-            val = cell_fn(eid, sid)
+            val = fn(eid, sid)
             if val is None:
                 valores.append(None)
             else:
                 fv = float(val)
                 valores.append(fv)
                 row_nums.append(fv)
+        return valores, (_mean_numeric(row_nums) if row_nums else None)
+
+    linhas: List[Dict[str, Any]] = []
+    for esc in scope_linhas.escolas:
+        eid = esc["escola_id"]
+        valores, taxa_esc = _school_row_mean(scope_linhas, cell_fn, eid)
         linhas.append(
             {
                 "escola_id": eid,
                 "escola_nome": esc["escola_nome"],
                 "valores_por_serie": valores,
-                # ✅ CORRETO: taxa_geral_escola = média hierárquica das séries (peso igual)
-                "taxa_geral_escola": _mean_numeric(row_nums),
+                "taxa_geral_escola": taxa_esc,
             }
         )
 
-    # ✅ CORRETO: por_serie = média das escolas por cada série (peso igual por escola)
     por_serie: List[Optional[float]] = []
     for col in cols:
         sid = col["serie_id"]
@@ -599,10 +640,13 @@ def _build_numeric_matriz(
                 col_vals.append(float(v))
         por_serie.append(_mean_numeric(col_vals) if col_vals else None)
 
-    # ✅ CORRETO: taxa_geral = média hierárquica das séries (peso igual por série)
-    # Hierarquia: Série → Município (não Escola → Município)
-    # Isso garante que cada série tenha peso igual, independente de quantas escolas têm aquela série
-    taxa_geral_municipal = _mean_numeric([v for v in por_serie if v is not None])
+    # §7: município = média das médias escolares (rede), não das colunas de série
+    school_means_rede: List[float] = []
+    for esc in rede_scope.escolas:
+        _vals, taxa_esc = _school_row_mean(rede_scope, rede_fn, esc["escola_id"])
+        if taxa_esc is not None:
+            school_means_rede.append(float(taxa_esc))
+    taxa_geral_municipal = _mean_numeric(school_means_rede) if school_means_rede else None
 
     return {
         "linhas": linhas,
@@ -1176,13 +1220,11 @@ def _build_medias_section_digital(
     """
     ⚠️ MÉDIA HIERÁRQUICA (NÃO PONDERADA) ⚠️
     
-    Hierarquia para medias_da_rede.taxa_geral:
+    Hierarquia para medias_da_rede.taxa_geral (FONTE_DA_VERDADE §7):
     1. TURMA → média das proficiências dos alunos; nota = calculate_grade(média_prof)
-    2. SÉRIE → média das turmas/escolas (peso igual por escola que tem a série)
-    3. MUNICÍPIO → média das séries (peso igual por série)
-    
-    NUNCA calcular média das escolas para obter taxa_geral, pois escolas com mais
-    séries teriam mais peso (média ponderada).
+    2. SÉRIE (célula escola×série) → média das turmas
+    3. ESCOLA → média das séries (peso igual por série)
+    4. MUNICÍPIO → média das escolas (peso igual por escola)
 
     O ``course_name`` da conversão nota←proficiência é o da **série da célula**
     (não o do primeiro item selecionado), para não aplicar escala de Anos Iniciais
@@ -1260,13 +1302,11 @@ def _build_medias_section_answer_sheet(
     """
     ⚠️ MÉDIA HIERÁRQUICA (NÃO PONDERADA) ⚠️
     
-    Hierarquia para medias_da_rede.taxa_geral:
+    Hierarquia para medias_da_rede.taxa_geral (FONTE_DA_VERDADE §7):
     1. TURMA → média das proficiências dos alunos; nota = calculate_grade(média_prof)
-    2. SÉRIE → média das turmas/escolas (peso igual por escola que tem a série)
-    3. MUNICÍPIO → média das séries (peso igual por série)
-    
-    NUNCA calcular média das escolas para obter taxa_geral, pois escolas com mais
-    séries teriam mais peso (média ponderada).
+    2. SÉRIE (célula escola×série) → média das turmas
+    3. ESCOLA → média das séries (peso igual por série)
+    4. MUNICÍPIO → média das escolas (peso igual por escola)
 
     O ``course_name`` da conversão nota←proficiência é o da **série da célula**,
     exceto com ``course_override`` (cartão ADAP: escala única de Educação Especial).
@@ -2543,6 +2583,20 @@ def build_digital_consolidated_report(
             test_ids, students_rede, results_rede, alunos_filtro
         )
 
+    medias_nota = _build_medias_section_digital(
+        ctx, notas_linhas, notas_rede, tests_by_id, all_disciplines, "grade",
+        has_matematica=has_mat,
+    )
+    medias_prof = _build_medias_section_digital(
+        ctx, notas_linhas, notas_rede, tests_by_id, all_disciplines, "proficiency",
+        has_matematica=has_mat,
+    )
+    # KPI municipal GERAL = mesmo hierarchical_mean de /avaliacoes (célula/série
+    # da matriz continuam para detalhe; evita média de notas vs calculate_grade).
+    _override_geral_taxa_municipal_from_results(
+        medias_nota, medias_prof, notas_rede, ctx.series_colunas, has_mat
+    )
+
     return _assemble_payload(
         tipo_entidade="avaliacao",
         filtros=filtros,
@@ -2559,14 +2613,8 @@ def build_digital_consolidated_report(
             censo_linhas=censo_linhas,
             censo_rede=censo_rede,
         ),
-        consolidado_medias_nota=_build_medias_section_digital(
-            ctx, notas_linhas, notas_rede, tests_by_id, all_disciplines, "grade",
-            has_matematica=has_mat,
-        ),
-        consolidado_medias_proficiencia=_build_medias_section_digital(
-            ctx, notas_linhas, notas_rede, tests_by_id, all_disciplines, "proficiency",
-            has_matematica=has_mat,
-        ),
+        consolidado_medias_nota=medias_nota,
+        consolidado_medias_proficiencia=medias_prof,
         acertos_por_habilidade=_digital_acertos_data(
             ctx, tests_by_id, test_ids, class_ids_linhas, class_ids_rede, all_disciplines
         ),
@@ -2750,6 +2798,26 @@ def build_answer_sheet_consolidated_report(
         else None
     )
 
+    medias_nota = _build_medias_section_answer_sheet(
+        ctx, results_linhas, results_rede, all_disciplines, "grade",
+        has_matematica=has_mat,
+        course_override=adap_course,
+    )
+    medias_prof = _build_medias_section_answer_sheet(
+        ctx, results_linhas, results_rede, all_disciplines, "proficiency",
+        has_matematica=has_mat,
+        course_override=adap_course,
+    )
+    # Com course_override (ADAP), a escala é única — mesma regra do digital.
+    series_for_override = ctx.series_colunas
+    if adap_course:
+        series_for_override = [
+            {**col, "serie_nome": adap_course} for col in (ctx.series_colunas or [])
+        ] or [{"serie_id": "_", "serie_nome": adap_course}]
+    _override_geral_taxa_municipal_from_results(
+        medias_nota, medias_prof, results_rede, series_for_override, has_mat
+    )
+
     return _assemble_payload(
         tipo_entidade="cartao_resposta",
         filtros=filtros,
@@ -2760,16 +2828,8 @@ def build_answer_sheet_consolidated_report(
         consolidado_frequencia=_build_frequencia_section_answer_sheet(
             ctx, results_linhas, results_rede, all_disciplines
         ),
-        consolidado_medias_nota=_build_medias_section_answer_sheet(
-            ctx, results_linhas, results_rede, all_disciplines, "grade",
-            has_matematica=has_mat,
-            course_override=adap_course,
-        ),
-        consolidado_medias_proficiencia=_build_medias_section_answer_sheet(
-            ctx, results_linhas, results_rede, all_disciplines, "proficiency",
-            has_matematica=has_mat,
-            course_override=adap_course,
-        ),
+        consolidado_medias_nota=medias_nota,
+        consolidado_medias_proficiencia=medias_prof,
         acertos_por_habilidade=_answer_sheet_acertos_data(
             ctx, gabs_by_id, gabarito_ids, results_linhas, results_rede, all_disciplines
         ),

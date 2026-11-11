@@ -617,10 +617,179 @@ class ClassPeerRankingService:
         )
 
     @classmethod
+    def _is_matematica_subject_name(cls, name: Any) -> bool:
+        return "matem" in cls._normalize_text(name)
+
+    @classmethod
+    def _instruments_include_matematica(cls, tests: Sequence[Test]) -> bool:
+        from app.models.subject import Subject as SubjectModel
+
+        subject_ids = [str(t.subject) for t in (tests or []) if getattr(t, "subject", None)]
+        if not subject_ids:
+            return False
+        names = {
+            str(row.name or "")
+            for row in SubjectModel.query.filter(SubjectModel.id.in_(subject_ids)).all()
+        }
+        return any(cls._is_matematica_subject_name(n) for n in names)
+
+    @classmethod
+    def _prefer_newer_result(cls, current: Any, candidate: Any) -> Any:
+        if current is None:
+            return candidate
+        cur_at = getattr(current, "calculated_at", None)
+        new_at = getattr(candidate, "calculated_at", None)
+        if new_at and (not cur_at or new_at > cur_at):
+            return candidate
+        if new_at == cur_at and str(getattr(candidate, "id", "")) > str(getattr(current, "id", "")):
+            return candidate
+        return current
+
+    @classmethod
+    def _merge_multi_instrument_student_results(
+        cls,
+        results: Sequence[Any],
+        *,
+        evaluation_ids: Sequence[str],
+        tests: Sequence[Test],
+    ) -> List[Any]:
+        """
+        Unifica LP+MAT (vários instrumentos) por aluno com peso igual:
+        média das proficiências → nota via ``calculate_grade`` (não média das notas).
+        """
+        if not results:
+            return []
+
+        course_by_test = cls._resolve_course_names_by_test_id(list(tests))
+        has_matematica = cls._instruments_include_matematica(tests)
+        primary_test_id = str(evaluation_ids[0]) if evaluation_ids else None
+
+        by_student_instrument: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        for er in results:
+            sid = str(getattr(er, "student_id", "") or "")
+            tid = str(getattr(er, "test_id", "") or "")
+            if not sid or not tid:
+                continue
+            by_student_instrument[sid][tid] = cls._prefer_newer_result(
+                by_student_instrument[sid].get(tid), er
+            )
+
+        merged: List[Any] = []
+        for sid, by_tid in by_student_instrument.items():
+            instrument_rows = list(by_tid.values())
+            if not instrument_rows:
+                continue
+            if len(instrument_rows) == 1:
+                merged.append(instrument_rows[0])
+                continue
+
+            profs = [float(getattr(r, "proficiency", 0) or 0) for r in instrument_rows]
+            avg_prof = sum(profs) / len(profs)
+            sample = instrument_rows[0]
+            course_label = (
+                course_by_test.get(str(getattr(sample, "test_id", "") or ""), "")
+                or course_by_test.get(primary_test_id or "", "")
+                or "Anos Iniciais"
+            )
+            avg_grade = float(
+                aggregated_grade_from_proficiency(
+                    avg_prof,
+                    course_label,
+                    subject_name="GERAL",
+                    has_matematica=True if has_matematica else None,
+                )
+                or 0
+            )
+            classification = cls._classification(
+                avg_prof,
+                course_label=course_label,
+                subject_name="GERAL",
+            )
+
+            subject_results: Dict[str, Any] = {}
+            total_correct = 0
+            total_questions = 0
+            for row in instrument_rows:
+                total_correct += int(getattr(row, "correct_answers", 0) or 0)
+                total_questions += int(getattr(row, "total_questions", 0) or 0)
+                raw = getattr(row, "subject_results", None) or {}
+                if isinstance(raw, dict) and raw:
+                    for key, payload in raw.items():
+                        if isinstance(payload, dict):
+                            subject_results[str(key)] = dict(payload)
+                    continue
+                # Prova mono-disciplina sem breakdown: sintetiza entrada pelo test_id.
+                tid = str(getattr(row, "test_id", "") or "")
+                subject_results[tid] = {
+                    "subject_name": "",
+                    "grade": float(getattr(row, "grade", 0) or 0),
+                    "proficiency": float(getattr(row, "proficiency", 0) or 0),
+                    "classification": getattr(row, "classification", None) or "",
+                    "correct_answers": int(getattr(row, "correct_answers", 0) or 0),
+                    "total_questions": int(getattr(row, "total_questions", 0) or 0),
+                }
+
+            # Preenche nomes de disciplina a partir dos Tests quando sintetizado.
+            missing_name_tids = [
+                tid
+                for tid, payload in subject_results.items()
+                if not payload.get("subject_name")
+            ]
+            if missing_name_tids:
+                from app.models.subject import Subject as SubjectModel
+
+                tests_by_id = {str(t.id): t for t in tests}
+                subject_ids = [
+                    str(getattr(tests_by_id[tid], "subject", "") or "")
+                    for tid in missing_name_tids
+                    if tid in tests_by_id and getattr(tests_by_id[tid], "subject", None)
+                ]
+                subjects_by_id = {}
+                if subject_ids:
+                    subjects_by_id = {
+                        str(s.id): s
+                        for s in SubjectModel.query.filter(SubjectModel.id.in_(subject_ids)).all()
+                    }
+                for tid in missing_name_tids:
+                    test = tests_by_id.get(tid)
+                    if not test or not getattr(test, "subject", None):
+                        continue
+                    subj = subjects_by_id.get(str(test.subject))
+                    if subj and subj.name:
+                        subject_results[tid]["subject_name"] = str(subj.name)
+
+            score_pct = (
+                round((total_correct / total_questions) * 100, 2) if total_questions > 0 else 0.0
+            )
+            calculated_ats = [
+                getattr(r, "calculated_at", None) for r in instrument_rows if getattr(r, "calculated_at", None)
+            ]
+            merged.append(
+                SimpleNamespace(
+                    id=getattr(sample, "id", None),
+                    student_id=sid,
+                    test_id=primary_test_id or getattr(sample, "test_id", None),
+                    grade=avg_grade,
+                    proficiency=avg_prof,
+                    classification=classification,
+                    correct_answers=total_correct,
+                    total_questions=total_questions,
+                    score_percentage=score_pct,
+                    subject_results=subject_results,
+                    class_id_snapshot=getattr(sample, "class_id_snapshot", None),
+                    school_id_snapshot=getattr(sample, "school_id_snapshot", None),
+                    grade_id_snapshot=getattr(sample, "grade_id_snapshot", None),
+                    calculated_at=max(calculated_ats) if calculated_ats else getattr(sample, "calculated_at", None),
+                )
+            )
+        return merged
+
+    @classmethod
     def _load_latest_results(
         cls, req: ClassPeerRankingRequest, scope: Dict[str, Any]
-    ) -> List[EvaluationResult]:
+    ) -> List[Any]:
         evaluation_ids = [str(eid) for eid in req.evaluation_ids]
+        tests = cls._resolve_tests(evaluation_ids)
 
         if req.scope == "municipio":
             base_q = municipal_evaluation_results_query(str(req.municipio), evaluation_ids)
@@ -650,21 +819,21 @@ class ClassPeerRankingService:
         results = base_q.all()
         if req.alunos_informado:
             results = cls._resultados_validos_do_recorte(req, results)
-        # Um aluno = um resultado (o mais recente entre as avaliações selecionadas).
-        latest_by_student: Dict[str, EvaluationResult] = {}
-        for er in results:
-            sid = str(er.student_id)
-            current = latest_by_student.get(sid)
-            if current is None:
-                latest_by_student[sid] = er
-                continue
-            cur_at = getattr(current, "calculated_at", None)
-            new_at = getattr(er, "calculated_at", None)
-            if new_at and (not cur_at or new_at > cur_at):
-                latest_by_student[sid] = er
-            elif new_at == cur_at and str(er.id) > str(current.id):
-                latest_by_student[sid] = er
-        return list(latest_by_student.values())
+
+        # Um instrumento: um aluno = tentativa mais recente.
+        if len(evaluation_ids) <= 1:
+            latest_by_student: Dict[str, Any] = {}
+            for er in results:
+                sid = str(er.student_id)
+                latest_by_student[sid] = cls._prefer_newer_result(latest_by_student.get(sid), er)
+            return list(latest_by_student.values())
+
+        # Vários instrumentos (ex.: LP+MAT): média igual-peso por aluno.
+        return cls._merge_multi_instrument_student_results(
+            results,
+            evaluation_ids=evaluation_ids,
+            tests=tests,
+        )
 
     @classmethod
     def _build_sections(

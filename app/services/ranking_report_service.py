@@ -535,6 +535,7 @@ class RankingReportService:
         average_proficiency: float,
         course_label: str,
         subject_name: str = "GERAL",
+        has_matematica: Optional[bool] = None,
     ) -> float:
         """Nota agregada canônica: calculate_grade(média_prof), não AVG das notas."""
         from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
@@ -544,6 +545,7 @@ class RankingReportService:
                 float(average_proficiency or 0),
                 str(course_label or "Anos Iniciais"),
                 subject_name=str(subject_name or "GERAL"),
+                has_matematica=has_matematica,
             )
         )
 
@@ -1686,11 +1688,17 @@ class RankingReportService:
             students_items = cls._alunos_do_pacote(pacote, students_items)
         students_total = len(students_items) if pacote is not None and pacote.get("parear") and not str(req.filters.get("disciplina") or "").strip() else int(students_data.get("total") or 0)
 
-        evaluation_id = str(req.filters.get("evaluation_id") or "").strip()
-        answer_sheet_id = str(req.filters.get("answer_sheet_id") or "").strip()
-        if evaluation_id or answer_sheet_id:
+        evaluation_ids = DashboardService._parse_ranking_instrument_ids(
+            req.filters, "evaluation_ids", "evaluation_id"
+        )
+        answer_sheet_ids = DashboardService._parse_ranking_instrument_ids(
+            req.filters, "answer_sheet_ids", "answer_sheet_id"
+        )
+        evaluation_id = evaluation_ids[0] if evaluation_ids else ""
+        answer_sheet_id = answer_sheet_ids[0] if answer_sheet_ids else ""
+        if evaluation_ids or answer_sheet_ids:
             class_rows = cls._build_evaluation_class_rows(scope, req.filters)
-            if pacote is not None and evaluation_id and not answer_sheet_id:
+            if pacote is not None and evaluation_ids and not answer_sheet_ids:
                 cls._aplicar_pacote_nas_turmas(class_rows, pacote, req.filters)
         else:
             class_rows_data = DashboardService.get_class_ranking_card(scope, limit=1000, offset=0) or {}
@@ -1804,11 +1812,20 @@ class RankingReportService:
 
     @classmethod
     def _build_school_general_rows(cls, scope: Dict[str, Any], filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-        evaluation_id = str(filters.get("evaluation_id") or "").strip()
-        answer_sheet_id = str(filters.get("answer_sheet_id") or "").strip()
+        evaluation_ids = DashboardService._parse_ranking_instrument_ids(
+            filters, "evaluation_ids", "evaluation_id"
+        )
+        answer_sheet_ids = DashboardService._parse_ranking_instrument_ids(
+            filters, "answer_sheet_ids", "answer_sheet_id"
+        )
+        evaluation_id = evaluation_ids[0] if evaluation_ids else ""
+        answer_sheet_id = answer_sheet_ids[0] if answer_sheet_ids else ""
         discipline_id = str(filters.get("disciplina") or "").strip()
         storage_key = cls._resolve_discipline_storage_key(discipline_id, filters) if discipline_id else ""
         subject_name = cls._resolve_subject_name_for_filters(filters)
+        use_answer_sheet = bool(answer_sheet_ids and not evaluation_ids)
+        instrument_ids = answer_sheet_ids if use_answer_sheet else evaluation_ids
+        multi_instruments = len(instrument_ids) > 1
 
         def _apply_common_student_filters(query):
             if filters.get("escola"):
@@ -1838,10 +1855,18 @@ class RankingReportService:
             return query
 
         def _apply_entity_filter(query, model):
-            if model is EvaluationResult and evaluation_id:
-                return query.filter(model.test_id == evaluation_id)
-            if model is AnswerSheetResult and answer_sheet_id:
-                return query.filter(model.gabarito_id == answer_sheet_id)
+            if model is EvaluationResult and instrument_ids:
+                return query.filter(
+                    model.test_id.in_(instrument_ids)
+                    if multi_instruments
+                    else model.test_id == instrument_ids[0]
+                )
+            if model is AnswerSheetResult and instrument_ids:
+                return query.filter(
+                    model.gabarito_id.in_(instrument_ids)
+                    if multi_instruments
+                    else model.gabarito_id == instrument_ids[0]
+                )
             return query
 
         def _subject_metric_expr(model, metric: str):
@@ -1854,7 +1879,7 @@ class RankingReportService:
             return None
 
         grade_ref = db.func.coalesce(Student.grade_id, Class.grade_id)
-        results_model = AnswerSheetResult if answer_sheet_id else EvaluationResult
+        results_model = AnswerSheetResult if use_answer_sheet else EvaluationResult
         subject_score_expr = _subject_metric_expr(results_model, "grade")
         subject_prof_expr = _subject_metric_expr(results_model, "proficiency")
         use_discipline_metrics = bool(storage_key)
@@ -1863,61 +1888,149 @@ class RankingReportService:
 
         from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
 
-        turma_query = (
-            db.session.query(
-                School.id.label("school_id"),
-                School.name.label("school_name"),
-                grade_ref.label("grade_id"),
-                Grade.name.label("grade_name"),
-                Class.id.label("class_id"),
-                db.func.avg(score_expr).label("average_score"),
-                db.func.avg(prof_expr).label("average_proficiency"),
-                db.func.count(db.func.distinct(Student.id)).label("students_count"),
-            )
-            .select_from(results_model)
-            .join(Student, Student.id == results_model.student_id)
-            .outerjoin(School, School.id == Student.school_id)
-            .outerjoin(Class, Class.id == Student.class_id)
-            .outerjoin(Grade, Grade.id == grade_ref)
-        )
-        turma_query = _apply_entity_filter(turma_query, results_model)
-        if use_discipline_metrics and subject_prof_expr is not None:
-            turma_query = turma_query.filter(subject_prof_expr.isnot(None))
-        turma_query = _apply_common_student_filters(turma_query)
+        has_matematica = None
+        if multi_instruments and not use_discipline_metrics and not use_answer_sheet:
+            tests = Test.query.filter(Test.id.in_(instrument_ids)).all()
+            subject_ids = [str(t.subject) for t in tests if getattr(t, "subject", None)]
+            if subject_ids:
+                names = [
+                    str(s.name or "")
+                    for s in Subject.query.filter(Subject.id.in_(subject_ids)).all()
+                ]
+                if any("matem" in n.lower() for n in names):
+                    has_matematica = True
 
-        turma_rows = turma_query.group_by(
-            School.id,
-            School.name,
-            grade_ref,
-            Grade.name,
-            Class.id,
-        ).all()
-        if not turma_rows:
-            return []
-
-        # Nota agregada canônica: calculate_grade(média_proficiência), não média das notas
-        normalized_turma_rows: List[Any] = []
-        for turma_row in turma_rows:
-            avg_prof = float(turma_row.average_proficiency or 0)
-            course_label = cls._derive_course_label(str(turma_row.grade_name or ""))
-            avg_score = aggregated_grade_from_proficiency(
-                avg_prof,
-                course_label,
-                subject_name=subject_name or "GERAL",
-            )
-            normalized_turma_rows.append(
-                SimpleNamespace(
-                    school_id=turma_row.school_id,
-                    school_name=turma_row.school_name,
-                    grade_id=turma_row.grade_id,
-                    grade_name=turma_row.grade_name,
-                    class_id=turma_row.class_id,
-                    average_score=avg_score,
-                    average_proficiency=avg_prof,
-                    students_count=turma_row.students_count,
+        # Multi-instrumento: média igual-peso por aluno antes de agregar a turma.
+        if multi_instruments and not use_discipline_metrics:
+            student_q = (
+                db.session.query(
+                    School.id.label("school_id"),
+                    School.name.label("school_name"),
+                    grade_ref.label("grade_id"),
+                    Grade.name.label("grade_name"),
+                    Class.id.label("class_id"),
+                    Student.id.label("student_id"),
+                    db.func.avg(prof_expr).label("student_proficiency"),
                 )
+                .select_from(results_model)
+                .join(Student, Student.id == results_model.student_id)
+                .outerjoin(School, School.id == Student.school_id)
+                .outerjoin(Class, Class.id == Student.class_id)
+                .outerjoin(Grade, Grade.id == grade_ref)
             )
-        turma_rows = normalized_turma_rows
+            student_q = _apply_entity_filter(student_q, results_model)
+            student_q = _apply_common_student_filters(student_q)
+            student_rows = student_q.group_by(
+                School.id,
+                School.name,
+                grade_ref,
+                Grade.name,
+                Class.id,
+                Student.id,
+            ).all()
+            if not student_rows:
+                return []
+
+            turma_buckets: Dict[tuple, Dict[str, Any]] = {}
+            for row in student_rows:
+                key = (
+                    str(row.school_id or ""),
+                    str(row.grade_id or ""),
+                    str(row.class_id or ""),
+                )
+                bucket = turma_buckets.get(key)
+                if not bucket:
+                    bucket = {
+                        "school_id": row.school_id,
+                        "school_name": row.school_name,
+                        "grade_id": row.grade_id,
+                        "grade_name": row.grade_name,
+                        "class_id": row.class_id,
+                        "profs": [],
+                    }
+                    turma_buckets[key] = bucket
+                bucket["profs"].append(float(row.student_proficiency or 0))
+
+            normalized_turma_rows: List[Any] = []
+            for bucket in turma_buckets.values():
+                avg_prof = cls._hierarchical_mean_values(bucket["profs"])
+                course_label = cls._derive_course_label(str(bucket["grade_name"] or ""))
+                avg_score = aggregated_grade_from_proficiency(
+                    avg_prof,
+                    course_label,
+                    subject_name=subject_name or "GERAL",
+                    has_matematica=has_matematica,
+                )
+                normalized_turma_rows.append(
+                    SimpleNamespace(
+                        school_id=bucket["school_id"],
+                        school_name=bucket["school_name"],
+                        grade_id=bucket["grade_id"],
+                        grade_name=bucket["grade_name"],
+                        class_id=bucket["class_id"],
+                        average_score=avg_score,
+                        average_proficiency=avg_prof,
+                        students_count=len(bucket["profs"]),
+                    )
+                )
+            turma_rows = normalized_turma_rows
+        else:
+            turma_query = (
+                db.session.query(
+                    School.id.label("school_id"),
+                    School.name.label("school_name"),
+                    grade_ref.label("grade_id"),
+                    Grade.name.label("grade_name"),
+                    Class.id.label("class_id"),
+                    db.func.avg(score_expr).label("average_score"),
+                    db.func.avg(prof_expr).label("average_proficiency"),
+                    db.func.count(db.func.distinct(Student.id)).label("students_count"),
+                )
+                .select_from(results_model)
+                .join(Student, Student.id == results_model.student_id)
+                .outerjoin(School, School.id == Student.school_id)
+                .outerjoin(Class, Class.id == Student.class_id)
+                .outerjoin(Grade, Grade.id == grade_ref)
+            )
+            turma_query = _apply_entity_filter(turma_query, results_model)
+            if use_discipline_metrics and subject_prof_expr is not None:
+                turma_query = turma_query.filter(subject_prof_expr.isnot(None))
+            turma_query = _apply_common_student_filters(turma_query)
+
+            turma_rows = turma_query.group_by(
+                School.id,
+                School.name,
+                grade_ref,
+                Grade.name,
+                Class.id,
+            ).all()
+            if not turma_rows:
+                return []
+
+            # Nota agregada canônica: calculate_grade(média_proficiência), não média das notas
+            normalized_turma_rows = []
+            for turma_row in turma_rows:
+                avg_prof = float(turma_row.average_proficiency or 0)
+                course_label = cls._derive_course_label(str(turma_row.grade_name or ""))
+                avg_score = aggregated_grade_from_proficiency(
+                    avg_prof,
+                    course_label,
+                    subject_name=subject_name or "GERAL",
+                    has_matematica=has_matematica,
+                )
+                normalized_turma_rows.append(
+                    SimpleNamespace(
+                        school_id=turma_row.school_id,
+                        school_name=turma_row.school_name,
+                        grade_id=turma_row.grade_id,
+                        grade_name=turma_row.grade_name,
+                        class_id=turma_row.class_id,
+                        average_score=avg_score,
+                        average_proficiency=avg_prof,
+                        students_count=turma_row.students_count,
+                    )
+                )
+            turma_rows = normalized_turma_rows
 
         grouped: List[Any] = []
         series_buckets: Dict[tuple, Dict[str, Any]] = {}
@@ -1994,7 +2107,12 @@ class RankingReportService:
             for row in totals_by_school_grade_query.group_by(School.id, grade_ref).all()
         }
 
-        if answer_sheet_id:
+        if use_answer_sheet and instrument_ids:
+            as_filter = (
+                AnswerSheetResult.gabarito_id.in_(instrument_ids)
+                if multi_instruments
+                else AnswerSheetResult.gabarito_id == instrument_ids[0]
+            )
             participating_query = (
                 db.session.query(
                     School.id.label("school_id"),
@@ -2007,7 +2125,7 @@ class RankingReportService:
                     AnswerSheetResult,
                     and_(
                         AnswerSheetResult.student_id == Student.id,
-                        AnswerSheetResult.gabarito_id == answer_sheet_id,
+                        as_filter,
                     ),
                 )
             )
@@ -2015,7 +2133,12 @@ class RankingReportService:
                 subject_prof = _subject_metric_expr(AnswerSheetResult, "proficiency")
                 if subject_prof is not None:
                     participating_query = participating_query.filter(subject_prof.isnot(None))
-        elif evaluation_id:
+        elif instrument_ids:
+            er_filter = (
+                EvaluationResult.test_id.in_(instrument_ids)
+                if multi_instruments
+                else EvaluationResult.test_id == instrument_ids[0]
+            )
             participating_query = (
                 db.session.query(
                     School.id.label("school_id"),
@@ -2028,7 +2151,7 @@ class RankingReportService:
                     EvaluationResult,
                     and_(
                         EvaluationResult.student_id == Student.id,
-                        EvaluationResult.test_id == evaluation_id,
+                        er_filter,
                     ),
                 )
             )
@@ -2060,7 +2183,12 @@ class RankingReportService:
             for row in participating_query.group_by(School.id).all()
         }
 
-        if answer_sheet_id:
+        if use_answer_sheet and instrument_ids:
+            as_grade_filter = (
+                AnswerSheetResult.gabarito_id.in_(instrument_ids)
+                if multi_instruments
+                else AnswerSheetResult.gabarito_id == instrument_ids[0]
+            )
             participating_by_school_grade_query = (
                 db.session.query(
                     School.id.label("school_id"),
@@ -2074,7 +2202,7 @@ class RankingReportService:
                     AnswerSheetResult,
                     and_(
                         AnswerSheetResult.student_id == Student.id,
-                        AnswerSheetResult.gabarito_id == answer_sheet_id,
+                        as_grade_filter,
                     ),
                 )
             )
@@ -2082,7 +2210,12 @@ class RankingReportService:
                 subject_prof = _subject_metric_expr(AnswerSheetResult, "proficiency")
                 if subject_prof is not None:
                     participating_by_school_grade_query = participating_by_school_grade_query.filter(subject_prof.isnot(None))
-        elif evaluation_id:
+        elif instrument_ids:
+            er_grade_filter = (
+                EvaluationResult.test_id.in_(instrument_ids)
+                if multi_instruments
+                else EvaluationResult.test_id == instrument_ids[0]
+            )
             participating_by_school_grade_query = (
                 db.session.query(
                     School.id.label("school_id"),
@@ -2096,7 +2229,7 @@ class RankingReportService:
                     EvaluationResult,
                     and_(
                         EvaluationResult.student_id == Student.id,
-                        EvaluationResult.test_id == evaluation_id,
+                        er_grade_filter,
                     ),
                 )
             )
@@ -2346,10 +2479,20 @@ class RankingReportService:
 
     @classmethod
     def _build_evaluation_class_rows(cls, scope: Dict[str, Any], filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-        evaluation_id = str(filters.get("evaluation_id") or "").strip()
-        answer_sheet_id = str(filters.get("answer_sheet_id") or "").strip()
-        if not evaluation_id and not answer_sheet_id:
+        evaluation_ids = DashboardService._parse_ranking_instrument_ids(
+            filters, "evaluation_ids", "evaluation_id"
+        )
+        answer_sheet_ids = DashboardService._parse_ranking_instrument_ids(
+            filters, "answer_sheet_ids", "answer_sheet_id"
+        )
+        if not evaluation_ids and not answer_sheet_ids:
             return []
+
+        evaluation_id = evaluation_ids[0] if evaluation_ids else ""
+        answer_sheet_id = answer_sheet_ids[0] if answer_sheet_ids else ""
+        use_answer_sheet = bool(answer_sheet_ids and not evaluation_ids)
+        instrument_ids = answer_sheet_ids if use_answer_sheet else evaluation_ids
+        multi_instruments = len(instrument_ids) > 1
 
         discipline_id = str(filters.get("disciplina") or "").strip()
         storage_key = cls._resolve_discipline_storage_key(discipline_id, filters) if discipline_id else ""
@@ -2382,10 +2525,18 @@ class RankingReportService:
             return query
 
         def _apply_entity_filter(query, model):
-            if model is EvaluationResult and evaluation_id:
-                return query.filter(model.test_id == evaluation_id)
-            if model is AnswerSheetResult and answer_sheet_id:
-                return query.filter(model.gabarito_id == answer_sheet_id)
+            if model is EvaluationResult and instrument_ids:
+                return query.filter(
+                    model.test_id.in_(instrument_ids)
+                    if multi_instruments
+                    else model.test_id == instrument_ids[0]
+                )
+            if model is AnswerSheetResult and instrument_ids:
+                return query.filter(
+                    model.gabarito_id.in_(instrument_ids)
+                    if multi_instruments
+                    else model.gabarito_id == instrument_ids[0]
+                )
             return query
 
         def _subject_metric_expr(model, metric: str):
@@ -2397,45 +2548,132 @@ class RankingReportService:
                 return cast(model.proficiency_by_subject[storage_key][metric].astext, Float)
             return None
 
-        results_model = AnswerSheetResult if answer_sheet_id else EvaluationResult
+        results_model = AnswerSheetResult if use_answer_sheet else EvaluationResult
         subject_score_expr = _subject_metric_expr(results_model, "grade")
         subject_prof_expr = _subject_metric_expr(results_model, "proficiency")
         use_discipline_metrics = bool(storage_key)
         score_expr = subject_score_expr if use_discipline_metrics else results_model.grade
         prof_expr = subject_prof_expr if use_discipline_metrics else results_model.proficiency
 
-        grouped_query = (
-            db.session.query(
-                Class.id.label("class_id"),
-                Class.name.label("turma"),
-                Class.shift.label("shift"),
-                Class._school_id.label("school_id"),
-                Grade.id.label("grade_id"),
-                Grade.name.label("serie"),
-                db.func.avg(score_expr).label("media"),
-                db.func.avg(prof_expr).label("average_proficiency"),
-                db.func.count(db.func.distinct(Student.id)).label("alunos"),
+        has_matematica = None
+        if multi_instruments and not use_discipline_metrics and not use_answer_sheet:
+            tests = Test.query.filter(Test.id.in_(instrument_ids)).all()
+            subject_ids = [str(t.subject) for t in tests if getattr(t, "subject", None)]
+            if subject_ids:
+                names = [
+                    str(s.name or "")
+                    for s in Subject.query.filter(Subject.id.in_(subject_ids)).all()
+                ]
+                if any("matem" in n.lower() for n in names):
+                    has_matematica = True
+
+        if multi_instruments and not use_discipline_metrics:
+            student_q = (
+                db.session.query(
+                    Class.id.label("class_id"),
+                    Class.name.label("turma"),
+                    Class.shift.label("shift"),
+                    Class._school_id.label("school_id"),
+                    Grade.id.label("grade_id"),
+                    Grade.name.label("serie"),
+                    Student.id.label("student_id"),
+                    db.func.avg(prof_expr).label("student_proficiency"),
+                )
+                .select_from(results_model)
+                .join(Student, Student.id == results_model.student_id)
+                .join(Class, Class.id == Student.class_id)
+                .outerjoin(Grade, Grade.id == db.func.coalesce(Student.grade_id, Class.grade_id))
+                .outerjoin(School, School.id == Student.school_id)
             )
-            .select_from(results_model)
-            .join(Student, Student.id == results_model.student_id)
-            .join(Class, Class.id == Student.class_id)
-            .outerjoin(Grade, Grade.id == db.func.coalesce(Student.grade_id, Class.grade_id))
-            .outerjoin(School, School.id == Student.school_id)
-        )
-        grouped_query = _apply_entity_filter(grouped_query, results_model)
-        if use_discipline_metrics and subject_prof_expr is not None:
-            grouped_query = grouped_query.filter(subject_prof_expr.isnot(None))
-        grouped_query = _apply_common_student_filters(grouped_query)
-        grouped = grouped_query.group_by(
-            Class.id,
-            Class.name,
-            Class.shift,
-            Class._school_id,
-            Grade.id,
-            Grade.name,
-        ).all()
-        if not grouped:
-            return []
+            student_q = _apply_entity_filter(student_q, results_model)
+            student_q = _apply_common_student_filters(student_q)
+            student_rows = student_q.group_by(
+                Class.id,
+                Class.name,
+                Class.shift,
+                Class._school_id,
+                Grade.id,
+                Grade.name,
+                Student.id,
+            ).all()
+            if not student_rows:
+                return []
+
+            class_buckets: Dict[str, Dict[str, Any]] = {}
+            for row in student_rows:
+                cid = str(row.class_id or "")
+                bucket = class_buckets.get(cid)
+                if not bucket:
+                    bucket = {
+                        "class_id": row.class_id,
+                        "turma": row.turma,
+                        "shift": row.shift,
+                        "school_id": row.school_id,
+                        "grade_id": row.grade_id,
+                        "serie": row.serie,
+                        "profs": [],
+                    }
+                    class_buckets[cid] = bucket
+                bucket["profs"].append(float(row.student_proficiency or 0))
+
+            from app.utils.school_equal_weight_means import aggregated_grade_from_proficiency
+
+            grouped = []
+            for bucket in class_buckets.values():
+                avg_prof = cls._hierarchical_mean_values(bucket["profs"])
+                course_label = cls._derive_course_label(str(bucket["serie"] or ""))
+                avg_score = aggregated_grade_from_proficiency(
+                    avg_prof,
+                    course_label,
+                    subject_name=subject_name or "GERAL",
+                    has_matematica=has_matematica,
+                )
+                grouped.append(
+                    SimpleNamespace(
+                        class_id=bucket["class_id"],
+                        turma=bucket["turma"],
+                        shift=bucket["shift"],
+                        school_id=bucket["school_id"],
+                        grade_id=bucket["grade_id"],
+                        serie=bucket["serie"],
+                        media=avg_score,
+                        average_proficiency=avg_prof,
+                        alunos=len(bucket["profs"]),
+                    )
+                )
+        else:
+            grouped_query = (
+                db.session.query(
+                    Class.id.label("class_id"),
+                    Class.name.label("turma"),
+                    Class.shift.label("shift"),
+                    Class._school_id.label("school_id"),
+                    Grade.id.label("grade_id"),
+                    Grade.name.label("serie"),
+                    db.func.avg(score_expr).label("media"),
+                    db.func.avg(prof_expr).label("average_proficiency"),
+                    db.func.count(db.func.distinct(Student.id)).label("alunos"),
+                )
+                .select_from(results_model)
+                .join(Student, Student.id == results_model.student_id)
+                .join(Class, Class.id == Student.class_id)
+                .outerjoin(Grade, Grade.id == db.func.coalesce(Student.grade_id, Class.grade_id))
+                .outerjoin(School, School.id == Student.school_id)
+            )
+            grouped_query = _apply_entity_filter(grouped_query, results_model)
+            if use_discipline_metrics and subject_prof_expr is not None:
+                grouped_query = grouped_query.filter(subject_prof_expr.isnot(None))
+            grouped_query = _apply_common_student_filters(grouped_query)
+            grouped = grouped_query.group_by(
+                Class.id,
+                Class.name,
+                Class.shift,
+                Class._school_id,
+                Grade.id,
+                Grade.name,
+            ).all()
+            if not grouped:
+                return []
 
         totals_by_class_query = (
             db.session.query(
@@ -2490,6 +2728,7 @@ class RankingReportService:
                 average_proficiency=avg_prof,
                 course_label=course_label,
                 subject_name=subject_name,
+                has_matematica=has_matematica,
             )
             adequado_avancado_count = int(adequado_avancado_by_class.get(class_id, 0))
             adequado_avancado_pct = (
@@ -2521,7 +2760,7 @@ class RankingReportService:
                     ),
                     "acerto_percent": 0.0,
                     "conclusao": round((participating / total_students) * 100, 1) if total_students > 0 else 0.0,
-                    "avaliacoes": 1,
+                    "avaliacoes": len(instrument_ids) if instrument_ids else 1,
                 }
             )
         return rows

@@ -332,17 +332,32 @@ def aggregated_grade_from_proficiency(
     )
 
 
+def _result_has_subject_breakdown(result: Any) -> bool:
+    raw = getattr(result, "subject_results", None) or getattr(
+        result, "proficiency_by_subject", None
+    )
+    return isinstance(raw, dict) and any(
+        isinstance(item, dict) and item.get("proficiency") is not None
+        for item in raw.values()
+    )
+
+
 def _results_have_subject_breakdown(results: Sequence[Any]) -> bool:
-    for result in results or []:
-        raw = getattr(result, "subject_results", None) or getattr(
-            result, "proficiency_by_subject", None
-        )
-        if isinstance(raw, dict) and any(
-            isinstance(item, dict) and item.get("proficiency") is not None
-            for item in raw.values()
-        ):
-            return True
-    return False
+    """True se **algum** resultado tem breakdown (legado / detecção frouxa)."""
+    return any(_result_has_subject_breakdown(r) for r in (results or []))
+
+
+def _all_results_have_subject_breakdown(results: Sequence[Any]) -> bool:
+    """True só se **todos** têm breakdown utilizável.
+
+    Misturar prova multi-disciplina com prova sem ``subject_results`` e ainda
+    expandir por disciplina empurra o GERAL do segundo para um fallback
+    (Outras / subject_rel) e diverge Resultados × Consolidado.
+    """
+    rows = list(results or [])
+    if not rows:
+        return False
+    return all(_result_has_subject_breakdown(r) for r in rows)
 
 
 def hierarchical_mean_grade_and_proficiency(
@@ -366,8 +381,9 @@ def hierarchical_mean_grade_and_proficiency(
     if not results:
         return 0.0, 0.0
     # Nota geral de prova com disciplinas: média das notas de cada uma.
-    # Sem o detalhe por disciplina, mantém a conversão antiga (provas de uma matéria).
-    if str(subject_name or "GERAL").upper() == "GERAL" and _results_have_subject_breakdown(results):
+    # Só quando TODOS os resultados têm subject_results; caso contrário usa o
+    # GERAL já persistido em evaluation_results.proficiency/grade.
+    if str(subject_name or "GERAL").upper() == "GERAL" and _all_results_have_subject_breakdown(results):
         return general_grade_from_subject_proficiencies(
             results,
             target_level,
@@ -458,6 +474,142 @@ def general_grade_from_subject_proficiencies(
     general_grade = sum(grades) / len(grades)
     general_prof = sum(proficiencies) / len(proficiencies)
     return round_to_two_decimals(general_grade), round_to_two_decimals(general_prof)
+
+
+def hierarchical_means_course_aware_by_serie(
+    results: Sequence[Any],
+    target_level: str,
+    *,
+    grade_id_to_course: Dict[str, str],
+    fallback_course_name: str,
+    fallback_subject_name: str = "Outras",
+    has_matematica: Optional[bool] = None,
+) -> Tuple[float, float]:
+    """
+    Médias com ``course_name`` por série (como o relatório consolidado).
+
+    Quando há um único curso no mapa (ou o mapa está vazio), delega para
+    ``hierarchical_mean_grade_and_proficiency``.
+
+    Com cursos mistos (ex.: Anos Iniciais + Finais) e alvo escola/município:
+    1. célula escola×série → média em nível turma com o course_name da série;
+    2. escola → média das séries;
+    3. município → média das escolas (§7).
+    """
+    from app.utils.decimal_helpers import round_to_two_decimals
+
+    unique_courses = {c for c in (grade_id_to_course or {}).values() if c}
+    tl = _normalize_hierarchical_target(target_level)
+    course = next(iter(unique_courses), None) or fallback_course_name or "Anos Iniciais"
+
+    if len(unique_courses) <= 1 or tl in {"turma", "serie"}:
+        # hierarchical_mean só expande disciplinas se TODOS tiverem subject_results
+        return hierarchical_mean_grade_and_proficiency(
+            results,
+            target_level,
+            course_name=course,
+            subject_name="GERAL",
+            has_matematica=has_matematica,
+        )
+
+    # sch -> gid -> [results] (snapshot primeiro; fallback via matrícula atual)
+    cells: Dict[str, Dict[str, List[Any]]] = defaultdict(lambda: defaultdict(list))
+    missing: List[Any] = []
+    for r in results or []:
+        if not getattr(r, "student_id", None):
+            continue
+        snap_school = getattr(r, "school_id_snapshot", None)
+        snap_grade = getattr(r, "grade_id_snapshot", None)
+        sch = str(snap_school) if snap_school else None
+        gid = str(snap_grade) if snap_grade is not None else None
+        if sch and gid:
+            cells[sch][gid].append(r)
+        else:
+            missing.append(r)
+    if missing:
+        student_ids = list(
+            {
+                str(getattr(r, "student_id", ""))
+                for r in missing
+                if getattr(r, "student_id", None)
+            }
+        )
+        stu_to_cell: Dict[str, Tuple[str, str]] = {}
+        if student_ids:
+            students = Student.query.filter(Student.id.in_(student_ids)).all()
+            class_ids = [s.class_id for s in students if s.class_id]
+            classes = {
+                str(c.id): c
+                for c in (Class.query.filter(Class.id.in_(class_ids)).all() if class_ids else [])
+            }
+            for s in students:
+                if not s.class_id:
+                    continue
+                co = classes.get(str(s.class_id))
+                if not co or not co.school_id or not co.grade_id:
+                    continue
+                stu_to_cell[str(s.id)] = (str(co.school_id), str(co.grade_id))
+        for r in missing:
+            cell = stu_to_cell.get(str(getattr(r, "student_id", "") or ""))
+            if not cell:
+                continue
+            cells[cell[0]][cell[1]].append(r)
+
+    if not cells:
+        return hierarchical_mean_grade_and_proficiency(
+            results,
+            target_level,
+            course_name=fallback_course_name or "Anos Iniciais",
+            subject_name="GERAL",
+            has_matematica=has_matematica,
+        )
+
+    school_grades: List[float] = []
+    school_profs: List[float] = []
+    for _sch, by_grade in cells.items():
+        serie_grades: List[float] = []
+        serie_profs: List[float] = []
+        for gid, cell_results in by_grade.items():
+            if not cell_results:
+                continue
+            cell_course = (
+                (grade_id_to_course or {}).get(str(gid))
+                or fallback_course_name
+                or "Anos Iniciais"
+            )
+            mg, mp = hierarchical_mean_grade_and_proficiency(
+                cell_results,
+                "turma",
+                course_name=cell_course,
+                subject_name="GERAL",
+                has_matematica=has_matematica,
+            )
+            serie_grades.append(float(mg))
+            serie_profs.append(float(mp))
+        if not serie_profs:
+            continue
+        school_grades.append(sum(serie_grades) / len(serie_grades))
+        school_profs.append(sum(serie_profs) / len(serie_profs))
+
+    if not school_profs:
+        return hierarchical_mean_grade_and_proficiency(
+            results,
+            target_level,
+            course_name=fallback_course_name or "Anos Iniciais",
+            subject_name="GERAL",
+            has_matematica=has_matematica,
+        )
+
+    if tl == "escola" and len(school_profs) == 1:
+        return (
+            round_to_two_decimals(school_grades[0]),
+            round_to_two_decimals(school_profs[0]),
+        )
+
+    return (
+        round_to_two_decimals(sum(school_grades) / len(school_grades)),
+        round_to_two_decimals(sum(school_profs) / len(school_profs)),
+    )
 
 
 def mean_grade_and_proficiency_equal_weight_by_school(

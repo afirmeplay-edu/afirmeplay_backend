@@ -589,18 +589,23 @@ const res = await api.get(`/afirme-reading/written-tests/${id}/pdf?mode=applicat
 
 ### Conteúdo do PDF
 
-- **Cabeçalho**: logo do município (se cadastrada; senão a logo Afirme), município/UF, título, séries e
-  linhas em branco para **Nome do aluno**, **Escola**, **Turma** e **Data**.
-- **Instruções**: marcar as respostas e responder o ditado e a produção escrita no cartão-resposta.
+- **Capa**: mesma capa Afirme da prova física institucional (`nova_capa.jpeg`), com logo Afirme
+  Educacional no círculo central, título, série e rótulo "AVALIAÇÃO ESCRITA". Escola/turma na capa
+  ficam em branco neste PDF genérico. Sem cabeçalho extra no caderno (a capa já identifica a prova).
+- **Instruções**: marcar múltipla escolha no cartão-resposta (PDF separado); escrever ditado e bilhete
+  nas linhas deste caderno.
 - **Questões** na ordem da avaliação, numeradas de 1 a 19 (1 a 16 múltipla escolha, 17 e 18 ditado,
-  19 bilhete):
+  19 bilhete), no visual da prova institucional (faixa "Questão N", tipografia 12pt, alternativas `(A)`):
+  - O **título** da questão (campo `title`, muitas vezes usado como código de habilidade) aparece
+    **ao lado** de "Questão N" na faixa roxa — não como título centralizado abaixo.
   - `multipleChoice`: enunciado (`formattedText`, ou `text` se vazio), texto de apoio
-    (`secondStatement`), imagens e alternativas `A)`, `B)`, `C)`… com texto e/ou imagem;
-  - `dictation`: número, enunciado e "Responda no cartão-resposta." — **a palavra ditada não é impressa**;
-  - `text_production`: número, comando e "Responda no cartão-resposta.".
+    (`secondStatement`), imagens (até 16,5×10 cm, centralizadas) e alternativas `(A)`, `(B)`, `(C)`…
+    com texto e/ou imagem;
+  - `dictation`: enunciado e **linha para o aluno escrever** — **a palavra ditada não é impressa**;
+  - `text_production`: comando e **área pautada (15 linhas)** para o bilhete.
 - **Nunca** são impressos: gabarito, `isCorrect`, `formattedSolution`, `dictatedWord`, pontuação.
-- Fonte grande (enunciado e alternativas em 15pt), questão de múltipla escolha não é quebrada entre
-  páginas quando cabe numa página, "Página X de Y" no rodapé.
+- O cartão-resposta **não** entra neste PDF (continua na geração separada de cartões).
+- Questão de múltipla escolha evita quebra entre páginas quando cabe; rodapé com página e data.
 
 ### Erros
 

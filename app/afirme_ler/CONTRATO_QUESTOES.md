@@ -47,8 +47,9 @@ município no contexto vê `GLOBAL` e as próprias `PRIVATE`.
 
 ### Tipos de questão do Afirme Ler
 
-A prova será aplicada no papel e terá cartão-resposta. Ditado e produção escrita não têm campo de
-resposta na prova; o aluno responde no cartão (linha para a palavra ditada e área para o bilhete).
+A prova será aplicada no papel. O cartão-resposta é gerado em PDF separado (não junto ao caderno).
+Nas questões de múltipla escolha o aluno marca no cartão; no ditado e na produção escrita (bilhete)
+há linhas de escrita no próprio caderno da prova.
 
 | `type` (canônico) | Aliases aceitos na entrada | Alternativas (`options`) | Gabarito (`correct_answer`) |
 |---|---|---|---|

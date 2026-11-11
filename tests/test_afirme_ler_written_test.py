@@ -7,6 +7,7 @@ Execução: python -m pytest tests/test_afirme_ler_written_test.py -q
 """
 import inspect
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -898,7 +899,7 @@ def test_pdf_data_order_numbers_and_letters(flask_app):
     assert first["support_html"] == "<p>Qual é o animal?</p>"
     assert [a["letter"] for a in first["alternatives"]] == ["A", "B", "C"]
     assert first["alternatives"][1]["content_html"] == (
-        f'<img src="/questions/mc-img/images/{IMG_ALTERNATIVE}" />'
+        f'<img src="/questions/mc-img/images/{IMG_ALTERNATIVE}" alt="" />'
     )
     assert data["questions"][1]["statement_html"] == "<p>Questão mc-01</p>"
 
@@ -911,15 +912,22 @@ def test_pdf_data_has_no_answer_key(flask_app):
     data = pdf_svc.build_pdf_data(_published_for_pdf())
     dictations = data["questions"][16:18]
     production = data["questions"][18]
+    multiple_choice = data["questions"][0]
 
     assert [item["type"] for item in dictations] == ["dictation", "dictation"]
     assert production["type"] == "text_production"
-    for item in (*dictations, production):
+    assert multiple_choice["answer_on_card"] is True
+    assert multiple_choice["writing_lines"] == 0
+    for item in dictations:
         assert item["alternatives"] == [] and item["support_html"] == ""
-        assert item["answer_on_card"] is True
+        assert item["answer_on_card"] is False
+        assert item["writing_lines"] == pdf_svc.DICTATION_WRITING_LINES
+    assert production["alternatives"] == [] and production["support_html"] == ""
+    assert production["answer_on_card"] is False
+    assert production["writing_lines"] == pdf_svc.PRODUCTION_WRITING_LINES
     expected_keys = {
-        "number", "id", "type", "statement_html", "images", "support_html", "alternatives",
-        "answer_on_card",
+        "number", "id", "type", "title_html", "statement_html", "images", "dictation_marks",
+        "support_html", "alternatives", "answer_on_card", "writing_lines",
     }
     assert all(set(q) == expected_keys for q in data["questions"])
 
@@ -933,16 +941,62 @@ def test_pdf_html_prints_questions_without_answer_key(flask_app):
     data = pdf_svc.build_pdf_data(_published_for_pdf(), SimpleNamespace(name="Limoeiro", state="AL"))
     html = service.render_html(data)
 
-    assert "Limoeiro" in html and "Avaliação escrita — 1º bimestre" in html
-    assert "Nome do aluno:" in html and "Escola:" in html and "Turma:" in html and "Data:" in html
+    assert "Avaliação escrita — 1º bimestre" in html
+    assert "Nome do aluno:" not in html and 'class="header"' not in html
+    assert 'class="afirme-cover-page"' in html
     assert html.count('class="question-number"') == 19
-    assert html.count("Responda no cartão-resposta.") == 3
-    assert "<span class=\"alternative-letter\">C)</span>" in html
+    assert "Responda no cartão-resposta." not in html
+    assert html.count('class="writing-area dictation-lines"') == 2
+    assert html.count("Escreva o bilhete nas linhas abaixo.") == 1
+    assert html.count('class="writing-line"') == pdf_svc.PRODUCTION_WRITING_LINES
+    assert 'class="question-header"' in html
+    assert "<span class=\"alternative-letter\">(C)</span>" in html
     assert "Qual é o animal?" in html
     assert "data:image/png;base64," in html  # imagens do MinIO embutidas
     assert "/questions/mc-img/images/" not in html
+    assert 'alt="Afirme Educacional"' in html
+    assert "max-width: 58%" in html  # logo Educacional cabe no círculo da capa
     for forbidden in ("sapato", "borboleta", "isCorrect", "SOLUCAO-SECRETA", "Pontuação", "pontos"):
         assert forbidden not in html
+
+
+def test_pdf_applicator_keeps_images_and_places_megaphone(flask_app):
+    """Megafone não pode quebrar a tag <img>; enunciado e alternativa continuam embutidos."""
+    question = db.session.get(Question, "mc-img")
+    question.dictation_marks = {"statement": True, "images": [0], "options": ["B"]}
+    db.session.commit()
+
+    service = _pdf_service()
+    data = pdf_svc.build_pdf_data(
+        _published_for_pdf(),
+        SimpleNamespace(name="Limoeiro", state="AL"),
+        mode="applicator",
+    )
+    html = service.render_html(data)
+
+    assert 'class="dictation-icon"' in html
+    assert 'class="dictation-media"' in html
+    assert "Imagem do enunciado" not in html
+    assert "/questions/mc-img/images/" not in html
+    assert html.count("data:image/png;base64,") >= 2
+    # Tag <img> intacta: src data-URI seguido de atributos/fechamento válidos
+    assert re.search(
+        r'<img\b[^>]*\bsrc="data:image/png;base64,[^"]+"[^>]*>',
+        html,
+        flags=re.IGNORECASE,
+    )
+
+
+def test_wrap_marked_images_does_not_split_img_tag():
+    html = (
+        f'<p>Veja.</p><img src="/questions/mc-img/images/{IMG_STATEMENT}" '
+        f'alt="Imagem do enunciado" />'
+    )
+    wrapped = pdf_svc._wrap_marked_images(html, [IMG_STATEMENT])
+    assert 'class="dictation-media"' in wrapped
+    assert f'src="/questions/mc-img/images/{IMG_STATEMENT}"' in wrapped
+    assert "alt=\"Imagem do enunciado\"" in wrapped
+    assert f'src="/questions/mc-img/images/{IMG_STATEMENT}"{pdf_svc.MEGAPHONE_TOKEN}' not in wrapped
 
 
 def test_pdf_blocks_draft_and_missing_question(flask_app):

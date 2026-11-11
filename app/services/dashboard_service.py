@@ -2086,16 +2086,24 @@ class DashboardService:
         school_alias,
         class_alias,
     ) -> Dict[str, Any]:
-        """Ranking de alunos para uma avaliação/cartão (e disciplina opcional) — relatório de ranking."""
-        import json
+        """Ranking de alunos para avaliação(ões)/cartão(ões) — relatório de ranking.
+
+        Com vários instrumentos (ex.: LP+MAT), a proficiência do aluno é a média
+        igual-peso entre instrumentos; a nota é ``calculate_grade`` dessa média.
+        """
         from sqlalchemy import Float, cast
         from sqlalchemy.dialects.postgresql import VARCHAR
 
-        evaluation_id = str(filters.get("evaluation_id") or "").strip()
-        answer_sheet_id = str(filters.get("answer_sheet_id") or "").strip()
+        evaluation_ids = cls._parse_ranking_instrument_ids(
+            filters, "evaluation_ids", "evaluation_id"
+        )
+        answer_sheet_ids = cls._parse_ranking_instrument_ids(
+            filters, "answer_sheet_ids", "answer_sheet_id"
+        )
         discipline_id = str(filters.get("disciplina") or "").strip()
-        use_answer_sheet = bool(answer_sheet_id and not evaluation_id)
+        use_answer_sheet = bool(answer_sheet_ids and not evaluation_ids)
         score_model = AnswerSheetResult if use_answer_sheet else EvaluationResult
+        instrument_ids = answer_sheet_ids if use_answer_sheet else evaluation_ids
 
         discipline_grade_expr = None
         discipline_prof_expr = None
@@ -2129,10 +2137,14 @@ class DashboardService:
         avg_grade = func.coalesce(func.avg(score_grade_expr), 0)
         avatar_config_expr = cast(User.avatar_config, db.Text)
 
+        if use_answer_sheet:
+            instrument_filter = score_model.gabarito_id.in_(instrument_ids) if instrument_ids else True
+        else:
+            instrument_filter = score_model.test_id.in_(instrument_ids) if instrument_ids else True
+
         join_cond = and_(
             score_model.student_id == Student.id,
-            score_model.gabarito_id == answer_sheet_id if use_answer_sheet and answer_sheet_id else True,
-            score_model.test_id == evaluation_id if (not use_answer_sheet and evaluation_id) else True,
+            instrument_filter,
             discipline_prof_expr.isnot(None) if discipline_prof_expr is not None else True,
         )
 
@@ -2146,7 +2158,11 @@ class DashboardService:
                 avg_grade.label("average_grade"),
                 avg_proficiency.label("average_proficiency"),
                 func.max(classification_expr).label("classification"),
-                func.count(score_model.id).label("completed_evaluations"),
+                func.count(
+                    distinct(
+                        score_model.gabarito_id if use_answer_sheet else score_model.test_id
+                    )
+                ).label("completed_evaluations"),
                 Student.profile_picture.label("profile_picture"),
                 avatar_config_expr.label("avatar_config"),
             )
@@ -2194,10 +2210,44 @@ class DashboardService:
         if class_ids:
             query = query.filter(Student.class_id.in_(class_ids))
 
-        return cls._finalize_ranking_alunos_rows(query, limit=limit, offset=offset)
+        subject_name = "GERAL"
+        has_matematica: Optional[bool] = None
+        if discipline_id:
+            subject_name = cls._subject_name_from_discipline_id(discipline_id)
+        elif not use_answer_sheet and instrument_ids:
+            tests = Test.query.filter(Test.id.in_(instrument_ids)).all()
+            subject_ids = [str(t.subject) for t in tests if getattr(t, "subject", None)]
+            names = [
+                str(s.name or "")
+                for s in Subject.query.filter(Subject.id.in_(subject_ids)).all()
+            ] if subject_ids else []
+            if len(instrument_ids) == 1 and names:
+                # Prova única: usar a escala da disciplina da avaliação (ex.: Matemática),
+                # alinhada à nota persistida em EvaluationResult.grade.
+                subject_name = names[0] or "GERAL"
+            elif len(instrument_ids) > 1:
+                # Pacote multi-disciplina (LP+MAT): GERAL com has_matematica se houver MAT.
+                if any("matem" in n.lower() for n in names):
+                    has_matematica = True
+
+        return cls._finalize_ranking_alunos_rows(
+            query,
+            limit=limit,
+            offset=offset,
+            subject_name=subject_name,
+            has_matematica=has_matematica,
+        )
 
     @classmethod
-    def _finalize_ranking_alunos_rows(cls, query, *, limit: int, offset: int) -> Dict[str, Any]:
+    def _finalize_ranking_alunos_rows(
+        cls,
+        query,
+        *,
+        limit: int,
+        offset: int,
+        subject_name: str = "GERAL",
+        has_matematica: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         import json
 
         MEDALHA_POR_POSICAO = {1: "platina", 2: "ouro", 3: "prata", 4: "bronze"}
@@ -2209,7 +2259,20 @@ class DashboardService:
         for idx, row in enumerate(rows):
             position = offset + idx + 1
             media_proficiencia = round(float(row.average_proficiency or 0), 2)
-            media_nota = round(float(row.average_grade or 0), 2)
+            # Nota canônica: calculate_grade(média_prof), não AVG(grade) — FONTE §7.
+            course_label = cls._course_label_from_grade_names([str(row.serie or "")])
+            media_nota = round(
+                float(
+                    aggregated_grade_from_proficiency(
+                        media_proficiencia,
+                        course_label,
+                        subject_name=subject_name or "GERAL",
+                        has_matematica=has_matematica,
+                    )
+                    or 0
+                ),
+                2,
+            )
             item = {
                 "student_id": row.student_id,
                 "name": row.student_name,
@@ -2264,9 +2327,13 @@ class DashboardService:
         offset = max(0, int(offset or 0))
         normalized_filters = filters or {}
 
-        evaluation_id = str(normalized_filters.get("evaluation_id") or "").strip()
-        answer_sheet_id = str(normalized_filters.get("answer_sheet_id") or "").strip()
-        if evaluation_id or answer_sheet_id:
+        evaluation_ids = cls._parse_ranking_instrument_ids(
+            normalized_filters, "evaluation_ids", "evaluation_id"
+        )
+        answer_sheet_ids = cls._parse_ranking_instrument_ids(
+            normalized_filters, "answer_sheet_ids", "answer_sheet_id"
+        )
+        if evaluation_ids or answer_sheet_ids:
             return cls._get_ranking_alunos_entity_filtered(
                 scope,
                 limit=limit,

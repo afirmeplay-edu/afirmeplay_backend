@@ -67,17 +67,39 @@ class AnswerSheetCorrectionNewGrid:
     FILL_THRESHOLD = 0.45  # 45% da área preenchida
 
     # =========================================================================
-    # DETECÇÃO DE MARCAÇÃO V2 (ink-agnostic, decisão relativa)
-    # Valores iniciais CONSERVADORES — não calibrados em um único cartão.
+    # DETECÇÃO DE MARCAÇÃO V2 (ink-agnostic, multi-feature + decisão adaptativa)
+    # Evolução in-place: mesma API de retorno {q: letra|None|INVALID}.
     # =========================================================================
-    # Região fotométrica interna (centro geométrico inalterado; r geométrico inalterado)
-    BUBBLE_MARK_INNER_RADIUS_RATIO = 0.65
-    # Média de ink_strength (0–255) mínima para considerar evidência de tinta
+    # Disco de análise (evita borda impressa ~ r*1.0). Antes: 0.65 (média só no centro).
+    # 0.78 cobre anéis/rabiscos sem engolir o anel impresso da bolha.
+    BUBBLE_MARK_INNER_RADIUS_RATIO = 0.78
+    # Regiões concêntricas (frações do raio geométrico)
+    BUBBLE_MARK_CORE_RADIUS_RATIO = 0.40
+    BUBBLE_MARK_RING_INNER_RATIO = 0.55  # início do anel intermediário
+    # Piso absoluto ALTO — marcações claras (caneta / grafite escuro)
     BUBBLE_MARK_SCORE_FLOOR = 28.0
-    # Diferença mínima entre 1º e 2º lugar (mesma escala 0–255)
+    # Piso absoluto BAIXO — candidatas fracas só com evidência relativa
+    BUBBLE_MARK_SCORE_FLOOR_LO = 18.0
+    # Margem 1º−2º para alta confiança
     BUBBLE_MARK_SCORE_MARGIN = 14.0
+    # Margem mínima para média confiança (marca fraca mas dominante)
+    BUBBLE_MARK_SCORE_MARGIN_LO = 9.0
+    # top − mediana das demais alternativas
+    BUBBLE_MARK_REL_EVIDENCE = 9.0
+    # Densidade: fração de pixels com ink_strength acima deste limiar
+    BUBBLE_MARK_DENSITY_INK_ABS = 22.0
+    # Pesos do score combinado (média + densidade + núcleo)
+    BUBBLE_MARK_W_MEAN = 0.50
+    BUBBLE_MARK_W_DENSITY = 0.40
+    BUBBLE_MARK_W_CORE = 0.10
     # Blur para estimar papel local (iluminação desigual)
     BUBBLE_MARK_PAPER_BLUR_SIGMA = 14.0
+    # CLAHE: desligado por padrão — em cartões reais elevava bolhas vazias
+    # (borda impressa) acima do floor_hi e gerava INVALID em massa.
+    # Mantido como opção experimental (clip baixo).
+    BUBBLE_MARK_USE_CLAHE = False
+    BUBBLE_MARK_CLAHE_CLIP = 1.5
+    BUBBLE_MARK_CLAHE_TILE = 8
     # V2 é a única implementação ativa no pipeline (constante documental).
     USE_BUBBLE_DETECTION_V2 = True
     
@@ -170,6 +192,8 @@ class AnswerSheetCorrectionNewGrid:
         self.debug = debug
         self.logger = logging.getLogger(__name__)
         self.debug_dir = "debug_corrections_new"
+        # Diagnóstico por questão da última detecção V2 (não altera contrato de answers)
+        self.last_bubble_diagnostics: Dict[int, Dict[str, Any]] = {}
         
         if self.debug:
             import os
@@ -1973,82 +1997,233 @@ class AnswerSheetCorrectionNewGrid:
         Mapa ink-agnostic (float32, ~0–255): quanto cada pixel é mais escuro
         que o papel local estimado.
 
-        Representação escolhida: min(B, G, R).
-        Justificativa: tinta preta/azul/vermelha/verde/lápis reduz pelo menos
-        um canal RGB; papel claro mantém os três altos. Não há regra por matiz
-        (não é "se azul"). Em seguida subtrai-se o fundo local (Gaussian blur
-        do mesmo mapa) para normalizar iluminação/sombra.
+        Representação: min(B, G, R) — caneta/lápis de qualquer cor escurece
+        ao menos um canal. Opcionalmente CLAHE leve no canal, depois subtração
+        do papel local (Gaussian blur) para normalizar iluminação/sombra.
         """
         if block_roi is None or block_roi.size == 0:
             return np.zeros((0, 0), dtype=np.float32)
         if len(block_roi.shape) == 2:
-            channel_min = block_roi.astype(np.float32)
+            channel_min_u8 = block_roi.astype(np.uint8)
         else:
-            channel_min = np.min(block_roi.astype(np.float32), axis=2)
+            channel_min_u8 = np.min(block_roi, axis=2).astype(np.uint8)
+
+        if self.BUBBLE_MARK_USE_CLAHE:
+            tile = int(self.BUBBLE_MARK_CLAHE_TILE)
+            clahe = cv2.createCLAHE(
+                clipLimit=float(self.BUBBLE_MARK_CLAHE_CLIP),
+                tileGridSize=(tile, tile),
+            )
+            channel_min_u8 = clahe.apply(channel_min_u8)
+
+        channel_min = channel_min_u8.astype(np.float32)
         sigma = float(self.BUBBLE_MARK_PAPER_BLUR_SIGMA)
         paper = cv2.GaussianBlur(channel_min, (0, 0), sigmaX=sigma, sigmaY=sigma)
         return np.clip(paper - channel_min, 0.0, 255.0).astype(np.float32)
 
-    def _bubble_ink_score(
+    def _bubble_mark_features(
         self, ink_map: np.ndarray, cx: int, cy: int, r: int
-    ) -> float:
-        """Score contínuo = média de ink_strength no disco interno (evita borda impressa)."""
+    ) -> Dict[str, float]:
+        """
+        Features multi-região + densidade para uma bolha.
+
+        - core: disco central
+        - mid: disco de análise (até INNER_RADIUS_RATIO)
+        - ring: anel intermediário (RING_INNER..INNER) — anéis/rabiscos periféricos
+        - density: % de pixels no disco mid com ink >= DENSITY_INK_ABS
+        - score: combinação média/densidade/núcleo (escala ~0–255)
+        """
+        empty = {
+            "mean_core": 0.0,
+            "mean_mid": 0.0,
+            "mean_ring": 0.0,
+            "density": 0.0,
+            "p90": 0.0,
+            "score": 0.0,
+        }
         if ink_map is None or ink_map.size == 0 or r <= 0:
-            return 0.0
+            return empty
         h, w = ink_map.shape[:2]
         cx, cy, r = int(cx), int(cy), int(r)
         if not (0 <= cx < w and 0 <= cy < h):
-            return 0.0
-        r_inner = max(2, int(round(r * float(self.BUBBLE_MARK_INNER_RADIUS_RATIO))))
-        mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.circle(mask, (cx, cy), r_inner, 255, -1)
-        vals = ink_map[mask > 0]
-        if vals.size == 0:
-            return 0.0
-        return float(np.mean(vals))
+            return empty
+
+        r_mid = max(2, int(round(r * float(self.BUBBLE_MARK_INNER_RADIUS_RATIO))))
+        r_core = max(2, int(round(r * float(self.BUBBLE_MARK_CORE_RADIUS_RATIO))))
+        r_ring_in = max(2, int(round(r * float(self.BUBBLE_MARK_RING_INNER_RATIO))))
+        if r_core >= r_mid:
+            r_core = max(2, r_mid - 1)
+        if r_ring_in >= r_mid:
+            r_ring_in = max(2, r_mid - 1)
+
+        yy, xx = np.ogrid[:h, :w]
+        dist2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        mask_mid = dist2 <= (r_mid * r_mid)
+        mask_core = dist2 <= (r_core * r_core)
+        mask_ring = (dist2 >= (r_ring_in * r_ring_in)) & mask_mid
+
+        vals_mid = ink_map[mask_mid]
+        if vals_mid.size == 0:
+            return empty
+        vals_core = ink_map[mask_core]
+        vals_ring = ink_map[mask_ring]
+
+        mean_mid = float(np.mean(vals_mid))
+        mean_core = float(np.mean(vals_core)) if vals_core.size else mean_mid
+        mean_ring = float(np.mean(vals_ring)) if vals_ring.size else 0.0
+        dens_thr = float(self.BUBBLE_MARK_DENSITY_INK_ABS)
+        density = float(np.mean(vals_mid >= dens_thr))
+        p90 = float(np.percentile(vals_mid, 90))
+
+        # Anel com tinta mas centro fraco: reforça o score via mean_ring
+        ring_boost = max(0.0, mean_ring - mean_core) * 0.25
+        score_area = (
+            float(self.BUBBLE_MARK_W_MEAN) * mean_mid
+            + float(self.BUBBLE_MARK_W_DENSITY) * (density * 255.0)
+            + float(self.BUBBLE_MARK_W_CORE) * mean_core
+            + ring_boost
+        )
+        # Rabisco/X concentrado no núcleo: média do disco mid dilui demais;
+        # caminho core-focado recupera evidência sem baixar floor global.
+        score_core = 0.70 * mean_core + 0.30 * (density * 255.0)
+        score = float(min(255.0, max(0.0, score_area, score_core)))
+
+        return {
+            "mean_core": mean_core,
+            "mean_mid": mean_mid,
+            "mean_ring": mean_ring,
+            "density": density,
+            "p90": p90,
+            "score": score,
+        }
+
+    def _bubble_ink_score(
+        self, ink_map: np.ndarray, cx: int, cy: int, r: int
+    ) -> float:
+        """Score combinado V2 (compatível com chamadas que esperam float)."""
+        return float(self._bubble_mark_features(ink_map, cx, cy, r)["score"])
+
+    def _decide_question_mark_v2_with_meta(
+        self, scored: List[Dict[str, Any]]
+    ) -> Tuple[Optional[str], Dict[str, Any]]:
+        """
+        Decisão adaptativa com confiança.
+
+        scored: [{"letter": "A", "score": float, ...features opcionais}, ...]
+
+        Níveis:
+          - high: top >= FLOOR e margem >= MARGIN (comportamento clássico)
+          - medium: FLOOR_LO <= top < FLOOR, ou margem intermediária, com
+            evidência relativa (top − mediana das demais)
+          - low: sem evidência → None (não inventa resposta)
+
+        Duplas: segundo >= FLOOR → INVALID (preservado).
+        """
+        meta: Dict[str, Any] = {
+            "confidence": "low",
+            "reason": "empty_input",
+            "top_letter": None,
+            "top_score": 0.0,
+            "second_letter": None,
+            "second_score": 0.0,
+            "margin": 0.0,
+            "rel_evidence": 0.0,
+        }
+        if not scored:
+            return None, meta
+
+        ordered = sorted(scored, key=lambda x: x["score"], reverse=True)
+        top = ordered[0]
+        second = ordered[1] if len(ordered) > 1 else {"letter": None, "score": 0.0}
+        top_score = float(top["score"])
+        second_score = float(second["score"])
+        margin = top_score - second_score
+        other_scores = [float(x["score"]) for x in ordered[1:]] or [0.0]
+        rel_evidence = top_score - float(np.median(other_scores))
+
+        floor_hi = float(self.BUBBLE_MARK_SCORE_FLOOR)
+        floor_lo = float(self.BUBBLE_MARK_SCORE_FLOOR_LO)
+        margin_hi = float(self.BUBBLE_MARK_SCORE_MARGIN)
+        margin_lo = float(self.BUBBLE_MARK_SCORE_MARGIN_LO)
+        rel_min = float(self.BUBBLE_MARK_REL_EVIDENCE)
+
+        meta.update({
+            "top_letter": top["letter"],
+            "top_score": top_score,
+            "second_letter": second.get("letter"),
+            "second_score": second_score,
+            "margin": margin,
+            "rel_evidence": rel_evidence,
+        })
+
+        if top_score < floor_lo:
+            meta["confidence"] = "low"
+            meta["reason"] = f"top<{floor_lo:.0f} (floor_lo)"
+            return None, meta
+
+        # Densidade do 2º (se disponível): evita INVALID por borda impressa
+        # com score inchado sem tinta real.
+        second_density = float(second.get("density") or 0.0)
+        top_density = float(top.get("density") or 0.0)
+        dens_min_double = 0.28
+
+        # Dupla marcação forte: ambos acima do piso clássico E com densidade
+        # mínima de tinta (ou sem feature de densidade → fallback clássico).
+        second_looks_marked = second_score >= floor_hi and (
+            "density" not in second or second_density >= dens_min_double
+        )
+        if second_looks_marked and top_score >= floor_hi and (
+            "density" not in top or top_density >= dens_min_double
+        ):
+            if margin < margin_hi and top_score < (floor_hi + margin_hi * 1.5):
+                meta["confidence"] = "low"
+                meta["reason"] = "ambiguous_double_weak"
+                return None, meta
+            meta["confidence"] = "high"
+            meta["reason"] = "double_mark_invalid"
+            return "INVALID", meta
+
+        # Duas candidatas fracas/medias próximas → não escolhe vencedor
+        if second_score >= floor_lo and margin < margin_lo:
+            meta["confidence"] = "low"
+            meta["reason"] = "ambiguous_close_pair"
+            return None, meta
+
+        # Alta confiança (equivalente ao floor/margin clássicos)
+        if top_score >= floor_hi and margin >= margin_hi:
+            meta["confidence"] = "high"
+            meta["reason"] = "high_score_clear_margin"
+            return top["letter"], meta
+
+        # Média confiança: marca fraca mas dominante na questão
+        if (
+            top_score >= floor_lo
+            and margin >= margin_lo
+            and rel_evidence >= rel_min
+        ):
+            meta["confidence"] = "medium"
+            meta["reason"] = "weak_mark_relative_winner"
+            return top["letter"], meta
+
+        meta["confidence"] = "low"
+        meta["reason"] = "insufficient_relative_evidence"
+        return None, meta
 
     def _decide_question_mark_v2(
         self, scored: List[Dict[str, Any]]
     ) -> Optional[str]:
-        """
-        Decisão relativa por questão.
-
-        scored: [{"letter": "A", "score": float}, ...]
-
-        Regras:
-          - top < FLOOR → None (vazio / sem evidência)
-          - segundo >= FLOOR e competição fraca/ambígua → None
-          - segundo >= FLOOR com evidência forte de dupla → INVALID
-          - margem (top − 2º) < MARGIN → None (ambíguo)
-          - senão → letra do top
-        """
-        if not scored:
-            return None
-        ordered = sorted(scored, key=lambda x: x["score"], reverse=True)
-        top = ordered[0]
-        second_score = ordered[1]["score"] if len(ordered) > 1 else 0.0
-        floor = float(self.BUBBLE_MARK_SCORE_FLOOR)
-        margin = float(self.BUBBLE_MARK_SCORE_MARGIN)
-        top_score = float(top["score"])
-
-        if top_score < floor:
-            return None
-        if second_score >= floor:
-            # Duas alternativas com evidência: dupla marcação vs empate fraco
-            if (top_score - second_score) < margin and top_score < (floor + margin * 1.5):
-                return None
-            return "INVALID"
-        if (top_score - second_score) < margin:
-            return None
-        return top["letter"]
+        """Wrapper compatível: retorna só a decisão (letra|None|INVALID)."""
+        decision, _meta = self._decide_question_mark_v2_with_meta(scored)
+        return decision
 
     def _detect_marked_bubbles_v2(
         self, block_roi: np.ndarray, bubbles: List[Dict], block_id: int = None
     ) -> Dict[int, str]:
         """
-        V2: ink-agnostic + score contínuo + decisão relativa (piso + margem).
+        V2: ink-agnostic + features (média/densidade/regiões) + decisão adaptativa.
 
-        Não usa Otsu global do bloco nem FILL_THRESHOLD.
+        Contrato de retorno inalterado: {q_num: letra|None|INVALID}.
+        Diagnóstico detalhado acumulado em self.last_bubble_diagnostics.
         """
         ink_map = self._build_ink_strength_map(block_roi)
 
@@ -2061,8 +2236,10 @@ class AnswerSheetCorrectionNewGrid:
             for bubble in bubbles:
                 cx, cy, r = int(bubble["cx"]), int(bubble["cy"]), int(bubble["r"])
                 r_in = max(2, int(round(r * float(self.BUBBLE_MARK_INNER_RADIUS_RATIO))))
+                r_core = max(2, int(round(r * float(self.BUBBLE_MARK_CORE_RADIUS_RATIO))))
                 cv2.circle(debug_img, (cx, cy), r, (0, 255, 0), 1)
                 cv2.circle(debug_img, (cx, cy), r_in, (0, 255, 255), 1)
+                cv2.circle(debug_img, (cx, cy), r_core, (255, 128, 0), 1)
             self._save_debug_image(f"06_block{block_id}_bubbles_mapped_v2.jpg", debug_img)
 
         questions_dict = defaultdict(list)
@@ -2075,27 +2252,67 @@ class AnswerSheetCorrectionNewGrid:
         for q_num, q_bubbles in questions_dict.items():
             scored = []
             for bubble in q_bubbles:
-                score = self._bubble_ink_score(
+                feats = self._bubble_mark_features(
                     ink_map, bubble["cx"], bubble["cy"], bubble["r"]
                 )
-                scored.append({"letter": bubble["alternative"], "score": score})
-                all_scores.append(score)
-                if self.debug and q_num <= 13:
+                entry = {
+                    "letter": bubble["alternative"],
+                    "score": feats["score"],
+                    "mean_core": feats["mean_core"],
+                    "mean_mid": feats["mean_mid"],
+                    "mean_ring": feats["mean_ring"],
+                    "density": feats["density"],
+                    "p90": feats["p90"],
+                    "cx": bubble["cx"],
+                    "cy": bubble["cy"],
+                    "r": bubble["r"],
+                }
+                scored.append(entry)
+                all_scores.append(feats["score"])
+                if self.debug:
                     self.logger.info(
                         f"   [V2] Q{q_num}{bubble['alternative']}: "
                         f"cx={bubble['cx']}, cy={bubble['cy']}, r={bubble['r']} → "
-                        f"score={score:.2f}"
+                        f"score={feats['score']:.2f} mid={feats['mean_mid']:.2f} "
+                        f"core={feats['mean_core']:.2f} ring={feats['mean_ring']:.2f} "
+                        f"dens={feats['density']:.3f} p90={feats['p90']:.2f}"
                     )
 
-            decision = self._decide_question_mark_v2(scored)
+            decision, meta = self._decide_question_mark_v2_with_meta(scored)
             answers[q_num] = decision
+
+            by_letter = {s["letter"]: s for s in scored}
+            self.last_bubble_diagnostics[int(q_num)] = {
+                "block_id": block_id,
+                "decision": decision,
+                "confidence": meta["confidence"],
+                "reason": meta["reason"],
+                "top_letter": meta["top_letter"],
+                "top_score": meta["top_score"],
+                "second_letter": meta["second_letter"],
+                "second_score": meta["second_score"],
+                "margin": meta["margin"],
+                "rel_evidence": meta["rel_evidence"],
+                "alternatives": {
+                    let: {
+                        "score": float(s["score"]),
+                        "mean_core": float(s["mean_core"]),
+                        "mean_mid": float(s["mean_mid"]),
+                        "mean_ring": float(s["mean_ring"]),
+                        "density": float(s["density"]),
+                        "p90": float(s["p90"]),
+                    }
+                    for let, s in by_letter.items()
+                },
+            }
+
             if self.debug:
-                ordered = sorted(scored, key=lambda x: x["score"], reverse=True)
-                top = ordered[0]["score"]
-                second = ordered[1]["score"] if len(ordered) > 1 else 0.0
                 self.logger.info(
-                    f"   [V2] Q{q_num}: top={top:.2f} second={second:.2f} "
-                    f"margin={top - second:.2f} → {decision!r}"
+                    f"   [V2] Q{q_num}: top={meta['top_score']:.2f} "
+                    f"({meta['top_letter']}) second={meta['second_score']:.2f} "
+                    f"({meta['second_letter']}) margin={meta['margin']:.2f} "
+                    f"rel={meta['rel_evidence']:.2f} → {decision!r} "
+                    f"conf={meta['confidence']} reason={meta['reason']}"
                 )
 
         self.logger.info(
@@ -2109,8 +2326,12 @@ class AnswerSheetCorrectionNewGrid:
             self.logger.info(
                 f"📊 [V2] Scores: min={arr.min():.2f}, max={arr.max():.2f}, "
                 f"mean={arr.mean():.2f}, median={np.median(arr):.2f} | "
-                f"floor={self.BUBBLE_MARK_SCORE_FLOOR} margin={self.BUBBLE_MARK_SCORE_MARGIN} "
-                f"inner_r={self.BUBBLE_MARK_INNER_RADIUS_RATIO}"
+                f"floor_hi={self.BUBBLE_MARK_SCORE_FLOOR} "
+                f"floor_lo={self.BUBBLE_MARK_SCORE_FLOOR_LO} "
+                f"margin_hi={self.BUBBLE_MARK_SCORE_MARGIN} "
+                f"margin_lo={self.BUBBLE_MARK_SCORE_MARGIN_LO} "
+                f"inner_r={self.BUBBLE_MARK_INNER_RADIUS_RATIO} "
+                f"clahe={self.BUBBLE_MARK_USE_CLAHE}"
             )
         return answers
 
@@ -2322,11 +2543,14 @@ class AnswerSheetCorrectionNewGrid:
                 wrong += 1
                 is_correct = False
             
+            diag = self.last_bubble_diagnostics.get(int(q_num), {})
             detailed_answers.append({
                 "question": q_num,
                 "marked": marked,
                 "correct": correct_answer,
-                "is_correct": is_correct
+                "is_correct": is_correct,
+                "confidence": diag.get("confidence"),
+                "decision_reason": diag.get("reason"),
             })
         
         score = (correct / total_questions * 100) if total_questions > 0 else 0
@@ -2334,6 +2558,10 @@ class AnswerSheetCorrectionNewGrid:
         # Converter chaves para strings para serialização JSON
         student_answers_str = {str(q): answers.get(q) for q in sorted(gabarito.keys())}
         answer_key_str = {str(q): gabarito[q] for q in sorted(gabarito.keys())}
+        confidence_str = {
+            str(q): (self.last_bubble_diagnostics.get(int(q), {}) or {}).get("confidence")
+            for q in sorted(gabarito.keys())
+        }
         
         return {
             "success": True,
@@ -2345,7 +2573,13 @@ class AnswerSheetCorrectionNewGrid:
             "score": round(score, 2),
             "detailed_answers": detailed_answers,  # Lista detalhada: [{question, marked, correct, is_correct}, ...]
             "student_answers": student_answers_str,  # Dicionário: {"1": "A", "2": "B", ...}
-            "answer_key": answer_key_str  # Gabarito oficial: {"1": "A", "2": "C", ...}
+            "answer_key": answer_key_str,  # Gabarito oficial: {"1": "A", "2": "C", ...}
+            "mark_confidence": confidence_str,  # Opcional: high|medium|low por questão
+            "mark_diagnostics": {
+                str(q): self.last_bubble_diagnostics[q]
+                for q in sorted(self.last_bubble_diagnostics.keys())
+                if q in gabarito
+            },
         }
 
     @staticmethod
@@ -2718,6 +2952,7 @@ class AnswerSheetCorrectionNewGrid:
         # ETAPAS 6-9: Processar cada bloco
         self.logger.info("🔄 Etapas 6-9: Processar blocos")
         all_answers = {}
+        self.last_bubble_diagnostics = {}
         
         for idx, block in enumerate(blocks):
             block_num = idx + 1
@@ -2753,6 +2988,7 @@ class AnswerSheetCorrectionNewGrid:
         return {
             "success": True,
             "answers": all_answers,
+            "mark_diagnostics": dict(self.last_bubble_diagnostics),
             "aluno_ausente": bool(ausente_info.get("marked")),
             "aluno_ausente_fill_ratio": ausente_info.get("fill_ratio", 0.0),
             "aluno_ausente_method": ausente_info.get("method"),

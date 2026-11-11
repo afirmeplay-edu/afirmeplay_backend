@@ -85,36 +85,36 @@ class EvaluationCalculator:
     }
     
     # Configurações de classificação por faixas de proficiência
+    # Limites .99 fecham buracos entre faixas inteiras (ex.: 199.63 em LP/Outras
+    # não pode cair no fallback "Abaixo do Básico" entre Básico max 199 e Adequado min 200).
     CLASSIFICATION_CONFIG = {
         # Educação Infantil, Anos Iniciais, Educação Especial, EJA - Outras matérias
         (CourseLevel.EDUCACAO_INFANTIL, Subject.OUTRAS): [
-            (0, 149, Classification.ABAIXO_BASICO),
-            (150, 199, Classification.BASICO),
-            (200, 249, Classification.ADEQUADO),
+            (0, 149.99, Classification.ABAIXO_BASICO),
+            (150, 199.99, Classification.BASICO),
+            (200, 249.99, Classification.ADEQUADO),
             (250, 350, Classification.AVANCADO)
         ],
         (CourseLevel.ANOS_INICIAIS, Subject.OUTRAS): [
-            (0, 149, Classification.ABAIXO_BASICO),
-            (150, 199, Classification.BASICO),
-            (200, 249, Classification.ADEQUADO),
+            (0, 149.99, Classification.ABAIXO_BASICO),
+            (150, 199.99, Classification.BASICO),
+            (200, 249.99, Classification.ADEQUADO),
             (250, 350, Classification.AVANCADO)
         ],
         (CourseLevel.EDUCACAO_ESPECIAL, Subject.OUTRAS): [
-            (0, 149, Classification.ABAIXO_BASICO),
-            (150, 199, Classification.BASICO),
-            (200, 249, Classification.ADEQUADO),
+            (0, 149.99, Classification.ABAIXO_BASICO),
+            (150, 199.99, Classification.BASICO),
+            (200, 249.99, Classification.ADEQUADO),
             (250, 350, Classification.AVANCADO)
         ],
         (CourseLevel.EJA, Subject.OUTRAS): [
-            (0, 149, Classification.ABAIXO_BASICO),
-            (150, 199, Classification.BASICO),
-            (200, 249, Classification.ADEQUADO),
+            (0, 149.99, Classification.ABAIXO_BASICO),
+            (150, 199.99, Classification.BASICO),
+            (200, 249.99, Classification.ADEQUADO),
             (250, 350, Classification.AVANCADO)
         ],
         
         # Educação Infantil, Anos Iniciais, Educação Especial, EJA - Matemática
-        # Limites .99 fecham buracos entre faixas inteiras (ex.: 224.9 não pode cair
-        # no fallback "Abaixo do Básico" entre Básico max 224 e Adequado min 225).
         (CourseLevel.EDUCACAO_INFANTIL, Subject.MATEMATICA): [
             (0, 174.99, Classification.ABAIXO_BASICO),
             (175, 224.99, Classification.BASICO),
@@ -142,13 +142,13 @@ class EvaluationCalculator:
         
         # Anos Finais e Ensino Médio - Outras matérias
         (CourseLevel.ANOS_FINAIS, Subject.OUTRAS): [
-            (0, 199, Classification.ABAIXO_BASICO),
+            (0, 199.99, Classification.ABAIXO_BASICO),
             (200, 274.99, Classification.BASICO),
             (275, 324.99, Classification.ADEQUADO),
             (325, 400, Classification.AVANCADO)
         ],
         (CourseLevel.ENSINO_MEDIO, Subject.OUTRAS): [
-            (0, 199, Classification.ABAIXO_BASICO),
+            (0, 199.99, Classification.ABAIXO_BASICO),
             (200, 274.99, Classification.BASICO),
             (275, 324.99, Classification.ADEQUADO),
             (325, 400, Classification.AVANCADO)
@@ -180,9 +180,9 @@ class EvaluationCalculator:
         ranges = cls.CLASSIFICATION_CONFIG.get(
             (course_level, subject_type),
             [
-                (0, 149, Classification.ABAIXO_BASICO),
-                (150, 199, Classification.BASICO),
-                (200, 249, Classification.ADEQUADO),
+                (0, 149.99, Classification.ABAIXO_BASICO),
+                (150, 199.99, Classification.BASICO),
+                (200, 249.99, Classification.ADEQUADO),
                 (250, 350, Classification.AVANCADO),
             ],
         )
@@ -373,9 +373,9 @@ class EvaluationCalculator:
                 ranges = cls.CLASSIFICATION_CONFIG.get(
                     (course_level, subject_type),
                     [
-                        (0, 149, Classification.ABAIXO_BASICO),
-                        (150, 199, Classification.BASICO),
-                        (200, 249, Classification.ADEQUADO),
+                        (0, 149.99, Classification.ABAIXO_BASICO),
+                        (150, 199.99, Classification.BASICO),
+                        (200, 249.99, Classification.ADEQUADO),
                         (250, 350, Classification.AVANCADO)
                     ],
                 )
@@ -400,9 +400,9 @@ class EvaluationCalculator:
                 (course_level, subject_type),
                 # Padrão para casos não identificados
                 [
-                    (0, 149, Classification.ABAIXO_BASICO),
-                    (150, 199, Classification.BASICO),
-                    (200, 249, Classification.ADEQUADO),
+                    (0, 149.99, Classification.ABAIXO_BASICO),
+                    (150, 199.99, Classification.BASICO),
+                    (200, 249.99, Classification.ADEQUADO),
                     (250, 350, Classification.AVANCADO)
                 ]
             )

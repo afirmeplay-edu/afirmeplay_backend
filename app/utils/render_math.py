@@ -6,6 +6,8 @@ Espelha o comportamento do frontend (renderMath.ts + KaTeX):
   - $...$       → inline  (displayMode: false)
   - $$...$$     → bloco   (displayMode: true)
   - throwOnError: false   → em falha, mantém o delimitador original
+  - `$` colado a uma letra (ex.: R$, US$) NÃO abre fórmula — evita falso
+    positivo de moeda em enunciados com dois R$ na mesma linha.
 
 WeasyPrint não executa JavaScript; fórmulas viram <img> PNG (matplotlib mathtext).
 """
@@ -25,8 +27,12 @@ import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
-# Mesma ordem do frontend: bloco ($$) antes de inline ($)
-MATH_PATTERN = re.compile(r'\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$')
+# Mesma ordem/regra do frontend (renderMath.ts):
+# bloco ($$) antes de inline ($); inline só se o `$` de abertura NÃO for
+# precedido por letra Unicode ([^\W\d_] ≈ \p{L} do JS).
+MATH_PATTERN = re.compile(
+    r'\$\$([\s\S]+?)\$\$|(?<![^\W\d_])\$([^$\n]+?)\$',
+)
 HTML_TAG_OR_TEXT = re.compile(r'(<[^>]+>)|([^<]+)', re.DOTALL)
 
 _MATH_FONT_SIZE = 24

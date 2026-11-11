@@ -5,18 +5,204 @@
 		<title>{{ test.title }}</title>
 		<!--
 			Caderno de questões da avaliação escrita do Afirme Ler (prova impressa).
-			Sem gabarito, sem pontuação e sem a palavra do ditado: as respostas vão no cartão-resposta.
+			Visual alinhado a institutional_test_hybrid.html (capa Afirme, tipografia,
+			imagens e layout de questões/alternativas).
+			Sem gabarito, sem pontuação e sem a palavra do ditado.
+			Cartão-resposta NÃO entra neste PDF (gerado à parte).
+			Ditado e bilhete: linhas de escrita no próprio caderno.
 		-->
 		<style>
 			@page {
 				size: A4 portrait;
-				margin: 1.6cm 1.8cm 1.8cm 1.8cm;
-				@bottom-center {
-					content: "Página " counter(page) " de " counter(pages);
-					font-family: "DejaVu Sans", "Helvetica", Arial, sans-serif;
-					font-size: 10pt;
-					color: #555;
+				margin: 1.5cm 2cm;
+			}
+
+			@page with-footer {
+				margin: 1.5cm 2cm;
+				@bottom-left {
+					content: "AfirmePlay Sistema de Ensino e Avaliação";
+					font-family: "Helvetica", Arial, sans-serif;
+					font-size: 7pt;
+					color: #999;
 				}
+				@bottom-center {
+					content: "Página " counter(page);
+					font-family: "Helvetica", Arial, sans-serif;
+					font-size: 7pt;
+					color: #999;
+				}
+				@bottom-right {
+					content: "Gerado em {{ generated_date }}";
+					font-family: "Helvetica", Arial, sans-serif;
+					font-size: 7pt;
+					color: #999;
+				}
+			}
+
+			@page afirme-cover {
+				size: A4 portrait;
+				margin: 0;
+			}
+
+			.afirme-cover-page {
+				page: afirme-cover;
+				position: relative;
+				width: 21cm;
+				height: 29.7cm;
+				page-break-after: always;
+				overflow: hidden;
+			}
+
+			.afirme-cover-bg {
+				position: absolute;
+				top: 0;
+				left: 0;
+				width: 21cm;
+				height: 29.7cm;
+				object-fit: fill;
+				z-index: 0;
+			}
+
+			.afirme-cover-overlay {
+				position: absolute;
+				top: 0;
+				left: 0;
+				width: 21cm;
+				height: 29.7cm;
+				z-index: 1;
+				pointer-events: none;
+			}
+
+			.afirme-cover-logo-municipality {
+				position: absolute;
+				top: {{ afirme_cover_layout.municipality_logo.top_cm | default(0.45) }}cm;
+				left: {{ afirme_cover_layout.municipality_logo.left_cm | default(0.45) }}cm;
+				width: {{ afirme_cover_layout.municipality_logo.width_cm | default(7.0) }}cm;
+				height: {{ afirme_cover_layout.municipality_logo.height_cm | default(2.25) }}cm;
+				display: flex;
+				align-items: center;
+				justify-content: flex-start;
+				overflow: hidden;
+			}
+
+			.afirme-cover-logo-municipality img {
+				max-width: 100%;
+				max-height: 100%;
+				width: auto;
+				height: auto;
+				object-fit: contain;
+				display: block;
+			}
+
+			.afirme-cover-logo-company {
+				position: absolute;
+				top: {{ afirme_cover_layout.company_logo.top_cm | default(9.0) }}cm;
+				left: {{ afirme_cover_layout.company_logo.left_cm | default(2.14) }}cm;
+				width: {{ afirme_cover_layout.company_logo.width_cm | default(10.77) }}cm;
+				height: {{ afirme_cover_layout.company_logo.height_cm | default(7.7) }}cm;
+				border-radius: 50%;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				overflow: hidden;
+			}
+
+			.afirme-cover-logo-company img {
+				/* Wordmark Educacional: menor que a logo Play para caber no círculo da capa */
+				max-width: 58%;
+				max-height: 58%;
+				width: auto;
+				height: auto;
+				object-fit: contain;
+				display: block;
+			}
+
+			.afirme-cover-title {
+				position: absolute;
+				top: {{ afirme_cover_layout.title.top_cm | default(10.6) }}cm;
+				left: {{ afirme_cover_layout.title.left_cm | default(9.0) }}cm;
+				width: {{ afirme_cover_layout.title.width_cm | default(11.2) }}cm;
+				text-align: right;
+				font-family: "Helvetica", Arial, sans-serif;
+				font-size: {{ afirme_cover_layout.title.font_pt | default(15) }}pt;
+				font-weight: bold;
+				color: #1a1a1a;
+				line-height: 1.2;
+			}
+
+			.afirme-cover-grade-subjects {
+				position: absolute;
+				top: {{ afirme_cover_layout.grade_subjects.top_cm | default(19.2) }}cm;
+				left: {{ afirme_cover_layout.grade_subjects.left_cm | default(12.8) }}cm;
+				width: {{ afirme_cover_layout.grade_subjects.width_cm | default(7.8) }}cm;
+				text-align: center;
+				color: #1a1a1a;
+				font-family: "Helvetica", Arial, sans-serif;
+			}
+
+			.afirme-cover-grade-line {
+				line-height: 1;
+				margin-bottom: 0.35cm;
+			}
+
+			.afirme-cover-grade-number {
+				font-size: {{ afirme_cover_layout.grade_subjects.grade_num_font_pt | default(42) }}pt;
+				font-weight: 800;
+				letter-spacing: -1px;
+			}
+
+			.afirme-cover-grade-label {
+				display: block;
+				font-size: {{ afirme_cover_layout.grade_subjects.grade_label_font_pt | default(14) }}pt;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.5px;
+				margin-top: -0.15cm;
+			}
+
+			.afirme-cover-subjects {
+				font-size: {{ afirme_cover_layout.grade_subjects.subjects_font_pt | default(11) }}pt;
+				font-weight: 700;
+				text-transform: uppercase;
+				line-height: 1.25;
+				overflow-wrap: break-word;
+				word-wrap: break-word;
+			}
+
+			.afirme-cover-field-school {
+				position: absolute;
+				top: {{ afirme_cover_layout.school.top_cm | default(28.05) }}cm;
+				left: {{ afirme_cover_layout.school.left_cm | default(5.0) }}cm;
+				width: {{ afirme_cover_layout.school.width_cm | default(9.2) }}cm;
+				height: {{ afirme_cover_layout.school.height_cm | default(0.88) }}cm;
+				display: flex;
+				align-items: center;
+				font-family: "Helvetica", Arial, sans-serif;
+				font-size: {{ afirme_cover_layout.school.font_pt | default(9) }}pt;
+				font-weight: 600;
+				color: #1a1a1a;
+				text-transform: uppercase;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+
+			.afirme-cover-field-class {
+				position: absolute;
+				top: {{ afirme_cover_layout.class.top_cm | default(28.05) }}cm;
+				left: {{ afirme_cover_layout.class.left_cm | default(16.1) }}cm;
+				width: {{ afirme_cover_layout.class.width_cm | default(4.8) }}cm;
+				height: {{ afirme_cover_layout.class.height_cm | default(0.88) }}cm;
+				display: flex;
+				align-items: center;
+				font-family: "Helvetica", Arial, sans-serif;
+				font-size: {{ afirme_cover_layout.class.font_pt | default(9) }}pt;
+				font-weight: 600;
+				color: #1a1a1a;
+				text-transform: uppercase;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
 			}
 
 			* {
@@ -25,296 +211,358 @@
 
 			body {
 				margin: 0;
-				font-family: "DejaVu Sans", "Helvetica", Arial, sans-serif;
-				font-size: 14pt;
-				line-height: 1.5;
-				color: #111;
+				font-family: "Helvetica", Arial, sans-serif;
+				font-size: 12pt;
+				line-height: 1.6;
+				color: #374151;
 			}
 
 			p {
-				margin: 0 0 0.25cm 0;
-			}
-
-			img {
-				max-width: 100%;
-				max-height: 9cm;
-				height: auto;
-			}
-
-			img.icon-inline {
-				max-height: 1em;
-				vertical-align: middle;
+				margin: 0 0 8px 0;
 			}
 
 			.dictation-icon {
-				display: inline-flex;
-				align-items: center;
-				justify-content: center;
-				width: 1.05em;
-				height: 1.05em;
-				margin-right: 0.18em;
-				vertical-align: -0.12em;
+				display: inline-block;
+				width: 22px;
+				height: 22px;
+				margin-right: 0.3em;
+				vertical-align: -5px;
 				color: #0b5cad;
+				line-height: 0;
 			}
 
 			.dictation-icon svg {
-				width: 100%;
-				height: 100%;
+				width: 22px;
+				height: 22px;
 				fill: currentColor;
+				display: block;
 			}
 
-			.question-title {
-				font-size: 14pt;
-				font-weight: bold;
-				margin-bottom: 0.15cm;
+			.dictation-media {
+				display: flex;
+				align-items: flex-start;
+				gap: 0.35cm;
+				margin: 10px 0;
+			}
+
+			.dictation-media .dictation-icon {
+				flex: 0 0 auto;
+				width: 28px;
+				height: 28px;
+				margin-right: 0;
+				margin-top: 6px;
+				vertical-align: top;
+			}
+
+			.dictation-media .dictation-icon svg {
+				width: 28px;
+				height: 28px;
+			}
+
+			.dictation-media img {
+				flex: 0 1 auto;
 			}
 
 			.applicator-banner {
 				border: 1px solid #0b5cad;
 				background: #eef6ff;
 				color: #0b5cad;
-				border-radius: 6px;
-				padding: 0.2cm 0.35cm;
-				margin-bottom: 0.4cm;
-				font-size: 12pt;
+				border-radius: 4px;
+				padding: 6px 10px;
+				margin-bottom: 14px;
+				font-size: 11pt;
 				font-weight: bold;
-			}
-
-			.header {
-				border: 1.5px solid #222;
-				border-radius: 8px;
-				padding: 0.35cm 0.45cm;
-				margin-bottom: 0.4cm;
-			}
-
-			.header-top {
-				display: flex;
-				align-items: center;
-				gap: 0.4cm;
-				margin-bottom: 0.3cm;
-			}
-
-			.header-top img {
-				max-height: 1.8cm;
-				max-width: 4cm;
-			}
-
-			.municipality {
-				font-size: 12pt;
-				font-weight: bold;
-				text-transform: uppercase;
-			}
-
-			.test-title {
-				font-size: 17pt;
-				font-weight: bold;
-				line-height: 1.25;
-			}
-
-			.grades {
-				font-size: 12pt;
-			}
-
-			.field {
-				display: flex;
-				align-items: flex-end;
-				font-size: 13pt;
-				margin-top: 0.3cm;
-			}
-
-			.field-label {
-				font-weight: bold;
-				white-space: nowrap;
-				margin-right: 0.2cm;
-			}
-
-			.field-line {
-				flex: 1;
-				border-bottom: 1px solid #222;
-				height: 0.7cm;
-			}
-
-			.field-row {
-				display: flex;
-				gap: 0.5cm;
-			}
-
-			.field-row .field {
-				flex: 1;
 			}
 
 			.instructions {
-				border: 1px dashed #444;
-				border-radius: 6px;
-				padding: 0.25cm 0.4cm;
-				margin-bottom: 0.5cm;
-				font-size: 13pt;
+				border: 1px solid #d1d5db;
+				border-radius: 4px;
+				padding: 8px 12px;
+				margin-bottom: 16px;
+				font-size: 11pt;
+				line-height: 1.45;
 			}
 
 			.instructions strong {
 				display: block;
-				margin-bottom: 0.1cm;
+				margin-bottom: 4px;
+			}
+
+			.questions-section {
+				page: with-footer;
 			}
 
 			.question {
-				margin-bottom: 0.55cm;
-				padding-bottom: 0.35cm;
-				border-bottom: 1px solid #ccc;
-			}
-
-			.question.keep-together {
+				margin-bottom: 35px;
 				page-break-inside: avoid;
 				break-inside: avoid;
+				background: white;
 			}
 
-			.question-head {
-				display: flex;
-				align-items: flex-start;
-				gap: 0.3cm;
+			.question.writing-question {
+				page-break-inside: auto;
+				break-inside: auto;
+			}
+
+			.question-header {
+				margin-bottom: 12px;
+				background: #7030A0;
+				padding: 8px 12px;
+				border-radius: 4px;
 			}
 
 			.question-number {
-				flex: 0 0 auto;
-				min-width: 1.1cm;
-				height: 1.1cm;
-				border: 2px solid #111;
-				border-radius: 50%;
-				font-size: 15pt;
+				font-size: 10pt;
 				font-weight: bold;
-				text-align: center;
-				line-height: 1.02cm;
+				color: #fff;
+				display: inline;
 			}
 
-			.question-body {
-				flex: 1;
+			/* Título da questão (muitos usam como código de habilidade) ao lado de Questão N */
+			.skill-code {
+				font-size: 10pt;
+				color: #fff;
+				font-weight: normal;
+				margin-left: 8px;
+				display: inline;
 			}
 
-			.statement {
-				font-size: 15pt;
+			.skill-code p {
+				display: inline;
+				margin: 0;
 			}
 
+			.statement,
 			.support {
-				font-size: 14pt;
-				margin-top: 0.2cm;
+				font-size: 12pt;
+				color: #000;
+				margin-bottom: 15px;
+				line-height: 1.5;
+				text-align: justify;
+				overflow-wrap: break-word;
+				word-break: break-word;
+				max-width: 100%;
+			}
+
+			.statement p,
+			.support p,
+			.alternative-content p {
+				margin-bottom: 8px;
+				overflow-wrap: break-word;
+				word-break: break-word;
+				max-width: 100%;
+			}
+
+			.statement img:not(.math-inline-img):not(.math-display-img),
+			.support img:not(.math-inline-img):not(.math-display-img) {
+				max-width: 16.5cm !important;
+				max-height: 10cm !important;
+				width: auto;
+				height: auto;
+				display: block !important;
+				margin: 8px auto !important;
+				object-fit: contain;
+				border: 1px solid #111;
+			}
+
+			.alternative-content img:not(.math-inline-img):not(.math-display-img) {
+				max-width: 8cm !important;
+				max-height: 6cm !important;
+				width: auto;
+				height: auto;
+				display: block !important;
+				margin: 4px 0 6px 0 !important;
+				object-fit: contain;
+				border: 1px solid #111;
+			}
+
+			.dictation-media img:not(.math-inline-img):not(.math-display-img) {
+				margin: 0 !important;
+			}
+
+			img.math-inline-img {
+				display: inline !important;
+				width: auto !important;
+				max-width: none !important;
+				height: 2.4em !important;
+				margin: 0 2px 0 0 !important;
+				vertical-align: middle !important;
+			}
+
+			img.math-display-img {
+				display: block !important;
+				width: auto !important;
+				max-width: 100% !important;
+				height: auto !important;
+				margin: 8px auto !important;
+				min-height: 1.8em;
+			}
+
+			img.icon-inline {
+				max-height: 1.5em !important;
+				max-width: 3em !important;
+				width: auto !important;
+				height: auto !important;
+				display: inline !important;
+				vertical-align: middle !important;
+				margin: 0 0.2em !important;
 			}
 
 			.alternatives {
-				list-style: none;
-				margin: 0.25cm 0 0 0;
-				padding: 0;
+				margin-top: 12px;
 			}
 
 			.alternative {
+				font-size: 12pt;
+				color: #000;
+				margin-bottom: 6px;
+				line-height: 1.4;
 				display: flex;
 				align-items: flex-start;
-				gap: 0.3cm;
-				font-size: 15pt;
-				margin-bottom: 0.2cm;
 				page-break-inside: avoid;
 				break-inside: avoid;
 			}
 
 			.alternative-letter {
-				flex: 0 0 auto;
 				font-weight: bold;
-				min-width: 0.9cm;
+				margin-right: 6px;
+				min-width: 20px;
 			}
 
-			.alternative-content p:last-child {
-				margin-bottom: 0;
+			.alternative-content {
+				flex: 1;
+				overflow-wrap: break-word;
+				word-break: break-word;
+				max-width: 100%;
 			}
 
-			.answer-on-card {
-				margin-top: 0.25cm;
-				font-size: 14pt;
-				font-weight: bold;
+			.writing-area {
+				margin-top: 12px;
+				border: 1px solid #111;
+				padding: 4px 8px 2px;
+			}
+
+			.writing-area.dictation-lines {
+				border: none;
+				border-bottom: 2px solid #111;
+				padding: 0;
+				min-height: 1.1cm;
+				margin-top: 18px;
+			}
+
+			.writing-line {
+				height: 0.85cm;
+				border-bottom: 1px solid #9ca3af;
+			}
+
+			.writing-line:last-child {
+				border-bottom: none;
+			}
+
+			.writing-hint {
+				margin-top: 6px;
+				font-size: 10pt;
+				color: #4b5563;
 				font-style: italic;
 			}
 		</style>
 	</head>
 	<body>
-		<div class="header">
-			<div class="header-top">
-				{% if municipality_logo %}
-				<img src="data:image/png;base64,{{ municipality_logo }}" alt="Logo do município" />
-				{% elif default_logo %}
-				<img src="data:image/png;base64,{{ default_logo }}" alt="Afirme" />
+		{% if afirme_cover_base64 %}
+		{% set municipality_cover_logo = municipality_logo %}
+		{% set system_cover_logo = educacional_logo or default_logo %}
+		{% set grade_name = test.grade_name or test.grades_label or '' %}
+		{% set grade_parts = grade_name.split() %}
+		<div class="afirme-cover-page">
+			<img
+				class="afirme-cover-bg"
+				src="data:{{ afirme_cover_mime | default('image/jpeg') }};base64,{{ afirme_cover_base64 }}"
+				alt="" />
+			<div class="afirme-cover-overlay">
+				{% if municipality_cover_logo %}
+				<div class="afirme-cover-logo-municipality">
+					<img src="data:image/png;base64,{{ municipality_cover_logo }}" alt="" />
+				</div>
 				{% endif %}
-				<div>
-					{% if municipality %}
-					<div class="municipality">
-						{{ municipality }}{% if state %} — {{ state }}{% endif %}
+				{% if system_cover_logo %}
+				<div class="afirme-cover-logo-company">
+					<img src="data:image/png;base64,{{ system_cover_logo }}" alt="Afirme Educacional" />
+				</div>
+				{% endif %}
+				<div class="afirme-cover-title">
+					{{ test.title }}
+				</div>
+				<div class="afirme-cover-grade-subjects">
+					{% if grade_name %}
+					<div class="afirme-cover-grade-line">
+						<span class="afirme-cover-grade-number">{{ grade_parts[0] }}</span>
+						{% if grade_parts|length > 1 %}
+						<span class="afirme-cover-grade-label">{{ grade_parts[1:]|join(' ') | upper }}</span>
+						{% endif %}
 					</div>
 					{% endif %}
-					<div class="test-title">{{ test.title }}</div>
-					{% if test.grades_label %}
-					<div class="grades">Série(s): {{ test.grades_label }}</div>
+					{% if cover_subject %}
+					<div class="afirme-cover-subjects">{{ cover_subject }}</div>
 					{% endif %}
 				</div>
+				<div class="afirme-cover-field-school"></div>
+				<div class="afirme-cover-field-class"></div>
 			</div>
-
-			<div class="field">
-				<span class="field-label">Nome do aluno:</span>
-				<span class="field-line"></span>
-			</div>
-			<div class="field">
-				<span class="field-label">Escola:</span>
-				<span class="field-line"></span>
-			</div>
-			<div class="field-row">
-				<div class="field">
-					<span class="field-label">Turma:</span>
-					<span class="field-line"></span>
-				</div>
-				<div class="field">
-					<span class="field-label">Data:</span>
-					<span class="field-line"></span>
-				</div>
-			</div>
-		</div>
-
-		<div class="instructions">
-			<strong>Instruções</strong>
-			Leia cada questão com atenção. Marque as respostas no cartão-resposta.
-			O ditado e a produção escrita também são respondidos no cartão-resposta.
-		</div>
-
-		{% if applicator_mode %}
-		<div class="applicator-banner">
-			Prova do aplicador — os megafones marcam o que deve ser lido em voz alta.
 		</div>
 		{% endif %}
 
-		{% for question in questions %}
-		<div class="question{% if question.type == 'multipleChoice' or question.answer_on_card %} keep-together{% endif %}">
-			<div class="question-head">
-				<div class="question-number">{{ question.number }}</div>
-				<div class="question-body">
+		<div class="questions-section">
+			<div class="instructions">
+				<strong>Instruções</strong>
+				Leia cada questão com atenção. Nas questões de múltipla escolha, marque a resposta no cartão-resposta.
+				No ditado e na produção escrita (bilhete), escreva nas linhas desta prova.
+			</div>
+
+			{% if applicator_mode %}
+			<div class="applicator-banner">
+				Prova do aplicador — os megafones marcam o que deve ser lido em voz alta.
+			</div>
+			{% endif %}
+
+			{% for question in questions %}
+			<div class="question{% if question.writing_lines %} writing-question{% endif %}">
+				<div class="question-header">
+					<span class="question-number">Questão {{ question.number }}</span>
 					{% if question.title %}
-					<div class="question-title">{{ question.title }}</div>
-					{% endif %}
-					<div class="statement">{{ question.statement }}</div>
-					{% if question.support %}
-					<div class="support">{{ question.support }}</div>
-					{% endif %}
-
-					{% if question.alternatives %}
-					<ul class="alternatives">
-						{% for alternative in question.alternatives %}
-						<li class="alternative">
-							<span class="alternative-letter">{{ alternative.letter }})</span>
-							<span class="alternative-content">{{ alternative.content }}</span>
-						</li>
-						{% endfor %}
-					</ul>
-					{% endif %}
-
-					{% if question.answer_on_card %}
-					<div class="answer-on-card">{{ answer_on_card_text }}</div>
+					<span class="skill-code">{{ question.title }}</span>
 					{% endif %}
 				</div>
+
+				<div class="statement">{{ question.statement }}</div>
+
+				{% if question.support %}
+				<div class="support">{{ question.support }}</div>
+				{% endif %}
+
+				{% if question.alternatives %}
+				<div class="alternatives">
+					{% for alternative in question.alternatives %}
+					<div class="alternative">
+						<span class="alternative-letter">({{ alternative.letter }})</span>
+						<div class="alternative-content">{{ alternative.content }}</div>
+					</div>
+					{% endfor %}
+				</div>
+				{% endif %}
+
+				{% if question.writing_lines and question.type == 'dictation' %}
+				<div class="writing-hint">Escreva a palavra ditada na linha abaixo.</div>
+				<div class="writing-area dictation-lines"></div>
+				{% elif question.writing_lines %}
+				<div class="writing-hint">Escreva o bilhete nas linhas abaixo.</div>
+				<div class="writing-area">
+					{% for _ in range(question.writing_lines) %}
+					<div class="writing-line"></div>
+					{% endfor %}
+				</div>
+				{% endif %}
 			</div>
+			{% endfor %}
 		</div>
-		{% endfor %}
 	</body>
 </html>

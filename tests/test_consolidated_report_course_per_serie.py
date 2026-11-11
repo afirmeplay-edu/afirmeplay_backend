@@ -117,6 +117,132 @@ def test_grade_formula_differs_by_serie_course():
     assert _course_name_for_serie("9º Ano") == "Anos Finais"
 
 
+def test_geral_misto_com_e_sem_subject_results_usa_proficiencia_persistida():
+    """Não inventar disciplina Outras/fallback ao misturar provas com/sem breakdown."""
+    from app.utils.school_equal_weight_means import hierarchical_mean_grade_and_proficiency
+
+    school = "esc-1"
+    grade = "serie-8"
+    turma = "turma-1"
+    with_sr = [
+        SimpleNamespace(
+            student_id=f"a{i}",
+            proficiency=300.0,
+            grade=7.0,
+            subject_results={
+                "m": {"subject_name": "Matemática", "proficiency": 200.0},
+                "p": {"subject_name": "Português", "proficiency": 400.0},
+            },
+            school_id_snapshot=school,
+            grade_id_snapshot=grade,
+            class_id_snapshot=turma,
+        )
+        for i in range(3)
+    ]
+    without_sr = [
+        SimpleNamespace(
+            student_id=f"b{i}",
+            proficiency=100.0,
+            grade=2.0,
+            subject_results=None,
+            school_id_snapshot=school,
+            grade_id_snapshot=grade,
+            class_id_snapshot=turma,
+        )
+        for i in range(2)
+    ]
+    mixed = with_sr + without_sr
+    # Média simples dos GERAIS persistidos: (300*3 + 100*2)/5 = 220
+    _mg, mp = hierarchical_mean_grade_and_proficiency(
+        mixed, "turma", course_name="Anos Finais", has_matematica=True
+    )
+    assert abs(mp - 220.0) < 0.01
+    # Só com breakdown: média das disciplinas (200+400)/2 = 300
+    _mg2, mp2 = hierarchical_mean_grade_and_proficiency(
+        with_sr, "turma", course_name="Anos Finais", has_matematica=True
+    )
+    assert abs(mp2 - 300.0) < 0.01
+
+
+def test_override_geral_taxa_municipal_usa_hierarchical_mean():
+    """KPI municipal GERAL do consolidado = hierarchical_mean (paridade /avaliacoes)."""
+    from app.services.consolidated_report_service import (
+        _override_geral_taxa_municipal_from_results,
+    )
+    from app.utils.school_equal_weight_means import hierarchical_mean_grade_and_proficiency
+
+    cols = [{"serie_id": "9", "serie_nome": "9º Ano"}]
+    results = [
+        SimpleNamespace(
+            student_id="a1",
+            proficiency=170.0,
+            grade=2.33,
+            subject_results=None,
+            school_id_snapshot="e1",
+            grade_id_snapshot="9",
+            class_id_snapshot="t1",
+        ),
+        SimpleNamespace(
+            student_id="a2",
+            proficiency=85.0,
+            grade=0.0,
+            subject_results=None,
+            school_id_snapshot="e1",
+            grade_id_snapshot="9",
+            class_id_snapshot="t1",
+        ),
+    ]
+    mg, mp = hierarchical_mean_grade_and_proficiency(
+        results, "municipio", course_name="Anos Finais", has_matematica=True
+    )
+    notas = {"GERAL": {"medias_da_rede": {"taxa_geral": 9.99}}, "por_disciplina": {}}
+    profs = {"GERAL": {"medias_da_rede": {"taxa_geral": 9.99}}, "por_disciplina": {}}
+    _override_geral_taxa_municipal_from_results(notas, profs, results, cols, True)
+    assert notas["GERAL"]["medias_da_rede"]["taxa_geral"] == float(
+        __import__("app.utils.decimal_helpers", fromlist=["round_to_two_decimals"]).round_to_two_decimals(mg)
+    )
+    assert profs["GERAL"]["medias_da_rede"]["taxa_geral"] == float(
+        __import__("app.utils.decimal_helpers", fromlist=["round_to_two_decimals"]).round_to_two_decimals(mp)
+    )
+
+
+def test_taxa_geral_municipal_e_media_das_escolas_nao_das_series():
+    """§7: taxa_geral = média das escolas; por_serie continua média por coluna."""
+    from app.services.consolidated_report_service import ScopeIndex, _build_numeric_matriz
+
+    # Escola A: série 5 (240) e 9 (200) → média escola 220
+    # Escola B: só série 5 (260) → média escola 260
+    # Média escolas = 240; média colunas (série) = ((240+260)/2 + 200)/2 = 225
+    cols = [
+        {"serie_id": "5", "serie_nome": "5º Ano"},
+        {"serie_id": "9", "serie_nome": "9º Ano"},
+    ]
+    scope = ScopeIndex(
+        series_colunas=cols,
+        escolas=[
+            {"escola_id": "a", "escola_nome": "A"},
+            {"escola_id": "b", "escola_nome": "B"},
+        ],
+        classes_by_cell={
+            ("a", "5"): {"t1"},
+            ("a", "9"): {"t2"},
+            ("b", "5"): {"t3"},
+        },
+        class_to_cell={},
+        students_by_class={},
+    )
+    cell_vals = {
+        ("a", "5"): 240.0,
+        ("a", "9"): 200.0,
+        ("b", "5"): 260.0,
+    }
+    matriz = _build_numeric_matriz(scope, lambda e, s: cell_vals.get((e, s)))
+    assert matriz["linhas"][0]["taxa_geral_escola"] == 220.0
+    assert matriz["linhas"][1]["taxa_geral_escola"] == 260.0
+    assert matriz["medias_da_rede"]["por_serie"] == [250.0, 200.0]
+    assert matriz["medias_da_rede"]["taxa_geral"] == 240.0
+
+
 def test_quem_saiu_entra_na_turma_do_snapshot():
     escopo = {"turma-a", "turma-b"}
     saiu = SimpleNamespace(id="maria", class_id=None)

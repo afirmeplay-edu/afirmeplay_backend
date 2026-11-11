@@ -134,7 +134,9 @@ def rebuild_report_for_scope(
         print(f"[REBUILD] 🚀 INÍCIO - test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
         logger.info(f"Iniciando rebuild de relatório: test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
         
-        if city_id and scope_type in ('overall', 'city', 'school'):
+        # city_id cobre overall/city/school/teacher e evita lookup em schema "tenant"
+        # antes do bind (ex.: school_teacher inexistente sem search_path do município).
+        if city_id and scope_type in ('overall', 'city', 'school', 'teacher'):
             schema = city_id_to_schema_name(city_id)
         else:
             schema = _get_schema_for_scope(scope_type, scope_id)
@@ -378,7 +380,7 @@ def trigger_rebuild_if_needed(
     
     from app.report_analysis.debounce import ReportDebounceService
     
-    if city_id and scope_type in ('overall', 'city', 'school'):
+    if city_id and scope_type in ('overall', 'city', 'school', 'teacher'):
         schema = city_id_to_schema_name(city_id)
     else:
         schema = _get_schema_for_scope(scope_type, scope_id)

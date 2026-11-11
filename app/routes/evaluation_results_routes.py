@@ -65,6 +65,7 @@ from app.utils.school_equal_weight_means import (
     general_grade_from_subject_proficiencies,
     granularidade_to_hierarchical_target,
     hierarchical_mean_grade_and_proficiency,
+    hierarchical_means_course_aware_by_serie,
 )
 from app.services.evaluation_group_service import (
     apply_test_id_filter,
@@ -1260,6 +1261,16 @@ def listar_avaliacoes():
             estatisticas_consolidadas["por_disciplina"] = _calcular_estatisticas_gerais_por_disciplina_escopo(
                 todas_avaliacoes_escopo, scope_info, nivel_granularidade
             )
+            # Alinha media_*_geral à média dos cards só quando o escopo é uma prova
+            # (ou grupo virtual). Em multi-test_id sem group_id, por_disciplina
+            # ainda reflete só o 1º teste e não deve sobrescrever o GERAL.
+            uniq_tests = {
+                str(getattr(ct, "test_id", "") or "")
+                for ct in (todas_avaliacoes_escopo or [])
+                if getattr(ct, "test_id", None)
+            }
+            if (isinstance(scope_info, dict) and scope_info.get("grupo")) or len(uniq_tests) <= 1:
+                _aplicar_media_geral_das_disciplinas_grupo(estatisticas_consolidadas, scope_info)
         
         # Calcular estatísticas por disciplina
         resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo, scope_info, nivel_granularidade)
@@ -9010,23 +9021,29 @@ def obter_opcoes_filtros():
 # ==================== FUNÇÕES AUXILIARES PARA CÁLCULO CONSOLIDADO ====================
 
 def _dedupe_evaluation_results_by_student(resultados: List[Any]) -> List[Any]:
-    """Uma entrada por aluno; em duplicidade, prefere o resultado com calculated_at mais recente."""
+    """Uma entrada por (test_id, student_id); em duplicidade, prefere calculated_at mais recente.
+
+    Alinha ao consolidado (`_dedupe_digital_by_test_student`). Dedupe só por aluno
+    descartava provas extras no escopo multi-avaliação sem group_id.
+    """
     if not resultados:
         return []
-    by_sid: Dict[str, Any] = {}
+    by_key: Dict[Tuple[str, str], Any] = {}
     for r in resultados:
         sid = getattr(r, "student_id", None)
         if not sid:
             continue
-        prev = by_sid.get(sid)
+        tid = str(getattr(r, "test_id", "") or "")
+        key = (tid, str(sid))
+        prev = by_key.get(key)
         if prev is None:
-            by_sid[sid] = r
+            by_key[key] = r
             continue
         r_ca = getattr(r, "calculated_at", None)
         p_ca = getattr(prev, "calculated_at", None)
         if r_ca and (p_ca is None or r_ca > p_ca):
-            by_sid[sid] = r
-    return list(by_sid.values())
+            by_key[key] = r
+    return list(by_key.values())
 
 
 def _montar_tabela_adap_para_resposta(
@@ -9346,6 +9363,7 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
                 media_proficiencia = 0.0
         elif resultados_por_aluno_unico:
             course_name = "Anos Iniciais"
+            first_test = None
             if class_tests:
                 first_test = getattr(class_tests[0], "test", None) or Test.query.get(class_tests[0].test_id)
                 if first_test:
@@ -9358,11 +9376,16 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             )
             if subject_rel is not None and getattr(subject_rel, "name", None):
                 fallback_name = subject_rel.name
-            media_nota, media_proficiencia = general_grade_from_subject_proficiencies(
+            grade_id_to_course = _grade_id_to_course_from_class_tests(class_tests)
+            media_nota, media_proficiencia = hierarchical_means_course_aware_by_serie(
                 resultados_por_aluno_unico,
                 granularidade_to_hierarchical_target(nivel_granularidade),
-                course_name=course_name,
+                grade_id_to_course=grade_id_to_course,
+                fallback_course_name=course_name,
                 fallback_subject_name=fallback_name,
+                has_matematica=_has_matematica_para_geral(
+                    scope_info=scope_info, class_tests=class_tests
+                ),
             )
         else:
             media_nota = 0.0
@@ -9481,12 +9504,19 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         )
         if first_test_nivel:
             course_name_nivel = _get_curso_nome(getattr(first_test_nivel, "course", None))
-        nivel_classificacao_geral = _nivel_classificacao_por_media_proficiencia(
-            media_proficiencia_geral_fmt,
-            course_name_nivel,
-            alunos_participantes,
-            _has_matematica_para_geral(scope_info=scope_info, class_tests=class_tests),
-        )
+        grade_courses = set(_grade_id_to_course_from_class_tests(class_tests).values())
+        if len(grade_courses) > 1:
+            # Escalas misturadas (Iniciais + Finais): sem nível único — igual ao consolidado
+            nivel_classificacao_geral = None
+        else:
+            if len(grade_courses) == 1:
+                course_name_nivel = next(iter(grade_courses))
+            nivel_classificacao_geral = _nivel_classificacao_por_media_proficiencia(
+                media_proficiencia_geral_fmt,
+                course_name_nivel,
+                alunos_participantes,
+                _has_matematica_para_geral(scope_info=scope_info, class_tests=class_tests),
+            )
 
         return {
             "tipo": nivel_granularidade,
@@ -9572,6 +9602,14 @@ def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Di
         escopo['escola_id'] = scope_info.get('escola')
         escopo['avaliacao_id'] = avaliacao_id
         escopo['municipio_id'] = scope_info.get('municipio_id')
+        if avaliacao_ids:
+            escopo['avaliacao_ids'] = avaliacao_ids
+
+    else:
+        # avaliacao / estado / geral → mesmo universo municipal
+        escopo['tipo'] = "municipio"
+        escopo['municipio_id'] = scope_info.get('municipio_id')
+        escopo['avaliacao_id'] = avaliacao_id
         if avaliacao_ids:
             escopo['avaliacao_ids'] = avaliacao_ids
 
@@ -10908,6 +10946,32 @@ def _media_geral_from_subject_statistics(statistics: Optional[Dict[str, Any]]) -
     )
 
 
+def _grade_id_to_course_from_class_tests(class_tests: list) -> Dict[str, str]:
+    """Mapa série_id → course_name (Anos Iniciais/Finais/…) a partir das turmas aplicadas."""
+    from app.models.grades import Grade
+    from app.services.consolidated_report_service import _course_name_for_serie
+
+    out: Dict[str, str] = {}
+    grade_ids = []
+    for ct in class_tests or []:
+        cls = getattr(ct, "class_", None)
+        gid = getattr(cls, "grade_id", None) if cls is not None else None
+        if gid is None:
+            continue
+        grade_ids.append(gid)
+    if not grade_ids:
+        return out
+    grades = {
+        str(g.id): g
+        for g in Grade.query.filter(Grade.id.in_(list(set(grade_ids)))).all()
+    }
+    for gid_raw in set(grade_ids):
+        g = grades.get(str(gid_raw))
+        nome = getattr(g, "name", None) or getattr(g, "nome", None) or ""
+        out[str(gid_raw)] = _course_name_for_serie(str(nome))
+    return out
+
+
 def _get_curso_nome(course_id):
     """
     Busca o nome do curso baseado no ID
@@ -11329,12 +11393,10 @@ def relatorio_consolidado():
 
         from app.services.alunos_resultado_filtro import AlunosFiltroInvalido, parse_alunos_filtro
 
-        bruto_alunos = request.args.get("alunos")
+        # Mesmo contrato de GET /avaliacoes: ausente/vazio = "todos"
+        # (parse_alunos_filtro). Front deve enviar `alunos` explicitamente.
         try:
-            if bruto_alunos is None or str(bruto_alunos).strip() == "":
-                alunos_filtro = "regular"
-            else:
-                alunos_filtro = parse_alunos_filtro(bruto_alunos)
+            alunos_filtro = parse_alunos_filtro(request.args.get("alunos"))
         except AlunosFiltroInvalido as exc:
             return jsonify({"error": str(exc)}), 400
 

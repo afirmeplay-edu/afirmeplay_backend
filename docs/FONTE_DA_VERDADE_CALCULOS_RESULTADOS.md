@@ -224,6 +224,10 @@ Nota do **aluno** continua sendo `calculate_grade(proficiência_do_aluno)` na co
 
 **Referência correta:** `GET /evaluation-results/avaliacoes` — `_calcular_estatisticas_grupo` + `hierarchical_mean_grade_and_proficiency`.
 
+**Relatório consolidado:** células/`por_serie`/`taxa_geral_escola` via `_build_numeric_matriz` (média das escolas no município para a matriz). O KPI municipal **`GERAL.medias_da_rede.taxa_geral`** (nota e proficiência) é sobrescrito por `hierarchical_mean_grade_and_proficiency(..., municipio)` — o mesmo cálculo de `GET /evaluation-results/avaliacoes` — quando a rede tem um único `course_name` (`_override_geral_taxa_municipal_from_results`).
+
+**Default do filtro `alunos`:** ausente/vazio = `todos` em `/avaliacoes` e `/relatorio-consolidado` (`parse_alunos_filtro`). O front deve enviar o valor explicitamente.
+
 **Exemplo auditável (Pedro Ribeiro, 3 turmas na mesma série):**
 
 | Turma | Alunos | Proficiência média (turma) |

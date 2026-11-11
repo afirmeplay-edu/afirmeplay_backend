@@ -26,6 +26,45 @@ def test_render_math_in_text_plain_text_unchanged():
     assert render_math_in_text('Apenas texto') == 'Apenas texto'
 
 
+def test_render_math_in_text_ignores_currency_rs_pairs():
+    """Dois R$ no mesmo parágrafo não podem virar delimitador inline."""
+    text = (
+        'Marina fez uma compra de R$ 103,75 no supermercado. '
+        'Para pagar essa compra, ela utilizou R$ 55,50 em dinheiro.'
+    )
+    result = render_math_in_text(text)
+    assert result == text
+    assert '103,75' in result
+    assert '55,50' in result
+    assert 'math-rendered' not in result
+    assert 'data:image/png' not in result
+
+
+def test_render_math_in_html_ignores_currency_rs_pairs():
+    html = (
+        '<p>Marina fez uma compra de R$ 103,75 no supermercado. '
+        'Para pagar essa compra, ela utilizou R$ 55,50 em dinheiro '
+        'e pagou o restante com o cartão de crédito.</p>'
+    )
+    result = render_math_in_html(html)
+    assert 'R$ 103,75' in result
+    assert 'R$ 55,50' in result
+    assert 'math-rendered' not in result
+
+
+def test_render_math_in_text_ignores_us_dollar_prefix():
+    text = 'O preço era US$ 10 e depois US$ 20.'
+    assert render_math_in_text(text) == text
+
+
+def test_render_math_in_text_keeps_real_formula_beside_currency():
+    text = r'Com R$ 10,00 restam $\frac{1}{2}$ do total.'
+    result = render_math_in_text(text)
+    assert 'R$ 10,00' in result
+    assert 'math-inline-img' in result
+    assert r'$\frac{1}{2}$' not in result
+
+
 def test_render_math_in_html_preserves_tags():
     html = '<p>A fração $x^{2}$ está <strong>aqui</strong>.</p>'
     result = render_math_in_html(html)

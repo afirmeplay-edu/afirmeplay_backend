@@ -1,0 +1,4 @@
+# Artefatos locais de diagnóstico (grandes); relatório baseline fica em reports/
+_baseline_debug/
+__pycache__/
+*.pyc

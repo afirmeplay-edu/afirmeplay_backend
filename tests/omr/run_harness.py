@@ -128,8 +128,10 @@ def run_one_card(
 
     answers: Dict[int, Optional[str]] = {}
     omr.last_bubble_diagnostics = {}
+    omr.last_geometry_diagnostics = {}
     all_scores: List[float] = []
     overlay = img_a4.copy()
+    geom_summary = []
 
     for idx, block in enumerate(blocks):
         x, y, w, h = block["x"], block["y"], block["w"], block["h"]
@@ -140,6 +142,25 @@ def run_one_card(
             continue
         bubbles = omr._calculate_bubble_centers(grid)
         block_id = cfg.get("block_id", idx + 1)
+        # B1: refino de grid (mesma ordem do pipeline de produção)
+        if hasattr(omr, "_refine_block_grid"):
+            bubbles, geom_diag = omr._refine_block_grid(
+                roi, grid, bubbles, block_id=block_id
+            )
+            omr.last_geometry_diagnostics[block_id] = geom_diag
+            geom_summary.append(
+                {
+                    "block_id": block_id,
+                    "used": geom_diag.get("used_refined"),
+                    "method": geom_diag.get("coarse_method"),
+                    "b_y": geom_diag.get("b_y"),
+                    "d_x": geom_diag.get("d_x"),
+                    "dx": geom_diag.get("median_dx"),
+                    "dy": geom_diag.get("median_dy"),
+                    "sep": geom_diag.get("separation"),
+                    "fallback": geom_diag.get("fallback_reason"),
+                }
+            )
         block_ans = omr._detect_marked_bubbles(roi, bubbles, block_id)
         answers.update(block_ans)
 
@@ -203,6 +224,7 @@ def run_one_card(
         "n_marked": sum(1 for v in answers.values() if v and v != "INVALID"),
         "n_blank": sum(1 for v in answers.values() if v is None),
         "n_invalid": sum(1 for v in answers.values() if v == "INVALID"),
+        "geometry": geom_summary,
     }
 
 

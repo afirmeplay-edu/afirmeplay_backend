@@ -1175,6 +1175,10 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
                             'motivo_ausencia': result.get('motivo_ausencia'),
                             'saved': bool(result.get('saved')),
                             'status': result.get('status', 'corrigido'),
+                            'mark_confidence': result.get('mark_confidence', {}),
+                            'confidence_summary': result.get('confidence_summary', {}),
+                            'needs_review': result.get('needs_review', []),
+                            'needs_review_reason': result.get('needs_review_reason'),
                         }
                         
                         update_item_done(job_id, i, adapted_result)
@@ -1336,7 +1340,11 @@ def process_physical_correction(test_id):
                     "detailed_answers": result.get('detailed_answers', []),
                     "student_answers": result.get('student_answers', {}),
                     "answer_key": result.get('answer_key', {}),
-                    "evaluation_result_id": result.get('evaluation_result_id')
+                    "evaluation_result_id": result.get('evaluation_result_id'),
+                    "mark_confidence": result.get('mark_confidence', {}),
+                    "confidence_summary": result.get('confidence_summary', {}),
+                    "needs_review": result.get('needs_review', []),
+                    "needs_review_reason": result.get('needs_review_reason'),
                 }), 200
             else:
                 student_name = None

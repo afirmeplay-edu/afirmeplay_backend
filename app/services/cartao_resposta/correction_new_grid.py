@@ -148,6 +148,12 @@ class AnswerSheetCorrectionNewGrid:
     VERTICAL_BLEED_HEIGHT_ROWS = 1.30
 
     # =========================================================================
+    # FASE D — ausente seguro / needs_review
+    # =========================================================================
+    # Só trata "cartão em branco" como ausente se TODOS os top scores < piso.
+    ABSENT_BLANK_SCORE_MAX = 22.0
+
+    # =========================================================================
     # CONSTANTES CALIBRADAS EMPIRICAMENTE (answer_sheet.html)
     # =========================================================================
     # ✅ VALORES FINAIS CALIBRADOS com calibrate_block_simple.py
@@ -3504,7 +3510,25 @@ class AnswerSheetCorrectionNewGrid:
             str(q): (self.last_bubble_diagnostics.get(int(q), {}) or {}).get("confidence")
             for q in sorted(gabarito.keys())
         }
-        
+        n_high = n_medium = n_low = 0
+        needs_review: List[int] = []
+        for q_num in sorted(gabarito.keys()):
+            diag = self.last_bubble_diagnostics.get(int(q_num), {}) or {}
+            conf = diag.get("confidence") or "low"
+            if conf == "high":
+                n_high += 1
+            elif conf == "medium":
+                n_medium += 1
+            else:
+                n_low += 1
+            marked = answers.get(q_num)
+            if (
+                conf == "low"
+                or marked == "INVALID"
+                or bool(diag.get("vertical_bleed"))
+            ):
+                needs_review.append(int(q_num))
+
         return {
             "success": True,
             "total_questions": total_questions,
@@ -3516,7 +3540,13 @@ class AnswerSheetCorrectionNewGrid:
             "detailed_answers": detailed_answers,  # Lista detalhada: [{question, marked, correct, is_correct}, ...]
             "student_answers": student_answers_str,  # Dicionário: {"1": "A", "2": "B", ...}
             "answer_key": answer_key_str,  # Gabarito oficial: {"1": "A", "2": "C", ...}
-            "mark_confidence": confidence_str,  # Opcional: high|medium|low por questão
+            "mark_confidence": confidence_str,  # high|medium|low por questão
+            "confidence_summary": {
+                "n_high": n_high,
+                "n_medium": n_medium,
+                "n_low": n_low,
+            },
+            "needs_review": needs_review,
             "mark_diagnostics": {
                 str(q): self.last_bubble_diagnostics[q]
                 for q in sorted(self.last_bubble_diagnostics.keys())
@@ -3533,6 +3563,21 @@ class AnswerSheetCorrectionNewGrid:
         blank = int(correction.get("blank_answers") or 0)
         invalid = int(correction.get("invalid_answers") or 0)
         return blank == total and invalid == 0
+
+    def _evidence_cartao_em_branco(self) -> bool:
+        """
+        Evidência positiva de folha em branco: todos os top scores abaixo do piso.
+        Sem diagnósticos (pipeline falhou parcial) → False (não assume ausente).
+        """
+        if not self.last_bubble_diagnostics:
+            return False
+        tops = [
+            float(d.get("top_score") or 0.0)
+            for d in self.last_bubble_diagnostics.values()
+        ]
+        if not tops:
+            return False
+        return max(tops) < float(self.ABSENT_BLANK_SCORE_MAX)
     
     # =========================================================================
     # FORMATAÇÃO DE ERROS AMIGÁVEIS
@@ -4152,9 +4197,19 @@ class AnswerSheetCorrectionNewGrid:
             correction = self._build_result(answers, gabarito)
             aluno_ausente = bool(result.get("aluno_ausente"))
             motivo_ausencia = "bolinha_aplicador" if aluno_ausente else None
+            # D1: cartão sem respostas só vira ausente com evidência positiva de
+            # branco (scores baixos). Caso contrário → needs_review (não zera).
+            needs_review_blank = False
             if not aluno_ausente and self._cartao_sem_nenhuma_resposta(correction):
-                aluno_ausente = True
-                motivo_ausencia = "cartao_em_branco"
+                if self._evidence_cartao_em_branco():
+                    aluno_ausente = True
+                    motivo_ausencia = "cartao_em_branco"
+                else:
+                    needs_review_blank = True
+                    self.logger.warning(
+                        "Cartão sem respostas marcadas, mas sem evidência de "
+                        "branco — status needs_review (não marca ausente)"
+                    )
             correction["aluno_ausente"] = aluno_ausente
             correction["motivo_ausencia"] = motivo_ausencia
             correction["aluno_ausente_fill_ratio"] = result.get("aluno_ausente_fill_ratio", 0.0)
@@ -4164,7 +4219,13 @@ class AnswerSheetCorrectionNewGrid:
                 else motivo_ausencia
             )
             correction["saved"] = False
-            correction["status"] = "aluno_ausente" if aluno_ausente else "corrigido"
+            if aluno_ausente:
+                correction["status"] = "aluno_ausente"
+            elif needs_review_blank:
+                correction["status"] = "needs_review"
+                correction["needs_review_reason"] = "marcacoes_fracas_ou_duvidosas"
+            else:
+                correction["status"] = "corrigido"
             
             # ============================================
             # IMPRIMIR RESUMO DETALHADO NO TERMINAL
@@ -4187,6 +4248,14 @@ class AnswerSheetCorrectionNewGrid:
                 self._descartar_resultado_se_ausente(
                     correction.get("gabarito_id"),
                     correction.get("student_id"),
+                )
+                return correction
+
+            # needs_review: não descarta resultado salvo nem força nota zero
+            if correction.get("status") == "needs_review" and needs_review_blank:
+                self.logger.info(
+                    "needs_review (sem evidência de branco) — não persistindo "
+                    "nota automática"
                 )
                 return correction
 

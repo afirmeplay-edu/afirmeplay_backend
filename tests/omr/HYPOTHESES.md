@@ -30,3 +30,7 @@ FB −99.7% (meta ≥90%). FM residual concentrado em cartões esparsos (`205842
 | after_c | **1** | 4 | **13** | 3 | 482 | ~0.61s |
 
 C1 suaviza ink em binário; C2 2ª passada + rejeição medium em blocos esparsos; C3 flag `vertical_bleed` (low). FM restante → needs_review (Fase D).
+
+## Fase D
+- Ausente por “cartão em branco” só com evidência (`max(top_score) < ABSENT_BLANK_SCORE_MAX`); senão `status=needs_review` sem zerar nota.
+- API: `mark_confidence`, `confidence_summary`, `needs_review` (low / INVALID / vertical_bleed) em correção unitária e lote.

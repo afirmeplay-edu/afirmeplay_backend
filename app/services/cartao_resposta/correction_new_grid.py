@@ -129,7 +129,24 @@ class AnswerSheetCorrectionNewGrid:
     EMPTY_TEMPLATE_MIN_ALIGN_FRAC = 0.60
     EMPTY_TEMPLATE_MATCH_MIN = 0.35
     EMPTY_TEMPLATE_W_RESIDUAL = 0.35  # peso do residual patch−template no score
-    
+
+    # =========================================================================
+    # FASE C — robustez em scan binário / decisão adaptativa / bleed vertical
+    # =========================================================================
+    # C1: suaviza ink map e usa cobertura do disco interno (~0,6·r) se binário
+    USE_BINARY_ROBUST_C1 = True
+    BINARY_HIST_EDGE_FRAC = 0.97
+    BINARY_INK_BLUR_SIGMA = 4.5
+    BINARY_INK_CLOSE_PX = 7
+    BINARY_INNER_RADIUS_RATIO = 0.60
+    # C2: 2ª passada com limiar relativo marca/vazio do cartão
+    USE_ADAPTIVE_TWO_PASS_C2 = True
+    TWO_PASS_MIN_HIGH = 6
+    TWO_PASS_EMPTY_FRAC = 0.35  # limiar = vazio + frac*(marca−vazio)
+    # C3: bleed vertical entre linhas consecutivas
+    USE_VERTICAL_BLEED_C3 = True
+    VERTICAL_BLEED_HEIGHT_ROWS = 1.30
+
     # =========================================================================
     # CONSTANTES CALIBRADAS EMPIRICAMENTE (answer_sheet.html)
     # =========================================================================
@@ -2714,7 +2731,31 @@ class AnswerSheetCorrectionNewGrid:
             sigma = float(self.BUBBLE_MARK_PAPER_BLUR_SIGMA)
             paper = cv2.GaussianBlur(channel_min, (0, 0), sigmaX=sigma, sigmaY=sigma)
 
-        return np.clip(paper - channel_min, 0.0, 255.0).astype(np.float32)
+        ink = np.clip(paper - channel_min, 0.0, 255.0).astype(np.float32)
+
+        # C1: em scan quase binário, suaviza pontilhado e fecha buracos da marca
+        is_bin = self._is_nearly_binary_u8(channel_min_u8)
+        self.last_is_binary = bool(is_bin)
+        if self.USE_BINARY_ROBUST_C1 and is_bin:
+            sig = float(self.BINARY_INK_BLUR_SIGMA)
+            ink = cv2.GaussianBlur(ink, (0, 0), sigmaX=sig, sigmaY=sig)
+            k = int(self.BINARY_INK_CLOSE_PX)
+            if k % 2 == 0:
+                k += 1
+            k = max(3, k)
+            ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+            ink_u8 = np.clip(ink, 0, 255).astype(np.uint8)
+            ink = cv2.morphologyEx(ink_u8, cv2.MORPH_CLOSE, ker).astype(np.float32)
+        return ink
+
+    def _is_nearly_binary_u8(self, gray_u8: np.ndarray) -> bool:
+        """True se histograma concentrado nos extremos (scan 1-bit / threshold)."""
+        if gray_u8 is None or gray_u8.size == 0:
+            return False
+        hist = cv2.calcHist([gray_u8], [0], None, [256], [0, 256]).flatten()
+        hist = hist / max(float(hist.sum()), 1.0)
+        edge = float(hist[:16].sum() + hist[240:].sum())
+        return edge >= float(self.BINARY_HIST_EDGE_FRAC)
 
     def _bubble_mark_features(
         self, ink_map: np.ndarray, cx: int, cy: int, r: int
@@ -2727,6 +2768,8 @@ class AnswerSheetCorrectionNewGrid:
         - ring: anel intermediário (RING_INNER..INNER) — anéis/rabiscos periféricos
         - density: % de pixels no disco mid com ink >= DENSITY_INK_ABS
         - score: combinação média/densidade/núcleo (escala ~0–255)
+
+        C1 (binário): disco mid mais interno (~0,6·r) e peso maior em densidade.
         """
         empty = {
             "mean_core": 0.0,
@@ -2743,7 +2786,15 @@ class AnswerSheetCorrectionNewGrid:
         if not (0 <= cx < w and 0 <= cy < h):
             return empty
 
-        r_mid = max(2, int(round(r * float(self.BUBBLE_MARK_INNER_RADIUS_RATIO))))
+        binary_mode = bool(
+            self.USE_BINARY_ROBUST_C1 and getattr(self, "last_is_binary", False)
+        )
+        inner_ratio = (
+            float(self.BINARY_INNER_RADIUS_RATIO)
+            if binary_mode
+            else float(self.BUBBLE_MARK_INNER_RADIUS_RATIO)
+        )
+        r_mid = max(2, int(round(r * inner_ratio)))
         r_core = max(2, int(round(r * float(self.BUBBLE_MARK_CORE_RADIUS_RATIO))))
         r_ring_in = max(2, int(round(r * float(self.BUBBLE_MARK_RING_INNER_RATIO))))
         if r_core >= r_mid:
@@ -2772,10 +2823,16 @@ class AnswerSheetCorrectionNewGrid:
 
         # Anel com tinta mas centro fraco: reforça o score via mean_ring
         ring_boost = max(0.0, mean_ring - mean_core) * 0.25
+        w_mean = float(self.BUBBLE_MARK_W_MEAN)
+        w_dens = float(self.BUBBLE_MARK_W_DENSITY)
+        w_core = float(self.BUBBLE_MARK_W_CORE)
+        if binary_mode:
+            # Em 1-bit a cobertura do disco interno é o sinal mais estável
+            w_mean, w_dens, w_core = 0.30, 0.55, 0.15
         score_area = (
-            float(self.BUBBLE_MARK_W_MEAN) * mean_mid
-            + float(self.BUBBLE_MARK_W_DENSITY) * (density * 255.0)
-            + float(self.BUBBLE_MARK_W_CORE) * mean_core
+            w_mean * mean_mid
+            + w_dens * (density * 255.0)
+            + w_core * mean_core
             + ring_boost
         )
         # Rabisco/X concentrado no núcleo: média do disco mid dilui demais;
@@ -3033,11 +3090,25 @@ class AnswerSheetCorrectionNewGrid:
                     f"conf={meta['confidence']} reason={meta['reason']}"
                 )
 
+        # C2: 2ª passada — limiar adaptativo marca/vazio do bloco
+        if self.USE_ADAPTIVE_TWO_PASS_C2:
+            answers = self._two_pass_adaptive_redecide(answers, block_id)
+
+        # C3: bleed vertical (mesma letra em linhas vizinhas + componente alto)
+        if self.USE_VERTICAL_BLEED_C3:
+            self._flag_vertical_bleed(ink_map, bubbles, answers, block_id)
+
+        for q in answers:
+            diag = self.last_bubble_diagnostics.get(int(q))
+            if diag is not None:
+                diag["is_binary"] = bool(getattr(self, "last_is_binary", False))
+
         self.logger.info(
             f"✅ [V2] {len(answers)} respostas detectadas "
             f"({sum(1 for a in answers.values() if a and a != 'INVALID')} marcadas, "
             f"{sum(1 for a in answers.values() if a is None)} em branco, "
-            f"{sum(1 for a in answers.values() if a == 'INVALID')} inválidas)"
+            f"{sum(1 for a in answers.values() if a == 'INVALID')} inválidas) "
+            f"binary={getattr(self, 'last_is_binary', False)}"
         )
         if all_scores:
             arr = np.array(all_scores, dtype=np.float64)
@@ -3052,6 +3123,159 @@ class AnswerSheetCorrectionNewGrid:
                 f"clahe={self.BUBBLE_MARK_USE_CLAHE}"
             )
         return answers
+
+    def _two_pass_adaptive_redecide(
+        self, answers: Dict[int, Any], block_id: Any = None
+    ) -> Dict[int, Any]:
+        """
+        C2: com ≥ TWO_PASS_MIN_HIGH marcas high, estima nível_marca / nível_vazio
+        e reavalia questões medium/low / None com limiar adaptativo.
+        Sem marcas high suficientes, mantém a 1ª passada.
+        """
+        high_tops = []
+        empty_scores = []
+        for q, diag in self.last_bubble_diagnostics.items():
+            if block_id is not None and diag.get("block_id") != block_id:
+                continue
+            conf = diag.get("confidence")
+            top = float(diag.get("top_score") or 0.0)
+            if conf == "high" and diag.get("decision") not in (None, "INVALID"):
+                high_tops.append(top)
+            alts = diag.get("alternatives") or {}
+            for let, ad in alts.items():
+                sc = float(ad.get("score") or 0.0)
+                if diag.get("decision") == let:
+                    continue
+                empty_scores.append(sc)
+
+        floor_hi = float(self.BUBBLE_MARK_SCORE_FLOOR)
+        # Cartão/bloco esparso: sem enough high → medium só com score bem alto
+        # (evita FM por mancha/anel em folhas quase em branco).
+        sparse_floor = max(floor_hi * 2.5, 70.0)
+        if len(high_tops) < int(self.TWO_PASS_MIN_HIGH):
+            for q, diag in list(self.last_bubble_diagnostics.items()):
+                if block_id is not None and diag.get("block_id") != block_id:
+                    continue
+                if diag.get("confidence") != "medium":
+                    continue
+                if diag.get("decision") in (None, "INVALID"):
+                    continue
+                top = float(diag.get("top_score") or 0.0)
+                if top < sparse_floor:
+                    answers[q] = None
+                    diag["decision"] = None
+                    diag["confidence"] = "low"
+                    diag["reason"] = f"two_pass_sparse_reject top={top:.1f}"
+            return answers
+
+        nivel_marca = float(np.median(high_tops))
+        nivel_vazio = float(np.median(empty_scores)) if empty_scores else 0.0
+        thr = nivel_vazio + float(self.TWO_PASS_EMPTY_FRAC) * max(
+            0.0, nivel_marca - nivel_vazio
+        )
+        # não baixar abaixo do floor_lo clássico
+        thr = max(thr, float(self.BUBBLE_MARK_SCORE_FLOOR_LO))
+        margin_need = max(
+            float(self.BUBBLE_MARK_SCORE_MARGIN_LO),
+            0.20 * max(1.0, nivel_marca - nivel_vazio),
+        )
+
+        for q, diag in list(self.last_bubble_diagnostics.items()):
+            if block_id is not None and diag.get("block_id") != block_id:
+                continue
+            if diag.get("confidence") == "high":
+                continue
+            if diag.get("decision") == "INVALID":
+                continue
+            top = float(diag.get("top_score") or 0.0)
+            second = float(diag.get("second_score") or 0.0)
+            margin = top - second
+            letter = diag.get("top_letter")
+            old = answers.get(q)
+            if top >= thr and margin >= margin_need and letter:
+                answers[q] = letter
+                diag["decision"] = letter
+                diag["confidence"] = "medium"
+                diag["reason"] = (
+                    f"two_pass_adapt thr={thr:.1f} marca={nivel_marca:.1f} "
+                    f"vazio={nivel_vazio:.1f}"
+                )
+            elif old and old != "INVALID" and top < thr:
+                # marca fraca demais vs nível do cartão → blank (corta FM)
+                answers[q] = None
+                diag["decision"] = None
+                diag["confidence"] = "low"
+                diag["reason"] = (
+                    f"two_pass_reject thr={thr:.1f} top={top:.1f}"
+                )
+        return answers
+
+    def _flag_vertical_bleed(
+        self,
+        ink_map: np.ndarray,
+        bubbles: List[Dict],
+        answers: Dict[int, Any],
+        block_id: Any = None,
+    ) -> None:
+        """
+        C3: se a mesma letra vence em linhas consecutivas e o blob de tinta
+        tem altura > VERTICAL_BLEED_HEIGHT_ROWS · row_h, marca vertical_bleed
+        (confiança low) sem alterar a letra — Fase D usa needs_review.
+        """
+        if not bubbles or not answers or ink_map is None or ink_map.size == 0:
+            return
+        # agrupa bolhas por (letra) e ordena por cy
+        by_letter: Dict[str, List[Dict]] = defaultdict(list)
+        for b in bubbles:
+            by_letter[str(b["alternative"])].append(b)
+        row_h = float(self.ROW_HEIGHT_PX)
+        min_h = float(self.VERTICAL_BLEED_HEIGHT_ROWS) * row_h
+
+        # mascara tinta forte
+        _, bw = cv2.threshold(
+            np.clip(ink_map, 0, 255).astype(np.uint8), 40, 255, cv2.THRESH_BINARY
+        )
+
+        for let, blist in by_letter.items():
+            blist = sorted(blist, key=lambda b: (int(b["cy"]), int(b["cx"])))
+            # pares de questões consecutivas com mesma decisão = let
+            qs = []
+            for b in blist:
+                q = int(b["q_num"])
+                if answers.get(q) == let:
+                    qs.append((q, int(b["cx"]), int(b["cy"]), int(b["r"])))
+            for i in range(len(qs) - 1):
+                q1, x1, y1, r1 = qs[i]
+                q2, x2, y2, r2 = qs[i + 1]
+                if abs(x1 - x2) > max(r1, r2):
+                    continue
+                if abs(y2 - y1) > row_h * 1.6:
+                    continue
+                # componente conectado na união das duas bolhas
+                y0 = max(0, min(y1, y2) - max(r1, r2))
+                y1b = min(bw.shape[0], max(y1, y2) + max(r1, r2) + 1)
+                x0 = max(0, min(x1, x2) - max(r1, r2))
+                x1b = min(bw.shape[1], max(x1, x2) + max(r1, r2) + 1)
+                crop = bw[y0:y1b, x0:x1b]
+                if crop.size == 0:
+                    continue
+                n, labels, stats, _ = cv2.connectedComponentsWithStats(crop, 8)
+                tall = False
+                for li in range(1, n):
+                    if stats[li, cv2.CC_STAT_HEIGHT] >= min_h:
+                        tall = True
+                        break
+                if not tall:
+                    continue
+                for q in (q1, q2):
+                    diag = self.last_bubble_diagnostics.get(q)
+                    if not diag:
+                        continue
+                    diag["vertical_bleed"] = True
+                    diag["confidence"] = "low"
+                    reason = diag.get("reason") or ""
+                    if "vertical_bleed" not in reason:
+                        diag["reason"] = (reason + "|vertical_bleed").strip("|")
 
     def _detect_marked_bubbles_legacy(self, block_roi: np.ndarray, bubbles: List[Dict],
                                block_id: int = None) -> Dict[int, str]:

@@ -22,3 +22,11 @@
 | after_b (B1+B2) | **1** | **4** | 21 | 3 | **482** | ~0.61s |
 
 FB −99.7% (meta ≥90%). FM residual concentrado em cartões esparsos (`20584288`, `20582024`) → Fase C/D.
+
+## Fase C (after_c)
+| | FB | SW | FM | FI | ok_mark | t/card |
+|--|---:|---:|---:|---:|--------:|-------:|
+| after_b | 1 | 4 | 21 | 3 | 482 | ~0.61s |
+| after_c | **1** | 4 | **13** | 3 | 482 | ~0.61s |
+
+C1 suaviza ink em binário; C2 2ª passada + rejeição medium em blocos esparsos; C3 flag `vertical_bleed` (low). FM restante → needs_review (Fase D).

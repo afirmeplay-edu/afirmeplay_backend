@@ -62,6 +62,7 @@ from app.models.studentClass import Class
 from app.models.subject import Subject
 from app.models.test import Test
 from app.report_analysis.answer_sheet_report_builder import (
+    get_answer_sheet_target_classes_for_report,
     question_skills_map_for_answer_sheet,
 )
 from app.routes.answer_sheet_evaluation_listing import (
@@ -939,12 +940,31 @@ def _build_distribuicao_matriz(
 
 
 def _matriz_kwargs(ctx: ConsolidatedScopeContext) -> Dict[str, Any]:
-    if not ctx.comparativo_municipio:
-        return {}
+    """Sempre usa ``scope_rede`` para ``medias_da_rede`` (benchmark municipal)."""
     return {
         "scope_rede": ctx.scope_rede,
         "series_colunas": ctx.series_colunas,
     }
+
+
+def _scope_context_linhas_e_rede(
+    scope_linhas: ScopeIndex,
+    scope_rede: ScopeIndex,
+    escola_id: Optional[str] = None,
+) -> ConsolidatedScopeContext:
+    """
+    Linhas = recorte do usuário; rede = município (benchmark).
+
+    ``comparativo.ativo`` só quando há escola selecionada (rótulo MÉDIA MUNICIPAL).
+    Com escola=all, o rodapé continua «MÉDIAS DA REDE», mas os valores vêm do município.
+    """
+    return ConsolidatedScopeContext(
+        scope_linhas=scope_linhas,
+        scope_rede=scope_rede,
+        series_colunas=scope_rede.series_colunas or scope_linhas.series_colunas,
+        comparativo_municipio=bool(escola_id),
+        escola_id=escola_id,
+    )
 
 
 def _section_geral_e_disciplinas(
@@ -1060,10 +1080,9 @@ def _build_frequencia_section_digital(
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
         kw = dict(mk)
-        if ctx.comparativo_municipio:
-            kw["counts_fn_rede"] = lambda e, s: _freq_counts(
-                ctx.scope_rede, results_rede, e, s, discipline
-            )
+        kw["counts_fn_rede"] = lambda e, s: _freq_counts(
+            ctx.scope_rede, results_rede, e, s, discipline
+        )
         return _build_participation_matriz(
             ctx.scope_linhas,
             lambda e, s: _freq_counts(ctx.scope_linhas, results_linhas, e, s, discipline),
@@ -1121,10 +1140,9 @@ def _build_frequencia_section_answer_sheet(
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
         kw = dict(mk)
-        if ctx.comparativo_municipio:
-            kw["counts_fn_rede"] = lambda e, s: _freq_counts(
-                ctx.scope_rede, results_rede, e, s, discipline
-            )
+        kw["counts_fn_rede"] = lambda e, s: _freq_counts(
+            ctx.scope_rede, results_rede, e, s, discipline
+        )
         return _build_participation_matriz(
             ctx.scope_linhas,
             lambda e, s: _freq_counts(ctx.scope_linhas, results_linhas, e, s, discipline),
@@ -1268,8 +1286,7 @@ def _build_medias_section_digital(
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
         kw = dict(mk)
-        if ctx.comparativo_municipio:
-            kw["cell_fn_rede"] = lambda e, s: _media_cell(ctx.scope_rede, results_rede, e, s, discipline)
+        kw["cell_fn_rede"] = lambda e, s: _media_cell(ctx.scope_rede, results_rede, e, s, discipline)
         matriz = _build_numeric_matriz(
             ctx.scope_linhas,
             lambda e, s: _media_cell(ctx.scope_linhas, results_linhas, e, s, discipline),
@@ -1348,8 +1365,7 @@ def _build_medias_section_answer_sheet(
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
         kw = dict(mk)
-        if ctx.comparativo_municipio:
-            kw["cell_fn_rede"] = lambda e, s: _media_cell(ctx.scope_rede, results_rede, e, s, discipline)
+        kw["cell_fn_rede"] = lambda e, s: _media_cell(ctx.scope_rede, results_rede, e, s, discipline)
         matriz = _build_numeric_matriz(
             ctx.scope_linhas,
             lambda e, s: _media_cell(ctx.scope_linhas, results_linhas, e, s, discipline),
@@ -1405,8 +1421,7 @@ def _build_distribuicao_section_digital(
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
         kw = dict(mk)
-        if ctx.comparativo_municipio:
-            kw["cell_fn_rede"] = lambda e, s: _cell_dist(ctx.scope_rede, results_rede, e, s, discipline)
+        kw["cell_fn_rede"] = lambda e, s: _cell_dist(ctx.scope_rede, results_rede, e, s, discipline)
         return _build_distribuicao_matriz(
             ctx.scope_linhas,
             lambda e, s: _cell_dist(ctx.scope_linhas, results_linhas, e, s, discipline),
@@ -1465,8 +1480,7 @@ def _build_distribuicao_section_answer_sheet(
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
         kw = dict(mk)
-        if ctx.comparativo_municipio:
-            kw["cell_fn_rede"] = lambda e, s: _cell_dist(ctx.scope_rede, results_rede, e, s, discipline)
+        kw["cell_fn_rede"] = lambda e, s: _cell_dist(ctx.scope_rede, results_rede, e, s, discipline)
         return _build_distribuicao_matriz(
             ctx.scope_linhas,
             lambda e, s: _cell_dist(ctx.scope_linhas, results_linhas, e, s, discipline),
@@ -1783,12 +1797,12 @@ def _digital_acertos_data(
     agg_by_serie_l, agg_by_serie_disc_l, totals_l = _digital_acertos_aggregate(
         ctx.scope_linhas, tests_by_id, test_ids, class_ids_linhas, all_disciplines
     )
-    if ctx.comparativo_municipio:
+    if ctx.scope_rede is ctx.scope_linhas:
+        totals_r = totals_l
+    else:
         _, _, totals_r = _digital_acertos_aggregate(
             ctx.scope_rede, tests_by_id, test_ids, class_ids_rede, all_disciplines
         )
-    else:
-        totals_r = totals_l
 
     mk = _matriz_kwargs(ctx)
 
@@ -1804,18 +1818,17 @@ def _digital_acertos_data(
             return round_to_two_decimals(100.0 * pair[0] / pair[1])
 
         kw = dict(mk)
-        if ctx.comparativo_municipio:
-            totals_rd = totals_r.get(discipline, {})
+        totals_rd = totals_r.get(discipline, {})
 
-            def _cell_rede(e: str, s: str) -> Optional[float]:
-                if (e, s) not in ctx.scope_rede.classes_by_cell:
-                    return None
-                pair = totals_rd.get((e, s))
-                if not pair or pair[1] == 0:
-                    return None
-                return round_to_two_decimals(100.0 * pair[0] / pair[1])
+        def _cell_rede(e: str, s: str) -> Optional[float]:
+            if (e, s) not in ctx.scope_rede.classes_by_cell:
+                return None
+            pair = totals_rd.get((e, s))
+            if not pair or pair[1] == 0:
+                return None
+            return round_to_two_decimals(100.0 * pair[0] / pair[1])
 
-            kw["cell_fn_rede"] = _cell_rede
+        kw["cell_fn_rede"] = _cell_rede
         return _build_numeric_matriz(ctx.scope_linhas, _cell, **kw)
 
     por_disc = {
@@ -2015,12 +2028,12 @@ def _answer_sheet_acertos_data(
     agg_by_serie_l, agg_by_serie_disc_l, totals_l = _answer_sheet_acertos_aggregate(
         ctx.scope_linhas, gabs_by_id, gabarito_ids, results_linhas, all_disciplines
     )
-    if ctx.comparativo_municipio:
+    if ctx.scope_rede is ctx.scope_linhas:
+        totals_r = totals_l
+    else:
         _, _, totals_r = _answer_sheet_acertos_aggregate(
             ctx.scope_rede, gabs_by_id, gabarito_ids, results_rede, all_disciplines
         )
-    else:
-        totals_r = totals_l
 
     mk = _matriz_kwargs(ctx)
 
@@ -2036,18 +2049,17 @@ def _answer_sheet_acertos_data(
             return round_to_two_decimals(100.0 * pair[0] / pair[1])
 
         kw = dict(mk)
-        if ctx.comparativo_municipio:
-            totals_rd = totals_r.get(discipline, {})
+        totals_rd = totals_r.get(discipline, {})
 
-            def _cell_rede(e: str, s: str) -> Optional[float]:
-                if (e, s) not in ctx.scope_rede.classes_by_cell:
-                    return None
-                pair = totals_rd.get((e, s))
-                if not pair or pair[1] == 0:
-                    return None
-                return round_to_two_decimals(100.0 * pair[0] / pair[1])
+        def _cell_rede(e: str, s: str) -> Optional[float]:
+            if (e, s) not in ctx.scope_rede.classes_by_cell:
+                return None
+            pair = totals_rd.get((e, s))
+            if not pair or pair[1] == 0:
+                return None
+            return round_to_two_decimals(100.0 * pair[0] / pair[1])
 
-            kw["cell_fn_rede"] = _cell_rede
+        kw["cell_fn_rede"] = _cell_rede
         return _build_numeric_matriz(ctx.scope_linhas, _cell, **kw)
 
     por_disc = {
@@ -2636,7 +2648,16 @@ def _fetch_answer_sheet_scope(
     user: dict,
     permissao: dict,
     area_type: Optional[str] = None,
+    *,
+    for_rede: bool = False,
 ) -> Tuple[List[AnswerSheetGabarito], List[Class], Dict[str, List[Class]]]:
+    """
+    Resolve gabaritos + turmas do escopo.
+
+    ``for_rede=True``: município inteiro (benchmark ``medias_da_rede``), sem ACL de
+    diretor/professor. ``tipo_area`` continua aplicado quando enviado pela tela.
+    ``for_rede=False``: linhas do relatório, respeitando permissão do usuário.
+    """
     gabs = AnswerSheetGabarito.query.filter(AnswerSheetGabarito.id.in_([str(g) for g in gabarito_ids])).all()
     classes_by_gab: Dict[str, List[Class]] = {}
     all_classes: List[Class] = []
@@ -2647,7 +2668,10 @@ def _fetch_answer_sheet_scope(
 
         area_school_ids = set(school_ids_for_area(area_type) or [])
     for gab in gabs:
-        classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
+        if for_rede:
+            classes = get_answer_sheet_target_classes_for_report(gab, "city", municipio_id)
+        else:
+            classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
         if escola_id:
             classes = [c for c in classes if str(c.school_id) == str(escola_id)]
         if area_school_ids is not None:
@@ -2658,6 +2682,34 @@ def _fetch_answer_sheet_scope(
                 seen.add(str(c.id))
                 all_classes.append(c)
     return gabs, all_classes, classes_by_gab
+
+
+def _answer_sheet_build_rede_scope(
+    gabarito_ids: List[str],
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    area_type: Optional[str],
+) -> Tuple[ScopeIndex, List[Any], List[AnswerSheetResult]]:
+    """Escopo + resultados da rede municipal (sem ACL de escola/turma)."""
+    _gabs_rede, all_classes_rede, classes_by_gab_rede = _fetch_answer_sheet_scope(
+        gabarito_ids,
+        municipio_id,
+        None,
+        user,
+        permissao,
+        area_type,
+        for_rede=True,
+    )
+    class_ids_rede = [c.id for c in all_classes_rede]
+    item_by_class_rede: Dict[str, str] = {}
+    for gid, cls_list in classes_by_gab_rede.items():
+        for c in cls_list:
+            item_by_class_rede[str(c.id)] = str(gid)
+    students_rede = _answer_sheet_students_by_class(class_ids_rede, item_by_class_rede)
+    scope_rede = _build_scope_index(all_classes_rede, students_rede, item_by_class_rede)
+    results_rede = _answer_sheet_results_for_classes(gabarito_ids, class_ids_rede)
+    return scope_rede, class_ids_rede, results_rede
 
 
 def _answer_sheet_results_for_classes(gabarito_ids: List[str], class_ids: List[Any]) -> List[AnswerSheetResult]:
@@ -2751,25 +2803,23 @@ def build_answer_sheet_consolidated_report(
     scope_linhas = _build_scope_index(all_classes_linhas, students_linhas, item_by_class_linhas)
     results_linhas = _answer_sheet_results_for_classes(gabarito_ids, class_ids_linhas)
 
-    if escola_id:
-        _gabs_rede, all_classes_rede, classes_by_gab_rede = _fetch_answer_sheet_scope(
-            gabarito_ids, municipio_id, None, user, permissao, area_type
-        )
-        class_ids_rede = [c.id for c in all_classes_rede]
-        item_by_class_rede: Dict[str, str] = {}
-        for gid, cls_list in classes_by_gab_rede.items():
-            for c in cls_list:
-                item_by_class_rede[str(c.id)] = str(gid)
-        students_rede = _answer_sheet_students_by_class(class_ids_rede, item_by_class_rede)
-        scope_rede = _build_scope_index(all_classes_rede, students_rede, item_by_class_rede)
-        results_rede = _answer_sheet_results_for_classes(gabarito_ids, class_ids_rede)
-        ctx = _scope_context_dual(scope_linhas, scope_rede, escola_id)
-        series_aplicadas = _build_series_aplicadas(scope_rede.series_items)
-    else:
-        ctx = _scope_context_from_single(scope_linhas)
+    # Benchmark municipal: SEMPRE município inteiro (qualquer perfil). Linhas seguem ACL.
+    # Tecadm/admin sem escola: linhas já são o município (+ tipo_area) — reutiliza para
+    # evitar segunda consulta pesada idêntica.
+    if (
+        escola_id is None
+        and permissao.get("scope") in ("all", "municipio")
+    ):
+        scope_rede = scope_linhas
         class_ids_rede = class_ids_linhas
         results_rede = results_linhas
-        series_aplicadas = _build_series_aplicadas(scope_linhas.series_items)
+        ctx = _scope_context_from_single(scope_linhas)
+    else:
+        scope_rede, class_ids_rede, results_rede = _answer_sheet_build_rede_scope(
+            gabarito_ids, municipio_id, user, permissao, area_type
+        )
+        ctx = _scope_context_linhas_e_rede(scope_linhas, scope_rede, escola_id)
+    series_aplicadas = _build_series_aplicadas(scope_rede.series_items)
 
     all_disciplines: Set[str] = set()
     for g in gabs_linhas:

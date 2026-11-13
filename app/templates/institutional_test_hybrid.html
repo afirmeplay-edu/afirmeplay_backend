@@ -975,6 +975,17 @@
 				text-align: center;
 			}
 
+			/* Data da geração do lote (fora da área OMR; margem @page OMR é 0). */
+			.generation-date {
+				font-size: 6pt;
+				font-weight: normal;
+				text-align: center;
+				color: #333;
+				margin-top: 2px;
+				line-height: 1.15;
+				white-space: nowrap;
+			}
+
 			.test-name-section {
 				border-top: 1px solid #000;
 				padding-top: 2px;
@@ -1730,6 +1741,9 @@
 							alt="QR Code" />
 					</div>
 					<div class="qr-label">QR Code:</div>
+					{% if generated_date %}
+					<div class="generation-date">Gerado em {{ generated_date }}</div>
+					{% endif %}
 				</div>
 			</div>
 

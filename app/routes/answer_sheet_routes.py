@@ -3753,10 +3753,16 @@ def _load_cartao_roster_and_results(
     class_ids: List[Any],
     periodo_bounds=None,
     alunos_filtro=None,
+    *,
+    somente_corrigidos: bool = False,
 ) -> Tuple[List[AnswerSheetResult], List[Student]]:
     """
     Roster (alunos atuais ∪ snapshots na turma) + resultados do gabarito no escopo.
     Alinhado a evaluation_results com class_id_snapshot.
+
+    ``somente_corrigidos=True``: universo = só quem tem AnswerSheetResult
+    (faltoso/ausente/não corrigido fica de fora de contagens, tabela e ranking).
+    Relatório de participação e análise de faltosos usam o default False.
     """
     from app.services.answer_sheet_result_snapshot import (
         query_answer_sheet_results_for_class_group,
@@ -3797,6 +3803,13 @@ def _load_cartao_roster_and_results(
         from app.services.alunos_resultado_filtro import aplicar_universo_alunos
 
         students, results = aplicar_universo_alunos(students, alunos_filtro, results)
+
+    if somente_corrigidos:
+        by_id = {s.id: s for s in students}
+        # Preserva ordem dos resultados; só alunos com correção entram no universo.
+        students = [by_id[r.student_id] for r in results if r.student_id in by_id]
+        results = [r for r in results if r.student_id in by_id]
+
     return results, students
 
 
@@ -4223,8 +4236,13 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
         else:
             alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
             resultados, todos_alunos = _load_cartao_roster_and_results(
-                str(gabarito_id), class_ids, periodo_bounds, alunos_filtro
+                str(gabarito_id),
+                class_ids,
+                periodo_bounds,
+                alunos_filtro,
+                somente_corrigidos=True,
             )
+            # Resultado: só corrigidos. Faltoso/ausente não conta.
             total_alunos = len(todos_alunos)
             alunos_participantes = len(resultados)
         # Agregação hierárquica; nota = calculate_grade(média_proficiência)
@@ -4268,14 +4286,24 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             elif 'avançado' in cl or 'avancado' in cl:
                 dist['avancado'] += 1
 
+        # Escolas/séries/turmas só das turmas que de fato têm aluno corrigido
+        turmas_com_resultado = set()
+        for s in todos_alunos:
+            if s.class_id:
+                turmas_com_resultado.add(s.class_id)
+        for r in resultados:
+            snap = getattr(r, "class_id_snapshot", None)
+            if snap:
+                turmas_com_resultado.add(snap)
         escolas_unicas = set()
         series_unicas = set()
-        turmas_unicas = set(class_ids)
-        for c in Class.query.filter(Class.id.in_(class_ids)).all():
-            if c.school_id:
-                escolas_unicas.add(c.school_id)
-            if c.grade_id:
-                series_unicas.add(c.grade_id)
+        turmas_unicas = set(turmas_com_resultado)
+        if turmas_com_resultado:
+            for c in Class.query.filter(Class.id.in_(list(turmas_com_resultado))).all():
+                if c.school_id:
+                    escolas_unicas.add(c.school_id)
+                if c.grade_id:
+                    series_unicas.add(c.grade_id)
 
         escola_nome = None
         serie_nome = None
@@ -4327,8 +4355,9 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             "total_gabaritos": 1 if gabarito_id else 0,
             "total_alunos": total_alunos,
             "alunos_participantes": alunos_participantes,
-            "alunos_pendentes": total_alunos - alunos_participantes,
-            "alunos_ausentes": max(0, total_alunos - alunos_participantes),
+            # Faltosos/ausentes não entram no universo de resultado (total = participantes).
+            "alunos_pendentes": 0,
+            "alunos_ausentes": 0,
             "percentual_comparecimento": pct,
             "nivel_classificacao": nivel_classificacao_geral,
             "media_nota_geral": round(media_nota, 2),
@@ -4351,7 +4380,11 @@ def _calcular_estatisticas_grupo_cartao(
     if not class_ids or not gabarito_id:
         return {'total_alunos': 0, 'alunos_participantes': 0, 'alunos_pendentes': 0, 'media_nota': 0.0, 'media_proficiencia': 0.0, 'distribuicao_classificacao': {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}}
     resultados, alunos = _load_cartao_roster_and_results(
-        str(gabarito_id), class_ids, periodo_bounds, alunos_filtro
+        str(gabarito_id),
+        class_ids,
+        periodo_bounds,
+        alunos_filtro,
+        somente_corrigidos=True,
     )
     total_alunos = len(alunos)
     participantes = len(resultados)
@@ -4390,7 +4423,14 @@ def _calcular_estatisticas_grupo_cartao(
             dist['adequado'] += 1
         elif 'avançado' in cl or 'avancado' in cl:
             dist['avancado'] += 1
-    return {'total_alunos': total_alunos, 'alunos_participantes': participantes, 'alunos_pendentes': total_alunos - participantes, 'media_nota': round(media_nota, 2), 'media_proficiencia': round(media_prof, 2), 'distribuicao_classificacao': dist}
+    return {
+        'total_alunos': total_alunos,
+        'alunos_participantes': participantes,
+        'alunos_pendentes': 0,
+        'media_nota': round(media_nota, 2),
+        'media_proficiencia': round(media_prof, 2),
+        'distribuicao_classificacao': dist,
+    }
 
 
 def _subject_name_is_lingua_portuguesa(name: str) -> bool:
@@ -4539,14 +4579,14 @@ def _complementar_metricas_escola_municipio_cartao(
     md = _medias_por_disciplina_de_resultados_cartao(
         results, gabarito, aggregation_level, serie_id=serie_id_scope
     )
-    ausentes = max(0, total - part)
     return {
         "percentual_comparecimento": pct,
         "nivel_classificacao": nivel,
         "media_nota_lingua_portuguesa": md["media_nota_lp"],
         "media_nota_matematica": md["media_nota_mat"],
         "medias_por_disciplina": md["lista"],
-        "alunos_ausentes": ausentes,
+        # Faltosos/ausentes não entram no universo de resultado.
+        "alunos_ausentes": 0,
     }
 
 
@@ -4572,7 +4612,7 @@ def _complementar_linha_resultado_detalhado_cartao(
         "media_nota_lingua_portuguesa": None,
         "media_nota_matematica": None,
         "medias_por_disciplina": [],
-        "alunos_ausentes": max(0, total - part),
+        "alunos_ausentes": 0,
     }
 
 
@@ -4607,6 +4647,8 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
             stats = _calcular_estatisticas_grupo_cartao(
                 cids, gabarito_id, periodo_bounds, aggregation_level="escola", alunos_filtro=alunos_filtro
             )
+            if not stats.get("alunos_participantes"):
+                continue
             comp = _complementar_linha_resultado_detalhado_cartao(
                 stats, cids, gabarito_id, periodo_bounds, gabarito, aggregation_level="escola", alunos_filtro=alunos_filtro
             )
@@ -4646,6 +4688,8 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
             stats = _calcular_estatisticas_grupo_cartao(
                 cids, gabarito_id, periodo_bounds, aggregation_level="serie", alunos_filtro=alunos_filtro
             )
+            if not stats.get("alunos_participantes"):
+                continue
             comp = _complementar_linha_resultado_detalhado_cartao(
                 stats, cids, gabarito_id, periodo_bounds, gabarito, aggregation_level="serie", alunos_filtro=alunos_filtro
             )
@@ -4677,6 +4721,8 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
             stats = _calcular_estatisticas_grupo_cartao(
                 cids_one, gabarito_id, periodo_bounds, aggregation_level="turma", alunos_filtro=alunos_filtro
             )
+            if not stats.get("alunos_participantes"):
+                continue
             comp = _complementar_linha_resultado_detalhado_cartao(
                 stats, cids_one, gabarito_id, periodo_bounds, gabarito, aggregation_level="turma", alunos_filtro=alunos_filtro
             )
@@ -4805,8 +4851,9 @@ def _build_disciplina_rows_from_cartao_results(
             "total_avaliacoes": 1,
             "total_alunos": total_alunos,
             "alunos_participantes": n,
-            "alunos_pendentes": max(0, total_alunos - n),
-            "alunos_ausentes": max(0, total_alunos - n),
+            # Universo de resultado = só corrigidos; sem “faltoso” nesta agregação.
+            "alunos_pendentes": 0,
+            "alunos_ausentes": 0,
             "media_nota": round(media_nota, 2),
             "media_proficiencia": round(media_prof, 2),
             "distribuicao_classificacao": agg["dist"],
@@ -4820,9 +4867,13 @@ def _load_cartao_results_and_students_for_disciplina(
     periodo_bounds=None,
     alunos_filtro=None,
 ) -> Tuple[List[AnswerSheetResult], List[Student], Dict[Any, Class]]:
-    """Resultados deduplicados e alunos do recorte (turmas previstas + snapshots)."""
+    """Resultados deduplicados e alunos corrigidos do recorte (faltosos fora)."""
     results, students = _load_cartao_roster_and_results(
-        gabarito_id, class_ids, periodo_bounds, alunos_filtro
+        gabarito_id,
+        class_ids,
+        periodo_bounds,
+        alunos_filtro,
+        somente_corrigidos=True,
     )
     classes = {
         c.id: c
@@ -5112,6 +5163,7 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
         class_ids,
         periodo_bounds,
         scope_info.get("alunos") if isinstance(scope_info, dict) else None,
+        somente_corrigidos=True,
     )
     student_ids = [s.id for s in students]
     result_by_student = {r.student_id: r for r in results}
@@ -5362,6 +5414,7 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user,
         class_ids,
         periodo_bounds,
         scope_info.get("alunos") if isinstance(scope_info, dict) else None,
+        somente_corrigidos=True,
     )
     if not students and not results:
         return []
@@ -8246,7 +8299,7 @@ def niveis_proficiencia_cartao():
             gabarito_id, scope_info, nivel_granularidade, user
         )
         results, _students = _load_cartao_roster_and_results(
-            gabarito_id, class_ids, periodo_bounds_dados
+            gabarito_id, class_ids, periodo_bounds_dados, somente_corrigidos=True
         )
         class_id_by_student = {}
         for r in results:

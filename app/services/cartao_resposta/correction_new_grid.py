@@ -42,6 +42,10 @@ from datetime import datetime
 from app import db
 
 
+class QrEntityNotFoundError(LookupError):
+    """QR lido com sucesso, mas gabarito/aluno/prova não existe no tenant atual."""
+
+
 class AnswerSheetCorrectionNewGrid:
     """
     Pipeline OMR Robusto - 9 Etapas Determinísticas
@@ -571,12 +575,19 @@ class AnswerSheetCorrectionNewGrid:
             student_id = self._resolve_qr_id(Student, student_raw, "Aluno")
             test_id = self._resolve_qr_id(Test, test_raw, "Prova")
 
+            # QR foi lido; falha de lookup NÃO deve virar "QR não detectado".
             if gabarito_raw and not gabarito_id:
-                return None
+                raise QrEntityNotFoundError(
+                    "Cartão não encontrado no sistema para o código QR lido."
+                )
             if student_raw and not student_id:
-                return None
+                raise QrEntityNotFoundError(
+                    "Aluno não encontrado no sistema para o código QR lido."
+                )
             if test_raw and not test_id:
-                return None
+                raise QrEntityNotFoundError(
+                    "Prova não encontrada no sistema para o código QR lido."
+                )
 
             if test_id and not gabarito_id:
                 self.logger.info(f"🔍 QR Code com test_id (prova física): {test_id[:8]}...")
@@ -598,6 +609,8 @@ class AnswerSheetCorrectionNewGrid:
             self.logger.error(f"❌ Erro ao decodificar JSON do QR Code: {str(e)}")
             self.logger.error(f"Dados recebidos: {qr_data_str[:200]}...")
             return None
+        except QrEntityNotFoundError:
+            raise
         except Exception as e:
             self.logger.error(f"❌ Erro ao processar QR Code: {str(e)}")
             return None
@@ -3620,6 +3633,7 @@ class AnswerSheetCorrectionNewGrid:
             (r"âncoras\s+A4|Âncoras\s+A4|quadrados\s+A4", "Não foi possível identificar os marcadores nos cantos da folha. Verifique se a imagem está completa e os cantos estão visíveis."),
             (r"triângulos", "Não foi possível identificar os marcadores de alinhamento. Certifique-se de que a imagem está nítida e os triângulos estão visíveis."),
             (r"blocos.*detectado|Nenhum bloco", "Não foi possível identificar as áreas de resposta. Verifique se a imagem está bem iluminada e as bordas dos blocos estão visíveis."),
+            # QR realmente não lido/detectado (não usar para lookup de cartão)
             (r"QR\s+Code.*não\s+detectado|QR\s+Code.*inválido|QR\s+Code.*não\s+encontrado", "Não foi possível ler o código QR do cartão. Verifique se o código está visível, não está danificado e a imagem está nítida."),
             
             # Processamento
@@ -3627,7 +3641,8 @@ class AnswerSheetCorrectionNewGrid:
             (r"normalizar.*A4", "Não foi possível ajustar a imagem. Tente escanear novamente com a folha bem posicionada e os cantos visíveis."),
             (r"crop.*área", "Não foi possível identificar a área de respostas. Verifique se a imagem está completa e bem alinhada."),
             
-            # Dados
+            # Dados (QR lido, entidade ausente no município/banco)
+            (r"Cartão.*não\s+encontrado", "Cartão não encontrado no sistema. Verifique se o cartão foi gerado neste município e ainda está cadastrado."),
             (r"Aluno.*não\s+encontrado", "Aluno não encontrado no sistema. Verifique se o código QR está correto."),
             (r"Gabarito.*não\s+encontrado", "Gabarito não encontrado. Verifique se a prova está cadastrada corretamente."),
             (r"Prova.*não\s+encontrada", "Prova não encontrada. Verifique se a prova está cadastrada corretamente."),
@@ -4058,14 +4073,19 @@ class AnswerSheetCorrectionNewGrid:
             # 3) Se QR falhar: tentar na A4 normalizada
             if auto_detect_qr:
                 self.logger.info("🔍 QR na imagem original (prioridade de estabilidade)...")
-                qr_data = self._detectar_qr_code(img)
+                try:
+                    qr_data = self._detectar_qr_code(img)
 
-                precomputed_anchors = self._detect_a4_anchors(img, None)
+                    precomputed_anchors = self._detect_a4_anchors(img, None)
 
-                if not qr_data and precomputed_anchors is not None:
-                    precomputed_img_a4 = self._normalize_to_a4(img, precomputed_anchors)
-                    self.logger.info("🔍 Fallback: QR na imagem A4 normalizada...")
-                    qr_data = self._detectar_qr_code(precomputed_img_a4)
+                    if not qr_data and precomputed_anchors is not None:
+                        precomputed_img_a4 = self._normalize_to_a4(img, precomputed_anchors)
+                        self.logger.info("🔍 Fallback: QR na imagem A4 normalizada...")
+                        qr_data = self._detectar_qr_code(precomputed_img_a4)
+                except QrEntityNotFoundError as e:
+                    # QR detectado e decodificado; cartão/aluno/prova ausente no tenant
+                    error_msg = self._format_user_friendly_error(str(e))
+                    return self._fail_correction(error_msg)
 
                 if not qr_data:
                     error_msg = self._format_user_friendly_error("QR Code não encontrado no cartão")

@@ -102,7 +102,57 @@ class AnswerSheetCorrectionNewGrid:
     BUBBLE_MARK_CLAHE_TILE = 8
     # V2 é a única implementação ativa no pipeline (constante documental).
     USE_BUBBLE_DETECTION_V2 = True
-    
+
+    # =========================================================================
+    # FASE B — geometria / ink map / template vazio (flags com fallback)
+    # =========================================================================
+    # B1: refinar grid por bloco (anel sintético + regressão robusta).
+    # Busca grossa ±45 (aprovada: offset real ~25–60px) + refino fino ±12.
+    USE_GRID_REFINE_B1 = True
+    GRID_REFINE_COARSE_SEARCH_PX = 45
+    GRID_REFINE_FINE_SEARCH_PX = 12
+    GRID_REFINE_MATCH_MIN = 0.28
+    GRID_REFINE_MATCH_HIGH = 0.40
+    GRID_REFINE_MIN_HITS = 12
+    GRID_REFINE_MAX_RESID_PX = 4.0
+    GRID_REFINE_ROW_H_MIN = 45.0
+    GRID_REFINE_ROW_H_MAX = 62.0
+    GRID_REFINE_SPACING_MIN = 45.0
+    GRID_REFINE_SPACING_MAX = 80.0
+    # B2: papel via dilatação elíptica (~2,6·r) + GaussianBlur σ≈10
+    USE_PAPER_DILATE_B2 = True
+    PAPER_DILATE_RADIUS_FACTOR = 2.6
+    PAPER_DILATE_BLUR_SIGMA = 10.0
+    # B3: score relativo a template de bolha vazia (mediana dos patches alinhados)
+    # Default OFF até geometria estável no harness (ativável por flag).
+    USE_EMPTY_TEMPLATE_B3 = False
+    EMPTY_TEMPLATE_MIN_ALIGN_FRAC = 0.60
+    EMPTY_TEMPLATE_MATCH_MIN = 0.35
+    EMPTY_TEMPLATE_W_RESIDUAL = 0.35  # peso do residual patch−template no score
+
+    # =========================================================================
+    # FASE C — robustez em scan binário / decisão adaptativa / bleed vertical
+    # =========================================================================
+    # C1: suaviza ink map e usa cobertura do disco interno (~0,6·r) se binário
+    USE_BINARY_ROBUST_C1 = True
+    BINARY_HIST_EDGE_FRAC = 0.97
+    BINARY_INK_BLUR_SIGMA = 4.5
+    BINARY_INK_CLOSE_PX = 7
+    BINARY_INNER_RADIUS_RATIO = 0.60
+    # C2: 2ª passada com limiar relativo marca/vazio do cartão
+    USE_ADAPTIVE_TWO_PASS_C2 = True
+    TWO_PASS_MIN_HIGH = 6
+    TWO_PASS_EMPTY_FRAC = 0.35  # limiar = vazio + frac*(marca−vazio)
+    # C3: bleed vertical entre linhas consecutivas
+    USE_VERTICAL_BLEED_C3 = True
+    VERTICAL_BLEED_HEIGHT_ROWS = 1.30
+
+    # =========================================================================
+    # FASE D — ausente seguro / needs_review
+    # =========================================================================
+    # Só trata "cartão em branco" como ausente se TODOS os top scores < piso.
+    ABSENT_BLANK_SCORE_MAX = 22.0
+
     # =========================================================================
     # CONSTANTES CALIBRADAS EMPIRICAMENTE (answer_sheet.html)
     # =========================================================================
@@ -194,6 +244,10 @@ class AnswerSheetCorrectionNewGrid:
         self.debug_dir = "debug_corrections_new"
         # Diagnóstico por questão da última detecção V2 (não altera contrato de answers)
         self.last_bubble_diagnostics: Dict[int, Dict[str, Any]] = {}
+        # Diagnóstico de geometria por bloco (Fase B1)
+        self.last_geometry_diagnostics: Dict[Any, Dict[str, Any]] = {}
+        # Estado por cartão (is_binary, template vazio, etc.)
+        self.last_card_diagnostics: Dict[str, Any] = {}
         
         if self.debug:
             import os
@@ -1974,6 +2028,649 @@ class AnswerSheetCorrectionNewGrid:
         
         self.logger.info(f"✅ {len(bubbles)} centros de bolhas calculados")
         return bubbles
+
+    # =========================================================================
+    # FASE B1 — REFINO DE GRID POR BLOCO
+    # =========================================================================
+
+    def _synth_bubble_ring_template(self, radius: int = None, thickness: int = 2) -> np.ndarray:
+        """Anel sintético (float32) para matchTemplate TM_CCOEFF_NORMED."""
+        r = int(radius if radius is not None else self.BUBBLE_RADIUS_PX)
+        s = r * 2 + 10
+        tmpl = np.zeros((s, s), dtype=np.float32)
+        c = s // 2
+        cv2.circle(tmpl, (c, c), r, 255.0, thickness)
+        return tmpl
+
+    def _match_ring_near(
+        self,
+        inv_gray: np.ndarray,
+        cx: int,
+        cy: int,
+        tmpl: np.ndarray,
+        search: int,
+    ) -> Tuple[int, int, float]:
+        """
+        matchTemplate do anel em janela ±search em torno de (cx, cy).
+        Retorna (fx, fy, score). Se falhar, devolve (cx, cy, 0).
+        """
+        th, tw = tmpl.shape[:2]
+        h, w = inv_gray.shape[:2]
+        x0 = max(0, int(cx) - search - tw // 2)
+        y0 = max(0, int(cy) - search - th // 2)
+        x1 = min(w, int(cx) + search + tw // 2)
+        y1 = min(h, int(cy) + search + th // 2)
+        win = inv_gray[y0:y1, x0:x1]
+        if win.shape[0] < th or win.shape[1] < tw:
+            return int(cx), int(cy), 0.0
+        res = cv2.matchTemplate(win, tmpl, cv2.TM_CCOEFF_NORMED)
+        _, maxv, _, maxloc = cv2.minMaxLoc(res)
+        fx = x0 + maxloc[0] + tw // 2
+        fy = y0 + maxloc[1] + th // 2
+        return int(fx), int(fy), float(maxv)
+
+    @staticmethod
+    def _fit_line_huber(
+        idxs: List[float], vals: List[float], max_iter: int = 12
+    ) -> Tuple[Optional[float], Optional[float], float]:
+        """
+        Regressão robusta y = a + b*idx (Huber IRLS).
+        Fallback: mínimos quadrados. Retorna (a, b, residual_mediano).
+        """
+        if len(idxs) < 3:
+            return None, None, 1e9
+        x = np.asarray(idxs, dtype=np.float64)
+        y = np.asarray(vals, dtype=np.float64)
+        A = np.vstack([np.ones(len(x)), x]).T
+        coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+        for _ in range(max_iter):
+            pred = A @ coef
+            resid = y - pred
+            mad = float(np.median(np.abs(resid - np.median(resid)))) + 1e-6
+            # Huber: peso 1 se |r|<k, k/|r| senão (k≈1.5·MAD·1.4826)
+            k = 1.5 * 1.4826 * mad
+            abs_r = np.abs(resid)
+            w = np.ones_like(resid)
+            mask = abs_r > k
+            w[mask] = k / abs_r[mask]
+            Aw = A * w[:, None]
+            yw = y * w
+            coef, *_ = np.linalg.lstsq(Aw, yw, rcond=None)
+        pred = A @ coef
+        resid_med = float(np.median(np.abs(y - pred)))
+        return float(coef[0]), float(coef[1]), resid_med
+
+    def _hough_circles_in_block(self, gray: np.ndarray) -> List[Tuple[int, int, int]]:
+        """Círculos impressos via Hough (passo grosso B1 — estável em scan binário)."""
+        r = int(self.BUBBLE_RADIUS_PX)
+        blur = cv2.GaussianBlur(gray, (5, 5), 1.2)
+        circles = cv2.HoughCircles(
+            blur,
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,
+            minDist=max(20, int(r * 1.1)),
+            param1=80,
+            param2=22,
+            minRadius=max(14, r - 8),
+            maxRadius=r + 10,
+        )
+        if circles is None:
+            return []
+        return [
+            (int(round(c[0])), int(round(c[1])), int(round(c[2])))
+            for c in circles[0]
+        ]
+
+    def _offset_ink_separation(
+        self,
+        gray: np.ndarray,
+        bubbles: List[Dict],
+        dx: float,
+        dy: float,
+        row_of: Dict,
+        col_of: Dict,
+    ) -> float:
+        """
+        Qualidade de um offset (dx,dy): mediana das margens (top−2º) por questão
+        usando escuridão no disco. Maior = melhor alinhamento com marcas reais.
+        """
+        # ink rápido: paper≈percentil alto local via blur
+        g = gray.astype(np.float32)
+        paper = cv2.GaussianBlur(g, (0, 0), 8)
+        ink = np.clip(paper - g, 0, 255)
+        by_q: Dict[Any, List[float]] = defaultdict(list)
+        for b in bubbles:
+            key = (b["q_num"], b["alternative"])
+            if key not in row_of:
+                continue
+            cx = int(round(b["cx"] + dx))
+            cy = int(round(b["cy"] + dy))
+            r = int(b["r"])
+            rr = max(2, int(round(r * 0.55)))
+            h, w = ink.shape
+            if not (rr <= cx < w - rr and rr <= cy < h - rr):
+                by_q[b["q_num"]].append(0.0)
+                continue
+            yy, xx = np.ogrid[-rr : rr + 1, -rr : rr + 1]
+            mask = xx * xx + yy * yy <= rr * rr
+            patch = ink[cy - rr : cy + rr + 1, cx - rr : cx + rr + 1]
+            if patch.shape != mask.shape:
+                by_q[b["q_num"]].append(0.0)
+                continue
+            by_q[b["q_num"]].append(float(np.mean(patch[mask])))
+        margins = []
+        for scores in by_q.values():
+            if len(scores) < 2:
+                continue
+            ordered = sorted(scores, reverse=True)
+            margins.append(ordered[0] - ordered[1])
+        if not margins:
+            return -1e9
+        return float(np.median(margins))
+
+    def _refine_block_grid(
+        self,
+        block_roi: np.ndarray,
+        grid_map: Dict,
+        bubbles: List[Dict],
+        block_id: Any = None,
+    ) -> Tuple[List[Dict], Dict[str, Any]]:
+        """
+        B1: refina centros das bolhas por bloco.
+
+        Estratégia principal: reticulado via HoughCircles (k-means 1D em X/Y).
+        Offset global falha quando o erro de calibração ≈ 1·spacing — há dois
+        atratores e o histograma de pares escolhe o vizinho. O clustering das
+        colunas físicas evita essa ambiguidade.
+
+        Fallback: offset mediano MT + pitch nominal.
+
+        Retorna (bubbles_ajustadas, diagnóstico).
+        """
+        diag: Dict[str, Any] = {
+            "enabled": True,
+            "used_refined": False,
+            "n_hits_coarse": 0,
+            "n_hits_fine": 0,
+            "coarse_method": None,
+            "a_y": None,
+            "b_y": None,
+            "a_x": None,
+            "d_x": None,
+            "resid_y": None,
+            "resid_x": None,
+            "median_dx": None,
+            "median_dy": None,
+            "fallback_reason": None,
+        }
+        if not self.USE_GRID_REFINE_B1 or not bubbles:
+            diag["enabled"] = False
+            diag["fallback_reason"] = "flag_off_or_empty"
+            return bubbles, diag
+
+        if len(block_roi.shape) == 3:
+            gray = cv2.cvtColor(block_roi, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = block_roi
+        inv = (255.0 - gray.astype(np.float32))
+        tmpl = self._synth_bubble_ring_template()
+        coarse = int(self.GRID_REFINE_COARSE_SEARCH_PX)
+        match_min = float(self.GRID_REFINE_MATCH_MIN)
+        min_hits = int(self.GRID_REFINE_MIN_HITS)
+        spacing = float(self.BUBBLE_SPACING_PX)
+        row_h = float(self.ROW_HEIGHT_PX)
+
+        row_of: Dict[Tuple[Any, str], int] = {}
+        col_of: Dict[Tuple[Any, str], int] = {}
+        for qmap in grid_map.get("questions", []):
+            for alt in qmap.get("alternatives", []):
+                row_of[(qmap["q_num"], alt["letter"])] = int(qmap["row_idx"])
+                col_of[(qmap["q_num"], alt["letter"])] = int(alt["col_idx"])
+
+        n_rows = len({r for r in row_of.values()})
+        n_cols = len({c for c in col_of.values()})
+        if n_rows < 2 or n_cols < 2:
+            diag["fallback_reason"] = "grid_too_small"
+            return bubbles, diag
+
+        def _kmeans_1d(vals: np.ndarray, k: int, pitch: float, max_iter: int = 16):
+            if len(vals) < k:
+                return None
+            lo, hi = float(np.min(vals)), float(np.max(vals))
+            if hi - lo < pitch * 0.5:
+                return None
+            centers = np.linspace(lo, hi, k)
+            for _ in range(max_iter):
+                dist = np.abs(vals[:, None] - centers[None, :])
+                labels = np.argmin(dist, axis=1)
+                new_c = centers.copy()
+                for j in range(k):
+                    m = vals[labels == j]
+                    if len(m) > 0:
+                        new_c[j] = float(np.median(m))
+                if np.max(np.abs(new_c - centers)) < 0.25:
+                    centers = new_c
+                    break
+                centers = new_c
+            centers = centers[np.argsort(centers)]
+            diffs = np.diff(centers)
+            if len(diffs) == 0:
+                return None
+            if not np.all((diffs >= pitch * 0.70) & (diffs <= pitch * 1.35)):
+                return None
+            dist = np.abs(vals[:, None] - centers[None, :])
+            labels = np.argmin(dist, axis=1)
+            for j in range(k):
+                if int(np.sum(labels == j)) < 2:
+                    return None
+            return centers
+
+        circles = self._hough_circles_in_block(gray)
+        diag["n_hits_coarse"] = len(circles)
+
+        pad = int(coarse + spacing + 15)
+        nom_x = [int(b["cx"]) for b in bubbles]
+        nom_y = [int(b["cy"]) for b in bubbles]
+        x_lo, x_hi = min(nom_x) - pad, max(nom_x) + pad
+        y_lo, y_hi = min(nom_y) - pad, max(nom_y) + pad
+        xs = np.array(
+            [float(hx) for hx, hy, _r in circles if x_lo <= hx <= x_hi and y_lo <= hy <= y_hi],
+            dtype=np.float64,
+        )
+        ys = np.array(
+            [float(hy) for hx, hy, _r in circles if x_lo <= hx <= x_hi and y_lo <= hy <= y_hi],
+            dtype=np.float64,
+        )
+
+        a_x = b_y = a_y = d_x = None
+        coarse_method = None
+        # Centros nominais por coluna/linha (mediana) — âncora para escolher
+        # qual janela de clusters é A..D (evita cluster extra à esquerda).
+        nom_col_x = []
+        for cidx in range(n_cols):
+            vals = [
+                float(b["cx"])
+                for b in bubbles
+                if col_of.get((b["q_num"], b["alternative"])) == cidx
+            ]
+            nom_col_x.append(float(np.median(vals)) if vals else float("nan"))
+        nom_row_y = []
+        for ridx in range(n_rows):
+            vals = [
+                float(b["cy"])
+                for b in bubbles
+                if row_of.get((b["q_num"], b["alternative"])) == ridx
+            ]
+            nom_row_y.append(float(np.median(vals)) if vals else float("nan"))
+
+        def _grid_support(col_centers, row_centers):
+            """(n_cols_fortes, n_rows_fortes, n_inliers) para um reticulado."""
+            tol2 = 10.0 ** 2
+            per_c = np.zeros(len(col_centers), dtype=int)
+            per_r = np.zeros(len(row_centers), dtype=int)
+            n_inl = 0
+            for hx, hy, _r in circles:
+                if not (x_lo <= hx <= x_hi and y_lo <= hy <= y_hi):
+                    continue
+                ci = int(np.argmin(np.abs(col_centers - hx)))
+                ri = int(np.argmin(np.abs(row_centers - hy)))
+                if (hx - col_centers[ci]) ** 2 + (hy - row_centers[ri]) ** 2 <= tol2:
+                    n_inl += 1
+                    per_c[ci] += 1
+                    per_r[ri] += 1
+            strong_c = int(np.sum(per_c >= max(2, n_rows // 3)))
+            strong_r = int(np.sum(per_r >= max(2, n_cols // 3)))
+            return strong_c, strong_r, n_inl
+
+        def _pick_col_window(centers, row_centers, n_keep, nom_targets, pitch):
+            """
+            Escolhe n_keep centros X consecutivos.
+            Prioriza cobertura forte de colunas (evita janela deslocada 1 col
+            que deixa D sem círculos). Empate: menor |offset| vs nominal.
+            """
+            if centers is None or len(centers) < n_keep or row_centers is None:
+                return None
+            best = None
+            for start in range(len(centers) - n_keep + 1):
+                win = centers[start : start + n_keep]
+                diffs = np.diff(win)
+                if len(diffs) and not np.all(
+                    (diffs >= pitch * 0.70) & (diffs <= pitch * 1.35)
+                ):
+                    continue
+                sc, sr, nin = _grid_support(win, row_centers)
+                off = float(np.median(win - np.asarray(nom_targets, float)))
+                # maximiza strong_c, strong_r, n_inl; minimiza |off|
+                tup = (sc, sr, nin, -abs(off), win)
+                if best is None or tup[:4] > best[:4]:
+                    best = tup
+            return None if best is None else best[4]
+
+        def _pick_row_window(centers, col_centers, n_keep, nom_targets, pitch):
+            if centers is None or len(centers) < n_keep or col_centers is None:
+                return None
+            best = None
+            for start in range(len(centers) - n_keep + 1):
+                win = centers[start : start + n_keep]
+                diffs = np.diff(win)
+                if len(diffs) and not np.all(
+                    (diffs >= pitch * 0.70) & (diffs <= pitch * 1.35)
+                ):
+                    continue
+                sc, sr, nin = _grid_support(col_centers, win)
+                off = float(np.median(win - np.asarray(nom_targets, float)))
+                tup = (sr, sc, nin, -abs(off), win)
+                if best is None or tup[:4] > best[:4]:
+                    best = tup
+            return None if best is None else best[4]
+
+        # Tenta k..k+2 clusters (círculo decorativo / letra pode criar extra)
+        col_cands = []
+        for ktry in (n_cols, n_cols + 1, n_cols + 2):
+            if len(xs) >= ktry * 2:
+                cc = _kmeans_1d(xs, ktry, spacing)
+                if cc is not None:
+                    col_cands.append(cc)
+        row_cands = []
+        for ktry in (n_rows, n_rows + 1, n_rows + 2):
+            if len(ys) >= ktry * 2:
+                rc = _kmeans_1d(ys, ktry, row_h)
+                if rc is not None:
+                    row_cands.append(rc)
+
+        # Primeiro fixa linhas com k=n_rows (ou melhor suporte), depois colunas
+        row_c = None
+        if row_cands:
+            # usa colunas provisórias (k=n_cols) só para avaliar linhas
+            provisional_cols = None
+            for cc in col_cands:
+                if len(cc) == n_cols:
+                    provisional_cols = cc
+                    break
+            if provisional_cols is None and col_cands:
+                provisional_cols = col_cands[0][:n_cols]
+            for rc in row_cands:
+                picked = _pick_row_window(
+                    rc, provisional_cols, n_rows, nom_row_y, row_h
+                )
+                if picked is not None:
+                    row_c = picked
+                    break
+
+        col_c = None
+        if row_c is not None:
+            for cc in col_cands:
+                picked = _pick_col_window(cc, row_c, n_cols, nom_col_x, spacing)
+                if picked is not None:
+                    # fica com a de maior suporte entre candidatas
+                    if col_c is None:
+                        col_c = picked
+                    else:
+                        s_new = _grid_support(picked, row_c)
+                        s_old = _grid_support(col_c, row_c)
+                        off_new = abs(
+                            float(np.median(picked - np.asarray(nom_col_x, float)))
+                        )
+                        off_old = abs(
+                            float(np.median(col_c - np.asarray(nom_col_x, float)))
+                        )
+                        if (s_new[0], s_new[2], -off_new) > (
+                            s_old[0],
+                            s_old[2],
+                            -off_old,
+                        ):
+                            col_c = picked
+
+        if col_c is not None and row_c is not None:
+            d_x = float(np.median(np.diff(col_c)))
+            b_y = float(np.median(np.diff(row_c)))
+            a_x = float(col_c[0])
+            a_y = float(row_c[0])
+            ress = []
+            for hx, hy, _r in circles:
+                if not (x_lo <= hx <= x_hi and y_lo <= hy <= y_hi):
+                    continue
+                ci = int(np.argmin(np.abs(col_c - hx)))
+                ri = int(np.argmin(np.abs(row_c - hy)))
+                ress.append(float(np.hypot(hx - col_c[ci], hy - row_c[ri])))
+            res_med = float(np.median(ress)) if ress else 99.0
+            pitch_ok = (
+                self.GRID_REFINE_SPACING_MIN <= d_x <= self.GRID_REFINE_SPACING_MAX
+                and self.GRID_REFINE_ROW_H_MIN <= b_y <= self.GRID_REFINE_ROW_H_MAX
+            )
+            if pitch_ok and res_med <= 12.0:
+                coarse_method = "hough_lattice"
+                diag.update(
+                    {
+                        "a_x": a_x,
+                        "d_x": d_x,
+                        "a_y": a_y,
+                        "b_y": b_y,
+                        "resid_x": res_med,
+                        "resid_y": res_med,
+                        "median_dx": a_x
+                        - (float(self.BLOCK_OFFSET_X) + float(self.BUBBLE_WIDTH_PX) / 2.0),
+                        "median_dy": a_y
+                        - (float(self.BLOCK_OFFSET_Y) + float(self.ROW_HEIGHT_PX) / 2.0),
+                        "coarse_method": coarse_method,
+                        "n_hits_fine": len(xs),
+                    }
+                )
+            else:
+                a_x = b_y = a_y = d_x = None
+
+        if a_x is None:
+            mt_dxs, mt_dys = [], []
+            for b in bubbles:
+                fx, fy, sc = self._match_ring_near(
+                    inv, int(b["cx"]), int(b["cy"]), tmpl, coarse
+                )
+                if sc >= match_min:
+                    mt_dxs.append(fx - int(b["cx"]))
+                    mt_dys.append(fy - int(b["cy"]))
+            if len(mt_dxs) < min_hits:
+                diag["fallback_reason"] = "lattice_and_mt_failed"
+                return bubbles, diag
+            med_dx = float(np.clip(np.median(mt_dxs), -coarse, coarse))
+            med_dy = float(np.clip(np.median(mt_dys), -coarse, coarse))
+            a_y = float(self.BLOCK_OFFSET_Y) + float(self.ROW_HEIGHT_PX) / 2.0 + med_dy
+            b_y = float(self.ROW_HEIGHT_PX)
+            a_x = float(self.BLOCK_OFFSET_X) + float(self.BUBBLE_WIDTH_PX) / 2.0 + med_dx
+            d_x = float(self.BUBBLE_SPACING_PX)
+            coarse_method = "match_template_offset_only"
+            diag.update(
+                {
+                    "a_x": a_x,
+                    "d_x": d_x,
+                    "a_y": a_y,
+                    "b_y": b_y,
+                    "median_dx": med_dx,
+                    "median_dy": med_dy,
+                    "coarse_method": coarse_method,
+                    "n_hits_fine": len(mt_dxs),
+                }
+            )
+
+        def _build_refined(ax, dx_, ay, by_):
+            out = []
+            for b in bubbles:
+                key = (b["q_num"], b["alternative"])
+                if key not in row_of or key not in col_of:
+                    out.append(dict(b))
+                    continue
+                nb = dict(b)
+                nb["cx"] = int(round(ax + dx_ * col_of[key]))
+                nb["cy"] = int(round(ay + by_ * row_of[key]))
+                nb["cx_nominal"] = b["cx"]
+                nb["cy_nominal"] = b["cy"]
+                out.append(nb)
+            return out
+
+        def _read_quality(bubs):
+            """
+            Qualidade sem GT: (n_colunas_com_tinta_forte, n_clear, sep).
+            Janela 1 coluna à esquerda deixa D fraco e A..C fortes nas marcas.
+            """
+            # tinta rápida por bolha
+            g = gray.astype(np.float32)
+            paper = cv2.GaussianBlur(g, (0, 0), 8)
+            ink = np.clip(paper - g, 0, 255)
+            by_q: Dict[Any, List[Tuple[str, float]]] = defaultdict(list)
+            col_ink = defaultdict(list)
+            h, w = ink.shape[:2]
+            for b in bubs:
+                cx, cy, r = int(b["cx"]), int(b["cy"]), int(b["r"])
+                rr = max(2, int(round(r * 0.55)))
+                key = (b["q_num"], b["alternative"])
+                cidx = col_of.get(key)
+                if not (rr <= cx < w - rr and rr <= cy < h - rr):
+                    sc = 0.0
+                else:
+                    yy, xx = np.ogrid[-rr : rr + 1, -rr : rr + 1]
+                    mask = xx * xx + yy * yy <= rr * rr
+                    patch = ink[cy - rr : cy + rr + 1, cx - rr : cx + rr + 1]
+                    sc = float(np.mean(patch[mask])) if patch.shape == mask.shape else 0.0
+                by_q[b["q_num"]].append((b["alternative"], sc))
+                if cidx is not None:
+                    col_ink[cidx].append(sc)
+            # colunas fortes: mediana alta (há bolhas impressas / marcas)
+            strong_cols = 0
+            for cidx, vals in col_ink.items():
+                if float(np.median(vals)) >= 8.0:
+                    strong_cols += 1
+            n_clear = 0
+            margins = []
+            for scores in by_q.values():
+                ordered = sorted(scores, key=lambda x: -x[1])
+                if len(ordered) < 2:
+                    continue
+                margin = ordered[0][1] - ordered[1][1]
+                margins.append(margin)
+                if ordered[0][1] >= 40.0 and margin >= 20.0:
+                    n_clear += 1
+            sep = float(np.median(margins)) if margins else -1e9
+            return strong_cols, n_clear, sep
+
+        # Desambigua atrator ±1 coluna (e ±1 linha em Y para bloco 1 anômalo)
+        cand_axes = [(a_x, a_y)]
+        if coarse_method == "hough_lattice":
+            cand_axes.extend(
+                [
+                    (a_x + d_x, a_y),
+                    (a_x - d_x, a_y),
+                    (a_x, a_y + b_y),
+                    (a_x, a_y - b_y),
+                ]
+            )
+
+        best_pack = None
+        for ax_c, ay_c in cand_axes:
+            trial = _build_refined(ax_c, d_x, ay_c, b_y)
+            sc, nc, sep = _read_quality(trial)
+            # prioriza colunas fortes (4), depois clears, depois sep
+            pack = (sc, nc, sep, ax_c, ay_c, trial)
+            if best_pack is None or pack[:3] > best_pack[:3]:
+                best_pack = pack
+
+        a_x, a_y = best_pack[3], best_pack[4]
+        refined = best_pack[5]
+        diag["a_x"] = a_x
+        diag["a_y"] = a_y
+        diag["median_dx"] = a_x - (
+            float(self.BLOCK_OFFSET_X) + float(self.BUBBLE_WIDTH_PX) / 2.0
+        )
+        diag["median_dy"] = a_y - (
+            float(self.BLOCK_OFFSET_Y) + float(self.ROW_HEIGHT_PX) / 2.0
+        )
+
+        sep_ref = self._offset_ink_separation(gray, refined, 0, 0, row_of, col_of)
+        sep_nom = self._offset_ink_separation(gray, bubbles, 0, 0, row_of, col_of)
+        diag["separation_refined"] = sep_ref
+        diag["separation_nominal"] = sep_nom
+        if sep_ref + 5.0 < sep_nom and coarse_method == "match_template_offset_only":
+            diag["fallback_reason"] = f"sep_worse:{sep_ref:.1f}<{sep_nom:.1f}"
+            return bubbles, diag
+
+        diag["used_refined"] = True
+        self.logger.info(
+            f"✅ [B1] Bloco {block_id}: grid refinado ({coarse_method}) "
+            f"row_h={b_y:.2f} spacing={d_x:.2f} "
+            f"a_x={a_x:.1f} a_y={a_y:.1f} sep={sep_ref:.1f}/{sep_nom:.1f} "
+            f"qual={best_pack[0]}/{best_pack[1]}"
+        )
+        return refined, diag
+
+    def _build_empty_bubble_template(
+        self,
+        block_roi: np.ndarray,
+        bubbles: List[Dict],
+        ink_map: np.ndarray,
+    ) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+        """
+        B3: mediana dos patches alinhados de bolhas com baixo score de tinta
+        (candidatas a vazias). Só ativa se fração alinhada >= limiar.
+        """
+        meta = {"enabled": bool(self.USE_EMPTY_TEMPLATE_B3), "n_used": 0, "active": False}
+        if not self.USE_EMPTY_TEMPLATE_B3 or not bubbles or ink_map is None or ink_map.size == 0:
+            return None, meta
+
+        r = int(bubbles[0]["r"])
+        pad = r + 2
+        patches = []
+        scores = []
+        for b in bubbles:
+            cx, cy = int(b["cx"]), int(b["cy"])
+            sc = float(self._bubble_ink_score(ink_map, cx, cy, r))
+            scores.append(sc)
+            y0, y1 = cy - pad, cy + pad + 1
+            x0, x1 = cx - pad, cx + pad + 1
+            if y0 < 0 or x0 < 0 or y1 > ink_map.shape[0] or x1 > ink_map.shape[1]:
+                continue
+            patches.append((sc, ink_map[y0:y1, x0:x1].astype(np.float32)))
+
+        if len(patches) < max(8, int(0.3 * len(bubbles))):
+            meta["fallback_reason"] = "few_patches"
+            return None, meta
+
+        # Bolhas "vazias": score abaixo da mediana do bloco
+        med = float(np.median(scores)) if scores else 0.0
+        empty_patches = [p for sc, p in patches if sc <= med]
+        align_frac = len(empty_patches) / max(len(bubbles), 1)
+        meta["align_frac"] = align_frac
+        meta["n_used"] = len(empty_patches)
+        if align_frac < float(self.EMPTY_TEMPLATE_MIN_ALIGN_FRAC):
+            meta["fallback_reason"] = "low_align_frac"
+            return None, meta
+        if len(empty_patches) < 8:
+            meta["fallback_reason"] = "few_empty"
+            return None, meta
+
+        stack = np.stack(empty_patches, axis=0)
+        tmpl = np.median(stack, axis=0).astype(np.float32)
+        meta["active"] = True
+        return tmpl, meta
+
+    def _empty_template_residual(
+        self, ink_map: np.ndarray, cx: int, cy: int, r: int, tmpl: np.ndarray
+    ) -> float:
+        """Residual médio |patch − template| no disco interno (maior = mais tinta extra)."""
+        pad = r + 2
+        y0, y1 = cy - pad, cy + pad + 1
+        x0, x1 = cx - pad, cx + pad + 1
+        if y0 < 0 or x0 < 0 or y1 > ink_map.shape[0] or x1 > ink_map.shape[1]:
+            return 0.0
+        if tmpl.shape != (y1 - y0, x1 - x0):
+            return 0.0
+        patch = ink_map[y0:y1, x0:x1].astype(np.float32)
+        diff = np.clip(patch - tmpl, 0.0, 255.0)
+        h, w = diff.shape
+        yy, xx = np.ogrid[:h, :w]
+        rr = max(2, int(round(r * float(self.BUBBLE_MARK_INNER_RADIUS_RATIO))))
+        mask = (xx - pad) ** 2 + (yy - pad) ** 2 <= rr * rr
+        vals = diff[mask]
+        if vals.size == 0:
+            return 0.0
+        return float(np.mean(vals))
     
     # =========================================================================
     # ETAPA 8: DETECTAR MARCAÇÕES
@@ -1999,7 +2696,11 @@ class AnswerSheetCorrectionNewGrid:
 
         Representação: min(B, G, R) — caneta/lápis de qualquer cor escurece
         ao menos um canal. Opcionalmente CLAHE leve no canal, depois subtração
-        do papel local (Gaussian blur) para normalizar iluminação/sombra.
+        do papel local.
+
+        B2 (USE_PAPER_DILATE_B2): papel = dilatação elíptica (~2,6·r) +
+        GaussianBlur σ≈10 — evita que marcas densas elevem o "papel" local.
+        Fallback legado: GaussianBlur da própria imagem.
         """
         if block_roi is None or block_roi.size == 0:
             return np.zeros((0, 0), dtype=np.float32)
@@ -2017,9 +2718,50 @@ class AnswerSheetCorrectionNewGrid:
             channel_min_u8 = clahe.apply(channel_min_u8)
 
         channel_min = channel_min_u8.astype(np.float32)
-        sigma = float(self.BUBBLE_MARK_PAPER_BLUR_SIGMA)
-        paper = cv2.GaussianBlur(channel_min, (0, 0), sigmaX=sigma, sigmaY=sigma)
-        return np.clip(paper - channel_min, 0.0, 255.0).astype(np.float32)
+
+        if self.USE_PAPER_DILATE_B2:
+            k = int(round(float(self.PAPER_DILATE_RADIUS_FACTOR) * float(self.BUBBLE_RADIUS_PX)))
+            if k % 2 == 0:
+                k += 1
+            k = max(3, k)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+            # Dilatação no canal claro ≈ "fecha" buracos de tinta → estima papel
+            paper_u8 = cv2.dilate(channel_min_u8, kernel)
+            paper = cv2.GaussianBlur(
+                paper_u8.astype(np.float32),
+                (0, 0),
+                sigmaX=float(self.PAPER_DILATE_BLUR_SIGMA),
+                sigmaY=float(self.PAPER_DILATE_BLUR_SIGMA),
+            )
+        else:
+            sigma = float(self.BUBBLE_MARK_PAPER_BLUR_SIGMA)
+            paper = cv2.GaussianBlur(channel_min, (0, 0), sigmaX=sigma, sigmaY=sigma)
+
+        ink = np.clip(paper - channel_min, 0.0, 255.0).astype(np.float32)
+
+        # C1: em scan quase binário, suaviza pontilhado e fecha buracos da marca
+        is_bin = self._is_nearly_binary_u8(channel_min_u8)
+        self.last_is_binary = bool(is_bin)
+        if self.USE_BINARY_ROBUST_C1 and is_bin:
+            sig = float(self.BINARY_INK_BLUR_SIGMA)
+            ink = cv2.GaussianBlur(ink, (0, 0), sigmaX=sig, sigmaY=sig)
+            k = int(self.BINARY_INK_CLOSE_PX)
+            if k % 2 == 0:
+                k += 1
+            k = max(3, k)
+            ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+            ink_u8 = np.clip(ink, 0, 255).astype(np.uint8)
+            ink = cv2.morphologyEx(ink_u8, cv2.MORPH_CLOSE, ker).astype(np.float32)
+        return ink
+
+    def _is_nearly_binary_u8(self, gray_u8: np.ndarray) -> bool:
+        """True se histograma concentrado nos extremos (scan 1-bit / threshold)."""
+        if gray_u8 is None or gray_u8.size == 0:
+            return False
+        hist = cv2.calcHist([gray_u8], [0], None, [256], [0, 256]).flatten()
+        hist = hist / max(float(hist.sum()), 1.0)
+        edge = float(hist[:16].sum() + hist[240:].sum())
+        return edge >= float(self.BINARY_HIST_EDGE_FRAC)
 
     def _bubble_mark_features(
         self, ink_map: np.ndarray, cx: int, cy: int, r: int
@@ -2032,6 +2774,8 @@ class AnswerSheetCorrectionNewGrid:
         - ring: anel intermediário (RING_INNER..INNER) — anéis/rabiscos periféricos
         - density: % de pixels no disco mid com ink >= DENSITY_INK_ABS
         - score: combinação média/densidade/núcleo (escala ~0–255)
+
+        C1 (binário): disco mid mais interno (~0,6·r) e peso maior em densidade.
         """
         empty = {
             "mean_core": 0.0,
@@ -2048,7 +2792,15 @@ class AnswerSheetCorrectionNewGrid:
         if not (0 <= cx < w and 0 <= cy < h):
             return empty
 
-        r_mid = max(2, int(round(r * float(self.BUBBLE_MARK_INNER_RADIUS_RATIO))))
+        binary_mode = bool(
+            self.USE_BINARY_ROBUST_C1 and getattr(self, "last_is_binary", False)
+        )
+        inner_ratio = (
+            float(self.BINARY_INNER_RADIUS_RATIO)
+            if binary_mode
+            else float(self.BUBBLE_MARK_INNER_RADIUS_RATIO)
+        )
+        r_mid = max(2, int(round(r * inner_ratio)))
         r_core = max(2, int(round(r * float(self.BUBBLE_MARK_CORE_RADIUS_RATIO))))
         r_ring_in = max(2, int(round(r * float(self.BUBBLE_MARK_RING_INNER_RATIO))))
         if r_core >= r_mid:
@@ -2077,10 +2829,16 @@ class AnswerSheetCorrectionNewGrid:
 
         # Anel com tinta mas centro fraco: reforça o score via mean_ring
         ring_boost = max(0.0, mean_ring - mean_core) * 0.25
+        w_mean = float(self.BUBBLE_MARK_W_MEAN)
+        w_dens = float(self.BUBBLE_MARK_W_DENSITY)
+        w_core = float(self.BUBBLE_MARK_W_CORE)
+        if binary_mode:
+            # Em 1-bit a cobertura do disco interno é o sinal mais estável
+            w_mean, w_dens, w_core = 0.30, 0.55, 0.15
         score_area = (
-            float(self.BUBBLE_MARK_W_MEAN) * mean_mid
-            + float(self.BUBBLE_MARK_W_DENSITY) * (density * 255.0)
-            + float(self.BUBBLE_MARK_W_CORE) * mean_core
+            w_mean * mean_mid
+            + w_dens * (density * 255.0)
+            + w_core * mean_core
             + ring_boost
         )
         # Rabisco/X concentrado no núcleo: média do disco mid dilui demais;
@@ -2227,6 +2985,12 @@ class AnswerSheetCorrectionNewGrid:
         """
         ink_map = self._build_ink_strength_map(block_roi)
 
+        # B3: template de bolha vazia (mediana) — reforça score se ativo
+        empty_tmpl, empty_meta = self._build_empty_bubble_template(
+            block_roi, bubbles, ink_map
+        )
+        w_resid = float(self.EMPTY_TEMPLATE_W_RESIDUAL) if empty_meta.get("active") else 0.0
+
         if self.debug and block_id is not None and ink_map.size:
             vis = np.clip(ink_map, 0, 255).astype(np.uint8)
             self._save_debug_image(f"06_block{block_id}_ink_strength_v2.jpg", vis)
@@ -2255,25 +3019,40 @@ class AnswerSheetCorrectionNewGrid:
                 feats = self._bubble_mark_features(
                     ink_map, bubble["cx"], bubble["cy"], bubble["r"]
                 )
+                score = float(feats["score"])
+                resid = 0.0
+                if empty_tmpl is not None and w_resid > 0:
+                    resid = self._empty_template_residual(
+                        ink_map,
+                        int(bubble["cx"]),
+                        int(bubble["cy"]),
+                        int(bubble["r"]),
+                        empty_tmpl,
+                    )
+                    # Mistura: tinta absoluta + residual vs bolha vazia típica
+                    score = float(
+                        min(255.0, (1.0 - w_resid) * score + w_resid * resid)
+                    )
                 entry = {
                     "letter": bubble["alternative"],
-                    "score": feats["score"],
+                    "score": score,
                     "mean_core": feats["mean_core"],
                     "mean_mid": feats["mean_mid"],
                     "mean_ring": feats["mean_ring"],
                     "density": feats["density"],
                     "p90": feats["p90"],
+                    "empty_resid": resid,
                     "cx": bubble["cx"],
                     "cy": bubble["cy"],
                     "r": bubble["r"],
                 }
                 scored.append(entry)
-                all_scores.append(feats["score"])
+                all_scores.append(score)
                 if self.debug:
                     self.logger.info(
                         f"   [V2] Q{q_num}{bubble['alternative']}: "
                         f"cx={bubble['cx']}, cy={bubble['cy']}, r={bubble['r']} → "
-                        f"score={feats['score']:.2f} mid={feats['mean_mid']:.2f} "
+                        f"score={score:.2f} mid={feats['mean_mid']:.2f} "
                         f"core={feats['mean_core']:.2f} ring={feats['mean_ring']:.2f} "
                         f"dens={feats['density']:.3f} p90={feats['p90']:.2f}"
                     )
@@ -2293,6 +3072,7 @@ class AnswerSheetCorrectionNewGrid:
                 "second_score": meta["second_score"],
                 "margin": meta["margin"],
                 "rel_evidence": meta["rel_evidence"],
+                "empty_template_active": bool(empty_meta.get("active")),
                 "alternatives": {
                     let: {
                         "score": float(s["score"]),
@@ -2301,6 +3081,7 @@ class AnswerSheetCorrectionNewGrid:
                         "mean_ring": float(s["mean_ring"]),
                         "density": float(s["density"]),
                         "p90": float(s["p90"]),
+                        "empty_resid": float(s.get("empty_resid") or 0.0),
                     }
                     for let, s in by_letter.items()
                 },
@@ -2315,11 +3096,25 @@ class AnswerSheetCorrectionNewGrid:
                     f"conf={meta['confidence']} reason={meta['reason']}"
                 )
 
+        # C2: 2ª passada — limiar adaptativo marca/vazio do bloco
+        if self.USE_ADAPTIVE_TWO_PASS_C2:
+            answers = self._two_pass_adaptive_redecide(answers, block_id)
+
+        # C3: bleed vertical (mesma letra em linhas vizinhas + componente alto)
+        if self.USE_VERTICAL_BLEED_C3:
+            self._flag_vertical_bleed(ink_map, bubbles, answers, block_id)
+
+        for q in answers:
+            diag = self.last_bubble_diagnostics.get(int(q))
+            if diag is not None:
+                diag["is_binary"] = bool(getattr(self, "last_is_binary", False))
+
         self.logger.info(
             f"✅ [V2] {len(answers)} respostas detectadas "
             f"({sum(1 for a in answers.values() if a and a != 'INVALID')} marcadas, "
             f"{sum(1 for a in answers.values() if a is None)} em branco, "
-            f"{sum(1 for a in answers.values() if a == 'INVALID')} inválidas)"
+            f"{sum(1 for a in answers.values() if a == 'INVALID')} inválidas) "
+            f"binary={getattr(self, 'last_is_binary', False)}"
         )
         if all_scores:
             arr = np.array(all_scores, dtype=np.float64)
@@ -2334,6 +3129,159 @@ class AnswerSheetCorrectionNewGrid:
                 f"clahe={self.BUBBLE_MARK_USE_CLAHE}"
             )
         return answers
+
+    def _two_pass_adaptive_redecide(
+        self, answers: Dict[int, Any], block_id: Any = None
+    ) -> Dict[int, Any]:
+        """
+        C2: com ≥ TWO_PASS_MIN_HIGH marcas high, estima nível_marca / nível_vazio
+        e reavalia questões medium/low / None com limiar adaptativo.
+        Sem marcas high suficientes, mantém a 1ª passada.
+        """
+        high_tops = []
+        empty_scores = []
+        for q, diag in self.last_bubble_diagnostics.items():
+            if block_id is not None and diag.get("block_id") != block_id:
+                continue
+            conf = diag.get("confidence")
+            top = float(diag.get("top_score") or 0.0)
+            if conf == "high" and diag.get("decision") not in (None, "INVALID"):
+                high_tops.append(top)
+            alts = diag.get("alternatives") or {}
+            for let, ad in alts.items():
+                sc = float(ad.get("score") or 0.0)
+                if diag.get("decision") == let:
+                    continue
+                empty_scores.append(sc)
+
+        floor_hi = float(self.BUBBLE_MARK_SCORE_FLOOR)
+        # Cartão/bloco esparso: sem enough high → medium só com score bem alto
+        # (evita FM por mancha/anel em folhas quase em branco).
+        sparse_floor = max(floor_hi * 2.5, 70.0)
+        if len(high_tops) < int(self.TWO_PASS_MIN_HIGH):
+            for q, diag in list(self.last_bubble_diagnostics.items()):
+                if block_id is not None and diag.get("block_id") != block_id:
+                    continue
+                if diag.get("confidence") != "medium":
+                    continue
+                if diag.get("decision") in (None, "INVALID"):
+                    continue
+                top = float(diag.get("top_score") or 0.0)
+                if top < sparse_floor:
+                    answers[q] = None
+                    diag["decision"] = None
+                    diag["confidence"] = "low"
+                    diag["reason"] = f"two_pass_sparse_reject top={top:.1f}"
+            return answers
+
+        nivel_marca = float(np.median(high_tops))
+        nivel_vazio = float(np.median(empty_scores)) if empty_scores else 0.0
+        thr = nivel_vazio + float(self.TWO_PASS_EMPTY_FRAC) * max(
+            0.0, nivel_marca - nivel_vazio
+        )
+        # não baixar abaixo do floor_lo clássico
+        thr = max(thr, float(self.BUBBLE_MARK_SCORE_FLOOR_LO))
+        margin_need = max(
+            float(self.BUBBLE_MARK_SCORE_MARGIN_LO),
+            0.20 * max(1.0, nivel_marca - nivel_vazio),
+        )
+
+        for q, diag in list(self.last_bubble_diagnostics.items()):
+            if block_id is not None and diag.get("block_id") != block_id:
+                continue
+            if diag.get("confidence") == "high":
+                continue
+            if diag.get("decision") == "INVALID":
+                continue
+            top = float(diag.get("top_score") or 0.0)
+            second = float(diag.get("second_score") or 0.0)
+            margin = top - second
+            letter = diag.get("top_letter")
+            old = answers.get(q)
+            if top >= thr and margin >= margin_need and letter:
+                answers[q] = letter
+                diag["decision"] = letter
+                diag["confidence"] = "medium"
+                diag["reason"] = (
+                    f"two_pass_adapt thr={thr:.1f} marca={nivel_marca:.1f} "
+                    f"vazio={nivel_vazio:.1f}"
+                )
+            elif old and old != "INVALID" and top < thr:
+                # marca fraca demais vs nível do cartão → blank (corta FM)
+                answers[q] = None
+                diag["decision"] = None
+                diag["confidence"] = "low"
+                diag["reason"] = (
+                    f"two_pass_reject thr={thr:.1f} top={top:.1f}"
+                )
+        return answers
+
+    def _flag_vertical_bleed(
+        self,
+        ink_map: np.ndarray,
+        bubbles: List[Dict],
+        answers: Dict[int, Any],
+        block_id: Any = None,
+    ) -> None:
+        """
+        C3: se a mesma letra vence em linhas consecutivas e o blob de tinta
+        tem altura > VERTICAL_BLEED_HEIGHT_ROWS · row_h, marca vertical_bleed
+        (confiança low) sem alterar a letra — Fase D usa needs_review.
+        """
+        if not bubbles or not answers or ink_map is None or ink_map.size == 0:
+            return
+        # agrupa bolhas por (letra) e ordena por cy
+        by_letter: Dict[str, List[Dict]] = defaultdict(list)
+        for b in bubbles:
+            by_letter[str(b["alternative"])].append(b)
+        row_h = float(self.ROW_HEIGHT_PX)
+        min_h = float(self.VERTICAL_BLEED_HEIGHT_ROWS) * row_h
+
+        # mascara tinta forte
+        _, bw = cv2.threshold(
+            np.clip(ink_map, 0, 255).astype(np.uint8), 40, 255, cv2.THRESH_BINARY
+        )
+
+        for let, blist in by_letter.items():
+            blist = sorted(blist, key=lambda b: (int(b["cy"]), int(b["cx"])))
+            # pares de questões consecutivas com mesma decisão = let
+            qs = []
+            for b in blist:
+                q = int(b["q_num"])
+                if answers.get(q) == let:
+                    qs.append((q, int(b["cx"]), int(b["cy"]), int(b["r"])))
+            for i in range(len(qs) - 1):
+                q1, x1, y1, r1 = qs[i]
+                q2, x2, y2, r2 = qs[i + 1]
+                if abs(x1 - x2) > max(r1, r2):
+                    continue
+                if abs(y2 - y1) > row_h * 1.6:
+                    continue
+                # componente conectado na união das duas bolhas
+                y0 = max(0, min(y1, y2) - max(r1, r2))
+                y1b = min(bw.shape[0], max(y1, y2) + max(r1, r2) + 1)
+                x0 = max(0, min(x1, x2) - max(r1, r2))
+                x1b = min(bw.shape[1], max(x1, x2) + max(r1, r2) + 1)
+                crop = bw[y0:y1b, x0:x1b]
+                if crop.size == 0:
+                    continue
+                n, labels, stats, _ = cv2.connectedComponentsWithStats(crop, 8)
+                tall = False
+                for li in range(1, n):
+                    if stats[li, cv2.CC_STAT_HEIGHT] >= min_h:
+                        tall = True
+                        break
+                if not tall:
+                    continue
+                for q in (q1, q2):
+                    diag = self.last_bubble_diagnostics.get(q)
+                    if not diag:
+                        continue
+                    diag["vertical_bleed"] = True
+                    diag["confidence"] = "low"
+                    reason = diag.get("reason") or ""
+                    if "vertical_bleed" not in reason:
+                        diag["reason"] = (reason + "|vertical_bleed").strip("|")
 
     def _detect_marked_bubbles_legacy(self, block_roi: np.ndarray, bubbles: List[Dict],
                                block_id: int = None) -> Dict[int, str]:
@@ -2562,7 +3510,25 @@ class AnswerSheetCorrectionNewGrid:
             str(q): (self.last_bubble_diagnostics.get(int(q), {}) or {}).get("confidence")
             for q in sorted(gabarito.keys())
         }
-        
+        n_high = n_medium = n_low = 0
+        needs_review: List[int] = []
+        for q_num in sorted(gabarito.keys()):
+            diag = self.last_bubble_diagnostics.get(int(q_num), {}) or {}
+            conf = diag.get("confidence") or "low"
+            if conf == "high":
+                n_high += 1
+            elif conf == "medium":
+                n_medium += 1
+            else:
+                n_low += 1
+            marked = answers.get(q_num)
+            if (
+                conf == "low"
+                or marked == "INVALID"
+                or bool(diag.get("vertical_bleed"))
+            ):
+                needs_review.append(int(q_num))
+
         return {
             "success": True,
             "total_questions": total_questions,
@@ -2574,7 +3540,13 @@ class AnswerSheetCorrectionNewGrid:
             "detailed_answers": detailed_answers,  # Lista detalhada: [{question, marked, correct, is_correct}, ...]
             "student_answers": student_answers_str,  # Dicionário: {"1": "A", "2": "B", ...}
             "answer_key": answer_key_str,  # Gabarito oficial: {"1": "A", "2": "C", ...}
-            "mark_confidence": confidence_str,  # Opcional: high|medium|low por questão
+            "mark_confidence": confidence_str,  # high|medium|low por questão
+            "confidence_summary": {
+                "n_high": n_high,
+                "n_medium": n_medium,
+                "n_low": n_low,
+            },
+            "needs_review": needs_review,
             "mark_diagnostics": {
                 str(q): self.last_bubble_diagnostics[q]
                 for q in sorted(self.last_bubble_diagnostics.keys())
@@ -2591,6 +3563,21 @@ class AnswerSheetCorrectionNewGrid:
         blank = int(correction.get("blank_answers") or 0)
         invalid = int(correction.get("invalid_answers") or 0)
         return blank == total and invalid == 0
+
+    def _evidence_cartao_em_branco(self) -> bool:
+        """
+        Evidência positiva de folha em branco: todos os top scores abaixo do piso.
+        Sem diagnósticos (pipeline falhou parcial) → False (não assume ausente).
+        """
+        if not self.last_bubble_diagnostics:
+            return False
+        tops = [
+            float(d.get("top_score") or 0.0)
+            for d in self.last_bubble_diagnostics.values()
+        ]
+        if not tops:
+            return False
+        return max(tops) < float(self.ABSENT_BLANK_SCORE_MAX)
     
     # =========================================================================
     # FORMATAÇÃO DE ERROS AMIGÁVEIS
@@ -2953,6 +3940,7 @@ class AnswerSheetCorrectionNewGrid:
         self.logger.info("🔄 Etapas 6-9: Processar blocos")
         all_answers = {}
         self.last_bubble_diagnostics = {}
+        self.last_geometry_diagnostics = {}
         
         for idx, block in enumerate(blocks):
             block_num = idx + 1
@@ -2974,11 +3962,17 @@ class AnswerSheetCorrectionNewGrid:
             if not grid_map:
                 continue
             
-            # ETAPA 7: Calcular centros das bolhas
+            # ETAPA 7: Calcular centros das bolhas (nominais do template/JSON)
             bubbles = self._calculate_bubble_centers(grid_map)
+
+            # ETAPA 7b (B1): refinar escala/offset por evidência local (±coarse/fine)
+            block_id = block_config.get('block_id', block_num)
+            bubbles, geom_diag = self._refine_block_grid(
+                block_roi, grid_map, bubbles, block_id=block_id
+            )
+            self.last_geometry_diagnostics[block_id] = geom_diag
             
             # ETAPA 8: Detectar marcações
-            block_id = block_config.get('block_id', block_num)
             block_answers = self._detect_marked_bubbles(block_roi, bubbles, block_id)
             
             # Adicionar ao resultado geral
@@ -2989,6 +3983,7 @@ class AnswerSheetCorrectionNewGrid:
             "success": True,
             "answers": all_answers,
             "mark_diagnostics": dict(self.last_bubble_diagnostics),
+            "geometry_diagnostics": dict(self.last_geometry_diagnostics),
             "aluno_ausente": bool(ausente_info.get("marked")),
             "aluno_ausente_fill_ratio": ausente_info.get("fill_ratio", 0.0),
             "aluno_ausente_method": ausente_info.get("method"),
@@ -3202,9 +4197,19 @@ class AnswerSheetCorrectionNewGrid:
             correction = self._build_result(answers, gabarito)
             aluno_ausente = bool(result.get("aluno_ausente"))
             motivo_ausencia = "bolinha_aplicador" if aluno_ausente else None
+            # D1: cartão sem respostas só vira ausente com evidência positiva de
+            # branco (scores baixos). Caso contrário → needs_review (não zera).
+            needs_review_blank = False
             if not aluno_ausente and self._cartao_sem_nenhuma_resposta(correction):
-                aluno_ausente = True
-                motivo_ausencia = "cartao_em_branco"
+                if self._evidence_cartao_em_branco():
+                    aluno_ausente = True
+                    motivo_ausencia = "cartao_em_branco"
+                else:
+                    needs_review_blank = True
+                    self.logger.warning(
+                        "Cartão sem respostas marcadas, mas sem evidência de "
+                        "branco — status needs_review (não marca ausente)"
+                    )
             correction["aluno_ausente"] = aluno_ausente
             correction["motivo_ausencia"] = motivo_ausencia
             correction["aluno_ausente_fill_ratio"] = result.get("aluno_ausente_fill_ratio", 0.0)
@@ -3214,7 +4219,13 @@ class AnswerSheetCorrectionNewGrid:
                 else motivo_ausencia
             )
             correction["saved"] = False
-            correction["status"] = "aluno_ausente" if aluno_ausente else "corrigido"
+            if aluno_ausente:
+                correction["status"] = "aluno_ausente"
+            elif needs_review_blank:
+                correction["status"] = "needs_review"
+                correction["needs_review_reason"] = "marcacoes_fracas_ou_duvidosas"
+            else:
+                correction["status"] = "corrigido"
             
             # ============================================
             # IMPRIMIR RESUMO DETALHADO NO TERMINAL
@@ -3237,6 +4248,14 @@ class AnswerSheetCorrectionNewGrid:
                 self._descartar_resultado_se_ausente(
                     correction.get("gabarito_id"),
                     correction.get("student_id"),
+                )
+                return correction
+
+            # needs_review: não descarta resultado salvo nem força nota zero
+            if correction.get("status") == "needs_review" and needs_review_blank:
+                self.logger.info(
+                    "needs_review (sem evidência de branco) — não persistindo "
+                    "nota automática"
                 )
                 return correction
 

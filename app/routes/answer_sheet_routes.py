@@ -3799,10 +3799,20 @@ def _load_cartao_roster_and_results(
         row for row in _dedupe_answer_sheet_results_latest_per_student(_rq.all())
         if str(row.student_id) in allowed_ids
     ]
-    if alunos_filtro and alunos_filtro != "todos":
-        from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+    # Resultados/participação de prova regular: ADAP 3 fora.
+    # Gabarito dedicado ADAP 3: mantém o nível 3 (geração continua permitida).
+    from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
 
-        students, results = aplicar_universo_alunos(students, alunos_filtro, results)
+    gab = AnswerSheetGabarito.query.get(str(gabarito_id))
+    incluir_adap3 = gabarito_adap_level(gab) == 3
+    students, results = aplicar_universo_alunos(
+        students,
+        alunos_filtro or "todos",
+        results,
+        incluir_adap3=incluir_adap3,
+    )
 
     if somente_corrigidos:
         by_id = {s.id: s for s in students}
@@ -4226,10 +4236,11 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
         if not gabarito_id:
             todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
             alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
-            if alunos_filtro and alunos_filtro != "todos":
-                from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+            from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
 
-                todos_alunos = filtrar_alunos_resultado(todos_alunos, alunos_filtro)
+            todos_alunos = filtrar_alunos_resultado(
+                todos_alunos, alunos_filtro or "todos"
+            )
             total_alunos = len(todos_alunos)
             resultados = []
             alunos_participantes = 0
@@ -4582,10 +4593,14 @@ def _complementar_metricas_escola_municipio_cartao(
     alunos = apply_gabarito_audience(
         Student.query.filter(Student.class_id.in_(class_ids)), gabarito_id
     ).all() if class_ids else []
-    if alunos_filtro and alunos_filtro != "todos":
-        from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+    from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
 
-        alunos = filtrar_alunos_resultado(alunos, alunos_filtro)
+    alunos = filtrar_alunos_resultado(
+        alunos,
+        alunos_filtro or "todos",
+        incluir_adap3=gabarito_adap_level(gabarito) == 3,
+    )
     sid_list = [a.id for a in alunos]
     results: List[AnswerSheetResult] = []
     if sid_list and gabarito_id:

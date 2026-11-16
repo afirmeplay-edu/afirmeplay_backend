@@ -2409,6 +2409,10 @@ def _students_by_class_for_digital(
         [st.id for st in sem_turma_no_escopo],
         scope_classes,
     )
+    from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+
+    # ADAP 3 fora do esperado de prova objetiva regular.
+    all_students = list(filtrar_alunos_resultado(all_students, "todos"))
     students_by_class: Dict[str, List[Student]] = defaultdict(list)
     for st in all_students:
         turma = _turma_para_nota_do_consolidado(
@@ -2776,17 +2780,34 @@ def _answer_sheet_results_for_classes(gabarito_ids: List[str], class_ids: List[A
 def _answer_sheet_students_by_class(
     class_ids: List[Any], item_by_class: Dict[str, str]
 ) -> Dict[str, List[Student]]:
-    """Roster por turma, recortado pelo público do gabarito daquela turma (ADAP)."""
-    from app.services.cartao_resposta.answer_sheet_audience import filter_students_for_gabarito
+    """Roster por turma, recortado pelo público do gabarito daquela turma (ADAP).
+
+    Prova regular: ADAP 3 fora do esperado. Gabarito dedicado ADAP 3: mantém.
+    """
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
+    from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+    from app.services.cartao_resposta.answer_sheet_audience import (
+        filter_students_for_gabarito,
+        gabarito_adap_level,
+    )
 
     out: Dict[str, List[Student]] = defaultdict(list)
     for st in Student.query.filter(Student.class_id.in_(class_ids)).all():
         if st.class_id:
             out[str(st.class_id)].append(st)
+    gab_cache: Dict[str, Any] = {}
     for cid in list(out.keys()):
         gid = item_by_class.get(cid)
         if gid:
             out[cid] = filter_students_for_gabarito(out[cid], gid)
+            if gid not in gab_cache:
+                gab_cache[gid] = AnswerSheetGabarito.query.get(str(gid))
+            incluir_adap3 = gabarito_adap_level(gab_cache[gid]) == 3
+        else:
+            incluir_adap3 = False
+        out[cid] = list(
+            filtrar_alunos_resultado(out[cid], "todos", incluir_adap3=incluir_adap3)
+        )
     return out
 
 

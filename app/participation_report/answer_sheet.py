@@ -406,8 +406,20 @@ def build_participation_report_answer_sheet(
             students_by_id[s.id] = s
     matriculados_ids = set(students_by_id.keys())
     statuses = is_special_education_many(students_by_id.values())
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
+
+    incluir_adap3 = False
+    for gid in gabarito_ids or []:
+        if gabarito_adap_level(AnswerSheetGabarito.query.get(str(gid))) == 3:
+            incluir_adap3 = True
+            break
     matriculados_ids, avaliados_ids = recortar_roster(
-        matriculados_ids, avaliados_ids, statuses, alunos_filtro
+        matriculados_ids,
+        avaliados_ids,
+        statuses,
+        alunos_filtro,
+        incluir_adap3=incluir_adap3,
     )
 
     matriculados = len(matriculados_ids)

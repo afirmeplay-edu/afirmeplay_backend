@@ -2,7 +2,7 @@
 """Recorte regular/ADAP e nota válida, o mesmo contrato de Resultados.
 
 A participação continua no censo, com o resultado cru. A nota usa o
-pareamento: regular na prova regular, ADAP 1, 2 ou 3 na prova pareada.
+pareamento: regular na prova regular, ADAP 1 ou 2 na prova pareada.
 """
 from __future__ import annotations
 

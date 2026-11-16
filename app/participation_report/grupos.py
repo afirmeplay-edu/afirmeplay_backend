@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Optional, Set
 
-from app.services.alunos_resultado_filtro import aluno_entra_no_filtro, filtro_restringe
+from app.services.adap_objetivo import ADAP_OBJETIVO_NIVEIS, e_adap_excluido_prova_objetiva
+from app.services.alunos_resultado_filtro import aluno_entra_no_filtro
 from app.services.special_education import SpecialEducationStatus
 
-_NIVEIS = (1, 2, 3)
+# Chave adap_3 permanece no payload (sempre zerada: ADAP 3 fora da prova objetiva).
+_NIVEIS = ADAP_OBJETIVO_NIVEIS
 _CHAVES = ("regular", "adap_1", "adap_2", "adap_3")
 
 
@@ -45,17 +47,19 @@ def aplicar_filtro_ids(
     ids: Iterable[Any],
     statuses: Dict[str, SpecialEducationStatus],
     filtro: Optional[str],
+    *,
+    incluir_adap3: bool = False,
 ) -> Set[Any]:
-    """Mesma regra da prova online. ``todos`` devolve o conjunto como veio."""
+    """Mesma regra da prova online. Por padrão exclui ADAP 3, inclusive em ``todos``."""
     bruto = set(ids)
-    if not filtro_restringe(filtro):
-        return bruto
+    valor = filtro or "todos"
     return {
         item
         for item in bruto
         if aluno_entra_no_filtro(
             statuses.get(str(item), SpecialEducationStatus(False, None, None)),
-            filtro or "todos",
+            valor,
+            incluir_adap3=incluir_adap3,
         )
     }
 
@@ -67,6 +71,8 @@ class AcumuladorGrupos:
         self.total_avaliados = 0
 
     def add(self, status: SpecialEducationStatus, avaliado: bool) -> None:
+        if status.is_special and e_adap_excluido_prova_objetiva(status.level):
+            return
         self.total_matriculados += 1
         if avaliado:
             self.total_avaliados += 1
@@ -121,9 +127,13 @@ def recortar_roster(
     avaliados: Iterable[Any],
     statuses: Dict[str, SpecialEducationStatus],
     filtro: Optional[str],
+    *,
+    incluir_adap3: bool = False,
 ) -> tuple:
-    """Aplica o filtro Alunos. ``todos`` devolve os mesmos conjuntos."""
-    mantidos = aplicar_filtro_ids(matriculados, statuses, filtro)
+    """Aplica o filtro Alunos. Por padrão exclui ADAP 3, inclusive em ``todos``."""
+    mantidos = aplicar_filtro_ids(
+        matriculados, statuses, filtro, incluir_adap3=incluir_adap3
+    )
     presentes = {item for item in avaliados if item in mantidos}
     return mantidos, presentes
 

@@ -1840,6 +1840,8 @@ class RankingReportService:
         multi_instruments = len(instrument_ids) > 1
 
         def _apply_common_student_filters(query):
+            from app.services.adap_objetivo import sql_excluir_adap3_de_student
+
             if filters.get("escola"):
                 query = query.filter(Student.school_id == str(filters["escola"]))
             if filters.get("turma"):
@@ -1864,7 +1866,8 @@ class RankingReportService:
                 query = query.filter(Student.class_id.in_(class_ids))
             if city_id:
                 query = query.filter(School.city_id == str(city_id))
-            return query
+            # Ranking Hub/Geral (cartão e online): ADAP 3 fora do esperado.
+            return query.filter(sql_excluir_adap3_de_student())
 
         def _apply_entity_filter(query, model):
             if model is EvaluationResult and instrument_ids:
@@ -2534,7 +2537,10 @@ class RankingReportService:
                 query = query.filter(Student.class_id.in_(class_ids))
             if city_id:
                 query = query.filter(School.city_id == str(city_id))
-            return query
+            from app.services.adap_objetivo import sql_excluir_adap3_de_student
+
+            # Ranking Hub/Geral: ADAP 3 fora do esperado (sem ligar pareamento).
+            return query.filter(sql_excluir_adap3_de_student())
 
         def _apply_entity_filter(query, model):
             if model is EvaluationResult and instrument_ids:

@@ -671,10 +671,16 @@ def compute_question_percentuals_answer_sheet(
         return {}
 
     students, result_by_student, _ = resolve_participating_students_answer_sheet(gabarito, class_ids)
-    if alunos and alunos != "todos":
-        from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+    from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
 
-        students = list(filtrar_alunos_resultado(students, alunos))
+    students = list(
+        filtrar_alunos_resultado(
+            students,
+            alunos or "todos",
+            incluir_adap3=gabarito_adap_level(gabarito) == 3,
+        )
+    )
     total = len(students)
     if total == 0:
         return {qn: 0.0 for qn in gab_map.keys()}

@@ -3,16 +3,23 @@
 Cálculo de proficiência por disciplina para cartões resposta.
 Usa blocks_config (com subject_id por bloco) para agregar acertos por disciplina
 e calcular proficiência e classificação por disciplina e média geral.
+
+Disciplina AUSENTE: todas as questões do bloco estão null/em branco em
+detected_answers. Não entra em média/proficiência/avaliados; no JSON fica com
+absent=true (sem migration).
 """
 
 import logging
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Dict, List, Any, Tuple, Optional, Iterator, Iterable
 from app.services.cartao_resposta.course_name_resolver import (
     infer_course_name_from_grade,
     resolve_grade_name_for_proficiency,
 )
 
 logger = logging.getLogger(__name__)
+
+SUBJECT_ABSENT_CLASSIFICATION = "Ausente"
+SUBJECT_ABSENT_STATUS = "ausente"
 
 
 def _get_course_name_from_grade(grade_name: str) -> str:
@@ -34,6 +41,148 @@ def _resolve_subject_name(subject_id: str, subject_name: Optional[str]) -> str:
     except Exception as e:
         logger.debug(f"Erro ao buscar Subject por id {subject_id}: {e}")
     return 'Outras'
+
+
+def _answer_value(answers: Optional[Dict], question_number: int) -> Optional[str]:
+    """Lê resposta da questão aceitando chave int ou str."""
+    if not isinstance(answers, dict):
+        return None
+    if question_number in answers:
+        raw = answers.get(question_number)
+    elif str(question_number) in answers:
+        raw = answers.get(str(question_number))
+    else:
+        return None
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or text.upper() in ("NONE", "NULL"):
+        return None
+    return text
+
+
+def subject_questions_all_blank(
+    question_numbers: Iterable[int],
+    answers: Optional[Dict],
+) -> bool:
+    """True se o bloco tem questões e todas estão sem marcação."""
+    nums = [int(q) for q in (question_numbers or [])]
+    if not nums:
+        return False
+    return all(_answer_value(answers, q) is None for q in nums)
+
+
+def make_absent_subject_entry(subject_name: str, total_questions: int) -> Dict[str, Any]:
+    """Entrada JSON de disciplina ausente (sem nota/proficiência)."""
+    return {
+        "subject_name": subject_name or "Outras",
+        "absent": True,
+        "status": SUBJECT_ABSENT_STATUS,
+        "proficiency": None,
+        "grade": None,
+        "classification": SUBJECT_ABSENT_CLASSIFICATION,
+        "correct_answers": 0,
+        "total_questions": int(total_questions or 0),
+        "answered_questions": 0,
+    }
+
+
+def is_subject_entry_absent(entry: Any) -> bool:
+    """True quando a disciplina foi marcada como ausente no proficiency_by_subject."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("absent") is True:
+        return True
+    status = str(entry.get("status") or "").strip().lower()
+    if status == SUBJECT_ABSENT_STATUS:
+        return True
+    if entry.get("grade") is None and entry.get("proficiency") is None:
+        cl = str(entry.get("classification") or "").strip().lower()
+        if cl == SUBJECT_ABSENT_CLASSIFICATION.lower():
+            return True
+    return False
+
+
+def iter_scored_subject_entries(
+    proficiency_by_subject: Optional[Dict],
+) -> Iterator[Tuple[str, Dict[str, Any]]]:
+    """Yield (subject_id, data) só das disciplinas com nota/proficiência válidas."""
+    if not isinstance(proficiency_by_subject, dict):
+        return
+    for sid, data in proficiency_by_subject.items():
+        if not isinstance(data, dict):
+            continue
+        if is_subject_entry_absent(data):
+            continue
+        if data.get("proficiency") is None and data.get("grade") is None:
+            continue
+        yield str(sid), data
+
+
+def parse_detected_answers_map(raw: Any) -> Dict[int, Optional[str]]:
+    """Normaliza detected_answers para {int: str|None}."""
+    payload = raw or {}
+    if isinstance(payload, str):
+        import json
+        try:
+            payload = json.loads(payload) or {}
+        except Exception:
+            return {}
+    if not isinstance(payload, dict):
+        return {}
+    out: Dict[int, Optional[str]] = {}
+    for k, v in payload.items():
+        try:
+            q = int(k)
+        except (TypeError, ValueError):
+            continue
+        out[q] = _answer_value({q: v}, q)
+    return out
+
+
+def legacy_subject_blank_from_answers(
+    entry: Optional[Dict[str, Any]],
+    *,
+    subject_id: str,
+    blocks_config: Optional[Dict] = None,
+    detected_answers: Any = None,
+) -> bool:
+    """
+    Fallback de leitura para cartões antigos (ainda com nota 0 gravada):
+    se o bloco da disciplina está 100% em branco em detected_answers, trata como ausente.
+    """
+    if is_subject_entry_absent(entry):
+        return True
+    answers = parse_detected_answers_map(detected_answers)
+    if not answers and detected_answers is None:
+        return False
+    blocks = _extract_blocks_with_questions(blocks_config)
+    qnums: List[int] = []
+    sid = str(subject_id)
+    for block in blocks:
+        bid = block.get("subject_id")
+        if not bid:
+            bid = f"block_{block.get('block_id', 0)}"
+        if str(bid) != sid:
+            continue
+        qnums.extend(int(q) for q in (block.get("question_numbers") or []))
+    if not qnums:
+        return False
+    return subject_questions_all_blank(qnums, answers)
+
+
+def sql_jsonb_subject_scored(pbs_column, storage_key):
+    """
+    Cláusula SQLAlchemy: disciplina presente no JSON e não ausente.
+    Uso em Ranking/Dashboard ao filtrar por disciplina do cartão.
+    """
+    from sqlalchemy import and_, or_, cast, Float
+
+    entry = pbs_column[storage_key]
+    absent_txt = entry["absent"].astext
+    not_absent = or_(absent_txt.is_(None), absent_txt != "true")
+    has_prof = cast(entry["proficiency"].astext, Float).isnot(None)
+    return and_(not_absent, has_prof)
 
 
 def infer_has_matematica_from_blocks_config(blocks_config: Optional[Dict]) -> bool:
@@ -108,7 +257,7 @@ def calcular_proficiencia_por_disciplina(
     grade_name: str = '',
     gabarito_obj: Any = None,
     student: Any = None,
-) -> Tuple[Dict[str, Any], float, str, bool]:
+) -> Tuple[Dict[str, Any], float, float, str, bool]:
     """
     Calcula proficiência e classificação por disciplina e média geral.
 
@@ -122,10 +271,8 @@ def calcular_proficiencia_por_disciplina(
 
     Returns:
         (proficiency_by_subject, proficiency_media, grade_media, classification_geral, has_matematica)
-        - proficiency_by_subject: { subject_id: { subject_name, proficiency, classification, correct_answers, total_questions } }
-        - proficiency_media: média das proficiências por disciplina
-        - grade_media: média das notas por disciplina (igual às avaliações)
-        - classification_geral: classificação para a média (usa "GERAL" no calculator)
+        - disciplina 100% em branco: absent=true (não entra na média geral)
+        - média geral: só disciplinas feitas
     """
     from app.services.evaluation_calculator import EvaluationCalculator
 
@@ -137,18 +284,24 @@ def calcular_proficiencia_por_disciplina(
     course_name = infer_course_name_from_grade(effective_grade_name)
     proficiency_by_subject = {}
     blocks = _extract_blocks_with_questions(blocks_config)
-    has_matematica = infer_has_matematica_from_blocks_config(blocks_config)
+    has_matematica_prova = infer_has_matematica_from_blocks_config(blocks_config)
+    answers = parse_detected_answers_map(validated_answers)
     if not blocks:
         # Fallback: um único bloco com todas as questões (sem subject_id)
         all_q = list(gabarito_dict.keys())
         if all_q:
+            if subject_questions_all_blank(all_q, answers):
+                # Cartão sem marcação: o fluxo de correção não deve persistir;
+                # devolve ausente explícito para quem chamar direto.
+                proficiency_by_subject['geral'] = make_absent_subject_entry('Outras', len(all_q))
+                return proficiency_by_subject, 0.0, 0.0, SUBJECT_ABSENT_CLASSIFICATION, False
             # Denominador = total de questões (em branco conta como erro)
             total = len(all_q)
             correct = sum(
                 1
                 for q in all_q
-                if validated_answers.get(q) is not None
-                and validated_answers.get(q) == gabarito_dict.get(q)
+                if answers.get(q) is not None
+                and answers.get(q) == (str(gabarito_dict.get(q)).strip().upper() if gabarito_dict.get(q) is not None else None)
             )
             subject_name = 'Outras'
             prof = EvaluationCalculator.calculate_proficiency(
@@ -163,11 +316,14 @@ def calcular_proficiencia_por_disciplina(
             )
             proficiency_by_subject['geral'] = {
                 'subject_name': subject_name,
+                'absent': False,
+                'status': 'avaliado',
                 'proficiency': prof,
                 'classification': classification,
                 'grade': grade,
                 'correct_answers': correct,
                 'total_questions': total,
+                'answered_questions': sum(1 for q in all_q if answers.get(q) is not None),
             }
             return proficiency_by_subject, prof, grade, classification, False
         return {}, 0.0, 0.0, 'Não calculado', False
@@ -190,15 +346,23 @@ def calcular_proficiencia_por_disciplina(
     for subject_id, question_numbers in questions_by_subject.items():
         if not question_numbers:
             continue
-        # Denominador = total de questões da disciplina (em branco conta como erro)
         total = len(question_numbers)
+        subject_name = subject_names.get(subject_id, 'Outras')
+        if subject_questions_all_blank(question_numbers, answers):
+            proficiency_by_subject[subject_id] = make_absent_subject_entry(subject_name, total)
+            continue
+        # Denominador = total de questões da disciplina (em branco conta como erro)
         correct = sum(
             1
             for q in question_numbers
-            if validated_answers.get(q) is not None
-            and validated_answers.get(q) == gabarito_dict.get(q)
+            if answers.get(q) is not None
+            and answers.get(q) == (
+                str(gabarito_dict.get(q)).strip().upper()
+                if gabarito_dict.get(q) is not None
+                else None
+            )
         )
-        subject_name = subject_names.get(subject_id, 'Outras')
+        answered = sum(1 for q in question_numbers if answers.get(q) is not None)
         proficiency = EvaluationCalculator.calculate_proficiency(
             correct, total, course_name, subject_name
         )
@@ -211,25 +375,33 @@ def calcular_proficiencia_por_disciplina(
         )
         proficiency_by_subject[subject_id] = {
             'subject_name': subject_name,
+            'absent': False,
+            'status': 'avaliado',
             'proficiency': round(proficiency, 2),
             'classification': classification,
             'grade': grade,
             'correct_answers': correct,
             'total_questions': total,
+            'answered_questions': answered,
         }
 
-    if not proficiency_by_subject:
-        return {}, 0.0, 0.0, 'Não calculado', False
+    scored = list(iter_scored_subject_entries(proficiency_by_subject))
+    if not scored:
+        # Só ausentes (ou vazio): sem média numérica
+        return proficiency_by_subject, 0.0, 0.0, SUBJECT_ABSENT_CLASSIFICATION, has_matematica_prova
 
-    proficiencies = [v['proficiency'] for v in proficiency_by_subject.values()]
-    grades = [v['grade'] for v in proficiency_by_subject.values()]
+    proficiencies = [float(v['proficiency']) for _sid, v in scored]
+    grades = [float(v['grade']) for _sid, v in scored]
     proficiency_media = round(sum(proficiencies) / len(proficiencies), 2)
-    # Nota geral = média das notas por disciplina (igual às avaliações)
+    # Nota geral = média das notas por disciplina feitas
     grade_media = round(sum(grades) / len(grades), 2)
-    classification_geral = EvaluationCalculator.determine_classification(
-        proficiency_media, course_name, 'GERAL', has_matematica=has_matematica
+    has_matematica_scored = any(
+        "matem" in str(v.get("subject_name") or "").lower() for _sid, v in scored
     )
-    return proficiency_by_subject, proficiency_media, grade_media, classification_geral, has_matematica
+    classification_geral = EvaluationCalculator.determine_classification(
+        proficiency_media, course_name, 'GERAL', has_matematica=has_matematica_scored
+    )
+    return proficiency_by_subject, proficiency_media, grade_media, classification_geral, has_matematica_prova
 
 
 def _extract_blocks_with_questions(blocks_config: Optional[Dict]) -> List[Dict]:
@@ -238,6 +410,14 @@ def _extract_blocks_with_questions(blocks_config: Optional[Dict]) -> List[Dict]:
     Preferência: topology.blocks (com questions[].q), senão blocks (com start_question/end_question).
     """
     if not blocks_config:
+        return []
+    if isinstance(blocks_config, str):
+        import json
+        try:
+            blocks_config = json.loads(blocks_config) or {}
+        except Exception:
+            return []
+    if not isinstance(blocks_config, dict):
         return []
     blocks = blocks_config.get('topology', {}).get('blocks', [])
     if not blocks:

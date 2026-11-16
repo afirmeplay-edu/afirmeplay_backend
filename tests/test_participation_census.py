@@ -223,32 +223,30 @@ def test_duas_modalidades_nao_viram_presenca():
 
 
 def test_modalidade_errada_fica_inconsistente():
-    adap = _aluno("a3", "t1", especial=True, nivel=3)
+    adap = _aluno("a2", "t1", especial=True, nivel=2)
     regular = _aluno("r", "t1")
     censo = _censo(
         [adap, regular],
-        [_res("a3", "reg-mat"), _res("r", "adap-lp")],
+        [_res("a2", "reg-mat"), _res("r", "adap-lp")],
         universo="todos",
     )
     por_id = _por_id(censo)
-    assert _disc(por_id["a3"], "mat").situacao == "inconsistente"
-    assert _disc(por_id["a3"], "mat").motivo_inconsistencia == "modalidade_incorreta"
-    assert _disc(por_id["a3"], "lp").situacao == "ausente"
+    assert _disc(por_id["a2"], "mat").situacao == "inconsistente"
+    assert _disc(por_id["a2"], "mat").motivo_inconsistencia == "modalidade_incorreta"
+    assert _disc(por_id["a2"], "lp").situacao == "ausente"
     assert _disc(por_id["r"], "lp").situacao == "inconsistente"
     assert _disc(por_id["r"], "lp").motivo_inconsistencia == "modalidade_incorreta"
-    assert por_id["a3"].participacao_pelo_menos_uma is False
+    assert por_id["a2"].participacao_pelo_menos_uma is False
     assert por_id["r"].participacao_pelo_menos_uma is False
 
 
-def test_adap_3_entra_em_adap_regular_adap_e_todos_e_sai_de_regular():
+def test_adap_3_fora_de_todas_as_opcoes_do_censo():
     aluno = _aluno("a3", "t1", especial=True, nivel=3)
     resultados = [_res("a3", "adap-lp"), _res("a3", "adap-mat")]
-    assert _censo([aluno], resultados, universo="regular").geral.matriculados == 0
-    for universo in ("adap", "regular_adap", "todos"):
+    for universo in ("regular", "adap", "regular_adap", "todos"):
         censo = _censo([aluno], resultados, universo=universo)
-        assert censo.geral.matriculados == 1
-        assert censo.alunos[0].participacao_completa is True
-        assert censo.alunos[0].nivel_adap == 3
+        assert censo.geral.matriculados == 0
+        assert censo.alunos == ()
 
 
 def test_snapshot_sem_turma_fica_no_historico_e_fora_da_taxa():

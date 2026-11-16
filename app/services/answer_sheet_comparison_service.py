@@ -458,12 +458,16 @@ class AnswerSheetComparisonService:
     def _get_subject_results_for_comparison(
         subject_id: str, results: List[AnswerSheetResult]
     ) -> List[Dict[str, Any]]:
+        from app.services.cartao_resposta.proficiency_by_subject import is_subject_entry_absent
+
         subject_results = []
         for result in results:
             entry = AnswerSheetComparisonService._subject_entry(
                 result.proficiency_by_subject, subject_id
             )
-            if not entry:
+            if not entry or is_subject_entry_absent(entry):
+                continue
+            if entry.get("proficiency") is None and entry.get("grade") is None:
                 continue
             subject_results.append(
                 {

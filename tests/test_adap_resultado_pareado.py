@@ -242,7 +242,7 @@ def test_projecao_sem_turma_atual_usa_turma_da_prova_regular():
     assert projected.grade_id_snapshot == "g-2ano"
 
 
-def test_adap3_entra_no_mapa_adap():
+def test_adap3_fora_do_mapa_adap_objetivo():
     serie = SimpleNamespace(name="5º Ano", education_stage_id=None)
     sub3 = SimpleNamespace(id="s3", class_id="c1", support_level=3)
     sub1 = SimpleNamespace(id="s1", class_id="c1", support_level=1)
@@ -256,8 +256,7 @@ def test_adap3_entra_no_mapa_adap():
     ]
     mapped = adap_students_level_12(alunos)
     assert "a1" in mapped
-    assert "a3" in mapped
-    assert mapped["a3"].level == 3
+    assert "a3" not in mapped
 
 
 def test_ranking_exclui_adap_por_constante():

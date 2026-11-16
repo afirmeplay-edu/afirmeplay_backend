@@ -699,12 +699,11 @@ class EvaluationResultService:
                     [test_id], escopo_calculo, class_ids_ct, base_ids
                 ).all()
                 alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
-                if alunos_filtro and alunos_filtro != "todos":
-                    from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+                from app.services.alunos_resultado_filtro import aplicar_universo_alunos
 
-                    alunos_escopo, results = aplicar_universo_alunos(
-                        alunos_escopo, alunos_filtro, results
-                    )
+                alunos_escopo, results = aplicar_universo_alunos(
+                    alunos_escopo, alunos_filtro or "todos", results
+                )
                 if scope_wants_adap_pareamento(scope_info):
                     alunos_escopo, results, _adap = apply_pareamento_to_universe(
                         str(test_id), alunos_escopo, results

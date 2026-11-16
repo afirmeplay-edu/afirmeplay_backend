@@ -47,7 +47,9 @@ def escolhidos(registros: Iterable[Dict[str, Any]], filtro: Optional[str]) -> Li
     return [
         row
         for row in registros
-        if aluno_entra_no_filtro(row["status"], filtro or "todos")
+        if aluno_entra_no_filtro(
+            row["status"], filtro or "todos", incluir_adap3=True
+        )
     ]
 
 

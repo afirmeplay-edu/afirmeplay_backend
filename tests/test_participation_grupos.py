@@ -45,16 +45,17 @@ def test_filtro_do_cartao_usa_a_mesma_regra_da_online():
         assert presentes == esperado & avaliados
 
 
-def test_todos_nao_muda_matriculados_nem_avaliados():
+def test_todos_exclui_adap3_e_mantem_os_demais():
     matriculados, avaliados, statuses = _roster()
+    sem_adap3 = matriculados - {"adap3"}
     mantidos, presentes = recortar_roster(matriculados, avaliados, statuses, "todos")
-    assert mantidos == matriculados
-    assert presentes == avaliados
+    assert mantidos == sem_adap3
+    assert presentes == avaliados & sem_adap3
     mantidos_ausente, presentes_ausente = recortar_roster(
         matriculados, avaliados, statuses, None
     )
-    assert mantidos_ausente == matriculados
-    assert presentes_ausente == avaliados
+    assert mantidos_ausente == sem_adap3
+    assert presentes_ausente == avaliados & sem_adap3
 
 
 def test_gabarito_adap_1_participa_so_sobre_o_publico_adap():

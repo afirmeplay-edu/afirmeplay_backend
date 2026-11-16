@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Recorte de alunos do menu Resultados (regular / ADAP 1, 2 e 3).
+"""Recorte de alunos do menu Resultados (regular / ADAP 1 e 2).
 
-Parâmetro ausente ou ``todos`` devolve as mesmas listas, sem reordenar.
+Parâmetro ausente ou ``todos`` exclui só o ADAP 3 (não faz prova objetiva).
 Educação especial sem nível fica de fora de regular, regular_adap e adap.
 Vale o vínculo atual (subturma ou série antiga de Educação Especial), via special_education.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Sequence
 
+from app.services.adap_objetivo import ADAP_OBJETIVO_NIVEIS, e_adap_excluido_prova_objetiva
 from app.services.special_education import (
     SpecialEducationStatus,
     is_special_education_many,
@@ -16,7 +17,6 @@ from app.services.special_education import (
 
 ALUNOS_FILTRO_TODOS = "todos"
 ALUNOS_FILTROS = ("regular", "regular_adap", "adap", ALUNOS_FILTRO_TODOS)
-_ADAP_OBJETIVO = (1, 2, 3)
 
 
 class AlunosFiltroInvalido(ValueError):
@@ -41,40 +41,80 @@ def filtro_restringe(filtro: Optional[str]) -> bool:
     return bool(filtro) and filtro != ALUNOS_FILTRO_TODOS
 
 
-def aluno_entra_no_filtro(status: SpecialEducationStatus, filtro: str) -> bool:
+def aluno_entra_no_filtro(
+    status: SpecialEducationStatus,
+    filtro: str,
+    *,
+    incluir_adap3: bool = False,
+) -> bool:
     """
+    Por padrão (prova objetiva/impressa) o ADAP 3 fica de fora.
+
+    ``incluir_adap3=True`` só para cadastro/Relatório de Usuários, onde o
+    nível 3 continua no filtro ADAP / Regular+ADAP / Todos.
+
     regular: quem não é educação especial.
-    adap: nível 1, 2 ou 3 (subturma ou série antiga).
-    regular_adap: regulares e esses três níveis.
-    Educação especial sem nível fica de fora dessas três opções.
+    adap: níveis do recorte (1–2 na objetiva; 1–3 com incluir_adap3).
+    regular_adap: regulares e esses níveis.
+    Educação especial sem nível fica de fora de regular/adap/regular_adap,
+    mas entra em todos.
     """
+    nivel = status.level if status.is_special else None
+    if not incluir_adap3 and e_adap_excluido_prova_objetiva(nivel):
+        return False
     if not filtro_restringe(filtro):
         return True
-    nivel = status.level if status.is_special else None
-    adap_objetivo = bool(status.is_special and nivel in _ADAP_OBJETIVO)
+    niveis = (1, 2, 3) if incluir_adap3 else ADAP_OBJETIVO_NIVEIS
+    adap = bool(status.is_special and nivel in niveis)
     regular = not status.is_special
     if filtro == "regular":
         return regular
     if filtro == "adap":
-        return adap_objetivo
+        return adap
     if filtro == "regular_adap":
-        return regular or adap_objetivo
+        return regular or adap
     return True
 
 
-def filtrar_alunos_resultado(students: Sequence[Any], filtro: Optional[str]) -> Sequence[Any]:
-    """Mantém a ordem. ``todos`` devolve a mesma sequência, sem cópia."""
-    if not filtro_restringe(filtro):
-        return students
+def _status_map(students: Sequence[Any]) -> dict:
     rows = [student for student in students if student is not None]
-    statuses = is_special_education_many(rows)
+    if not rows:
+        return {}
+    return is_special_education_many(rows)
+
+
+def _tem_adap_excluido(statuses: dict) -> bool:
+    return any(
+        status.is_special and e_adap_excluido_prova_objetiva(status.level)
+        for status in statuses.values()
+    )
+
+
+def filtrar_alunos_resultado(
+    students: Sequence[Any],
+    filtro: Optional[str],
+    *,
+    incluir_adap3: bool = False,
+) -> Sequence[Any]:
+    """Mantém a ordem. Sem ADAP 3 no universo, ``todos`` devolve a mesma sequência.
+
+    ``incluir_adap3=True`` para gabarito/prova dedicada ADAP 3 (geração continua
+    permitida; o recorte de resultados daquela prova precisa ver o nível 3).
+    """
+    statuses = _status_map(students)
+    if (
+        not filtro_restringe(filtro)
+        and (incluir_adap3 or not _tem_adap_excluido(statuses))
+    ):
+        return students
     escolhidos: List[Any] = []
+    valor = filtro or ALUNOS_FILTRO_TODOS
     for student in students:
         if student is None:
             continue
         key = str(getattr(student, "id", ""))
         status = statuses.get(key, SpecialEducationStatus(False, None, None))
-        if aluno_entra_no_filtro(status, filtro):
+        if aluno_entra_no_filtro(status, valor, incluir_adap3=incluir_adap3):
             escolhidos.append(student)
     return escolhidos
 
@@ -87,18 +127,19 @@ def aplicar_universo_alunos(
     students: Sequence[Any],
     filtro: Optional[str],
     results: Optional[Sequence[Any]] = None,
+    *,
+    incluir_adap3: bool = False,
 ) -> Any:
     """
     Corta alunos e, se houver resultados, só os desses alunos.
 
-    Com ``todos``, devolve os mesmos objetos recebidos.
+    Por padrão exclui ADAP 3 (provas regulares). Com ``todos`` e sem ADAP 3 /
+    extras, devolve os mesmos objetos. ``incluir_adap3`` para prova/gabarito ADAP 3.
     Resultado cujo aluno não está em ``students`` é classificado junto
     (transferido que entra pelo snapshot).
     """
     if results is None:
-        return filtrar_alunos_resultado(students, filtro)
-    if not filtro_restringe(filtro):
-        return students, results
+        return filtrar_alunos_resultado(students, filtro, incluir_adap3=incluir_adap3)
 
     by_id = {}
     ordered: List[Any] = []
@@ -129,7 +170,17 @@ def aplicar_universo_alunos(
                 by_id[key] = student
                 ordered.append(student)
 
-    filtered_students = filtrar_alunos_resultado(ordered, filtro)
+    statuses = _status_map(ordered)
+    if (
+        not filtro_restringe(filtro)
+        and not missing
+        and (incluir_adap3 or not _tem_adap_excluido(statuses))
+    ):
+        return students, results
+
+    filtered_students = filtrar_alunos_resultado(
+        ordered, filtro, incluir_adap3=incluir_adap3
+    )
     allowed = {_ids_aluno(student) for student in filtered_students}
     filtered_results = [
         row

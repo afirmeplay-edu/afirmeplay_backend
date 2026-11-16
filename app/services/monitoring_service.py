@@ -176,8 +176,14 @@ class MonitoringService:
         items: List[Dict[str, Any]] = []
         payload = result.proficiency_by_subject
         if isinstance(payload, dict) and payload:
+            from app.services.cartao_resposta.proficiency_by_subject import (
+                is_subject_entry_absent,
+            )
+
             for key, data in payload.items():
                 if not isinstance(data, dict):
+                    continue
+                if is_subject_entry_absent(data):
                     continue
                 name = MonitoringService._subject_name_from_result_data(data, str(key))
                 if not name:

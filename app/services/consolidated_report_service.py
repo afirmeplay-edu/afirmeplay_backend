@@ -1118,11 +1118,22 @@ def _build_frequencia_section_answer_sheet(
                 out.add(str(r.student_id))
                 continue
             pbs = r.proficiency_by_subject or {}
-            if isinstance(pbs, dict):
-                for _sid, block in pbs.items():
-                    if isinstance(block, dict) and (block.get("subject_name") or "").strip() == discipline:
-                        out.add(str(r.student_id))
-                        break
+            if not isinstance(pbs, dict):
+                continue
+            from app.services.cartao_resposta.proficiency_by_subject import (
+                is_subject_entry_absent,
+            )
+            for _sid, block in pbs.items():
+                if not isinstance(block, dict):
+                    continue
+                if (block.get("subject_name") or "").strip() != discipline:
+                    continue
+                if is_subject_entry_absent(block):
+                    break
+                if block.get("proficiency") is None and block.get("grade") is None:
+                    break
+                out.add(str(r.student_id))
+                break
         return out
 
     def _freq_counts(
@@ -1205,7 +1216,13 @@ def _subject_rows_from_digital_result(
 def _subject_rows_from_answer_sheet(
     r: AnswerSheetResult,
     discipline: Optional[str],
+    blocks_config: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        is_subject_entry_absent,
+        legacy_subject_blank_from_answers,
+    )
+
     if discipline is None:
         return [{"student_id": r.student_id, "grade": float(r.grade or 0), "proficiency": float(r.proficiency or 0)}]
     rows: List[Dict[str, Any]] = []
@@ -1215,14 +1232,24 @@ def _subject_rows_from_answer_sheet(
             if not isinstance(block, dict):
                 continue
             name = (block.get("subject_name") or str(_sid)).strip()
-            if name == discipline:
-                rows.append(
-                    {
-                        "student_id": r.student_id,
-                        "grade": float(block.get("grade") or 0),
-                        "proficiency": float(block.get("proficiency") or 0),
-                    }
-                )
+            if name != discipline:
+                continue
+            if is_subject_entry_absent(block) or legacy_subject_blank_from_answers(
+                block,
+                subject_id=str(_sid),
+                blocks_config=blocks_config,
+                detected_answers=getattr(r, "detected_answers", None),
+            ):
+                continue
+            if block.get("proficiency") is None and block.get("grade") is None:
+                continue
+            rows.append(
+                {
+                    "student_id": r.student_id,
+                    "grade": float(block.get("grade") or 0),
+                    "proficiency": float(block.get("proficiency") or 0),
+                }
+            )
     return rows
 
 
@@ -1466,6 +1493,8 @@ def _build_distribuicao_section_answer_sheet(
         cell_results = _filter_answer_sheet_in_cell(scope, results, escola_id, serie_id)
         if not cell_results:
             return None
+        from app.services.cartao_resposta.proficiency_by_subject import is_subject_entry_absent
+
         dist = _empty_distribution()
         for r in cell_results:
             if discipline is None:
@@ -1474,8 +1503,15 @@ def _build_distribuicao_section_answer_sheet(
             pbs = r.proficiency_by_subject or {}
             if isinstance(pbs, dict):
                 for _sid, block in pbs.items():
-                    if isinstance(block, dict) and (block.get("subject_name") or "").strip() == discipline:
-                        dist[_classification_bucket(block.get("classification"))] += 1
+                    if not isinstance(block, dict):
+                        continue
+                    if (block.get("subject_name") or "").strip() != discipline:
+                        continue
+                    if is_subject_entry_absent(block):
+                        continue
+                    if block.get("proficiency") is None and block.get("grade") is None:
+                        continue
+                    dist[_classification_bucket(block.get("classification"))] += 1
         return dist if sum(dist.values()) > 0 else None
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:
@@ -2373,6 +2409,10 @@ def _students_by_class_for_digital(
         [st.id for st in sem_turma_no_escopo],
         scope_classes,
     )
+    from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+
+    # ADAP 3 fora do esperado de prova objetiva regular.
+    all_students = list(filtrar_alunos_resultado(all_students, "todos"))
     students_by_class: Dict[str, List[Student]] = defaultdict(list)
     for st in all_students:
         turma = _turma_para_nota_do_consolidado(
@@ -2740,17 +2780,34 @@ def _answer_sheet_results_for_classes(gabarito_ids: List[str], class_ids: List[A
 def _answer_sheet_students_by_class(
     class_ids: List[Any], item_by_class: Dict[str, str]
 ) -> Dict[str, List[Student]]:
-    """Roster por turma, recortado pelo público do gabarito daquela turma (ADAP)."""
-    from app.services.cartao_resposta.answer_sheet_audience import filter_students_for_gabarito
+    """Roster por turma, recortado pelo público do gabarito daquela turma (ADAP).
+
+    Prova regular: ADAP 3 fora do esperado. Gabarito dedicado ADAP 3: mantém.
+    """
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
+    from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+    from app.services.cartao_resposta.answer_sheet_audience import (
+        filter_students_for_gabarito,
+        gabarito_adap_level,
+    )
 
     out: Dict[str, List[Student]] = defaultdict(list)
     for st in Student.query.filter(Student.class_id.in_(class_ids)).all():
         if st.class_id:
             out[str(st.class_id)].append(st)
+    gab_cache: Dict[str, Any] = {}
     for cid in list(out.keys()):
         gid = item_by_class.get(cid)
         if gid:
             out[cid] = filter_students_for_gabarito(out[cid], gid)
+            if gid not in gab_cache:
+                gab_cache[gid] = AnswerSheetGabarito.query.get(str(gid))
+            incluir_adap3 = gabarito_adap_level(gab_cache[gid]) == 3
+        else:
+            incluir_adap3 = False
+        out[cid] = list(
+            filtrar_alunos_resultado(out[cid], "todos", incluir_adap3=incluir_adap3)
+        )
     return out
 
 

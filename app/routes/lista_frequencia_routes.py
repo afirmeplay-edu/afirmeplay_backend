@@ -64,6 +64,41 @@ def _turmas_query(query):
     return query.options(*_CLASS_LIST_OPTIONS)
 
 
+def lista_frequencia_inclui_adap3(*, test=None, gabarito=None) -> bool:
+    """
+    True só quando a prova/cartão é direcionado a ADAP 3 (Educação Especial).
+    Prova/cartão regular (e ADAP 1/2): False → ADAP 3 sai da lista.
+    """
+    from app.services.adap_objetivo import prova_direcionada_adap3
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
+
+    if gabarito is not None:
+        return prova_direcionada_adap3(gabarito_level=gabarito_adap_level(gabarito))
+
+    if test is not None:
+        grade = getattr(test, "grade", None)
+        if grade is None and getattr(test, "grade_id", None):
+            grade = Grade.query.get(test.grade_id)
+        return prova_direcionada_adap3(grade_name=getattr(grade, "name", None))
+
+    return False
+
+
+def _aplicar_exclusao_adap3_lista(query, *, test=None, gabarito=None):
+    """
+    Em avaliação online ou cartão regular, tira ADAP 3 do roster da lista
+    (tela + PDF usam o mesmo payload). Cartão/prova ADAP 3 mantém.
+    Lista só por turma (sem test/gabarito) não filtra.
+    """
+    if test is None and gabarito is None:
+        return query
+    if lista_frequencia_inclui_adap3(test=test, gabarito=gabarito):
+        return query
+    from app.services.adap_objetivo import sql_excluir_adap3_de_student
+
+    return query.filter(sql_excluir_adap3_de_student())
+
+
 def _cabecalho_real(classe, tipo, test=None, gabarito=None, school=None, city=None):
     """Monta o cabeçalho a partir da turma (Class) e do tipo de lista.
     Se test ou gabarito tiver título, usa em nome_prova_ano.
@@ -247,14 +282,12 @@ def _montar_listas_turmas_bulk(turmas, tipo, test, fill_status, gabarito=None, c
     class_ids = [c.id for c in turmas]
     alunos_por_turma = defaultdict(list)
     if class_ids:
-        for aluno in (
-            apply_gabarito_audience(
-                Student.query.filter(Student.class_id.in_(class_ids)),
-                str(gabarito.id) if gabarito is not None else None,
-            )
-            .order_by(Student.class_id, Student.name)
-            .all()
-        ):
+        alunos_q = apply_gabarito_audience(
+            Student.query.filter(Student.class_id.in_(class_ids)),
+            str(gabarito.id) if gabarito is not None else None,
+        )
+        alunos_q = _aplicar_exclusao_adap3_lista(alunos_q, test=test, gabarito=gabarito)
+        for aluno in alunos_q.order_by(Student.class_id, Student.name).all():
             alunos_por_turma[aluno.class_id].append(aluno)
 
     school_ids = {str(c._school_id) for c in turmas if c._school_id}
@@ -327,14 +360,12 @@ def _montar_lista_turma(classe, tipo, test, fill_status, gabarito=None):
     from app.services.cartao_resposta.answer_sheet_audience import apply_gabarito_audience
 
     cabecalho = _cabecalho_real(classe, tipo, test=test, gabarito=gabarito)
-    alunos = (
-        apply_gabarito_audience(
-            Student.query.filter_by(class_id=classe.id),
-            str(gabarito.id) if gabarito is not None else None,
-        )
-        .order_by(Student.name)
-        .all()
+    alunos_q = apply_gabarito_audience(
+        Student.query.filter_by(class_id=classe.id),
+        str(gabarito.id) if gabarito is not None else None,
     )
+    alunos_q = _aplicar_exclusao_adap3_lista(alunos_q, test=test, gabarito=gabarito)
+    alunos = alunos_q.order_by(Student.name).all()
     estudantes = _estudantes_payload(
         alunos, fill_status, test=test, gabarito=gabarito
     )

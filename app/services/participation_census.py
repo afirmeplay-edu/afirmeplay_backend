@@ -5,9 +5,10 @@ Não grava tabela e não altera endpoint. O chamador entrega turmas,
 provas, vínculos ``class_test`` e resultados já autorizados.
 
 Presença segue a modalidade do aluno. Regular conta só a prova regular.
-ADAP 1, 2 ou 3 conta só a prova pareada. Modalidade errada, ou as duas
-juntas, fica inconsistente: sem presença válida. A nota não escolhe a origem
-e o ``test_id`` do resultado não é reescrito.
+ADAP 1 ou 2 conta só a prova pareada. ADAP 3 não entra no censo
+(prova objetiva). Modalidade errada, ou as duas juntas, fica inconsistente:
+sem presença válida. A nota não escolhe a origem e o ``test_id`` do
+resultado não é reescrito.
 
 Completa significa presente em toda disciplina que a turma atual recebeu.
 Pelo menos uma significa presente em uma ou mais dessas disciplinas.
@@ -18,12 +19,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from app.services.adap_objetivo import ADAP_OBJETIVO_NIVEIS
 from app.services.adap_resultado_pareado import classificar_resultado_modalidade
 from app.services.alunos_resultado_filtro import aluno_entra_no_filtro, parse_alunos_filtro
 from app.services.special_education import SpecialEducationStatus
 from app.utils.decimal_helpers import round_to_two_decimals
-
-_NIVEIS_ADAP = (1, 2, 3)
 
 
 @dataclass(frozen=True)
@@ -452,7 +452,7 @@ def _avaliar_aluno(
 
 
 def _perfil(status: SpecialEducationStatus) -> str:
-    if status.is_special and status.level in _NIVEIS_ADAP:
+    if status.is_special and status.level in ADAP_OBJETIVO_NIVEIS:
         return "adap"
     if status.is_special:
         return "especial_sem_nivel"
@@ -494,7 +494,7 @@ def _disciplina_do_aluno(
     regular = linhas.get(slot.prova_regular_id)
     adap_rows = [linhas[tid] for tid in slot.adap_por_id if tid in linhas]
     origens = _origens(slot, regular, adap_rows)
-    aluno_e_adap = bool(status.is_special and status.level in _NIVEIS_ADAP)
+    aluno_e_adap = bool(status.is_special and status.level in ADAP_OBJETIVO_NIVEIS)
     if not status.is_special or aluno_e_adap:
         escolhido, situacao_modalidade = classificar_resultado_modalidade(
             regular,

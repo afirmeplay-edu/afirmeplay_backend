@@ -5,6 +5,10 @@ O nível vem do gabarito: a série dele é "Suporte N" (etapa Educação Especia
 exibida como "ADAP N", e equivale a ``subturma.support_level = N``. Gabarito com
 séries regulares gera para turmas inteiras; gabarito ADAP gera só para subturmas.
 
+A exclusão do ADAP 3 no universo de resultados/participação de provas
+regulares fica em ``alunos_resultado_filtro`` / ``adap_objetivo`` — não aqui.
+A geração de cartão/gabarito ADAP 3 continua permitida.
+
 O recorte fica no scope_snapshot de cada geração (answer_sheet_generations):
 chave ``subturma_ids`` e ``subturma_id`` em cada item de ``class_ids``.
 Snapshot sem ``subturma_ids`` vale a turma inteira, como sempre foi.

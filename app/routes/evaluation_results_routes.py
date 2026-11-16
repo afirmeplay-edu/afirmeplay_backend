@@ -2883,10 +2883,9 @@ def _carregar_dataset_virtual_grupo(
         test_ids, escopo_calculo, class_ids, base_orig_ids
     ).all()
     alunos_filtro = (scope_info or {}).get("alunos") if isinstance(scope_info, dict) else None
-    if alunos_filtro and alunos_filtro != "todos":
-        from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+    from app.services.alunos_resultado_filtro import aplicar_universo_alunos
 
-        _, raw = aplicar_universo_alunos(todos_alunos, alunos_filtro, raw)
+    _, raw = aplicar_universo_alunos(todos_alunos, alunos_filtro or "todos", raw)
     virtual = build_virtual_multidisciplinary_results(
         raw, tests_info, course_name, only_complete=only_complete
     )
@@ -9084,10 +9083,9 @@ def _montar_tabela_adap_para_resposta(
             escopo_calculo, nivel_granularidade, user, restrict_class_ids
         )
         alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
-        if alunos_filtro and alunos_filtro != "todos":
-            from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+        from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
 
-            base_students = list(filtrar_alunos_resultado(base_students, alunos_filtro))
+        base_students = list(filtrar_alunos_resultado(base_students, alunos_filtro or "todos"))
 
         class_ids = class_ids_for_evaluation_in_scope(
             tid, escopo_calculo, restrict_class_ids
@@ -9260,13 +9258,12 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         ).all()
 
         alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
-        if alunos_filtro and alunos_filtro != "todos":
-            from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+        from app.services.alunos_resultado_filtro import aplicar_universo_alunos
 
-            todos_alunos, resultados_escopo = aplicar_universo_alunos(
-                todos_alunos, alunos_filtro, resultados_escopo
-            )
-            total_alunos = len(todos_alunos)
+        todos_alunos, resultados_escopo = aplicar_universo_alunos(
+            todos_alunos, alunos_filtro or "todos", resultados_escopo
+        )
+        total_alunos = len(todos_alunos)
 
         sombra_alunos = list(todos_alunos)
         sombra_resultados = list(resultados_escopo)
@@ -9907,13 +9904,12 @@ def _carregar_participantes_avaliacao_escopo(
         for s in Student.query.filter(Student.id.in_(participant_ids)).all():
             students_by_id[s.id] = s
     alunos_filtro = escopo_calculo.get("alunos") if isinstance(escopo_calculo, dict) else None
-    if alunos_filtro and alunos_filtro != "todos":
-        from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+    from app.services.alunos_resultado_filtro import aplicar_universo_alunos
 
-        alunos_lista, resultados = aplicar_universo_alunos(
-            list(students_by_id.values()), alunos_filtro, resultados
-        )
-        students_by_id = {s.id: s for s in alunos_lista}
+    alunos_lista, resultados = aplicar_universo_alunos(
+        list(students_by_id.values()), alunos_filtro or "todos", resultados
+    )
+    students_by_id = {s.id: s for s in alunos_lista}
     return resultados, students_by_id
 
 

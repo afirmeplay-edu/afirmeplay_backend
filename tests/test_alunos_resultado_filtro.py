@@ -60,19 +60,17 @@ def test_parametro_invalido():
         raise AssertionError("valor inválido deveria falhar")
 
 
-def test_opcoes_incluem_adap_3():
+def test_adap_3_fora_de_todas_as_opcoes():
     alunos = _turma_mista()
     assert _ids(filtrar_alunos_resultado(alunos, "regular")) == ["regular"]
     assert _ids(filtrar_alunos_resultado(alunos, "regular_adap")) == [
         "regular",
         "adap1",
         "adap2",
-        "adap3",
     ]
-    assert _ids(filtrar_alunos_resultado(alunos, "adap")) == ["adap1", "adap2", "adap3"]
-    mesmo = filtrar_alunos_resultado(alunos, "todos")
-    assert mesmo is alunos
-    assert _ids(filtrar_alunos_resultado(alunos, None)) == _ids(alunos)
+    assert _ids(filtrar_alunos_resultado(alunos, "adap")) == ["adap1", "adap2"]
+    assert _ids(filtrar_alunos_resultado(alunos, "todos")) == ["regular", "adap1", "adap2"]
+    assert _ids(filtrar_alunos_resultado(alunos, None)) == ["regular", "adap1", "adap2"]
 
 
 def test_serie_antiga_conta_como_adap_pelo_nivel():
@@ -89,13 +87,13 @@ def test_serie_antiga_conta_como_adap_pelo_nivel():
     )
     regular = _aluno("regular", grade=serie_regular)
     grupo = [regular, antigo_1, antigo_3]
-    assert _ids(filtrar_alunos_resultado(grupo, "adap")) == ["antigo1", "antigo3"]
+    assert _ids(filtrar_alunos_resultado(grupo, "adap")) == ["antigo1"]
     assert _ids(filtrar_alunos_resultado(grupo, "regular")) == ["regular"]
     assert _ids(filtrar_alunos_resultado(grupo, "regular_adap")) == [
         "regular",
         "antigo1",
-        "antigo3",
     ]
+    assert _ids(filtrar_alunos_resultado(grupo, "todos")) == ["regular", "antigo1"]
 
 
 def test_transferido_sem_subturma_conta_como_regular():
@@ -113,10 +111,24 @@ def test_transferido_sem_subturma_conta_como_regular():
     assert fora == []
 
 
-def test_todos_nao_recria_as_listas():
-    alunos = _turma_mista()
-    resultados = [SimpleNamespace(student_id="adap3")]
+def test_todos_sem_adap3_mantem_identidade():
+    serie = _grade("5º Ano")
+    alunos = [
+        _aluno("regular", grade=serie),
+        _aluno("adap1", grade=serie, subturma=_sub(1)),
+    ]
+    resultados = [SimpleNamespace(student_id="regular")]
     out_alunos, out_resultados = aplicar_universo_alunos(alunos, "todos", resultados)
     assert out_alunos is alunos
     assert out_resultados is resultados
-    assert aplicar_universo_alunos(alunos, None, resultados)[1] is resultados
+
+
+def test_todos_exclui_adap3_e_seus_resultados():
+    alunos = _turma_mista()
+    resultados = [
+        SimpleNamespace(student_id="regular"),
+        SimpleNamespace(student_id="adap3"),
+    ]
+    out_alunos, out_resultados = aplicar_universo_alunos(alunos, "todos", resultados)
+    assert _ids(out_alunos) == ["regular", "adap1", "adap2"]
+    assert [r.student_id for r in out_resultados] == ["regular"]

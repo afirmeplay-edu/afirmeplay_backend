@@ -1350,11 +1350,13 @@ class RankingReportService:
                 AnswerSheetResult.gabarito_id == answer_sheet_id,
             ]
             if storage_key:
+                from app.services.cartao_resposta.proficiency_by_subject import (
+                    sql_jsonb_subject_scored,
+                )
                 join_conditions.append(
-                    cast(
-                        AnswerSheetResult.proficiency_by_subject[storage_key]["proficiency"].astext,
-                        Float,
-                    ).isnot(None)
+                    sql_jsonb_subject_scored(
+                        AnswerSheetResult.proficiency_by_subject, storage_key
+                    )
                 )
             query = query.join(AnswerSheetResult, and_(*join_conditions))
         elif evaluation_id:
@@ -1464,7 +1466,17 @@ class RankingReportService:
                 )
             )
         if discipline_prof_expr is not None:
-            result_join_conditions.append(discipline_prof_expr.isnot(None))
+            if use_answer_sheet and storage_key:
+                from app.services.cartao_resposta.proficiency_by_subject import (
+                    sql_jsonb_subject_scored,
+                )
+                result_join_conditions.append(
+                    sql_jsonb_subject_scored(
+                        AnswerSheetResult.proficiency_by_subject, storage_key
+                    )
+                )
+            else:
+                result_join_conditions.append(discipline_prof_expr.isnot(None))
 
         adequado_condition = cls._adequado_avancado_student_condition(results_model, storage_key)
         has_result = results_model.id.isnot(None)
@@ -1828,6 +1840,8 @@ class RankingReportService:
         multi_instruments = len(instrument_ids) > 1
 
         def _apply_common_student_filters(query):
+            from app.services.adap_objetivo import sql_excluir_adap3_de_student
+
             if filters.get("escola"):
                 query = query.filter(Student.school_id == str(filters["escola"]))
             if filters.get("turma"):
@@ -1852,7 +1866,8 @@ class RankingReportService:
                 query = query.filter(Student.class_id.in_(class_ids))
             if city_id:
                 query = query.filter(School.city_id == str(city_id))
-            return query
+            # Ranking Hub/Geral (cartão e online): ADAP 3 fora do esperado.
+            return query.filter(sql_excluir_adap3_de_student())
 
         def _apply_entity_filter(query, model):
             if model is EvaluationResult and instrument_ids:
@@ -2522,7 +2537,10 @@ class RankingReportService:
                 query = query.filter(Student.class_id.in_(class_ids))
             if city_id:
                 query = query.filter(School.city_id == str(city_id))
-            return query
+            from app.services.adap_objetivo import sql_excluir_adap3_de_student
+
+            # Ranking Hub/Geral: ADAP 3 fora do esperado (sem ligar pareamento).
+            return query.filter(sql_excluir_adap3_de_student())
 
         def _apply_entity_filter(query, model):
             if model is EvaluationResult and instrument_ids:

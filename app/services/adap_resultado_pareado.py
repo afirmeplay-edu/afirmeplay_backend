@@ -4,8 +4,9 @@
 Ativado só quando o cliente envia o parâmetro ``alunos``. Sem o parâmetro,
 ou sem vínculos ``paired_regular_test_id``, o comportamento permanece o de sempre.
 
-Regular entra só com a prova regular. ADAP 1, 2 ou 3 entra só com a prova
+Regular entra só com a prova regular. ADAP 1 ou 2 entra só com a prova
 pareada. As duas modalidades, ou só a modalidade errada, não geram nota.
+ADAP 3 não faz prova objetiva e não entra neste pareamento.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from app.services.adap_objetivo import ADAP_OBJETIVO_NIVEIS
 from app.services.special_education import (
     SpecialEducationStatus,
     is_special_education_many,
@@ -22,10 +24,8 @@ from app.services.special_education import (
 
 logger = logging.getLogger(__name__)
 
-# Ranking: ADAP 1, 2 e 3 ficam de fora. Troque para True para incluí-los no ranking.
+# Ranking: ADAP 1 e 2 ficam de fora. Troque para True para incluí-los no ranking.
 ADAP_INCLUDED_IN_RANKING = False
-
-_ADAP_LEVELS = (1, 2, 3)
 
 _ADAP_TITLE_RE = re.compile(
     r"^adap\s*(i{1,3}|[123])\b",
@@ -63,8 +63,8 @@ def parse_adap_level_from_title(title: Any) -> Optional[int]:
     token = match.group(1).lower()
     if token.isdigit():
         level = int(token)
-        return level if level in (1, 2, 3) else None
-    roman = {"i": 1, "ii": 2, "iii": 3}
+        return level if level in ADAP_OBJETIVO_NIVEIS else None
+    roman = {"i": 1, "ii": 2}
     return roman.get(token)
 
 
@@ -185,7 +185,7 @@ def choose_valid_evaluation_result(
 
 
 def adap_students_level_12(students: Sequence[Any]) -> Dict[str, SpecialEducationStatus]:
-    """Alunos ADAP nível 1, 2 ou 3 no universo (subturma ou série)."""
+    """Alunos ADAP nível 1 ou 2 no universo (subturma ou série). ADAP 3 fica de fora."""
     rows = [s for s in students if s is not None]
     if not rows:
         return {}
@@ -196,7 +196,7 @@ def adap_students_level_12(students: Sequence[Any]) -> Dict[str, SpecialEducatio
         if not key:
             continue
         status = statuses.get(key) or SpecialEducationStatus(False, None, None)
-        if status.is_special and status.level in _ADAP_LEVELS:
+        if status.is_special and status.level in ADAP_OBJETIVO_NIVEIS:
             out[key] = status
     return out
 
@@ -229,7 +229,7 @@ def resolve_adap_valid_results(
     regular_results_by_student: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, AdapValidResult]:
     """
-    Para cada aluno ADAP 1, 2 ou 3, devolve a prova pareada quando ela é a única.
+    Para cada aluno ADAP 1 ou 2, devolve a prova pareada quando ela é a única.
 
     Prova regular sozinha, ou regular junto com ADAP, fica inconsistente e sem resultado.
     """
@@ -372,7 +372,7 @@ def protect_adap_ids_in_roster(
     roster_ids: Set[str],
     adap_student_ids: Iterable[str],
 ) -> Set[str]:
-    """Garante que ADAP 1, 2 e 3 da turma atual não saiam do universo."""
+    """Garante que ADAP 1 e 2 da turma atual não saiam do universo."""
     merged = set(roster_ids or set())
     for sid in adap_student_ids or []:
         if sid:
@@ -384,7 +384,7 @@ def build_tabela_adap_rows(
     students_by_id: Dict[str, Any],
     adap_valid: Dict[str, AdapValidResult],
 ) -> List[Dict[str, Any]]:
-    """Payload do bloco ``tabela_adap`` (ADAP 1, 2 e 3)."""
+    """Payload do bloco ``tabela_adap`` (ADAP 1 e 2)."""
     rows: List[Dict[str, Any]] = []
     for sid, info in sorted(
         (adap_valid or {}).items(),
@@ -539,7 +539,7 @@ def apply_pareamento_to_universe(
     results: Sequence[Any],
 ) -> Tuple[List[Any], List[Any], Dict[str, AdapValidResult]]:
     """
-    Protege ADAP 1, 2 e 3 no roster e devolve
+    Protege ADAP 1 e 2 no roster e devolve
     (students, results_efetivos, adap_valid).
 
     Resultado inconsistente sai de results_efetivos e não entra na média.

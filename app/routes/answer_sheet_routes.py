@@ -3799,10 +3799,20 @@ def _load_cartao_roster_and_results(
         row for row in _dedupe_answer_sheet_results_latest_per_student(_rq.all())
         if str(row.student_id) in allowed_ids
     ]
-    if alunos_filtro and alunos_filtro != "todos":
-        from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+    # Resultados/participação de prova regular: ADAP 3 fora.
+    # Gabarito dedicado ADAP 3: mantém o nível 3 (geração continua permitida).
+    from app.services.alunos_resultado_filtro import aplicar_universo_alunos
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
 
-        students, results = aplicar_universo_alunos(students, alunos_filtro, results)
+    gab = AnswerSheetGabarito.query.get(str(gabarito_id))
+    incluir_adap3 = gabarito_adap_level(gab) == 3
+    students, results = aplicar_universo_alunos(
+        students,
+        alunos_filtro or "todos",
+        results,
+        incluir_adap3=incluir_adap3,
+    )
 
     if somente_corrigidos:
         by_id = {s.id: s for s in students}
@@ -4226,10 +4236,11 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
         if not gabarito_id:
             todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
             alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
-            if alunos_filtro and alunos_filtro != "todos":
-                from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+            from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
 
-                todos_alunos = filtrar_alunos_resultado(todos_alunos, alunos_filtro)
+            todos_alunos = filtrar_alunos_resultado(
+                todos_alunos, alunos_filtro or "todos"
+            )
             total_alunos = len(todos_alunos)
             resultados = []
             alunos_participantes = 0
@@ -4463,9 +4474,14 @@ def _medias_por_disciplina_de_resultados_cartao(
     if not course_name:
         return {"lista": [], "media_nota_lp": None, "media_nota_mat": None}
     from app.utils.school_equal_weight_means import hierarchical_mean_from_subject_rows
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        is_subject_entry_absent,
+        legacy_subject_blank_from_answers,
+    )
 
     by_subject: Dict[str, Dict[str, Any]] = {}
     subject_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    blocks_config = getattr(gabarito, "blocks_config", None)
     for r in results:
         pbs = r.proficiency_by_subject or {}
         if isinstance(pbs, str):
@@ -4475,13 +4491,25 @@ def _medias_por_disciplina_de_resultados_cartao(
                 pbs = {}
         for sid, data in (pbs or {}).items():
             sidk = str(sid)
-            if sidk not in by_subject:
-                by_subject[sidk] = {
-                    "disciplina": (data.get("subject_name") if isinstance(data, dict) else None) or sidk,
-                    "n": 0,
-                }
             if not isinstance(data, dict):
                 continue
+            if is_subject_entry_absent(data) or legacy_subject_blank_from_answers(
+                data,
+                subject_id=sidk,
+                blocks_config=blocks_config,
+                detected_answers=getattr(r, "detected_answers", None),
+            ):
+                if sidk not in by_subject:
+                    by_subject[sidk] = {
+                        "disciplina": data.get("subject_name") or sidk,
+                        "n": 0,
+                    }
+                continue
+            if sidk not in by_subject:
+                by_subject[sidk] = {
+                    "disciplina": data.get("subject_name") or sidk,
+                    "n": 0,
+                }
             by_subject[sidk]["n"] += 1
             nota_disc = data.get("grade")
             if nota_disc is None and data.get("proficiency") is not None:
@@ -4489,8 +4517,10 @@ def _medias_por_disciplina_de_resultados_cartao(
                 nota_disc = EvaluationCalculator.calculate_grade(
                     data.get("proficiency"), course_name, subject_name
                 )
-            nf = float(nota_disc) if nota_disc is not None else 0.0
-            pf = float(data.get("proficiency") or 0)
+            if nota_disc is None or data.get("proficiency") is None:
+                continue
+            nf = float(nota_disc)
+            pf = float(data.get("proficiency"))
             subject_rows[sidk].append(
                 {
                     "student_id": r.student_id,
@@ -4563,10 +4593,14 @@ def _complementar_metricas_escola_municipio_cartao(
     alunos = apply_gabarito_audience(
         Student.query.filter(Student.class_id.in_(class_ids)), gabarito_id
     ).all() if class_ids else []
-    if alunos_filtro and alunos_filtro != "todos":
-        from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+    from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
+    from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
 
-        alunos = filtrar_alunos_resultado(alunos, alunos_filtro)
+    alunos = filtrar_alunos_resultado(
+        alunos,
+        alunos_filtro or "todos",
+        incluir_adap3=gabarito_adap_level(gabarito) == 3,
+    )
     sid_list = [a.id for a in alunos]
     results: List[AnswerSheetResult] = []
     if sid_list and gabarito_id:
@@ -4785,8 +4819,14 @@ def _build_disciplina_rows_from_cartao_results(
     course_name, _gname, _gid = course_meta_for_gabarito_serie(gabarito, serie_id)
     if not course_name:
         return []
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        is_subject_entry_absent,
+        legacy_subject_blank_from_answers,
+    )
+
     subject_rows: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
     by_subject: Dict[Any, Dict[str, Any]] = {}
+    blocks_config = getattr(gabarito, "blocks_config", None)
 
     for r in results:
         pbs = r.proficiency_by_subject or {}
@@ -4796,15 +4836,24 @@ def _build_disciplina_rows_from_cartao_results(
             except Exception:
                 pbs = {}
         for sid, data in (pbs or {}).items():
+            if not isinstance(data, dict):
+                continue
             if sid not in by_subject:
                 by_subject[sid] = {
-                    "disciplina": (data.get("subject_name") if isinstance(data, dict) else None) or sid,
+                    "disciplina": data.get("subject_name") or sid,
                     "alunos_participantes": 0,
                     "dist": {"abaixo_do_basico": 0, "basico": 0, "adequado": 0, "avancado": 0},
                 }
-            by_subject[sid]["alunos_participantes"] += 1
-            if not isinstance(data, dict):
+            if is_subject_entry_absent(data) or legacy_subject_blank_from_answers(
+                data,
+                subject_id=str(sid),
+                blocks_config=blocks_config,
+                detected_answers=getattr(r, "detected_answers", None),
+            ):
+                if data.get("subject_name"):
+                    by_subject[sid]["disciplina"] = data.get("subject_name")
                 continue
+            by_subject[sid]["alunos_participantes"] += 1
             if data.get("subject_name"):
                 by_subject[sid]["disciplina"] = data.get("subject_name")
             nota_disc = data.get("grade")
@@ -4813,8 +4862,10 @@ def _build_disciplina_rows_from_cartao_results(
                 nota_disc = EvaluationCalculator.calculate_grade(
                     data.get("proficiency"), course_name, subject_name
                 )
-            nf = float(nota_disc) if nota_disc is not None else 0.0
-            pf = float(data.get("proficiency") or 0)
+            if nota_disc is None or data.get("proficiency") is None:
+                continue
+            nf = float(nota_disc)
+            pf = float(data.get("proficiency"))
             subject_rows[sid].append(
                 {
                     "student_id": r.student_id,
@@ -5262,9 +5313,36 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
                     pbs = json.loads(pbs)
                 except Exception:
                     pbs = {}
+            from app.services.cartao_resposta.proficiency_by_subject import (
+                is_subject_entry_absent,
+                subject_questions_all_blank,
+                SUBJECT_ABSENT_CLASSIFICATION,
+            )
             disc_data = (pbs or {}).get(str(subject_id), pbs.get(subject_id, {}))
-            disciplina_proficiencia = disc_data.get('proficiency') if isinstance(disc_data, dict) else (r.proficiency if r else 0)
-            disciplina_classificacao = disc_data.get('classification') if isinstance(disc_data, dict) else (r.classification if r else None)
+            disciplina_ausente = False
+            if r and (
+                is_subject_entry_absent(disc_data)
+                or subject_questions_all_blank(q_numbers, detected)
+            ):
+                disciplina_ausente = True
+            disciplina_proficiencia = (
+                None
+                if disciplina_ausente
+                else (
+                    disc_data.get("proficiency")
+                    if isinstance(disc_data, dict)
+                    else (r.proficiency if r else 0)
+                )
+            )
+            disciplina_classificacao = (
+                SUBJECT_ABSENT_CLASSIFICATION
+                if disciplina_ausente
+                else (
+                    disc_data.get("classification")
+                    if isinstance(disc_data, dict)
+                    else (r.classification if r else None)
+                )
+            )
             # Escala pela série do aluno (nunca pelo title do gabarito)
             grade_label_aluno = resolve_grade_name_for_proficiency(
                 gabarito_obj=gabarito,
@@ -5276,7 +5354,9 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
                 if grade_label_aluno
                 else course_name_escopo
             )
-            if isinstance(disc_data, dict) and disc_data.get('proficiency') is not None and course_name_aluno:
+            if disciplina_ausente:
+                disciplina_nota = None
+            elif isinstance(disc_data, dict) and disc_data.get('proficiency') is not None and course_name_aluno:
                 disciplina_nota = EvaluationCalculator.calculate_grade(
                     proficiency=float(disc_data['proficiency']),
                     course_name=course_name_aluno,
@@ -5286,7 +5366,7 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             elif isinstance(disc_data, dict) and disc_data.get('grade') is not None:
                 disciplina_nota = float(disc_data['grade'])
             else:
-                disciplina_nota = 0.0
+                disciplina_nota = 0.0 if r else None
             alunos_disciplina.append({
                 "id": str(s.id),
                 "nome": s.name or "N/A",
@@ -5295,16 +5375,32 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
                 "turma": turma_nome,
                 "respostas_por_questao": respostas_por_questao,
                 "total_acertos": total_acertos,
-                "total_erros": total_erros,
+                "total_erros": 0 if disciplina_ausente else total_erros,
                 "total_respondidas": total_respondidas,
                 "total_questoes_disciplina": total_questoes_disciplina,
                 "total_em_branco": total_questoes_disciplina - total_respondidas,
                 "nivel_proficiencia": disciplina_classificacao,
-                "nota": round(disciplina_nota, 2),
-                "proficiencia": round(disciplina_proficiencia, 2) if disciplina_proficiencia else 0.0,
-                "status": "concluida" if r else "pendente",
-                # Percentual deve considerar o total de questões da disciplina (inclui em branco como erro)
-                "percentual_acertos": round((total_acertos / total_questoes_disciplina * 100), 2) if total_questoes_disciplina > 0 else 0.0
+                "nota": None if disciplina_nota is None else round(disciplina_nota, 2),
+                "proficiencia": (
+                    None
+                    if disciplina_ausente or disciplina_proficiencia is None
+                    else round(float(disciplina_proficiencia), 2)
+                ),
+                "status": (
+                    "ausente"
+                    if disciplina_ausente
+                    else ("concluida" if r else "pendente")
+                ),
+                # Percentual: ausente não conta como 0% de acerto na disciplina
+                "percentual_acertos": (
+                    None
+                    if disciplina_ausente
+                    else (
+                        round((total_acertos / total_questoes_disciplina * 100), 2)
+                        if total_questoes_disciplina > 0
+                        else 0.0
+                    )
+                ),
             })
         disciplinas_out.append({
             "id": subject_id,
@@ -5322,9 +5418,11 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name, student_id
     """Consolida por aluno: nota_geral, proficiencia_geral, total_acertos_geral, respostas_por_questao (todas as questões).
 
     status_geral: concluida se existe AnswerSheetResult para o aluno (mesmo sem respostas detectadas); caso contrário pendente.
+    Disciplina ausente não entra na média geral do aluno.
     """
     dados_alunos = {}
     for disc in disciplinas_out:
+        disc_nome = disc.get("nome") or ""
         for aluno_data in disc.get("alunos", []):
             aluno_id = aluno_data["id"]
             if aluno_id not in dados_alunos:
@@ -5336,6 +5434,7 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name, student_id
                     "turma": aluno_data["turma"],
                     "notas_disciplinas": [],
                     "proficiencias_disciplinas": [],
+                    "disciplinas_feitas_nomes": [],
                     "total_acertos_geral": 0,
                     "total_questoes_geral": 0,
                     "total_respondidas_geral": 0,
@@ -5343,33 +5442,31 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name, student_id
                 }
                 dados_alunos[aluno_id]["respostas_por_questao_geral"] = list(aluno_data.get("respostas_por_questao", []))
             else:
-                dados_alunos[aluno_id]["notas_disciplinas"].append(aluno_data["nota"])
-                dados_alunos[aluno_id]["proficiencias_disciplinas"].append(aluno_data["proficiencia"])
-                dados_alunos[aluno_id]["total_acertos_geral"] += aluno_data["total_acertos"]
-                dados_alunos[aluno_id]["total_questoes_geral"] += aluno_data["total_questoes_disciplina"]
-                dados_alunos[aluno_id]["total_respondidas_geral"] += aluno_data["total_respondidas"]
                 existing = {x["questao"]: x for x in dados_alunos[aluno_id]["respostas_por_questao_geral"]}
                 for x in aluno_data.get("respostas_por_questao", []):
                     existing[x["questao"]] = x
                 dados_alunos[aluno_id]["respostas_por_questao_geral"] = sorted(existing.values(), key=lambda t: t["questao"])
-                continue
-            dados_alunos[aluno_id]["notas_disciplinas"].append(aluno_data["nota"])
-            dados_alunos[aluno_id]["proficiencias_disciplinas"].append(aluno_data["proficiencia"])
-            dados_alunos[aluno_id]["total_acertos_geral"] += aluno_data["total_acertos"]
-            dados_alunos[aluno_id]["total_questoes_geral"] += aluno_data["total_questoes_disciplina"]
-            dados_alunos[aluno_id]["total_respondidas_geral"] += aluno_data["total_respondidas"]
+            ausente = (aluno_data.get("status") == "ausente") or (
+                aluno_data.get("nota") is None and aluno_data.get("proficiencia") is None
+            )
+            if not ausente and aluno_data.get("nota") is not None and aluno_data.get("proficiencia") is not None:
+                dados_alunos[aluno_id]["notas_disciplinas"].append(float(aluno_data["nota"]))
+                dados_alunos[aluno_id]["proficiencias_disciplinas"].append(float(aluno_data["proficiencia"]))
+                dados_alunos[aluno_id]["disciplinas_feitas_nomes"].append(disc_nome)
+                dados_alunos[aluno_id]["total_acertos_geral"] += aluno_data.get("total_acertos") or 0
+                dados_alunos[aluno_id]["total_questoes_geral"] += aluno_data.get("total_questoes_disciplina") or 0
+                dados_alunos[aluno_id]["total_respondidas_geral"] += aluno_data.get("total_respondidas") or 0
     from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
     from app.services.evaluation_calculator import EvaluationCalculator
     course_name_geral = _get_course_name_from_grade(grade_name)
-    has_matematica = any(
-        "matem" in (disc.get("nome") or "").lower()
-        for disc in disciplinas_out
-    )
     alunos_gerais = []
     for aluno_id, dados in dados_alunos.items():
         nota_geral = sum(dados["notas_disciplinas"]) / len(dados["notas_disciplinas"]) if dados["notas_disciplinas"] else 0.0
         proficiencia_geral = sum(dados["proficiencias_disciplinas"]) / len(dados["proficiencias_disciplinas"]) if dados["proficiencias_disciplinas"] else 0.0
         percentual = (dados["total_acertos_geral"] / dados["total_questoes_geral"] * 100) if dados["total_questoes_geral"] > 0 else 0.0
+        has_matematica = any(
+            "matem" in (n or "").lower() for n in dados.get("disciplinas_feitas_nomes") or []
+        )
         cl = None
         if dados["proficiencias_disciplinas"]:
             cl = EvaluationCalculator.determine_classification(

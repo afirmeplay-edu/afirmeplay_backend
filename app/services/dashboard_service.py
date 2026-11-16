@@ -2142,10 +2142,21 @@ class DashboardService:
         else:
             instrument_filter = score_model.test_id.in_(instrument_ids) if instrument_ids else True
 
+        discipline_present = True
+        if discipline_prof_expr is not None:
+            if use_answer_sheet and discipline_id:
+                from app.services.cartao_resposta.proficiency_by_subject import (
+                    sql_jsonb_subject_scored,
+                )
+                discipline_present = sql_jsonb_subject_scored(
+                    AnswerSheetResult.proficiency_by_subject, discipline_id
+                )
+            else:
+                discipline_present = discipline_prof_expr.isnot(None)
         join_cond = and_(
             score_model.student_id == Student.id,
             instrument_filter,
-            discipline_prof_expr.isnot(None) if discipline_prof_expr is not None else True,
+            discipline_present,
         )
 
         query = (
@@ -2753,6 +2764,10 @@ class DashboardService:
             )
             .group_by(TeacherClass.teacher_id)
         ).subquery()
+        from app.services.cartao_resposta.proficiency_by_subject import (
+            sql_jsonb_subject_scored,
+        )
+
         asr_by_teacher = (
             db.session.query(
                 TeacherClass.teacher_id.label("teacher_id"),
@@ -2766,9 +2781,13 @@ class DashboardService:
                 and_(
                     AnswerSheetResult.student_id == Student.id,
                     AnswerSheetResult.gabarito_id == answer_sheet_id if answer_sheet_id else True,
-                    cast(AnswerSheetResult.proficiency_by_subject[discipline_id]["proficiency"].astext, db.Float).isnot(None)
-                    if discipline_id
-                    else True,
+                    (
+                        sql_jsonb_subject_scored(
+                            AnswerSheetResult.proficiency_by_subject, discipline_id
+                        )
+                        if discipline_id
+                        else True
+                    ),
                 ),
             )
             .group_by(TeacherClass.teacher_id)

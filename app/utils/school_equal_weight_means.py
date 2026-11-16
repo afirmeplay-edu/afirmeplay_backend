@@ -333,11 +333,15 @@ def aggregated_grade_from_proficiency(
 
 
 def _result_has_subject_breakdown(result: Any) -> bool:
+    from app.services.cartao_resposta.proficiency_by_subject import is_subject_entry_absent
+
     raw = getattr(result, "subject_results", None) or getattr(
         result, "proficiency_by_subject", None
     )
     return isinstance(raw, dict) and any(
-        isinstance(item, dict) and item.get("proficiency") is not None
+        isinstance(item, dict)
+        and item.get("proficiency") is not None
+        and not is_subject_entry_absent(item)
         for item in raw.values()
     )
 
@@ -403,6 +407,8 @@ def hierarchical_mean_grade_and_proficiency(
 
 def _iter_subject_proficiency_rows(results: Sequence[Any], fallback_subject_name: str):
     """Uma linha sintética por aluno e disciplina, com a proficiência só daquela disciplina."""
+    from app.services.cartao_resposta.proficiency_by_subject import is_subject_entry_absent
+
     by_subject: Dict[str, List[Any]] = {}
     for result in results or []:
         raw = (
@@ -415,11 +421,20 @@ def _iter_subject_proficiency_rows(results: Sequence[Any], fallback_subject_name
             for data in raw.values():
                 if not isinstance(data, dict):
                     continue
+                if is_subject_entry_absent(data):
+                    continue
                 name = str(data.get("subject_name") or "").strip() or fallback_subject_name
                 if data.get("proficiency") is None:
                     continue
                 entries.append((name, float(data.get("proficiency") or 0)))
         if not entries:
+            # Sem disciplinas feitas (todas ausentes) ou sem breakdown: usa GERAL persistido
+            # só se houver ao menos uma disciplina marcada no JSON como avaliada, ou
+            # se não houver PBS (legado). Se PBS só tem ausentes, não inventa linha.
+            if isinstance(raw, dict) and raw and all(
+                is_subject_entry_absent(d) for d in raw.values() if isinstance(d, dict)
+            ):
+                continue
             name = fallback_subject_name or "Outras"
             entries.append((name, float(getattr(result, "proficiency", None) or 0)))
         for name, proficiency in entries:

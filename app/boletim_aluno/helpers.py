@@ -153,6 +153,24 @@ def attach_disciplina_cards(
     acertou_local = sum(1 for q in questoes if q.get("acertou"))
     total_local = len(questoes)
     if subject_data:
+        from app.services.cartao_resposta.proficiency_by_subject import (
+            is_subject_entry_absent,
+            SUBJECT_ABSENT_CLASSIFICATION,
+        )
+        if is_subject_entry_absent(subject_data):
+            total_q = int(subject_data.get("total_questions") or total_local or 0)
+            bloco["cards"] = {
+                "acertos_totais": {
+                    "acertou": 0,
+                    "total": total_q,
+                    "percentual": None,
+                },
+                "nota": None,
+                "proficiencia": None,
+                "nivel": SUBJECT_ABSENT_CLASSIFICATION,
+            }
+            bloco["status"] = "ausente"
+            return
         bloco["cards"] = build_cards(
             subject_data["correct_answers"],
             subject_data["total_questions"],

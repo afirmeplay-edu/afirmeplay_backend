@@ -1118,11 +1118,22 @@ def _build_frequencia_section_answer_sheet(
                 out.add(str(r.student_id))
                 continue
             pbs = r.proficiency_by_subject or {}
-            if isinstance(pbs, dict):
-                for _sid, block in pbs.items():
-                    if isinstance(block, dict) and (block.get("subject_name") or "").strip() == discipline:
-                        out.add(str(r.student_id))
-                        break
+            if not isinstance(pbs, dict):
+                continue
+            from app.services.cartao_resposta.proficiency_by_subject import (
+                is_subject_entry_absent,
+            )
+            for _sid, block in pbs.items():
+                if not isinstance(block, dict):
+                    continue
+                if (block.get("subject_name") or "").strip() != discipline:
+                    continue
+                if is_subject_entry_absent(block):
+                    break
+                if block.get("proficiency") is None and block.get("grade") is None:
+                    break
+                out.add(str(r.student_id))
+                break
         return out
 
     def _freq_counts(
@@ -1205,7 +1216,13 @@ def _subject_rows_from_digital_result(
 def _subject_rows_from_answer_sheet(
     r: AnswerSheetResult,
     discipline: Optional[str],
+    blocks_config: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        is_subject_entry_absent,
+        legacy_subject_blank_from_answers,
+    )
+
     if discipline is None:
         return [{"student_id": r.student_id, "grade": float(r.grade or 0), "proficiency": float(r.proficiency or 0)}]
     rows: List[Dict[str, Any]] = []
@@ -1215,14 +1232,24 @@ def _subject_rows_from_answer_sheet(
             if not isinstance(block, dict):
                 continue
             name = (block.get("subject_name") or str(_sid)).strip()
-            if name == discipline:
-                rows.append(
-                    {
-                        "student_id": r.student_id,
-                        "grade": float(block.get("grade") or 0),
-                        "proficiency": float(block.get("proficiency") or 0),
-                    }
-                )
+            if name != discipline:
+                continue
+            if is_subject_entry_absent(block) or legacy_subject_blank_from_answers(
+                block,
+                subject_id=str(_sid),
+                blocks_config=blocks_config,
+                detected_answers=getattr(r, "detected_answers", None),
+            ):
+                continue
+            if block.get("proficiency") is None and block.get("grade") is None:
+                continue
+            rows.append(
+                {
+                    "student_id": r.student_id,
+                    "grade": float(block.get("grade") or 0),
+                    "proficiency": float(block.get("proficiency") or 0),
+                }
+            )
     return rows
 
 
@@ -1466,6 +1493,8 @@ def _build_distribuicao_section_answer_sheet(
         cell_results = _filter_answer_sheet_in_cell(scope, results, escola_id, serie_id)
         if not cell_results:
             return None
+        from app.services.cartao_resposta.proficiency_by_subject import is_subject_entry_absent
+
         dist = _empty_distribution()
         for r in cell_results:
             if discipline is None:
@@ -1474,8 +1503,15 @@ def _build_distribuicao_section_answer_sheet(
             pbs = r.proficiency_by_subject or {}
             if isinstance(pbs, dict):
                 for _sid, block in pbs.items():
-                    if isinstance(block, dict) and (block.get("subject_name") or "").strip() == discipline:
-                        dist[_classification_bucket(block.get("classification"))] += 1
+                    if not isinstance(block, dict):
+                        continue
+                    if (block.get("subject_name") or "").strip() != discipline:
+                        continue
+                    if is_subject_entry_absent(block):
+                        continue
+                    if block.get("proficiency") is None and block.get("grade") is None:
+                        continue
+                    dist[_classification_bucket(block.get("classification"))] += 1
         return dist if sum(dist.values()) > 0 else None
 
     def _build_one(discipline: Optional[str]) -> Dict[str, Any]:

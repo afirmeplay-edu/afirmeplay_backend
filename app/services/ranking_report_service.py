@@ -1350,11 +1350,13 @@ class RankingReportService:
                 AnswerSheetResult.gabarito_id == answer_sheet_id,
             ]
             if storage_key:
+                from app.services.cartao_resposta.proficiency_by_subject import (
+                    sql_jsonb_subject_scored,
+                )
                 join_conditions.append(
-                    cast(
-                        AnswerSheetResult.proficiency_by_subject[storage_key]["proficiency"].astext,
-                        Float,
-                    ).isnot(None)
+                    sql_jsonb_subject_scored(
+                        AnswerSheetResult.proficiency_by_subject, storage_key
+                    )
                 )
             query = query.join(AnswerSheetResult, and_(*join_conditions))
         elif evaluation_id:
@@ -1464,7 +1466,17 @@ class RankingReportService:
                 )
             )
         if discipline_prof_expr is not None:
-            result_join_conditions.append(discipline_prof_expr.isnot(None))
+            if use_answer_sheet and storage_key:
+                from app.services.cartao_resposta.proficiency_by_subject import (
+                    sql_jsonb_subject_scored,
+                )
+                result_join_conditions.append(
+                    sql_jsonb_subject_scored(
+                        AnswerSheetResult.proficiency_by_subject, storage_key
+                    )
+                )
+            else:
+                result_join_conditions.append(discipline_prof_expr.isnot(None))
 
         adequado_condition = cls._adequado_avancado_student_condition(results_model, storage_key)
         has_result = results_model.id.isnot(None)

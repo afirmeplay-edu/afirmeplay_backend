@@ -24,9 +24,38 @@ from app.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
 from app.models.testQuestion import TestQuestion
 from app.report_analysis.answer_sheet_report_builder import question_skills_map_for_answer_sheet
-from app.services.cartao_resposta.proficiency_by_subject import _extract_blocks_with_questions
+from app.services.cartao_resposta.proficiency_by_subject import (
+    _extract_blocks_with_questions,
+    is_subject_entry_absent,
+    parse_detected_answers_map,
+    subject_questions_all_blank,
+)
 from app.services.evaluation_result_service import EvaluationResultService
 from app.utils.decimal_helpers import round_to_two_decimals
+
+
+def _answer_sheet_subject_absent_for_student(
+    result: Optional[AnswerSheetResult],
+    subject_id: str,
+    question_numbers: List[int],
+) -> bool:
+    """True se a disciplina do cartão está ausente (PBS absent ou bloco 100% em branco)."""
+    if not result or not question_numbers:
+        return False
+    pbs = getattr(result, "proficiency_by_subject", None) or {}
+    if isinstance(pbs, str):
+        try:
+            pbs = json.loads(pbs) or {}
+        except Exception:
+            pbs = {}
+    if isinstance(pbs, dict):
+        entry = pbs.get(str(subject_id))
+        if entry is None:
+            entry = pbs.get(subject_id)
+        if is_subject_entry_absent(entry):
+            return True
+    answers = parse_detected_answers_map(getattr(result, "detected_answers", None))
+    return subject_questions_all_blank(question_numbers, answers)
 
 FAIXA_ABAIXO = "abaixo_do_basico"
 FAIXA_BASICO = "basico"
@@ -650,17 +679,38 @@ def compute_question_percentuals_answer_sheet(
     if total == 0:
         return {qn: 0.0 for qn in gab_map.keys()}
 
+    blocks_config = getattr(gabarito, "blocks_config", None) or {}
+    disciplinas_config = _disciplinas_config_from_gabarito_blocks(blocks_config)
+    question_to_subject = _question_num_to_subject_id(disciplinas_config, gab_map)
+    qnums_by_subject: Dict[str, List[int]] = defaultdict(list)
+    for qn, sid in question_to_subject.items():
+        qnums_by_subject[str(sid)].append(int(qn))
+
     correct_counts: Dict[int, int] = defaultdict(int)
+    denom_counts: Dict[int, int] = defaultdict(int)
     for st in students:
         r = result_by_student.get(st.id)
         detected = _parse_detected(r.detected_answers if r else None)
+        absent_by_subject: Dict[str, bool] = {}
         for qn, ca in gab_map.items():
+            sid = str(question_to_subject.get(qn) or "geral")
+            if sid not in absent_by_subject:
+                absent_by_subject[sid] = _answer_sheet_subject_absent_for_student(
+                    r, sid, qnums_by_subject.get(sid) or []
+                )
+            if absent_by_subject[sid]:
+                continue
+            denom_counts[qn] += 1
             st_ans = detected.get(qn, "")
             if ca and st_ans and st_ans == ca:
                 correct_counts[qn] += 1
 
     return {
-        qn: round_to_two_decimals((correct_counts.get(qn, 0) / total) * 100.0)
+        qn: round_to_two_decimals(
+            (correct_counts.get(qn, 0) / denom_counts[qn]) * 100.0
+            if denom_counts.get(qn, 0) > 0
+            else 0.0
+        )
         for qn in gab_map.keys()
     }
 
@@ -746,18 +796,28 @@ def build_skills_map_answer_sheet(
 
     stats: Dict[str, Dict[str, int]] = defaultdict(lambda: {"correct": 0, "total": 0})
     failed_by_skill: Dict[str, Set[str]] = defaultdict(set)
+    qnums_by_subject: Dict[str, List[int]] = defaultdict(list)
+    for qn, sid in question_to_subject.items():
+        qnums_by_subject[str(sid)].append(int(qn))
 
     for st in students:
         r = result_by_student.get(st.id)
         detected = _parse_detected(r.detected_answers if r else None)
+        absent_by_subject: Dict[str, bool] = {}
         for qn in question_nums:
+            block_sid = str(question_to_subject.get(qn) or "geral")
+            if block_sid not in absent_by_subject:
+                absent_by_subject[block_sid] = _answer_sheet_subject_absent_for_student(
+                    r, block_sid, qnums_by_subject.get(block_sid) or []
+                )
+            if absent_by_subject[block_sid]:
+                continue
             ca = gab_map.get(qn)
             st_ans = detected.get(qn, "")
             ok = bool(ca is not None and st_ans and st_ans == ca)
             sids = q_skills.get(qn) or []
             if not sids:
                 continue
-            block_sid = question_to_subject.get(qn) or "geral"
             for raw_sid in sids:
                 if not raw_sid:
                     continue
@@ -1032,16 +1092,27 @@ def compute_student_critical_skills_answer_sheet(
         lambda: defaultdict(lambda: {"correct": 0, "total": 0})
     )
 
+    qnums_by_subject: Dict[str, List[int]] = defaultdict(list)
+    for qn, sid in question_to_subject.items():
+        qnums_by_subject[str(sid)].append(int(qn))
+
     for student_id in student_ids:
         sheet_result = result_by_student.get(student_id)
         if not sheet_result or not _participating_answer_sheet_result(sheet_result):
             continue
         detected = _parse_detected(sheet_result.detected_answers if sheet_result else None)
+        absent_by_subject: Dict[str, bool] = {}
         for qn in question_nums:
+            block_sid = str(question_to_subject.get(qn) or "geral")
+            if block_sid not in absent_by_subject:
+                absent_by_subject[block_sid] = _answer_sheet_subject_absent_for_student(
+                    sheet_result, block_sid, qnums_by_subject.get(block_sid) or []
+                )
+            if absent_by_subject[block_sid]:
+                continue
             correct_answer = gab_map.get(qn)
             student_answer = detected.get(qn, "")
             is_correct = bool(correct_answer is not None and student_answer and student_answer == correct_answer)
-            block_sid = question_to_subject.get(qn) or "geral"
             disc_key = nome_por_disciplina.get(block_sid, "outras")
             for raw_sid in q_skills.get(qn) or []:
                 if not raw_sid:

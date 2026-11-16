@@ -248,12 +248,25 @@ def _subject_payload_from_map(
     subject_map: Optional[dict],
     subject_ids: List[str],
 ) -> Dict[str, Any]:
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        is_subject_entry_absent,
+        SUBJECT_ABSENT_CLASSIFICATION,
+    )
+
     out: Dict[str, Any] = {}
     raw = subject_map if isinstance(subject_map, dict) else {}
     for sid in subject_ids:
         data = raw.get(sid) or raw.get(str(sid)) or {}
         if not isinstance(data, dict):
             data = {}
+        if is_subject_entry_absent(data):
+            out[sid] = {
+                "proficiencia": None,
+                "nota": None,
+                "classificacao": SUBJECT_ABSENT_CLASSIFICATION,
+                "status": "ausente",
+            }
+            continue
         out[sid] = {
             "proficiencia": _metric_cell(data.get("proficiency")),
             "nota": _metric_cell(data.get("grade")),

@@ -708,7 +708,9 @@ def _answer_sheet_subject_names_in_order(results: List[AnswerSheetResult]) -> Li
 
 
 def _classification_for_subject(r: AnswerSheetResult, subject_name: str) -> Optional[str]:
-    """Classificação INEP só para a disciplina; None se não houver bloco ou texto vazio."""
+    """Classificação INEP só para a disciplina; None se não houver bloco, ausente ou texto vazio."""
+    from app.services.cartao_resposta.proficiency_by_subject import is_subject_entry_absent
+
     target = (subject_name or "").strip()
     if not target:
         return None
@@ -721,10 +723,14 @@ def _classification_for_subject(r: AnswerSheetResult, subject_name: str) -> Opti
         name = (block.get("subject_name") or str(_sid) or "").strip()
         if name != target:
             continue
+        if is_subject_entry_absent(block):
+            return None
         raw = block.get("classification")
         if raw is None:
             return None
         s = str(raw).strip()
+        if s.lower() == "ausente":
+            return None
         return s if s else None
     return None
 
@@ -889,8 +895,13 @@ def _build_proficiencia_nota(
             pbs = r.proficiency_by_subject or {}
             if not isinstance(pbs, dict):
                 continue
+            from app.services.cartao_resposta.proficiency_by_subject import (
+                is_subject_entry_absent,
+            )
             for subj_id, block in pbs.items():
                 if not isinstance(block, dict):
+                    continue
+                if is_subject_entry_absent(block):
                     continue
                 dname = block.get("subject_name") or str(subj_id)
                 if dname != name:

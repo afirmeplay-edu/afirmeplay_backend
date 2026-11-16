@@ -4,18 +4,29 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
 from docx.shared import Pt, RGBColor
 
-from app.models.grades import Grade
-from app.models.subject import Subject
 from app.question_import.constants import ALLOWED_DIFFICULTIES
+from app.question_import.docx_template import (
+    MAX_TEMPLATE_QUESTIONS,
+    parse_template_counts,
+    resolve_template_question_plan,
+)
+from app.question_import.importer import validate_import_defaults
 
-MAX_TEMPLATE_QUESTIONS = 100
 DEFAULT_TEMPLATE_COUNT = 10
+
+# Reexport for callers that still import the constant from this module.
+__all__ = [
+    "DEFAULT_TEMPLATE_COUNT",
+    "MAX_TEMPLATE_QUESTIONS",
+    "build_questions_import_template",
+    "resolve_template_context",
+]
 
 
 def _add_heading(doc: Document, text: str, size: int = 16) -> None:
@@ -49,6 +60,15 @@ def _add_marker(doc: Document, text: str) -> None:
     run.font.highlight_color = WD_COLOR_INDEX.YELLOW
 
 
+def _add_example_marker(doc: Document, text: str) -> None:
+    """Marcadores de exemplo — o parser ignora (não são === QUESTÃO ===)."""
+    p = doc.add_paragraph()
+    run = p.add_run(text)
+    run.bold = True
+    run.font.size = Pt(12)
+    run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
+
+
 def _add_locked_meta(doc: Document, label: str, value: str) -> None:
     p = doc.add_paragraph()
     run = p.add_run(f"{label}: {value}")
@@ -62,50 +82,95 @@ def _add_user_meta(doc: Document, label: str, value: str) -> None:
     run.font.size = Pt(11)
 
 
-def resolve_template_context(grade_id: str, subject_id: str, count: int) -> Dict[str, Any]:
-    grade_id = (grade_id or "").strip()
-    subject_id = (subject_id or "").strip()
-    if not grade_id:
-        raise ValueError("Selecione a série antes de baixar o modelo.")
-    if not subject_id:
-        raise ValueError("Selecione a disciplina antes de baixar o modelo.")
+def _legacy_counts(subject_id: str, count: int) -> str:
+    """Converte subjectId+count legado para o formato counts=subjectId:qtd."""
     if count < 1 or count > MAX_TEMPLATE_QUESTIONS:
         raise ValueError(
             f"Informe uma quantidade entre 1 e {MAX_TEMPLATE_QUESTIONS}."
         )
+    return f"{subject_id}:{count}"
 
-    grade = Grade.query.get(grade_id)
-    if not grade:
-        raise ValueError("Série não encontrada.")
-    subject = Subject.query.get(subject_id)
-    if not subject:
-        raise ValueError("Disciplina não encontrada.")
 
-    return {
-        "gradeId": str(grade.id),
-        "gradeName": grade.name,
-        "subjectId": str(subject.id),
-        "subjectName": subject.name,
-        "count": count,
+def resolve_template_context(
+    grade_id: str,
+    subject_ids: Optional[str] = None,
+    counts: Optional[str] = None,
+    *,
+    subject_id: Optional[str] = None,
+    count: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Valida série/disciplinas e monta o contexto do modelo.
+
+    Contrato preferido: subjectIds + counts (como o Afirme Play).
+    Compatibilidade: subjectId + count → counts=subjectId:count.
+    """
+    grade_id = (grade_id or "").strip()
+    subject_id = (subject_id or "").strip() or None
+    subject_ids = (subject_ids or "").strip() or None
+    counts = (counts or "").strip() or None
+
+    if not grade_id:
+        raise ValueError("Selecione a série antes de baixar o modelo.")
+
+    if not counts:
+        if subject_id and count is not None:
+            counts = _legacy_counts(subject_id, int(count))
+            subject_ids = subject_ids or subject_id
+        else:
+            raise ValueError(
+                "Parâmetro obrigatório ausente: counts. "
+                "Informe a quantidade por disciplina no formato subjectId:qtd,subjectId:qtd."
+            )
+    elif subject_id and not subject_ids:
+        subject_ids = subject_id
+
+    # Garante que todo id em counts entre na lista de subjects validados.
+    parsed_counts = parse_template_counts(counts)
+    count_ids = [sid for sid, _ in parsed_counts]
+    if subject_ids:
+        listed = [part.strip() for part in subject_ids.split(",") if part.strip()]
+        for sid in count_ids:
+            if sid not in listed:
+                listed.append(sid)
+        subject_ids = ",".join(listed)
+    else:
+        subject_ids = ",".join(count_ids)
+
+    defaults = {
+        "grade": grade_id,
+        "subjectId": subject_id or (count_ids[0] if len(count_ids) == 1 else ""),
+        "subjectIds": subject_ids,
     }
+    context = validate_import_defaults(defaults)
+    if not context.get("subjects"):
+        raise ValueError("Selecione ao menos uma disciplina antes de baixar o modelo.")
+
+    question_plan = resolve_template_question_plan(context["subjects"], counts)
+    context["questionPlan"] = question_plan
+    context["count"] = sum(qty for _, qty in question_plan)
+    # Compat: campos single usados pelos exemplos ilustrativos.
+    first_subject = question_plan[0][0]
+    context.setdefault("subjectId", first_subject.get("id"))
+    context.setdefault("subjectName", first_subject.get("name"))
+    return context
 
 
 def _add_common_meta(
     doc: Document,
     *,
     grade_name: str,
-    grade_id: str,
     subject_name: str,
-    subject_id: str,
     question_type: str,
     title: str = "",
     difficulty: str = "",
     ditar: str = "",
 ) -> None:
-    _add_locked_meta(doc, "Série", grade_name)
-    _add_locked_meta(doc, "GradeId", grade_id)
-    _add_user_meta(doc, "Disciplina", subject_name)
-    _add_user_meta(doc, "SubjectId", subject_id)
+    """Metadados visíveis ao usuário — só nomes legíveis, sem UUIDs/códigos internos."""
+    if grade_name:
+        _add_locked_meta(doc, "Série", grade_name)
+    if subject_name:
+        _add_locked_meta(doc, "Disciplina", subject_name)
     _add_user_meta(doc, "Tipo", question_type)
     if difficulty:
         _add_user_meta(doc, "Dificuldade", difficulty)
@@ -120,121 +185,138 @@ def _add_multiple_choice_block(
     doc: Document,
     *,
     grade_name: str,
-    grade_id: str,
     subject_name: str,
-    subject_id: str,
     title: str = "",
     enunciado: str = "",
     alternativas: Optional[list] = None,
     solucao: str = "",
     difficulty: str = "",
     ditar: str = "",
+    as_example: bool = False,
 ) -> None:
-    _add_marker(doc, "=== QUESTÃO ===")
+    start = "=== EXEMPLO ===" if as_example else "=== QUESTÃO ==="
+    end = "=== FIM EXEMPLO ===" if as_example else "=== FIM ==="
+    mark = _add_example_marker if as_example else _add_marker
+    mark(doc, start)
     _add_common_meta(
         doc,
         grade_name=grade_name,
-        grade_id=grade_id,
         subject_name=subject_name,
-        subject_id=subject_id,
         question_type="múltipla escolha",
         title=title,
         difficulty=difficulty,
         ditar=ditar,
     )
     doc.add_paragraph()
-    _add_marker(doc, "Enunciado:")
+    mark(doc, "Enunciado:")
     doc.add_paragraph(enunciado)
     doc.add_paragraph()
-    _add_marker(doc, "Alternativas:")
+    mark(doc, "Alternativas:")
     for alt in alternativas or ["A) ", "B) ", "C) ", "D) "]:
         doc.add_paragraph(alt)
     doc.add_paragraph()
-    _add_marker(doc, "Solução:")
+    mark(doc, "Solução:")
     _add_muted(
         doc,
         "Escreva só a letra correta (A, B, C…) ou marque [CORRETA] na alternativa.",
     )
     doc.add_paragraph(solucao)
-    _add_marker(doc, "=== FIM ===")
+    mark(doc, end)
 
 
 def _add_dictation_block(
     doc: Document,
     *,
     grade_name: str,
-    grade_id: str,
     subject_name: str,
-    subject_id: str,
     title: str = "",
     enunciado: str = "",
     palavra: str = "",
     difficulty: str = "",
     ditar: str = "",
+    as_example: bool = False,
 ) -> None:
-    _add_marker(doc, "=== QUESTÃO ===")
+    start = "=== EXEMPLO ===" if as_example else "=== QUESTÃO ==="
+    end = "=== FIM EXEMPLO ===" if as_example else "=== FIM ==="
+    mark = _add_example_marker if as_example else _add_marker
+    mark(doc, start)
     _add_common_meta(
         doc,
         grade_name=grade_name,
-        grade_id=grade_id,
         subject_name=subject_name,
-        subject_id=subject_id,
         question_type="ditado",
         title=title,
         difficulty=difficulty,
         ditar=ditar,
     )
     doc.add_paragraph()
-    _add_marker(doc, "Enunciado:")
+    mark(doc, "Enunciado:")
     doc.add_paragraph(enunciado or "Escreva a palavra que o aplicador vai ditar.")
     doc.add_paragraph()
-    _add_marker(doc, "Solução:")
+    mark(doc, "Solução:")
     _add_muted(doc, "Coloque aqui a palavra ditada (uma única palavra, sem espaços).")
     doc.add_paragraph(palavra)
-    _add_marker(doc, "=== FIM ===")
+    mark(doc, end)
 
 
 def _add_text_production_block(
     doc: Document,
     *,
     grade_name: str,
-    grade_id: str,
     subject_name: str,
-    subject_id: str,
     title: str = "",
     enunciado: str = "",
     criterios: str = "",
     difficulty: str = "",
     ditar: str = "",
+    as_example: bool = False,
 ) -> None:
-    _add_marker(doc, "=== QUESTÃO ===")
+    start = "=== EXEMPLO ===" if as_example else "=== QUESTÃO ==="
+    end = "=== FIM EXEMPLO ===" if as_example else "=== FIM ==="
+    mark = _add_example_marker if as_example else _add_marker
+    mark(doc, start)
     _add_common_meta(
         doc,
         grade_name=grade_name,
-        grade_id=grade_id,
         subject_name=subject_name,
-        subject_id=subject_id,
         question_type="produção escrita",
         title=title,
         difficulty=difficulty,
         ditar=ditar,
     )
     doc.add_paragraph()
-    _add_marker(doc, "Enunciado:")
+    mark(doc, "Enunciado:")
     doc.add_paragraph(enunciado)
     doc.add_paragraph()
-    _add_marker(doc, "Solução:")
+    mark(doc, "Solução:")
     _add_muted(doc, "Opcional: critérios de correção para o professor.")
     doc.add_paragraph(criterios)
-    _add_marker(doc, "=== FIM ===")
+    mark(doc, end)
 
 
 def build_questions_import_template(context: Dict[str, Any]) -> BytesIO:
-    grade_name = context["gradeName"]
-    grade_id = context["gradeId"]
-    subject_name = context["subjectName"]
-    subject_id = context["subjectId"]
-    count = int(context["count"])
+    grade_name = str(context.get("gradeName") or "").strip()
+    subjects: List[Dict[str, Any]] = list(context.get("subjects") or [])
+    question_plan: List[Tuple[Dict[str, Any], int]] = list(
+        context.get("questionPlan") or []
+    )
+    if not question_plan and context.get("counts") is not None:
+        question_plan = resolve_template_question_plan(subjects, context.get("counts"))
+    if not question_plan and context.get("subjectId") and context.get("count"):
+        # Fallback legado: 1 disciplina + count.
+        subject = {
+            "id": context["subjectId"],
+            "name": context.get("subjectName") or "—",
+        }
+        question_plan = [(subject, int(context["count"]))]
+        if not subjects:
+            subjects = [subject]
+
+    example_subject = subjects[0] if subjects else {
+        "id": context.get("subjectId") or "",
+        "name": context.get("subjectName") or "—",
+    }
+    example_subject_name = str(example_subject.get("name") or "").strip()
 
     doc = Document()
 
@@ -259,16 +341,28 @@ def build_questions_import_template(context: Dict[str, Any]) -> BytesIO:
     ]:
         doc.add_paragraph(line, style="List Bullet")
 
+    visible_subjects = [
+        str(subject.get("name") or "").strip()
+        for subject in subjects
+        if str(subject.get("name") or "").strip()
+    ]
+    if visible_subjects:
+        doc.add_paragraph()
+        _add_heading(doc, "Disciplinas deste arquivo", size=13)
+        for name in visible_subjects:
+            doc.add_paragraph(name, style="List Bullet")
+
     doc.add_paragraph()
     _add_heading(doc, "Dificuldade (opcional)", size=13)
     for label in ALLOWED_DIFFICULTIES:
         doc.add_paragraph(label, style="List Bullet")
 
     doc.add_paragraph()
-    _add_heading(doc, "Exemplos — não importe estes blocos", size=13)
+    _add_heading(doc, "Exemplos — só referência (não são importados)", size=13)
     _add_warning(
         doc,
-        "Os três blocos abaixo são só referência. Na pré-visualização, ignore-os se aparecerem.",
+        "Os três blocos abaixo usam === EXEMPLO === e não entram na importação. "
+        "Não copie esses marcadores para as questões reais.",
     )
 
     doc.add_paragraph()
@@ -276,15 +370,14 @@ def build_questions_import_template(context: Dict[str, Any]) -> BytesIO:
     _add_multiple_choice_block(
         doc,
         grade_name=grade_name,
-        grade_id=grade_id,
-        subject_name=subject_name,
-        subject_id=subject_id,
+        subject_name=example_subject_name,
         title="Palavras com a letra B",
         enunciado="Qual palavra começa com a mesma letra de BOLA?",
         alternativas=["A) Dado", "B) Casa", "C) Bota [CORRETA]", "D) Pato"],
         solucao="C",
         difficulty="Básico",
         ditar="enunciado",
+        as_example=True,
     )
 
     doc.add_paragraph()
@@ -292,14 +385,13 @@ def build_questions_import_template(context: Dict[str, Any]) -> BytesIO:
     _add_dictation_block(
         doc,
         grade_name=grade_name,
-        grade_id=grade_id,
-        subject_name=subject_name,
-        subject_id=subject_id,
+        subject_name=example_subject_name,
         title="Ditado — borboleta",
         enunciado="Escreva a palavra que o aplicador vai ditar.",
         palavra="borboleta",
         difficulty="Básico",
         ditar="enunciado",
+        as_example=True,
     )
 
     doc.add_paragraph()
@@ -307,14 +399,13 @@ def build_questions_import_template(context: Dict[str, Any]) -> BytesIO:
     _add_text_production_block(
         doc,
         grade_name=grade_name,
-        grade_id=grade_id,
-        subject_name=subject_name,
-        subject_id=subject_id,
+        subject_name=example_subject_name,
         title="Bilhete para a família",
         enunciado="Escreva um bilhete convidando a família para a reunião da escola.",
         criterios="Observe se o bilhete tem destinatário, mensagem clara e despedida.",
         difficulty="Adequado",
         ditar="título, enunciado",
+        as_example=True,
     )
 
     doc.add_paragraph()
@@ -324,16 +415,21 @@ def build_questions_import_template(context: Dict[str, Any]) -> BytesIO:
         "Edite apenas o conteúdo de cada bloco. Mantenha os marcadores em amarelo e os campos em verde.",
     )
 
-    for index in range(1, count + 1):
-        doc.add_paragraph()
-        _add_heading(doc, f"Questão {index}", size=13)
-        _add_multiple_choice_block(
-            doc,
-            grade_name=grade_name,
-            grade_id=grade_id,
-            subject_name=subject_name,
-            subject_id=subject_id,
-        )
+    global_index = 0
+    for subject, qty in question_plan:
+        subject_name = str(subject.get("name") or "").strip()
+        for _ in range(qty):
+            global_index += 1
+            doc.add_paragraph()
+            heading = f"Questão {global_index}"
+            if subject_name:
+                heading = f"{heading} — {subject_name}"
+            _add_heading(doc, heading, size=13)
+            _add_multiple_choice_block(
+                doc,
+                grade_name=grade_name,
+                subject_name=subject_name,
+            )
 
     buffer = BytesIO()
     doc.save(buffer)

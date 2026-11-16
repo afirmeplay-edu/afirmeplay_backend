@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import io
 import json
+import re
+import unicodedata
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from app import db
 from app.models.grades import Grade
 from app.models.subject import Subject
 from app.question_import.docx_parser import parse_questions_docx
+from app.question_import.importer import validate_import_defaults
 from app.afirme_ler.services.question_bank_service import (
     QuestionBankService,
     parse_create_payload,
@@ -26,6 +30,116 @@ from app.afirme_ler.services.written_test_service import (
 MAX_DOCX_BYTES = 25 * 1024 * 1024
 
 
+def _is_uuid(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        UUID(str(value).strip())
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def _norm_name(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value or "")
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _resolve_subject(meta: Dict[str, Any], defaults: Dict[str, Any]) -> str:
+    """
+    Disciplina por bloco.
+    Prioridade: SubjectId do DOCX → nome Disciplina → subjectId/default do formulário.
+    Se allowedSubjectIds existir, a disciplina precisa estar na lista.
+    """
+    allowed = defaults.get("allowedSubjectIds")
+    allowed_set = {str(a) for a in allowed} if allowed else None
+
+    subject_id = None
+    if _is_uuid(meta.get("subjectId")):
+        subject_id = str(meta.get("subjectId")).strip()
+    elif _is_uuid(meta.get("subject")):
+        subject_id = str(meta.get("subject")).strip()
+
+    subject_name = meta.get("subject") if not _is_uuid(meta.get("subject")) else None
+
+    if subject_id:
+        subject = Subject.query.get(subject_id)
+        if not subject:
+            raise ValueError("Disciplina não encontrada neste bloco. Confira o nome da disciplina.")
+        if allowed_set is not None and str(subject.id) not in allowed_set:
+            name = (subject.name or "").strip() or "informada"
+            raise ValueError(
+                f"A disciplina '{name}' não está entre as disciplinas selecionadas na importação."
+            )
+        return str(subject.id)
+
+    if subject_name:
+        needle = _norm_name(str(subject_name))
+        if allowed_set is not None:
+            candidates = [Subject.query.get(sid) for sid in allowed_set]
+            candidates = [s for s in candidates if s]
+        else:
+            candidates = Subject.query.all()
+        match = next((s for s in candidates if _norm_name(s.name or "") == needle), None)
+        if not match:
+            match = next((s for s in candidates if needle in _norm_name(s.name or "")), None)
+        if not match:
+            raise ValueError(
+                f"Disciplina não encontrada: {subject_name}. "
+                "Use o nome exato de uma das disciplinas selecionadas na importação."
+            )
+        return str(match.id)
+
+    form_sid = defaults.get("subjectId") or defaults.get("defaultSubjectId")
+    if form_sid and _is_uuid(form_sid):
+        subject = Subject.query.get(str(form_sid).strip())
+        if not subject:
+            raise ValueError("Disciplina padrão da importação não encontrada. Selecione novamente.")
+        if allowed_set is not None and str(subject.id) not in allowed_set:
+            name = (subject.name or "").strip() or "informada"
+            raise ValueError(
+                f"A disciplina '{name}' não está entre as disciplinas selecionadas na importação."
+            )
+        return str(subject.id)
+
+    raise ValueError(
+        "Disciplina obrigatória neste bloco. Informe o nome da disciplina "
+        "ou selecione as disciplinas no formulário de importação."
+    )
+
+
+def _resolve_grade(meta: Dict[str, Any], defaults: Dict[str, Any]) -> str:
+    """Prioriza série do formulário; fallback GradeId/Série do bloco."""
+    for key in ("grade", "gradeId"):
+        value = defaults.get(key)
+        if value and _is_uuid(value):
+            return str(value).strip()
+    for key in ("gradeId", "grade"):
+        value = meta.get(key)
+        if value and _is_uuid(value):
+            return str(value).strip()
+    raise ValueError("Série (grade) obrigatória. Selecione a série no formulário.")
+
+
+def _enrich_defaults(defaults: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Valida grade/disciplinas do form e acrescenta whitelist."""
+    defaults = dict(defaults or {})
+    if not defaults.get("grade") and not defaults.get("gradeId"):
+        raise ValueError("Campo obrigatório do formulário ausente: grade.")
+    ctx = validate_import_defaults(defaults)
+    merged = {
+        **defaults,
+        "grade": ctx.get("gradeId") or defaults.get("grade"),
+        "gradeId": ctx.get("gradeId"),
+        "subjectId": ctx.get("defaultSubjectId") or defaults.get("subjectId"),
+        "defaultSubjectId": ctx.get("defaultSubjectId"),
+        "allowedSubjectIds": ctx.get("allowedSubjectIds"),
+        "subjects": ctx.get("subjects") or [],
+    }
+    return merged
+
+
 def _directive_marks(raw: Any) -> Dict[str, Any]:
     marks: Dict[str, Any] = {}
     text = str(raw or "").strip()
@@ -36,7 +150,6 @@ def _directive_marks(raw: Any) -> Dict[str, Any]:
         chunk = part.strip()
         if not chunk:
             continue
-        token = chunk
         if chunk.startswith(("titulo", "título")):
             marks["title"] = True
             continue
@@ -79,8 +192,8 @@ def _merge_marks(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def _payload(block: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
     meta = block.get("meta") or {}
     question_type = meta.get("type") or "multipleChoice"
-    subject_id = meta.get("subjectId") or defaults.get("subjectId")
-    grade_id = meta.get("grade") or meta.get("gradeId") or defaults.get("grade")
+    subject_id = _resolve_subject(meta, defaults)
+    grade_id = _resolve_grade(meta, defaults)
     enunciado = block.get("enunciado") or {}
     solution = block.get("solution") or {}
     marks = _merge_marks(block)
@@ -146,13 +259,14 @@ def _read_blocks(file_storage) -> List[Dict[str, Any]]:
 
 
 def prepare(file_storage, defaults: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    defaults = defaults or {}
+    defaults = _enrich_defaults(defaults)
     blocks = _read_blocks(file_storage)
     items = []
     prepared = []
     for block in blocks:
         errors = list(block.get("parseErrors") or [])
         payload = None
+        fields = None
         try:
             payload = _payload(block, defaults)
             fields = parse_create_payload(payload)
@@ -179,7 +293,16 @@ def prepare(file_storage, defaults: Optional[Dict[str, Any]] = None) -> Dict[str
         "valid": sum(1 for item in items if item["valid"]),
         "invalid": sum(1 for item in items if not item["valid"]),
     }
-    return {"items": items, "prepared": prepared, "summary": summary}
+    return {
+        "items": items,
+        "prepared": prepared,
+        "summary": summary,
+        "form": {
+            "gradeId": defaults.get("gradeId") or defaults.get("grade"),
+            "subjects": defaults.get("subjects") or [],
+            "allowedSubjectIds": defaults.get("allowedSubjectIds"),
+        },
+    }
 
 
 def _selected(pack: Dict[str, Any], indexes: Optional[List[int]]) -> List[Dict[str, Any]]:
@@ -216,7 +339,12 @@ def import_questions(
 ) -> Dict[str, Any]:
     pack = prepare(file_storage, defaults)
     if not commit:
-        return {"mode": "preview", "summary": pack["summary"], "questions": pack["items"]}
+        return {
+            "mode": "preview",
+            "form": pack.get("form"),
+            "summary": pack["summary"],
+            "questions": pack["items"],
+        }
 
     overrides = dictation_overrides or {}
     for index, raw_marks in overrides.items():
@@ -332,6 +460,10 @@ def parse_import_form(request) -> Dict[str, Any]:
     commit = commit_raw in ("1", "true", "yes", "sim")
     grade = request.form.get("grade") or request.form.get("gradeId")
     subject_id = request.form.get("subjectId") or request.form.get("subject_id")
+    subject_ids_raw = request.form.get("subjectIds") or request.form.get("subjects")
+    listed = request.form.getlist("subjectIds") or request.form.getlist("subjectIds[]")
+    if listed and not subject_ids_raw:
+        subject_ids_raw = ",".join(v.strip() for v in listed if v and str(v).strip())
     indexes_raw = request.form.get("indexes") or ""
     indexes = None
     if indexes_raw.strip():
@@ -342,9 +474,12 @@ def parse_import_form(request) -> Dict[str, Any]:
         data = json.loads(confirmation_raw)
         for item in data.get("questions") or []:
             overrides[int(item["index"])] = item.get("dictationMarks")
+    defaults: Dict[str, Any] = {"grade": grade, "subjectId": subject_id}
+    if subject_ids_raw:
+        defaults["subjectIds"] = subject_ids_raw
     return {
         "commit": commit,
-        "defaults": {"grade": grade, "subjectId": subject_id},
+        "defaults": defaults,
         "indexes": indexes,
         "dictation_overrides": overrides,
     }

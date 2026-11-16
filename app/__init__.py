@@ -335,6 +335,7 @@ def create_app():
     from app.routes.comparative_report_routes import bp as comparative_report_bp
     from app.tempo_prova import bp as tempo_prova_bp
     from app.mapa_questoes import bp as mapa_questoes_bp
+    from app.habilidade_gabarito import bp as habilidade_gabarito_bp
     from app.boletim_aluno import bp as boletim_aluno_bp
     from app.unified_report import bp as unified_report_bp
     from app.question_import import bp as question_import_bp
@@ -412,6 +413,7 @@ def create_app():
     app.register_blueprint(comparative_report_bp)
     app.register_blueprint(tempo_prova_bp)
     app.register_blueprint(mapa_questoes_bp)
+    app.register_blueprint(habilidade_gabarito_bp)
     app.register_blueprint(boletim_aluno_bp)
     app.register_blueprint(unified_report_bp)
     app.register_blueprint(question_import_bp)

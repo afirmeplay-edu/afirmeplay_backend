@@ -512,12 +512,16 @@ Campo opcional na criação/edição e na resposta:
 
 Query:
 
-- `grade` (obrigatório): UUID da série
-- `subjectId` (obrigatório): UUID da disciplina
-- `count` (opcional): quantidade de blocos vazios, 1–100 (padrão 10)
+- `grade` / `gradeId` (obrigatório): UUID da série
+- `subjectIds` (recomendado): `id1,id2,...` disciplinas do arquivo
+- `subjectId` (opcional): atalho para 1 disciplina (também entra na lista; compat legado)
+- `counts` (obrigatório no fluxo novo): `subjectId:qtd,subjectId:qtd` — qtd ≥ 1, soma ≤ 100
+- `count` (opcional, legado): usado com `subjectId` único → convertido para `counts=subjectId:count`
 
-Resposta: arquivo `.docx` com instruções, 3 exemplos (múltipla escolha, ditado, produção escrita)
-e `count` blocos vazios pré-preenchidos com série/disciplina.
+Resposta: arquivo `.docx` com instruções, lista de disciplinas **por nome** (sem UUIDs),
+3 exemplos (múltipla escolha, ditado, produção escrita) com marcadores `=== EXEMPLO ===` /
+`=== FIM EXEMPLO ===` (**não são importados**) e blocos vazios `=== QUESTÃO ===` por disciplina
+conforme `counts`. Metadados visíveis usam só nomes (Série, Disciplina) — sem `GradeId`/`SubjectId`.
 
 ### 6.2 Importar arquivo
 
@@ -525,11 +529,19 @@ e `count` blocos vazios pré-preenchidos com série/disciplina.
 
 - `file`: `.docx`
 - `commit`: `false` (prévia) ou `true` (grava)
-- `grade`, `subjectId`: defaults para blocos sem meta
-- `indexes`: lista opcional `1,2,3`
+- `grade` / `gradeId`: série obrigatória (prioridade sobre o DOCX)
+- `subjectId`: default para blocos sem disciplina (útil com 1 disciplina)
+- `subjectIds`: whitelist opcional das disciplinas permitidas neste arquivo
+- `indexes`: lista opcional `1,2,3` (no commit; omitido = todas as válidas)
 - `confirmation`: JSON `{ "questions": [{ "index": 1, "dictationMarks": {...} }] }`
 
-Resposta de prévia: `{ mode: "preview", summary, questions }`.
+Resolução de disciplina por bloco: `SubjectId` interno (se existir no arquivo) → nome
+`Disciplina` → `subjectId` do formulário. O modelo gerado pelo sistema **não** inclui UUIDs
+visíveis; a resolução padrão é pelo nome da disciplina + whitelist do formulário.
+Se `subjectIds` for enviado, disciplina fora da lista vira erro **do item**
+(a prévia/commit do request não cai).
+
+Resposta de prévia: `{ mode: "preview", form?, summary, questions }`.
 Resposta de commit: `{ mode: "commit", summary, questions, created, failed }`.
 
 ---

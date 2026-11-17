@@ -13,6 +13,7 @@ AFIRME_LER_ROLES = (
 )
 
 from app.afirme_ler.routes import (  # noqa: E402, F401
+    discovery_routes,
     texts_routes,
     questions_routes,
     word_lists_routes,

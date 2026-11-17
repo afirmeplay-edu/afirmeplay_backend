@@ -41,12 +41,12 @@ BASIC_FEATURES: FrozenSet[str] = frozenset({
     "lista_frequencia",
     "city_branding",
     "filters",
-})
-
-# Exclusivas do plus
-PLUS_ONLY_FEATURES: FrozenSet[str] = frozenset({
+    # Temporariamente no basic: todos os municípios têm acesso ao Afirme Ler.
     "afirme_reading",
 })
+
+# Exclusivas do plus (vazio por enquanto — afirme_reading liberado no basic)
+PLUS_ONLY_FEATURES: FrozenSet[str] = frozenset()
 
 ALL_KNOWN_FEATURES: FrozenSet[str] = BASIC_FEATURES | PLUS_ONLY_FEATURES
 

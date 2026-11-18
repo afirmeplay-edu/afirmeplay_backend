@@ -569,9 +569,11 @@ estar aplicada.
 Gera o caderno de questões na hora (A4) e devolve o arquivo. Não grava nada (nem no banco nem no
 armazenamento); chamar de novo gera de novo, já com as questões atuais do banco de questões.
 
-- `mode=student` (padrão): prova limpa, sem megafones.
+- `mode=student` (padrão): prova limpa, sem megafones e **sem** o estímulo do ditado
+  (palavra ou figura).
 - `mode=applicator`: inclui ícones de megafone nos campos marcados em `dictationMarks`
-  (override da avaliação, se houver; senão o da questão).
+  (override da avaliação, se houver; senão o da questão) e o **estímulo do ditado**
+  (palavra a ditar ou figura).
 
 Perfis: todos os do Afirme Ler, **inclusive `aplicador`** (quem imprime/aplica).
 
@@ -601,9 +603,12 @@ const res = await api.get(`/afirme-reading/written-tests/${id}/pdf?mode=applicat
   - `multipleChoice`: enunciado (`formattedText`, ou `text` se vazio), texto de apoio
     (`secondStatement`), imagens (até 16,5×10 cm, centralizadas) e alternativas `(A)`, `(B)`, `(C)`…
     com texto e/ou imagem;
-  - `dictation`: enunciado e **linha para o aluno escrever** — **a palavra ditada não é impressa**;
+  - `dictation`: enunciado e **linha para o aluno escrever**. No modo aluno, **não** saem a
+    palavra ditada nem a figura do estímulo. No modo aplicador, a palavra (`dictatedWord`)
+    aparece num bloco “Palavra a ditar” e a figura permanece no enunciado;
   - `text_production`: comando e **área pautada (15 linhas)** para o bilhete.
-- **Nunca** são impressos: gabarito, `isCorrect`, `formattedSolution`, `dictatedWord`, pontuação.
+- **Nunca** são impressos: gabarito, `isCorrect`, `formattedSolution`, `imageDescription`,
+  pontuação. `dictatedWord` e a figura do ditado saem **somente** em `mode=applicator`.
 - O cartão-resposta **não** entra neste PDF (continua na geração separada de cartões).
 - Questão de múltipla escolha evita quebra entre páginas quando cabe; rodapé com página e data.
 
@@ -645,7 +650,7 @@ O fluxo é assíncrono: `POST` dispara (202), `GET` acompanha, `.../download` ba
   - `multipleChoice`: número + bolhas com as letras da questão (A até a última alternativa, máximo H);
   - `dictation`: número + linha para escrever a palavra (sem bolhas);
   - `text_production`: número + área pautada de 15 linhas (vai para a folha seguinte se não couber).
-- Nunca são impressos: gabarito, palavra ditada, pontuação.
+- Nunca são impressos: gabarito, palavra ditada, figura do ditado, pontuação.
 - No ZIP: `municipio_<m>/escola_<e>/serie_<s>/turma_<t>/<aluno>_<serie>_<turma>_<8 do id>.pdf`
   (sem acentos; o sufixo do id separa homônimos).
 

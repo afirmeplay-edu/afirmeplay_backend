@@ -7,7 +7,7 @@
 			Caderno de questões da avaliação escrita do Afirme Ler (prova impressa).
 			Visual alinhado a institutional_test_hybrid.html (capa Afirme, tipografia,
 			imagens e layout de questões/alternativas).
-			Sem gabarito, sem pontuação e sem a palavra do ditado.
+			Sem gabarito e sem pontuação. Estímulo do ditado (palavra/figura) só no modo aplicador.
 			Cartão-resposta NÃO entra neste PDF (gerado à parte).
 			Ditado e bilhete: linhas de escrita no próprio caderno.
 		-->
@@ -274,6 +274,24 @@
 				font-weight: bold;
 			}
 
+			.applicator-stimulus {
+				border: 1px dashed #0b5cad;
+				background: #f7fbff;
+				color: #0b5cad;
+				border-radius: 4px;
+				padding: 8px 12px;
+				margin: 10px 0 12px;
+				font-size: 12pt;
+			}
+
+			.applicator-stimulus strong {
+				display: block;
+				margin-bottom: 2px;
+				font-size: 10pt;
+				text-transform: uppercase;
+				letter-spacing: 0.02em;
+			}
+
 			.instructions {
 				border: 1px solid #d1d5db;
 				border-radius: 4px;
@@ -520,7 +538,7 @@
 
 			{% if applicator_mode %}
 			<div class="applicator-banner">
-				Prova do aplicador — os megafones marcam o que deve ser lido em voz alta.
+				Prova do aplicador — megafones marcam a leitura em voz alta; no ditado, a palavra ou a figura fica só nesta versão.
 			</div>
 			{% endif %}
 
@@ -534,6 +552,13 @@
 				</div>
 
 				<div class="statement">{{ question.statement }}</div>
+
+				{% if applicator_mode and question.dictated_word %}
+				<div class="applicator-stimulus">
+					<strong>Palavra a ditar</strong>
+					{{ question.dictated_word }}
+				</div>
+				{% endif %}
 
 				{% if question.support %}
 				<div class="support">{{ question.support }}</div>

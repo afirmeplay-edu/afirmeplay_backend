@@ -407,7 +407,6 @@ def build_participation_report_answer_sheet(
     matriculados_ids = set(students_by_id.keys())
     statuses = is_special_education_many(students_by_id.values())
     from app.services.cartao_resposta.answer_sheet_audience import gabarito_adap_level
-    from app.models.answerSheetGabarito import AnswerSheetGabarito
 
     incluir_adap3 = False
     for gid in gabarito_ids or []:

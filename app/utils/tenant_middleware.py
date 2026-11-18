@@ -307,6 +307,17 @@ def _resolve_mobile_discovery_public_context():
     return ctx
 
 
+def _resolve_afirme_ler_discovery_public_context():
+    """
+    GET /afirme-reading/discovery/cities: lista public.city com feature afirme_reading;
+    sem JWT, sem tenant, sem resolução por Host/headers.
+    """
+    ctx = TenantContext()
+    ctx.schema = "public"
+    ctx.has_tenant_context = False
+    return ctx
+
+
 def _resolve_mobile_offline_pack_redeem_preflight():
     """
     POST /offline-pack/redeem: começa em public para consultar mobile_offline_pack_registry
@@ -421,6 +432,12 @@ def resolve_tenant_context():
         "OPTIONS",
     ):
         return _resolve_mobile_discovery_public_context()
+    if path.endswith("/afirme-reading/discovery/cities") and request.method in (
+        "GET",
+        "HEAD",
+        "OPTIONS",
+    ):
+        return _resolve_afirme_ler_discovery_public_context()
     if path.endswith("/mobile/v1/auth/login") and request.method in ("POST", "OPTIONS"):
         return _resolve_mobile_login_tenant_context()
     if path.endswith("/login") and request.method == "POST":
@@ -642,6 +659,15 @@ def tenant_middleware():
             'OPTIONS',
         ):
             ctx = _resolve_mobile_discovery_public_context()
+            g.tenant_context = ctx
+            _register_multitenant_sessions(ctx)
+            return None
+        if path_norm.endswith('/afirme-reading/discovery/cities') and request.method in (
+            'GET',
+            'HEAD',
+            'OPTIONS',
+        ):
+            ctx = _resolve_afirme_ler_discovery_public_context()
             g.tenant_context = ctx
             _register_multitenant_sessions(ctx)
             return None

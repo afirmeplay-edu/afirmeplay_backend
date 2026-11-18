@@ -6,8 +6,8 @@ Layout visual alinhado à prova física institucional (capa Afirme, tipografia e
 questões no padrão de institutional_test_hybrid.html). O cartão-resposta permanece
 em PDF separado — não é embutido neste caderno.
 
-mode=student: prova limpa.
-mode=applicator: inclui ícones de megafone nos campos marcados (dictationMarks).
+mode=student: prova limpa (ditado sem palavra/figura).
+mode=applicator: megafones (dictationMarks) e estímulo do ditado (palavra ou figura).
 """
 from __future__ import annotations
 
@@ -33,6 +33,8 @@ from app.afirme_ler.services.question_bank_service import (
     QUESTION_TYPE_DICTATION,
     QUESTION_TYPE_MULTIPLE_CHOICE,
     QUESTION_TYPE_TEXT_PRODUCTION,
+    STIMULUS_IMAGE,
+    STIMULUS_WORD,
 )
 from app.afirme_ler.services.written_test_service import _assert_allowed_type, _type_key
 
@@ -67,6 +69,38 @@ def _statement_html(question: Question) -> str:
     if formatted and str(formatted).strip():
         return str(formatted)
     return _plain_to_html(question.text)
+
+
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", flags=re.IGNORECASE)
+
+
+def _strip_img_tags(html: str) -> str:
+    """Remove figuras do HTML (prova do aluno no ditado por figura)."""
+    if not html:
+        return ""
+    cleaned = _IMG_TAG_RE.sub("", html)
+    # Evita parágrafos/vazios óbvios deixados só pela figura.
+    cleaned = re.sub(r"(?:<p>\s*</p>\s*)+", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _dictation_stimulus(question: Question) -> Optional[str]:
+    if _type_key(question.question_type) != QUESTION_TYPE_DICTATION:
+        return None
+    stimulus = getattr(question, "writing_stimulus", None)
+    if stimulus == STIMULUS_IMAGE:
+        return STIMULUS_IMAGE
+    return STIMULUS_WORD
+
+
+def _dictated_word_for_pdf(question: Question, mode: str) -> Optional[str]:
+    """Palavra a ditar: só no PDF do aplicador e só no ditado falado."""
+    if mode != "applicator":
+        return None
+    if _dictation_stimulus(question) != STIMULUS_WORD:
+        return None
+    word = str(getattr(question, "correct_answer", None) or "").strip()
+    return word or None
 
 
 def _parse_alternatives(raw: Any) -> List[Any]:
@@ -197,20 +231,39 @@ def _question_data(
     number: int,
     question: Question,
     dictation_marks: Optional[Dict[str, Any]] = None,
+    mode: str = "student",
 ) -> Dict[str, Any]:
     question_type = _type_key(question.question_type)
     writing_lines = _writing_lines_for_type(question_type)
+    statement_html = _statement_html(question)
+    images = _collect_image_metas(question)
+    dictated_word = _dictated_word_for_pdf(question, mode)
+    stimulus = _dictation_stimulus(question)
+
+    # Prova do aluno: estímulo do ditado (figura) não sai; a palavra só no aplicador.
+    if question_type == QUESTION_TYPE_DICTATION and mode == "student" and stimulus == STIMULUS_IMAGE:
+        statement_html = _strip_img_tags(statement_html)
+        if not statement_html:
+            # Enunciado só com figura: mantém o texto (ou instrução genérica), sem a imagem.
+            text = str(getattr(question, "text", None) or "").strip()
+            if text and text.lower() != "imagem":
+                statement_html = _plain_to_html(text)
+            else:
+                statement_html = _plain_to_html("Escreva o nome da figura.")
+        images = []
+
     data = {
         "number": number,
         "id": question.id,
         "type": question_type,
         "title_html": _plain_to_html(question.title),
-        "statement_html": _statement_html(question),
-        "images": _collect_image_metas(question),
+        "statement_html": statement_html,
+        "images": images,
         "dictation_marks": dictation_marks if isinstance(dictation_marks, dict) else None,
         "writing_lines": writing_lines,
         # Múltipla escolha: marca no cartão separado. Ditado/bilhete: escreve nas linhas do caderno.
         "answer_on_card": question_type == QUESTION_TYPE_MULTIPLE_CHOICE,
+        "dictated_word": dictated_word,
     }
     if question_type == QUESTION_TYPE_MULTIPLE_CHOICE:
         data["support_html"] = question.secondstatement or ""
@@ -248,7 +301,7 @@ def build_pdf_data(
             )
         _assert_allowed_type(question)
         marks = _effective_marks(link, question) if pdf_mode == "applicator" else None
-        questions.append(_question_data(number, question, marks))
+        questions.append(_question_data(number, question, marks, mode=pdf_mode))
 
     grade_ids = [str(g) for g in (written_test.grade_ids or [])]
     grade_rows = (
@@ -397,6 +450,11 @@ class WrittenTestPdfService:
                 })
 
             writing_lines = int(item.get("writing_lines") or 0)
+            dictated_word = item.get("dictated_word") if applicator_mode else None
+            if isinstance(dictated_word, str):
+                dictated_word = dictated_word.strip() or None
+            else:
+                dictated_word = None
             questions.append({
                 "number": item["number"],
                 "type": item["type"],
@@ -407,6 +465,7 @@ class WrittenTestPdfService:
                 "answer_on_card": bool(item.get("answer_on_card")),
                 "writing_lines": writing_lines,
                 "dictation_marks": marks or None,
+                "dictated_word": dictated_word,
             })
 
         municipality_logo = self._municipality_logo(city)

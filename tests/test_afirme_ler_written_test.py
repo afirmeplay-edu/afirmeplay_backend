@@ -922,12 +922,13 @@ def test_pdf_data_has_no_answer_key(flask_app):
         assert item["alternatives"] == [] and item["support_html"] == ""
         assert item["answer_on_card"] is False
         assert item["writing_lines"] == pdf_svc.DICTATION_WRITING_LINES
+        assert item["dictated_word"] is None
     assert production["alternatives"] == [] and production["support_html"] == ""
     assert production["answer_on_card"] is False
     assert production["writing_lines"] == pdf_svc.PRODUCTION_WRITING_LINES
     expected_keys = {
         "number", "id", "type", "title_html", "statement_html", "images", "dictation_marks",
-        "support_html", "alternatives", "answer_on_card", "writing_lines",
+        "support_html", "alternatives", "answer_on_card", "writing_lines", "dictated_word",
     }
     assert all(set(q) == expected_keys for q in data["questions"])
 
@@ -956,6 +957,7 @@ def test_pdf_html_prints_questions_without_answer_key(flask_app):
     assert "/questions/mc-img/images/" not in html
     assert 'alt="Afirme Educacional"' in html
     assert "max-width: 58%" in html  # logo Educacional cabe no círculo da capa
+    assert 'class="applicator-stimulus"' not in html
     for forbidden in ("sapato", "borboleta", "isCorrect", "SOLUCAO-SECRETA", "Pontuação", "pontos"):
         assert forbidden not in html
 
@@ -985,6 +987,76 @@ def test_pdf_applicator_keeps_images_and_places_megaphone(flask_app):
         html,
         flags=re.IGNORECASE,
     )
+    # Palavras do ditado falado saem só na prova do aplicador.
+    assert "sapato" in html and "borboleta" in html
+    assert html.count('class="applicator-stimulus"') == 2
+
+
+def test_pdf_dictation_word_only_on_applicator(flask_app):
+    """Ditado por palavra: estímulo só no PDF do aplicador."""
+    city = SimpleNamespace(name="Limoeiro", state="AL")
+    service = _pdf_service()
+
+    student = pdf_svc.build_pdf_data(_published_for_pdf(), city, mode="student")
+    assert student["questions"][16]["dictated_word"] is None
+    assert student["questions"][17]["dictated_word"] is None
+    student_html = service.render_html(student)
+    assert "sapato" not in student_html and "borboleta" not in student_html
+    assert 'class="applicator-stimulus"' not in student_html
+
+    applicator = pdf_svc.build_pdf_data(_published_for_pdf(), city, mode="applicator")
+    assert applicator["questions"][16]["dictated_word"] == "sapato"
+    assert applicator["questions"][17]["dictated_word"] == "borboleta"
+    applicator_html = service.render_html(applicator)
+    assert "sapato" in applicator_html and "borboleta" in applicator_html
+    assert "Palavra a ditar" in applicator_html
+    assert applicator_html.count('class="applicator-stimulus"') == 2
+
+
+def test_pdf_dictation_image_only_on_applicator(flask_app):
+    """Ditado por figura: a imagem sai só no PDF do aplicador; a descrição nunca sai."""
+    dict_img = "ffffffff-0000-4000-8000-0000000000f1"
+    question = db.session.get(Question, "dict-2")
+    question.writing_stimulus = "image"
+    question.correct_answer = None
+    question.writing_reference = "cinto de roupa secreto"
+    question.formatted_text = (
+        f'<p>Escreva o nome da figura.</p>'
+        f'<img src="/questions/dict-2/images/{dict_img}" alt="figura ditado" />'
+    )
+    question.images = [{
+        "id": dict_img,
+        "type": "image/png",
+        "minio_bucket": "question-images",
+        "minio_object_name": f"dict-2/{dict_img}.png",
+    }]
+    db.session.commit()
+
+    city = SimpleNamespace(name="Limoeiro", state="AL")
+    service = _pdf_service()
+
+    student = pdf_svc.build_pdf_data(_published_for_pdf(), city, mode="student")
+    dictation = student["questions"][17]
+    assert dictation["dictated_word"] is None
+    assert dictation["images"] == []
+    assert "<img" not in (dictation["statement_html"] or "").lower()
+    assert "Escreva o nome da figura." in dictation["statement_html"]
+    student_html = service.render_html(student)
+    assert dict_img not in student_html
+    assert "figura ditado" not in student_html
+    assert "cinto de roupa secreto" not in student_html
+
+    applicator = pdf_svc.build_pdf_data(_published_for_pdf(), city, mode="applicator")
+    dictation_app = applicator["questions"][17]
+    assert dictation_app["dictated_word"] is None
+    assert any(img.get("id") == dict_img for img in dictation_app["images"])
+    assert dict_img in (dictation_app["statement_html"] or "")
+    applicator_html = service.render_html(applicator)
+    assert "data:image/png;base64," in applicator_html
+    assert "cinto de roupa secreto" not in applicator_html
+    # A outra ditado (palavra) continua com estímulo no aplicador.
+    assert "sapato" in applicator_html
+    assert applicator["questions"][16]["dictated_word"] == "sapato"
 
 
 def test_wrap_marked_images_does_not_split_img_tag():

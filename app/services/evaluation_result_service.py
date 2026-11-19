@@ -668,6 +668,7 @@ class EvaluationResultService:
                     questions_by_subject[question.subject_id].append(question)
             
             # 8. Buscar resultados dos alunos (com filtros de granularidade se especificados)
+            enrolled_students = 0
             if scope_info and nivel_granularidade:
                 from app.models.classTest import ClassTest
                 from app.routes.evaluation_results_routes import _determinar_escopo_calculo, _buscar_alunos_por_escopo
@@ -708,9 +709,21 @@ class EvaluationResultService:
                     alunos_escopo, results, _adap = apply_pareamento_to_universe(
                         str(test_id), alunos_escopo, results
                     )
+                enrolled_students = len(alunos_escopo)
             else:
                 # Sem filtros de granularidade, buscar todos os resultados
+                from app.models.classTest import ClassTest
+
                 results = EvaluationResult.query.filter_by(test_id=test_id).all()
+                class_ids = [
+                    ct.class_id
+                    for ct in ClassTest.query.filter_by(test_id=str(test_id)).all()
+                    if ct.class_id
+                ]
+                if class_ids:
+                    enrolled_students = (
+                        Student.query.filter(Student.class_id.in_(class_ids)).count()
+                    )
 
             subject_statistics = {}
             
@@ -866,6 +879,7 @@ class EvaluationResultService:
                 'test_title': test.title,
                 'course_name': course_name,
                 'subjects_count': len(subject_statistics),
+                'enrolled_students': enrolled_students,
                 'subjects': subject_statistics
             }
             

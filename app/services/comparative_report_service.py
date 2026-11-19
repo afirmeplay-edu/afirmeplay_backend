@@ -394,7 +394,10 @@ def _compute_one_evaluation(
     por_disciplina: List[Dict[str, Any]] = []
     if "proficiencia_media" in indicadores:
         por_disciplina = _calcular_estatisticas_gerais_por_disciplina_escopo(
-            class_tests, scope_info, nivel
+            class_tests,
+            scope_info,
+            nivel,
+            matriculados=stats.get("total_alunos"),
         ) or []
 
     subject_name = None

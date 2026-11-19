@@ -3760,9 +3760,9 @@ def _load_cartao_roster_and_results(
     Roster (alunos atuais ∪ snapshots na turma) + resultados do gabarito no escopo.
     Alinhado a evaluation_results com class_id_snapshot.
 
-    ``somente_corrigidos=True``: só quem tem AnswerSheetResult (tabela detalhada
-    e ranking). Estatísticas de participação usam o default False: matrícula
-    completa no denominador e corrigidos no numerador.
+    ``somente_corrigidos=True``: só quem tem AnswerSheetResult (ranking).
+    Estatísticas e tabela detalhada usam o default False: matrícula completa
+    (faltosos com status pendente) e corrigidos no numerador das métricas.
     """
     from app.services.answer_sheet_result_snapshot import (
         query_answer_sheet_results_for_class_group,
@@ -5209,7 +5209,11 @@ def _skills_payload_for_question_number(
 
 
 def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
-    """Tabela detalhada no mesmo formato de evaluation_results: disciplinas (com questões e alunos com respostas_por_questao) e geral (alunos com totais e proficiência geral)."""
+    """Tabela detalhada no mesmo formato de evaluation_results.
+
+    Inclui a matrícula do recorte: quem tem correção fica ``concluida``;
+    quem falta aparece com ``status``/``status_geral`` ``pendente``.
+    """
     import json
     class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
     if not class_ids or not gabarito_id:
@@ -5230,12 +5234,13 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
     disciplinas_config = _extrair_blocos_por_disciplina_cartao(blocks_config)
     if not disciplinas_config:
         disciplinas_config = [{'id': 'geral', 'nome': 'Geral', 'question_numbers': list(gabarito_dict.keys())}]
+    # Matrícula completa para listar faltosos; médias/ranking continuam só com corrigidos.
     results, students = _load_cartao_roster_and_results(
         str(gabarito_id),
         class_ids,
         periodo_bounds,
         scope_info.get("alunos") if isinstance(scope_info, dict) else None,
-        somente_corrigidos=True,
+        somente_corrigidos=False,
     )
     student_ids = [s.id for s in students]
     result_by_student = {r.student_id: r for r in results}

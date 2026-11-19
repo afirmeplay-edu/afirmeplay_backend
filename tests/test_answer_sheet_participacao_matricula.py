@@ -4,6 +4,7 @@ import unittest
 
 from app.routes.answer_sheet_routes import (
     _build_disciplina_rows_from_cartao_results,
+    _calcular_dados_gerais_alunos_cartao,
     _participacao_matricula_cartao,
 )
 
@@ -71,6 +72,52 @@ class TestParticipacaoMatriculaCartao(unittest.TestCase):
         self.assertEqual(rows[0]["total_alunos"], 10)
         self.assertEqual(rows[0]["alunos_ausentes"], 9)
         self.assertEqual(rows[0]["percentual_comparecimento"], 10.0)
+
+    def test_tabela_geral_marca_faltoso_como_pendente(self):
+        disciplinas = [
+            {
+                "nome": "Matemática",
+                "alunos": [
+                    {
+                        "id": "fez",
+                        "nome": "Fez",
+                        "escola": "E1",
+                        "serie": "1º",
+                        "turma": "A",
+                        "nota": 7.0,
+                        "proficiencia": 250.0,
+                        "status": "concluida",
+                        "total_acertos": 5,
+                        "total_questoes_disciplina": 10,
+                        "total_respondidas": 10,
+                        "respostas_por_questao": [],
+                    },
+                    {
+                        "id": "faltou",
+                        "nome": "Faltou",
+                        "escola": "E1",
+                        "serie": "1º",
+                        "turma": "A",
+                        "nota": None,
+                        "proficiencia": None,
+                        "status": "pendente",
+                        "total_acertos": 0,
+                        "total_questoes_disciplina": 10,
+                        "total_respondidas": 0,
+                        "respostas_por_questao": [],
+                    },
+                ],
+            }
+        ]
+
+        gerais = _calcular_dados_gerais_alunos_cartao(
+            disciplinas, "1º Ano", student_ids_com_resultado={"fez"}
+        )
+        por_id = {a["id"]: a for a in gerais["alunos"]}
+
+        self.assertEqual(por_id["fez"]["status_geral"], "concluida")
+        self.assertEqual(por_id["faltou"]["status_geral"], "pendente")
+        self.assertEqual(por_id["faltou"]["nome"], "Faltou")
 
 
 if __name__ == "__main__":

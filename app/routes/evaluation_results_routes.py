@@ -1259,7 +1259,10 @@ def listar_avaliacoes():
             )
             # Consolidado por disciplina do mesmo escopo (para evitar o frontend recalcular)
             estatisticas_consolidadas["por_disciplina"] = _calcular_estatisticas_gerais_por_disciplina_escopo(
-                todas_avaliacoes_escopo, scope_info, nivel_granularidade
+                todas_avaliacoes_escopo,
+                scope_info,
+                nivel_granularidade,
+                matriculados=estatisticas_consolidadas.get("total_alunos"),
             )
             # Alinha media_*_geral à média dos cards só quando o escopo é uma prova
             # (ou grupo virtual). Em multi-test_id sem group_id, por_disciplina
@@ -2843,7 +2846,7 @@ def _carregar_dataset_virtual_grupo(
     nivel_granularidade: str,
     *,
     only_complete: bool = True,
-) -> Tuple[List[Any], str]:
+) -> Tuple[List[Any], str, List[Any]]:
     """
     Carrega EvaluationResults das N provas e monta o dataset virtual multidisciplinar.
 
@@ -2862,7 +2865,7 @@ def _carregar_dataset_virtual_grupo(
     ]
     test_ids = list(dict.fromkeys(str(t) for t in test_ids if t))
     if not test_ids or not tests_info:
-        return [], "Anos Iniciais"
+        return [], "Anos Iniciais", []
 
     course_name = "Anos Iniciais"
     if class_tests:
@@ -2885,27 +2888,75 @@ def _carregar_dataset_virtual_grupo(
     alunos_filtro = (scope_info or {}).get("alunos") if isinstance(scope_info, dict) else None
     from app.services.alunos_resultado_filtro import aplicar_universo_alunos
 
-    _, raw = aplicar_universo_alunos(todos_alunos, alunos_filtro or "todos", raw)
+    alunos_universo, raw = aplicar_universo_alunos(todos_alunos, alunos_filtro or "todos", raw)
     virtual = build_virtual_multidisciplinary_results(
         raw, tests_info, course_name, only_complete=only_complete
     )
-    return virtual, course_name
+    return virtual, course_name, list(alunos_universo or [])
 
 
-def _converter_subjects_stats_para_rows(statistics: dict) -> List[Dict[str, Any]]:
+def _participacao_da_disciplina(participantes: int, matriculados: Optional[int]) -> Dict[str, Any]:
+    """Quem fez, quem não fez e o percentual sobre a matrícula do recorte."""
+    feitos = max(0, int(participantes or 0))
+    if matriculados is None:
+        total = feitos
+    else:
+        total = max(int(matriculados or 0), feitos)
+    faltantes = total - feitos
+    percentual = round(100.0 * feitos / total, 2) if total else 0.0
+    return {
+        "total_alunos": total,
+        "alunos_participantes": feitos,
+        "alunos_pendentes": faltantes,
+        "alunos_ausentes": faltantes,
+        "percentual_comparecimento": percentual,
+    }
+
+
+def _contagem_matricula_por_recorte(alunos: Sequence[Any]) -> Dict[str, Any]:
+    """Matrícula do recorte, por escola e por turma."""
+    class_ids = []
+    for aluno in alunos or []:
+        class_id = getattr(aluno, "class_id", None)
+        if class_id:
+            class_ids.append(class_id)
+    school_by_class: Dict[str, str] = {}
+    if class_ids:
+        for row in Class.query.filter(Class.id.in_(list(set(class_ids)))).all():
+            school_id = getattr(row, "school_id", None)
+            school_by_class[str(row.id)] = str(school_id) if school_id else ""
+    por_escola: Dict[str, int] = {}
+    por_turma: Dict[str, int] = {}
+    for aluno in alunos or []:
+        class_id = str(getattr(aluno, "class_id", "") or "")
+        por_turma[class_id] = por_turma.get(class_id, 0) + 1
+        school_id = school_by_class.get(class_id) or ""
+        if school_id:
+            por_escola[school_id] = por_escola.get(school_id, 0) + 1
+    return {
+        "total": len(list(alunos or [])),
+        "por_escola": por_escola,
+        "por_turma": por_turma,
+    }
+
+
+def _converter_subjects_stats_para_rows(
+    statistics: dict,
+    matriculados: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     if not isinstance(statistics, dict) or "subjects" not in statistics:
         return []
+    if matriculados is None and statistics.get("enrolled_students") is not None:
+        matriculados = int(statistics.get("enrolled_students") or 0)
     rows: List[Dict[str, Any]] = []
     for subject_name, subject_data in (statistics.get("subjects") or {}).items():
         distribuicao_classificacao = (subject_data or {}).get("classification_distribution", {}) or {}
+        participantes = int((subject_data or {}).get("total_students") or 0)
         rows.append(
             {
                 "disciplina": subject_name,
                 "total_avaliacoes": 1,
-                "total_alunos": (subject_data or {}).get("total_students", 0),
-                "alunos_participantes": (subject_data or {}).get("total_students", 0),
-                "alunos_pendentes": 0,
-                "alunos_ausentes": 0,
+                **_participacao_da_disciplina(participantes, matriculados),
                 "media_nota": (subject_data or {}).get("average_grade", 0.0),
                 "media_proficiencia": (subject_data or {}).get("average_proficiency", 0.0),
                 "distribuicao_classificacao": {
@@ -2929,12 +2980,13 @@ def _calcular_estatisticas_por_disciplina_grupo_virtual(
     (inclui quem fez só aquela disciplina). O GERAL continua na interseção.
     """
     tests_info = (scope_info or {}).get("grupo_tests_info") or []
-    virtual, course_name = _carregar_dataset_virtual_grupo(
+    virtual, course_name, alunos_universo = _carregar_dataset_virtual_grupo(
         class_tests, scope_info, nivel_granularidade, only_complete=False
     )
     if not virtual or not tests_info:
         return []
 
+    matricula = _contagem_matricula_por_recorte(alunos_universo)
     resultados_disciplina: List[Dict[str, Any]] = []
 
     if nivel_granularidade == "municipio":
@@ -2955,7 +3007,9 @@ def _calcular_estatisticas_por_disciplina_grupo_virtual(
         for sc in escolas or []:
             subset = filter_virtual_results_by_school(virtual, sc.id)
             stats = subject_statistics_from_virtual_results(subset, tests_info, course_name)
-            for r in _converter_subjects_stats_para_rows(stats):
+            for r in _converter_subjects_stats_para_rows(
+                stats, matriculados=matricula["por_escola"].get(str(sc.id), 0)
+            ):
                 r["escola_id"] = str(sc.id)
                 r["escola"] = getattr(sc, "name", None)
                 resultados_disciplina.append(r)
@@ -2974,7 +3028,9 @@ def _calcular_estatisticas_por_disciplina_grupo_virtual(
         for turma_obj in turmas:
             subset = filter_virtual_results_by_class(virtual, turma_obj.id)
             stats = subject_statistics_from_virtual_results(subset, tests_info, course_name)
-            for r in _converter_subjects_stats_para_rows(stats):
+            for r in _converter_subjects_stats_para_rows(
+                stats, matriculados=matricula["por_turma"].get(str(turma_obj.id), 0)
+            ):
                 r["turma_id"] = str(turma_obj.id)
                 r["turma"] = getattr(turma_obj, "name", None)
                 try:
@@ -2995,7 +3051,7 @@ def _calcular_estatisticas_por_disciplina_grupo_virtual(
         return resultados_disciplina
 
     stats = subject_statistics_from_virtual_results(virtual, tests_info, course_name)
-    return _converter_subjects_stats_para_rows(stats)
+    return _converter_subjects_stats_para_rows(stats, matriculados=matricula["total"])
 
 
 def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, nivel_granularidade: str):
@@ -3027,35 +3083,10 @@ def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, n
 
         def _convert_subjects_to_rows(statistics: dict) -> List[Dict[str, Any]]:
             """
-            Converte o dict retornado pelo serviço (subjects:{...}) para uma lista de rows
-            no formato esperado pelo frontend.
-            IMPORTANTE: não alterar cálculos nem campos (mantém redundâncias atuais).
+            Converte o dict do serviço para as linhas do frontend.
+            Médias seguem o cálculo existente. Participação usa a matrícula do recorte.
             """
-            if not isinstance(statistics, dict) or "subjects" not in statistics:
-                return []
-
-            rows: List[Dict[str, Any]] = []
-            for subject_name, subject_data in (statistics.get("subjects") or {}).items():
-                distribuicao_classificacao = (subject_data or {}).get("classification_distribution", {}) or {}
-                rows.append(
-                    {
-                        "disciplina": subject_name,
-                        "total_avaliacoes": 1,
-                        "total_alunos": (subject_data or {}).get("total_students", 0),
-                        "alunos_participantes": (subject_data or {}).get("total_students", 0),
-                        "alunos_pendentes": 0,
-                        "alunos_ausentes": 0,
-                        "media_nota": (subject_data or {}).get("average_grade", 0.0),
-                        "media_proficiencia": (subject_data or {}).get("average_proficiency", 0.0),
-                        "distribuicao_classificacao": {
-                            "abaixo_do_basico": distribuicao_classificacao.get("abaixo_do_basico", 0),
-                            "basico": distribuicao_classificacao.get("basico", 0),
-                            "adequado": distribuicao_classificacao.get("adequado", 0),
-                            "avancado": distribuicao_classificacao.get("avancado", 0),
-                        },
-                    }
-                )
-            return rows
+            return _converter_subjects_stats_para_rows(statistics)
 
         def _safe_get_subject_stats(scoped_info: dict, scoped_level: str) -> List[Dict[str, Any]]:
             statistics = EvaluationResultService.get_subject_detailed_statistics(test_id, scoped_info, scoped_level)
@@ -3154,15 +3185,18 @@ def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, n
 
 
 def _calcular_estatisticas_gerais_por_disciplina_escopo(
-    class_tests: list, scope_info: dict, nivel_granularidade: str
+    class_tests: list,
+    scope_info: dict,
+    nivel_granularidade: str,
+    matriculados: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Retorna o consolidado por disciplina DO ESCOPO (sem agrupamento por escola/turma),
     para ser aninhado em estatisticas_gerais.por_disciplina.
 
-    Importante:
-    - Reutiliza o mesmo serviço/cálculo de médias já existente.
-    - Não altera nem "corrige" campos redundantes do payload.
+    Médias reutilizam o cálculo existente. Participação usa a matrícula do recorte:
+    quem fez, quem não fez e o percentual. ``matriculados`` alinha o denominador
+    ao total já publicado no card geral.
     """
     try:
         from app.services.evaluation_result_service import EvaluationResultService
@@ -3174,7 +3208,7 @@ def _calcular_estatisticas_gerais_por_disciplina_escopo(
         if (scope_info or {}).get("grupo") and len(grupo_ids) > 1:
             tests_info = (scope_info or {}).get("grupo_tests_info") or []
             # Mesmo universo da prova isolada por disciplina (não só interseção).
-            virtual, course_name = _carregar_dataset_virtual_grupo(
+            virtual, course_name, alunos_universo = _carregar_dataset_virtual_grupo(
                 class_tests, scope_info, nivel_granularidade, only_complete=False
             )
             if not virtual or not tests_info:
@@ -3182,7 +3216,8 @@ def _calcular_estatisticas_gerais_por_disciplina_escopo(
             statistics = subject_statistics_from_virtual_results(
                 virtual, tests_info, course_name
             )
-            return _converter_subjects_stats_para_rows(statistics)
+            total = matriculados if matriculados is not None else len(alunos_universo)
+            return _converter_subjects_stats_para_rows(statistics, matriculados=total)
 
         test = class_tests[0].test
         if not test or not getattr(test, "subjects_info", None):
@@ -3198,30 +3233,7 @@ def _calcular_estatisticas_gerais_por_disciplina_escopo(
             )
             return []
 
-        subjects = (statistics or {}).get("subjects") or {}
-        rows: List[Dict[str, Any]] = []
-        for subject_name, subject_data in subjects.items():
-            distribuicao_classificacao = (subject_data or {}).get("classification_distribution", {}) or {}
-            rows.append(
-                {
-                    "disciplina": subject_name,
-                    "total_avaliacoes": 1,
-                    "total_alunos": (subject_data or {}).get("total_students", 0),
-                    "alunos_participantes": (subject_data or {}).get("total_students", 0),
-                    "alunos_pendentes": 0,
-                    "alunos_ausentes": 0,
-                    "media_nota": (subject_data or {}).get("average_grade", 0.0),
-                    "media_proficiencia": (subject_data or {}).get("average_proficiency", 0.0),
-                    "distribuicao_classificacao": {
-                        "abaixo_do_basico": distribuicao_classificacao.get("abaixo_do_basico", 0),
-                        "basico": distribuicao_classificacao.get("basico", 0),
-                        "adequado": distribuicao_classificacao.get("adequado", 0),
-                        "avancado": distribuicao_classificacao.get("avancado", 0),
-                    },
-                }
-            )
-
-        return rows
+        return _converter_subjects_stats_para_rows(statistics, matriculados=matriculados)
     except Exception as e:
         logging.error(
             "Erro ao calcular estatísticas gerais por disciplina (escopo): %s",
@@ -10904,7 +10916,10 @@ def _anexar_cards_e_media_geral(
     if not isinstance(estatisticas, dict):
         return
     estatisticas["por_disciplina"] = _calcular_estatisticas_gerais_por_disciplina_escopo(
-        class_tests, scope_info, nivel_granularidade
+        class_tests,
+        scope_info,
+        nivel_granularidade,
+        matriculados=estatisticas.get("total_alunos"),
     )
     _aplicar_media_geral_das_disciplinas_grupo(estatisticas, scope_info)
 

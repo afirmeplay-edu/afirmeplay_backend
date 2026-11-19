@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 from app.routes.evaluation_results_routes import (
     _calcular_dados_gerais_alunos,
     _collect_participating_student_ids,
+    _converter_subjects_stats_para_rows,
+    _participacao_da_disciplina,
 )
 
 
@@ -173,6 +175,57 @@ class TestEvaluationResultsParticipation(unittest.TestCase):
         self.assertEqual(aluno["nota_geral"], 7.0)
         self.assertEqual(aluno["total_questoes_geral"], 20)
         self.assertIn("participacao", aluno)
+
+    def test_participacao_da_disciplina_separa_quem_nao_fez(self):
+        campos = _participacao_da_disciplina(23, 40)
+
+        self.assertEqual(campos["alunos_participantes"], 23)
+        self.assertEqual(campos["total_alunos"], 40)
+        self.assertEqual(campos["alunos_ausentes"], 17)
+        self.assertEqual(campos["alunos_pendentes"], 17)
+        self.assertEqual(campos["percentual_comparecimento"], 57.5)
+
+    def test_converter_de_disciplina_nao_forca_cem_por_cento(self):
+        rows = _converter_subjects_stats_para_rows(
+            {
+                "enrolled_students": 10,
+                "subjects": {
+                    "Matemática": {
+                        "total_students": 4,
+                        "average_grade": 6.0,
+                        "average_proficiency": 200.0,
+                        "classification_distribution": {"abaixo_do_basico": 4},
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["alunos_participantes"], 4)
+        self.assertEqual(rows[0]["total_alunos"], 10)
+        self.assertEqual(rows[0]["alunos_ausentes"], 6)
+        self.assertEqual(rows[0]["percentual_comparecimento"], 40.0)
+        self.assertEqual(rows[0]["media_nota"], 6.0)
+
+    def test_matricula_explicita_vence_o_enrolled_do_servico(self):
+        rows = _converter_subjects_stats_para_rows(
+            {
+                "enrolled_students": 4,
+                "subjects": {
+                    "Português": {
+                        "total_students": 4,
+                        "average_grade": 5.0,
+                        "average_proficiency": 180.0,
+                        "classification_distribution": {},
+                    }
+                },
+            },
+            matriculados=12,
+        )
+
+        self.assertEqual(rows[0]["total_alunos"], 12)
+        self.assertEqual(rows[0]["alunos_ausentes"], 8)
+        self.assertEqual(rows[0]["percentual_comparecimento"], 33.33)
 
 
 if __name__ == "__main__":

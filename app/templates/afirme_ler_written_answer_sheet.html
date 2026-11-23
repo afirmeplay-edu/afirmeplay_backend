@@ -214,9 +214,9 @@
 
 		<div class="instructions">
 			<strong>Como responder</strong>
-			Múltipla escolha: preencha completamente a bolha da letra escolhida, assim: <span class="example-mark"></span>. Marque só uma bolha por questão.<br />
-			Ditado: escreva na linha a palavra que o aplicador ditar.<br />
-			Produção escrita: escreva o bilhete na área pautada.
+			Múltipla escolha: preencha completamente a bolha da letra escolhida, assim: <span class="example-mark"></span>. Marque só uma bolha por questão.
+			{% if has_dictation %}<br />Ditado: escreva na linha a palavra que o aplicador ditar.{% endif %}
+			{% if has_production %}<br />Produção escrita: escreva o bilhete na área pautada.{% endif %}
 		</div>
 
 		{% for item in items %}

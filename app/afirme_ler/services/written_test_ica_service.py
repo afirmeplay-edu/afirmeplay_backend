@@ -316,7 +316,18 @@ def compute_ica_result(
 
 
 def refresh_correction_ica(row: ReadingWrittenTestCorrection) -> Dict[str, Any]:
-    """Recalcula e grava o bloco ICA da correção. Não faz commit."""
+    """Recalcula e grava o bloco ICA da correção. Não faz commit.
+
+    Matemática não usa ICA de alfabetização: limpa o bloco e retorna vazio
+    (a correção objetiva segue normalmente).
+    """
+    written_test = db.session.get(ReadingWrittenTest, str(row.written_test_id))
+    from app.afirme_ler.services.written_test_subject_rules import is_matematica
+
+    if written_test is not None and is_matematica(written_test):
+        row.ica = {}
+        return {}
+
     finalized = _is_finalized(row)
     reading = words = text = None
     if finalized:
@@ -395,6 +406,9 @@ def _load(written_test_id: str, filters: Optional[Dict[str, Any]]) -> Dict[str, 
     written_test = db.session.get(ReadingWrittenTest, str(written_test_id))
     if written_test is None:
         raise LookupError("Avaliação escrita não encontrada.")
+    from app.afirme_ler.services.written_test_subject_rules import assert_not_matematica
+
+    assert_not_matematica(written_test)
 
     escola_id = _param(filters, "escolaId", "escola_id", "schoolId", "school_id")
     serie_raw = _param(filters, "serieId", "serie_id", "gradeId", "grade_id")

@@ -44,19 +44,30 @@ Na listagem e no detalhe, todos os perfis acima veem todas as avaliações escri
 
 1. **Criação**: `title`, uma ou mais séries (`gradeIds`), escolas (`schoolIds`) e turmas (`classIds`).
    Toda turma tem que ser de uma das escolas **e** de uma das séries escolhidas. Ids que não existem = `400`.
+   `subjectId` é **opcional**: se omitido, a prova fica em **Português** (resolvido pelo nome em
+   `public.subject`). Se enviado, só aceita **Português** ou **Matemática** (pelo nome, não por ID fixo).
 2. **Questões**: o frontend envia a lista **completa e ordenada**; ela substitui a anterior. Cada questão:
    - precisa estar visível ao usuário (mesmo escopo do banco de questões: `GLOBAL`, `CITY` do município,
      `PRIVATE` de quem envia);
-   - tem que ser `multipleChoice`, `dictation` ou `text_production`;
-   - não pode repetir; no máximo **19** questões.
+   - tem que ter `question.subject_id` **igual** ao `subjectId` da avaliação;
+   - **Português**: `multipleChoice`, `dictation` ou `text_production`; no máximo **19**;
+   - **Matemática**: só `multipleChoice`; no máximo **19**; `dictation` e `text_production` são
+     proibidos;
+   - não pode repetir; `order` contínuo de 1 a N (sem buracos).
    - A série da questão **não** precisa ser uma das séries da avaliação.
-3. **Publicação**: só com **exatamente 19** questões, nesta ordem: posições **1 a 16** de
-   `multipleChoice`, **17 e 18** de `dictation` (ditado) e **19** de `text_production` (bilhete).
+3. **Publicação**:
+   - **Português**: exatamente **19** questões, nesta ordem: posições **1 a 16** de `multipleChoice`,
+     **17 e 18** de `dictation` (ditado) e **19** de `text_production` (bilhete).
+   - **Matemática**: entre **16 e 19** questões, todas `multipleChoice` de Matemática, posições 1..N.
    Muda `status` para `publicada` e grava `publishedAt`.
 4. Avaliação **publicada** não pode ter dados nem questões alterados, nem ser excluída (`400`).
+   Trocar `subjectId` só em rascunho **e** sem questões vinculadas; senão `400`.
 5. **Pontuação**: a de cada questão (`value`; vazio = `1`). `totalScore` = soma.
 6. `status` da avaliação: `rascunho` (padrão) ou `publicada`. A aplicação **não** muda esse status;
    o andamento é por turma (seção 8).
+7. **ICA / correção escrita / Acertos e Níveis (fonte escrita)**: só Português. Em Matemática essas
+   rotas respondem `400` com `Não se aplica a avaliações de Matemática`. A correção objetiva/OMR
+   funciona com a quantidade real de questões (16–19).
 
 ### Erros barrados antes da rota
 
@@ -90,6 +101,10 @@ Na listagem e no detalhe, todos os perfis acima veem todas as avaliações escri
   "title": "Avaliação escrita — 1º bimestre",
   "description": "Prova impressa",
   "status": "rascunho",
+  "subjectId": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+  "subjectName": "Língua Portuguesa",
+  "minQuestions": 19,
+  "maxQuestions": 19,
   "gradeIds": ["5600f4b8-af7e-429d-b03c-f7886c046b39"],
   "schoolIds": ["0b3e6a1c-2d4f-4b8a-9c1e-3f5a7b9d1e2f"],
   "classIds": ["7c9e1a3b-5d7f-4a2c-8e0b-2d4f6a8c0e1b"],
@@ -105,6 +120,8 @@ Na listagem e no detalhe, todos os perfis acima veem todas as avaliações escri
 }
 ```
 
+- `subjectId` / `subjectName`: disciplina da prova (`public.subject`).
+- `minQuestions` / `maxQuestions`: Português = 19/19; Matemática = 16/19.
 - `questionsByType` sempre traz as três chaves (com `0` quando não há).
 - `totalQuestions` conta todas as questões da avaliação.
 - `appliedClassesCount`: quantas turmas têm aplicação (qualquer status).
@@ -164,6 +181,7 @@ Cria em `rascunho`. `createdBy` vem do token.
 |---|---|---|---|
 | `title` | string | Sim | Não pode ser vazio; até 255 caracteres |
 | `description` | string | Não | Texto livre |
+| `subjectId` | string | Não | Id de `public.subject`. Se omitido → Português. Se enviado: só Português ou Matemática (pelo nome) |
 | `gradeIds` | array de UUID | Sim | Ao menos uma série. Precisam existir |
 | `schoolIds` | array de UUID | Sim | Ao menos uma escola do município. Precisam existir |
 | `classIds` | array de UUID | Sim | Ao menos uma turma. Cada turma é de uma das escolas e de uma das séries |
@@ -177,6 +195,7 @@ Ids repetidos em `gradeIds`, `schoolIds` ou `classIds` são gravados uma vez só
 {
   "title": "Avaliação escrita — 1º bimestre",
   "description": "Prova impressa",
+  "subjectId": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
   "gradeIds": ["5600f4b8-af7e-429d-b03c-f7886c046b39"],
   "schoolIds": ["0b3e6a1c-2d4f-4b8a-9c1e-3f5a7b9d1e2f"],
   "classIds": ["7c9e1a3b-5d7f-4a2c-8e0b-2d4f6a8c0e1b"],
@@ -196,6 +215,8 @@ Detalhe da avaliação, com `status: "rascunho"` e `publishedAt: null`.
 | `error` |
 |---|
 | `title é obrigatório.` / `title deve ter no máximo 255 caracteres.` / `description deve ser um texto.` |
+| `Disciplina (subjectId) não encontrada.` / `Disciplina não suportada na avaliação escrita. Use Português ou Matemática.` |
+| `Não foi possível encontrar a disciplina 'Português' em public.subject pelo nome. ...` (default do POST sem `subjectId`) |
 | `Informe ao menos uma série em gradeIds.` / `Informe ao menos uma escola em schoolIds.` / `Informe ao menos uma turma em classIds.` |
 | `gradeIds deve ser uma lista.` (idem `schoolIds`, `classIds`) |
 | `gradeIds contém ID inválido: <valor>` (idem `schoolIds`, `classIds`) |
@@ -219,6 +240,7 @@ Mais recentes primeiro.
 | `page` | int | `1` | Maior que zero |
 | `per_page` | int | `10` | Maior que zero; máximo `100` (acima disso vira 100) |
 | `status` | string | — | `rascunho` ou `publicada` |
+| `subject_id` | string | — | Filtra pela disciplina da avaliação (`subjectId`) |
 | `grade_id` | UUID | — | Avaliações que incluem essa série |
 | `school_id` | UUID | — | Avaliações que incluem essa escola |
 | `q` | string | — | Busca no título, sem diferenciar maiúsculas |
@@ -268,10 +290,11 @@ Detalhe da avaliação. `404` se não existir no município.
 `PUT /afirme-reading/written-tests/<id>`
 
 - Só em `rascunho`.
-- Atualização **parcial** de `title`, `description`, `gradeIds`, `schoolIds` e `classIds`. Campos
-  ausentes ficam como estão. Outros campos são ignorados (as questões têm rota própria).
+- Atualização **parcial** de `title`, `description`, `subjectId`, `gradeIds`, `schoolIds` e `classIds`.
+  Campos ausentes ficam como estão. Outros campos são ignorados (as questões têm rota própria).
 - Se qualquer um de `gradeIds`, `schoolIds` ou `classIds` vier, o escopo inteiro é revalidado
   (os ausentes entram com o valor atual).
+- Trocar `subjectId` só é permitido se a avaliação **não tiver questões** vinculadas.
 
 ### Exemplo
 
@@ -289,11 +312,12 @@ Detalhe atualizado.
 
 ### Erros
 
-Os `400` de escopo e de título da criação, mais:
+Os `400` de escopo, título e disciplina da criação, mais:
 
 | Status | `error` |
 |---|---|
 | 400 | `Avaliação publicada não pode ser alterada.` |
+| 400 | `Não é possível trocar a disciplina enquanto houver questões vinculadas. Remova as questões antes de alterar subjectId.` |
 
 ---
 
@@ -347,7 +371,10 @@ Detalhe atualizado, com `questions` na nova ordem.
 | `error` |
 |---|
 | `questions é obrigatório.` / `questions deve ser uma lista de {id, order}.` |
-| `A avaliação aceita no máximo 19 questões.` |
+| `A avaliação aceita no máximo 19 questões.` (Português) |
+| `A prova de Matemática precisa ter entre 16 e 19 questões de múltipla escolha.` |
+| `A prova de Matemática aceita apenas questões de múltipla escolha. Ditado e produção escrita não são permitidos.` |
+| `A questão <id> é de outra disciplina. Todas as questões devem ser da mesma disciplina da avaliação.` |
 | `Cada questão deve ser um objeto {id, order}.` / `Cada questão precisa de id.` |
 | `Questão repetida na avaliação.` |
 | `order deve ser um número inteiro.` |
@@ -362,8 +389,10 @@ Detalhe atualizado, com `questions` na nova ordem.
 
 `POST /afirme-reading/written-tests/<id>/publish`
 
-Sem corpo. Exige **exatamente 19** questões, nas posições fixas (1 a 16 múltipla escolha, 17 e 18
-ditado, 19 bilhete), e que todas ainda existam no banco de questões.
+Sem corpo. Exige o padrão da disciplina da avaliação e que todas as questões ainda existam no banco:
+
+- **Português**: exatamente 19 (1–16 múltipla escolha, 17–18 ditado, 19 bilhete).
+- **Matemática**: entre 16 e 19, todas múltipla escolha de Matemática.
 
 ### Resposta `200`
 
@@ -374,7 +403,10 @@ Detalhe com `status: "publicada"` e `publishedAt` preenchido.
 | `error` |
 |---|
 | `A avaliação precisa ter exatamente 19 questões para ser publicada (hoje tem <N>).` |
+| `A prova de Matemática precisa ter entre 16 e 19 questões de múltipla escolha (hoje tem <N>).` |
 | `A posição <n> precisa ser <tipo>. A prova tem 16 questões de múltipla escolha (1 a 16), 2 ditados (17 e 18) e 1 bilhete (19).` |
+| `A prova de Matemática aceita apenas questões de múltipla escolha. Ditado e produção escrita não são permitidos.` |
+| `A questão <id> é de outra disciplina. ...` |
 | `A questão <id> não existe mais no banco de questões. Troque-a antes de publicar.` |
 | `A questão <id> é do tipo <tipo>, que não é aceito na avaliação escrita. ...` |
 | `A avaliação já está publicada.` |

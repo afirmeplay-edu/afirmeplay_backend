@@ -390,6 +390,185 @@ class PhotoAnswersService:
                 r["order"] = i
         return result
 
+    # ------------------------------------------------------------------
+    # Cartão-resposta (AnswerSheetGabarito sem Test)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _gabarito_blocks_config(gabarito: AnswerSheetGabarito) -> Dict[str, Any]:
+        import json
+
+        bc = gabarito.blocks_config or {}
+        if isinstance(bc, str):
+            try:
+                bc = json.loads(bc)
+            except (ValueError, TypeError):
+                bc = {}
+        return bc if isinstance(bc, dict) else {}
+
+    @staticmethod
+    def _gabarito_correct_answers(gabarito: AnswerSheetGabarito) -> Dict[int, str]:
+        import json
+
+        raw = gabarito.correct_answers
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                raw = {}
+        out: Dict[int, str] = {}
+        for key, value in (raw or {}).items():
+            try:
+                out[int(key)] = str(value).strip().upper() if value else ""
+            except (ValueError, TypeError):
+                continue
+        return out
+
+    @staticmethod
+    def _gabarito_legacy_alternatives(correct_answers: Dict[int, str]) -> List[str]:
+        letters = {str(v).strip().upper() for v in (correct_answers or {}).values() if v}
+        return ["A", "B", "C", "D", "E"] if "E" in letters else ["A", "B", "C", "D"]
+
+    @classmethod
+    def resolve_gabarito_topology(cls, gabarito: AnswerSheetGabarito) -> Dict[str, Any]:
+        """Topologia (blocos/questões/alternativas) a partir de blocks_config do cartão."""
+        bc = cls._gabarito_blocks_config(gabarito)
+        correct_answers = cls._gabarito_correct_answers(gabarito)
+        topo = bc.get("topology") or {}
+        raw_blocks = topo.get("blocks") if isinstance(topo, dict) else None
+
+        blocks: List[Dict[str, Any]] = []
+        for idx, b in enumerate(raw_blocks or [], start=1):
+            qs = []
+            for q in b.get("questions") or []:
+                try:
+                    q_num = int(q.get("q"))
+                except (TypeError, ValueError):
+                    continue
+                alts = q.get("alternatives")
+                if not isinstance(alts, list) or len(alts) < 2:
+                    alts = ["A", "B", "C", "D"]
+                entry = {"q": q_num, "alternatives": [str(a).upper() for a in alts]}
+                subj = q.get("subject_name") or b.get("subject_name")
+                if subj:
+                    entry["subject_name"] = subj
+                qs.append(entry)
+            if not qs:
+                continue
+            block = {"block_id": b.get("block_id") or idx, "questions": qs}
+            if b.get("subject_name"):
+                block["subject_name"] = b["subject_name"]
+            if b.get("subject_id"):
+                block["subject_id"] = b["subject_id"]
+            blocks.append(block)
+
+        source = "gabarito_blocks_config"
+        if not blocks:
+            # Cartões legados sem `topology`: usa `blocks` (start_question/end_question + disciplina)
+            # O gerador atual imprime A-D por padrão; cartões com resposta correta E usam A-E.
+            legacy_alternatives = cls._gabarito_legacy_alternatives(correct_answers)
+            for idx, b in enumerate(bc.get("blocks") or [], start=1):
+                if not isinstance(b, dict) or len(blocks) >= 4:
+                    continue
+                try:
+                    start_q = int(b.get("start_question"))
+                    end_q = int(b.get("end_question"))
+                except (TypeError, ValueError):
+                    continue
+                if end_q < start_q:
+                    continue
+                subj = b.get("subject_name")
+                block = {
+                    "block_id": b.get("block_id") or idx,
+                    "questions": [
+                        {
+                            "q": q,
+                            "alternatives": legacy_alternatives,
+                            **({"subject_name": subj} if subj else {}),
+                        }
+                        for q in range(start_q, end_q + 1)
+                    ],
+                }
+                if subj:
+                    block["subject_name"] = subj
+                if b.get("subject_id"):
+                    block["subject_id"] = b["subject_id"]
+                blocks.append(block)
+            if blocks:
+                source = "gabarito_legacy_blocks"
+        if not blocks:
+            n = int(gabarito.num_questions or 0)
+            per = int(bc.get("questions_per_block") or 0) or 22
+            per = max(1, min(per, 22))
+            source = "gabarito_num_questions"
+            for i in range(0, n, per):
+                if len(blocks) >= 4:
+                    break
+                blocks.append(
+                    {
+                        "block_id": len(blocks) + 1,
+                        "questions": [
+                            {"q": q, "alternatives": ["A", "B", "C", "D"]}
+                            for q in range(i + 1, min(i + per, n) + 1)
+                        ],
+                    }
+                )
+
+        return {
+            "num_blocks": len(blocks),
+            "use_blocks": True,
+            "topology": {"blocks": blocks},
+            "source": source,
+        }
+
+    @classmethod
+    def is_gabarito_scan_compatible(cls, gabarito: AnswerSheetGabarito) -> bool:
+        if not cls._gabarito_correct_answers(gabarito):
+            return False
+        topo = cls.resolve_gabarito_topology(gabarito)
+        if topo.get("source") == "gabarito_num_questions":
+            return False
+        return cls._topology_question_count(topo) > 0
+
+    @classmethod
+    def get_gabarito_questions_meta(cls, gabarito: AnswerSheetGabarito) -> List[Dict[str, Any]]:
+        correct = cls._gabarito_correct_answers(gabarito)
+        topo = cls.resolve_gabarito_topology(gabarito)
+        out: List[Dict[str, Any]] = []
+        for b in (topo.get("topology") or {}).get("blocks") or []:
+            for q in b.get("questions") or []:
+                out.append(
+                    {
+                        "order": q["q"],
+                        "question_id": None,
+                        "alternatives": q["alternatives"],
+                        "correct_answer": correct.get(q["q"]) or None,
+                        "subject_id": b.get("subject_id"),
+                        "subject_name": q.get("subject_name") or b.get("subject_name"),
+                    }
+                )
+        out.sort(key=lambda m: m["order"])
+        return out
+
+    @classmethod
+    def get_gabarito_existing_answers(
+        cls, gabarito_id: str, student_id: str
+    ) -> Dict[str, Optional[str]]:
+        from app.models.answerSheetResult import AnswerSheetResult
+
+        row = AnswerSheetResult.query.filter_by(
+            gabarito_id=gabarito_id, student_id=student_id
+        ).first()
+        if not row or not row.detected_answers:
+            return {}
+        out: Dict[str, Optional[str]] = {}
+        for key, value in dict(row.detected_answers).items():
+            letter = (str(value).strip().upper() if value else "") or None
+            if letter == "INVALID":
+                letter = None
+            out[str(key)] = letter
+        return out
+
     @classmethod
     def _looks_interactive_payload(cls, raw_alts: Any, qtype: Any = None) -> bool:
         """Detecta ligar colunas / arrastar-soltar / payloads não-OMR no JSON da questão."""

@@ -556,6 +556,7 @@ def submit_manual_correction(
     student_id: str,
     raw_answers: Dict[Any, Any],
     user: Dict[str, Any],
+    detection_method: str = "manual",
 ) -> Dict[str, Any]:
     gabarito = resolve_gabarito_for_manual(gabarito_id=gabarito_id, test_id=test_id)
     student = Student.query.get(student_id)
@@ -576,7 +577,7 @@ def submit_manual_correction(
     correction = corrector._build_result(answers, gabarito_dict)
     correction["gabarito_id"] = gabarito.id
     correction["student_id"] = student_id
-    correction["detection_method"] = "manual"
+    correction["detection_method"] = detection_method
     if gabarito.test_id:
         correction["test_id"] = str(gabarito.test_id)
 
@@ -596,8 +597,8 @@ def submit_manual_correction(
 
     return {
         "message": "Respostas registradas com sucesso",
-        "system": "manual",
-        "detection_method": "manual",
+        "system": detection_method,
+        "detection_method": detection_method,
         "kind": _entry_kind(gabarito),
         "student_id": student_id,
         "student_name": student_name,

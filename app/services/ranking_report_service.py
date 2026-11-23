@@ -341,15 +341,24 @@ class RankingReportService:
 
     @classmethod
     def _resolve_discipline_options(cls, filters: Dict[str, Any]) -> List[Dict[str, str]]:
-        evaluation_id = str(filters.get("evaluation_id") or "").strip()
-        answer_sheet_id = str(filters.get("answer_sheet_id") or "").strip()
+        evaluation_ids = DashboardService._parse_ranking_instrument_ids(
+            filters, "evaluation_ids", "evaluation_id"
+        )
+        answer_sheet_ids = DashboardService._parse_ranking_instrument_ids(
+            filters, "answer_sheet_ids", "answer_sheet_id"
+        )
 
-        if answer_sheet_id:
-            options = cls._discipline_options_from_answer_sheet(answer_sheet_id)
-        elif evaluation_id:
-            options = cls._discipline_options_from_evaluation(evaluation_id)
-        else:
-            options = {}
+        options: Dict[str, str] = {}
+        if answer_sheet_ids:
+            for answer_sheet_id in answer_sheet_ids:
+                for sid, name in cls._discipline_options_from_answer_sheet(answer_sheet_id).items():
+                    if sid not in options or not options[sid]:
+                        options[sid] = name
+        elif evaluation_ids:
+            for evaluation_id in evaluation_ids:
+                for sid, name in cls._discipline_options_from_evaluation(evaluation_id).items():
+                    if sid not in options or not options[sid]:
+                        options[sid] = name
 
         return [
             {"id": sid, "name": name}
@@ -389,15 +398,19 @@ class RankingReportService:
 
     @classmethod
     def _collect_discipline_keys_from_results(cls, filters: Dict[str, Any]) -> Dict[str, str]:
-        evaluation_id = str(filters.get("evaluation_id") or "").strip()
-        answer_sheet_id = str(filters.get("answer_sheet_id") or "").strip()
+        evaluation_ids = DashboardService._parse_ranking_instrument_ids(
+            filters, "evaluation_ids", "evaluation_id"
+        )
+        answer_sheet_ids = DashboardService._parse_ranking_instrument_ids(
+            filters, "answer_sheet_ids", "answer_sheet_id"
+        )
         key_names: Dict[str, str] = {}
 
-        if answer_sheet_id:
+        if answer_sheet_ids:
             rows = (
                 db.session.query(AnswerSheetResult.proficiency_by_subject)
                 .filter(
-                    AnswerSheetResult.gabarito_id == answer_sheet_id,
+                    AnswerSheetResult.gabarito_id.in_(answer_sheet_ids),
                     AnswerSheetResult.proficiency_by_subject.isnot(None),
                 )
                 .limit(500)
@@ -407,11 +420,11 @@ class RankingReportService:
                 for sid, name in cls._extract_discipline_keys_from_payload(payload).items():
                     if sid not in key_names or not key_names[sid]:
                         key_names[sid] = name
-        elif evaluation_id:
+        elif evaluation_ids:
             rows = (
                 db.session.query(EvaluationResult.subject_results)
                 .filter(
-                    EvaluationResult.test_id == evaluation_id,
+                    EvaluationResult.test_id.in_(evaluation_ids),
                     EvaluationResult.subject_results.isnot(None),
                 )
                 .limit(500)
@@ -2913,13 +2926,19 @@ class RankingReportService:
 
     @classmethod
     def _pacote_universo_avaliacao(cls, scope: Dict[str, Any], filters: Dict[str, Any]):
-        """Censo e notas da prova. Cartão e ranking sem prova ficam de fora."""
-        evaluation_id = str(filters.get("evaluation_id") or "").strip()
-        if not evaluation_id or str(filters.get("answer_sheet_id") or "").strip():
+        """Censo e notas da(s) prova(s). Cartão e ranking sem prova ficam de fora."""
+        evaluation_ids = DashboardService._parse_ranking_instrument_ids(
+            filters, "evaluation_ids", "evaluation_id"
+        )
+        answer_sheet_ids = DashboardService._parse_ranking_instrument_ids(
+            filters, "answer_sheet_ids", "answer_sheet_id"
+        )
+        if not evaluation_ids or answer_sheet_ids:
             return None
         from app.models.studentClass import Class
         from app.services.alunos_resultado_filtro import filtro_restringe
-        from app.services.resultado_universo import carregar_universo_da_prova
+        from app.services.class_peer_ranking_service import ClassPeerRankingService
+        from app.services.resultado_universo import carregar_universo_das_provas
 
         alunos_filtro = filters.get("alunos") or "todos"
         parear = str(filters.get("alunos_informado") or "") == "1" or filtro_restringe(alunos_filtro)
@@ -2938,8 +2957,8 @@ class RankingReportService:
             restringe_turma = bool(
                 filters.get("serie") or filters.get("turma") or scope.get("class_ids")
             )
-            students, notas, censo = carregar_universo_da_prova(
-                evaluation_id,
+            students, notas, censo = carregar_universo_das_provas(
+                evaluation_ids,
                 municipio_id=scope.get("city_id") or filters.get("municipio"),
                 alunos_filtro=alunos_filtro,
                 parear=parear,
@@ -2951,12 +2970,26 @@ class RankingReportService:
             return None
         if censo is None and not parear:
             return None
+
+        # Pacote multi (ex.: LP+MAT): uma linha GERAL por aluno (média igual-peso).
+        if len(evaluation_ids) > 1 and notas:
+            try:
+                tests = ClassPeerRankingService._resolve_tests(evaluation_ids)
+                notas = ClassPeerRankingService._merge_multi_instrument_student_results(
+                    notas,
+                    evaluation_ids=evaluation_ids,
+                    tests=tests,
+                )
+            except Exception:
+                logging.warning("Merge multi-instrumento do pacote falhou no ranking", exc_info=True)
+
         return {
             "students": students,
             "notas": notas,
             "censo": censo,
             "parear": parear,
-            "evaluation_id": evaluation_id,
+            "evaluation_id": evaluation_ids[0],
+            "evaluation_ids": list(evaluation_ids),
         }
 
     @classmethod

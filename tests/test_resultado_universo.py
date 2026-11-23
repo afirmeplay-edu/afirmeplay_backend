@@ -11,7 +11,13 @@ from app.services.participation_census import (
     ProvaCenso,
     build_participation_census,
 )
-from app.services.resultado_universo import linhas_com_nota_valida, resultados_para_notas
+from app.services.resultado_universo import (
+    _ids_unicos_ordenados,
+    carregar_universo_da_prova,
+    carregar_universo_das_provas,
+    linhas_com_nota_valida,
+    resultados_para_notas,
+)
 
 
 def test_sem_pareamento_corta_quem_esta_fora_do_recorte(monkeypatch):
@@ -83,6 +89,102 @@ def test_linhas_de_nivel_usam_a_nota_valida():
     assert linhas[0]["proficiencia_geral"] == 180
     assert linhas[0]["nivel_proficiencia_geral"] == "Básico"
     assert linhas[0]["status_geral"] == "concluida"
+
+
+def test_ids_unicos_ordenados_remove_vazios_e_duplicatas():
+    assert _ids_unicos_ordenados(["a", " b ", "a", "", None, "c"]) == ["a", "b", "c"]
+
+
+def test_carregar_universo_das_provas_vazio_retorna_sem_censo():
+    students, notas, censo = carregar_universo_das_provas([])
+    assert students == []
+    assert notas == []
+    assert censo is None
+
+
+def test_carregar_universo_das_provas_usa_in_e_test_ids_multi(monkeypatch):
+    captured = {}
+    import app.services.resultado_universo as mod
+
+    class_tests = [SimpleNamespace(class_id="t1", test_id="lp")]
+    students = [SimpleNamespace(id="s1", class_id="t1", school_id="esc")]
+    results = [SimpleNamespace(student_id="s1", test_id="lp", grade=8)]
+
+    class _CTQuery:
+        def filter(self, *args):
+            captured["class_test_filter"] = args
+            return self
+
+        def all(self):
+            return class_tests
+
+    class _StudentQuery:
+        def filter(self, *args):
+            return self
+
+        def all(self):
+            return students
+
+    class _ERQuery:
+        def filter(self, *args):
+            captured["er_filter"] = args
+            return self
+
+        def all(self):
+            return results
+
+    monkeypatch.setattr(
+        "app.models.classTest.ClassTest",
+        SimpleNamespace(query=_CTQuery(), test_id=SimpleNamespace(in_=lambda ids: True)),
+    )
+    monkeypatch.setattr(
+        "app.models.student.Student",
+        SimpleNamespace(
+            query=_StudentQuery(),
+            class_id=SimpleNamespace(in_=lambda ids: True),
+        ),
+    )
+    monkeypatch.setattr(
+        "app.models.evaluationResult.EvaluationResult",
+        SimpleNamespace(
+            query=_ERQuery(),
+            test_id=SimpleNamespace(in_=lambda ids: True),
+            student_id=SimpleNamespace(in_=lambda ids: True),
+        ),
+    )
+
+    def _notas(test_ids, alunos, rows, filtro, parear=False):
+        captured["notas_test_ids"] = list(test_ids)
+        return rows
+
+    def _censo(**kwargs):
+        captured["censo_test_ids"] = list(kwargs.get("test_ids") or [])
+        return SimpleNamespace(ok=True)
+
+    monkeypatch.setattr(mod, "resultados_para_notas", _notas)
+    monkeypatch.setattr(
+        "app.services.participation_census_shadow.montar_censo_carregado",
+        _censo,
+    )
+
+    out_students, out_notas, out_censo = carregar_universo_das_provas(
+        ["lp", "mat", "lp"],
+        municipio_id="city",
+        alunos_filtro="regular",
+        parear=True,
+    )
+    assert [s.id for s in out_students] == ["s1"]
+    assert out_notas == results
+    assert out_censo.ok is True
+    assert captured["notas_test_ids"] == ["lp", "mat"]
+    assert captured["censo_test_ids"] == ["lp", "mat"]
+
+    # Wrapper singular continua delegando.
+    captured.clear()
+    class_tests[:] = [SimpleNamespace(class_id="t1", test_id="lp")]
+    carregar_universo_da_prova("lp", municipio_id="city")
+    assert captured["notas_test_ids"] == ["lp"]
+    assert captured["censo_test_ids"] == ["lp"]
 
 
 def test_resumo_de_participacao_passa_a_usar_o_censo():

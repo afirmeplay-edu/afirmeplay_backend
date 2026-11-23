@@ -3,8 +3,8 @@
 Evolução por grupos (turma / série / escola) ao longo de múltiplas avaliações.
 Nível do grupo = classificação da proficiência média hierárquica (CLASSIFICATION_CONFIG).
 
-Cada grupo inclui ``grade_by_recorte``: nota 0–10 por disciplina (+ Geral)
-em cada avaliação, com ``evolution.percentage`` entre pares consecutivos.
+Cada grupo inclui ``grade_by_recorte`` só com o Geral (este relatório não
+mostra nota por disciplina) e ``evolution.percentage`` entre pares consecutivos.
 """
 from __future__ import annotations
 
@@ -22,10 +22,7 @@ from app.models.student import Student
 from app.models.test import Test
 from app.services.evaluation_calculator import EvaluationCalculator
 from app.services.evaluation_comparison_service import EvaluationComparisonService
-from app.utils.school_equal_weight_means import (
-    hierarchical_mean_from_subject_rows,
-    hierarchical_mean_grade_and_proficiency,
-)
+from app.utils.school_equal_weight_means import hierarchical_mean_grade_and_proficiency
 
 LEVEL_ORDER = [
     "Abaixo do Básico",
@@ -33,17 +30,6 @@ LEVEL_ORDER = [
     "Adequado",
     "Avançado",
 ]
-
-# Ordem preferencial dos recortes de disciplina na tabela do front.
-_PREFERRED_RECORTE_ORDER = (
-    "Língua Portuguesa",
-    "Lingua Portuguesa",
-    "Português",
-    "Portugues",
-    "Matemática",
-    "Matematica",
-)
-
 
 def _as_naive_utc(value: Any) -> datetime:
     if value is None:
@@ -130,61 +116,37 @@ def _pp_delta(from_val: float, to_val: float) -> float:
     return round(to_val - from_val, 2)
 
 
-def _subjects_from_group_results(results: List[Any]) -> Dict[str, str]:
-    """Mapa subject_id -> nome a partir de subject_results persistido."""
-    subjects: Dict[str, str] = {}
+def _disciplinas_com_dados(results: List[Any]) -> set:
+    """IDs de disciplina presentes no subject_results dos alunos do grupo."""
+    subjects = set()
     for result in results or []:
         stored = getattr(result, "subject_results", None) or {}
         if not isinstance(stored, dict):
             continue
         for subject_id, data in stored.items():
-            key = str(subject_id)
-            if key in subjects:
+            if data is None:
                 continue
-            if isinstance(data, dict):
-                name = data.get("subject_name") or data.get("name") or key
-            else:
-                name = key
-            subjects[key] = str(name)
+            subjects.add(str(subject_id))
     return subjects
 
 
-def _subject_rows_from_results(results: List[Any], subject_id: str) -> List[Dict[str, Any]]:
-    """Linhas de nota/proficiência por aluno para uma disciplina (JSON persistido)."""
-    sid = str(subject_id)
-    rows: List[Dict[str, Any]] = []
-    for result in results or []:
-        stored = getattr(result, "subject_results", None) or {}
-        if not isinstance(stored, dict):
-            continue
-        data = stored.get(sid) or stored.get(subject_id)
-        if not isinstance(data, dict):
-            continue
-        rows.append(
-            {
-                "student_id": result.student_id,
-                "grade": data.get("grade", 0),
-                "proficiency": data.get("proficiency", 0),
-                "classification": data.get("classification"),
-                "score_percentage": data.get("score_percentage", 0),
-                "class_id_snapshot": getattr(result, "class_id_snapshot", None),
-                "school_id_snapshot": getattr(result, "school_id_snapshot", None),
-                "grade_id_snapshot": getattr(result, "grade_id_snapshot", None),
-            }
-        )
-    return rows
+def _resultados_para_geral_do_relatorio(group_results: List[Any]) -> List[Any]:
+    """Quem entra no Geral de /test/compare-groups.
 
-
-def _sort_recorte_names(names: List[str]) -> List[str]:
-    preferred_index = {n.lower(): i for i, n in enumerate(_PREFERRED_RECORTE_ORDER)}
-
-    def _key(name: str):
-        idx = preferred_index.get((name or "").lower())
-        if idx is not None:
-            return (0, idx, (name or "").lower())
-        return (1, 0, (name or "").lower())
-
-    return sorted(names, key=_key)
+    AVISO (somente este relatório, 2026-11): não mostramos nota por disciplina.
+    O Geral da turma usa quem fez as duas quando as duas têm dados. Se a turma
+    só tiver uma disciplina neste ponto (ex.: 1º C fez Português e não fez
+    Matemática no diagnóstico), o Geral é essa disciplina. A nota virtual de
+    quem fez uma só já é a dessa disciplina. Resultados e a outra comparação
+    continuam exigindo o par completo (only_complete=True).
+    """
+    if not group_results:
+        return group_results
+    if not any(hasattr(result, "completo") for result in group_results):
+        return group_results
+    if len(_disciplinas_com_dados(group_results)) <= 1:
+        return list(group_results)
+    return [result for result in group_results if getattr(result, "completo", False)]
 
 
 def _grade_transitions_for_values(values: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -209,103 +171,22 @@ def _grade_transitions_for_values(values: List[Dict[str, Any]]) -> List[Dict[str
     return transitions
 
 
-def _build_grade_by_recorte(
-    points: List[Dict[str, Any]],
-    group_results_by_order: List[List[Any]],
-    ordered_tests: List[Any],
-    aggregation_level: str,
-) -> List[Dict[str, Any]]:
+def _build_grade_by_recorte(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Só o Geral. Ver ``_resultados_para_geral_do_relatorio``.
+
+    AVISO: Português e Matemática saíram deste payload de propósito. O front
+    deste relatório deve desenhar o item ``is_geral``. Não repor o recorte por
+    disciplina aqui sem rever a regra do 1º C (disciplina ausente).
     """
-    Nota 0–10 por disciplina (+ Geral) em cada avaliação do grupo,
-    com evolution.percentage entre pares consecutivos.
-    """
-    # União de disciplinas presentes em qualquer avaliação deste grupo.
-    subjects_map: Dict[str, str] = {}
-    for results in group_results_by_order:
-        for sid, name in _subjects_from_group_results(results).items():
-            if sid not in subjects_map:
-                subjects_map[sid] = name
-
-    # Fallback: subjects_info / questões do Test quando JSON não traz nomes.
-    if not subjects_map:
-        for test in ordered_tests:
-            if not test or not getattr(test, "id", None):
-                continue
-            try:
-                extracted = EvaluationComparisonService._extract_subjects_from_test(test)
-            except Exception:
-                extracted = {}
-            for sid, name in (extracted or {}).items():
-                key = str(sid)
-                if key not in subjects_map:
-                    subjects_map[key] = name
-
-    name_to_ids: Dict[str, List[str]] = {}
-    for sid, name in subjects_map.items():
-        name_to_ids.setdefault(name, []).append(sid)
-
-    grade_by_recorte: List[Dict[str, Any]] = []
-    for name in _sort_recorte_names(list(name_to_ids.keys())):
-        ids_for_name = name_to_ids[name]
-        values: List[Dict[str, Any]] = []
-        for i, (point, results, test) in enumerate(
-            zip(points, group_results_by_order, ordered_tests)
-        ):
-            order = point.get("order", i + 1)
-            evaluation_id = point.get("evaluation_id")
-            course_name = _course_name_for_test(test)
-            rows: List[Dict[str, Any]] = []
-            seen_students = set()
-            for sid in ids_for_name:
-                for row in _subject_rows_from_results(results, sid):
-                    student_key = row.get("student_id")
-                    if student_key in seen_students:
-                        continue
-                    seen_students.add(student_key)
-                    rows.append(row)
-            if not rows:
-                values.append(
-                    {
-                        "evaluation_id": evaluation_id,
-                        "order": order,
-                        "average_grade": None,
-                    }
-                )
-                continue
-            avg_grade, _, _ = hierarchical_mean_from_subject_rows(
-                rows,
-                aggregation_level,
-                course_name=course_name,
-                subject_name=name or "GERAL",
-            )
-            values.append(
-                {
-                    "evaluation_id": evaluation_id,
-                    "order": order,
-                    "average_grade": round(float(avg_grade), 2),
-                }
-            )
-
-        grade_by_recorte.append(
-            {
-                "recorte": name,
-                "subject_id": ids_for_name[0],
-                "is_geral": False,
-                "values": values,
-                "transitions": _grade_transitions_for_values(values),
-            }
-        )
-
-    # Linha Geral = mesma regra de points[].average_grade.
     geral_values = [
         {
-            "evaluation_id": p.get("evaluation_id"),
-            "order": p.get("order"),
-            "average_grade": p.get("average_grade"),
+            "evaluation_id": point.get("evaluation_id"),
+            "order": point.get("order"),
+            "average_grade": point.get("average_grade"),
         }
-        for p in points
+        for point in points
     ]
-    grade_by_recorte.append(
+    return [
         {
             "recorte": "Geral",
             "subject_id": None,
@@ -313,8 +194,7 @@ def _build_grade_by_recorte(
             "values": geral_values,
             "transitions": _grade_transitions_for_values(geral_values),
         }
-    )
-    return grade_by_recorte
+    ]
 
 
 class EvolutionGroupsService:
@@ -398,11 +278,15 @@ class EvolutionGroupsService:
             if grupos and any(len(group) > 1 for group in grupos):
                 from app.services.evolution_points_service import build_comparison_points
 
+                # only_complete=False: guarda quem fez só uma disciplina para o
+                # Geral deste relatório. O corte por turma está em
+                # _resultados_para_geral_do_relatorio.
                 materialized = build_comparison_points(
                     grupos,
                     escopo_calculo,
                     alunos_filtro=alunos_filtro,
                     parear=parear,
+                    only_complete=False,
                 )
                 tests_with_dates = [
                     {"test": point.as_test(), "application_date": point.application_date}
@@ -531,7 +415,6 @@ class EvolutionGroupsService:
 
             for key, meta in sorted(groups_meta.items(), key=lambda kv: (kv[1].get("name") or "").lower()):
                 points = []
-                group_results_by_order: List[List[Any]] = []
                 for i, test in enumerate(ordered_tests):
                     group_results = []
                     for r in all_results.get(test.id, []):
@@ -542,7 +425,7 @@ class EvolutionGroupsService:
                         if _group_key(view_by, school_id, grade_id, class_id) != key:
                             continue
                         group_results.append(r)
-                    group_results_by_order.append(group_results)
+                    group_results = _resultados_para_geral_do_relatorio(group_results)
 
                     if not group_results:
                         points.append(
@@ -603,12 +486,7 @@ class EvolutionGroupsService:
                             }
                         )
 
-                grade_by_recorte = _build_grade_by_recorte(
-                    points,
-                    group_results_by_order,
-                    ordered_tests,
-                    aggregation_level,
-                )
+                grade_by_recorte = _build_grade_by_recorte(points)
 
                 # Nível atual = última prova com dados
                 current_level = None

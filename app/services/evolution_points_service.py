@@ -278,8 +278,14 @@ def build_comparison_points(
     *,
     alunos_filtro: str = "todos",
     parear: bool = False,
+    only_complete: bool = True,
 ) -> List[ComparisonPointData]:
-    """Monta um ponto por grupo. Grupo com 2+ IDs usa a mescla de Resultados."""
+    """Monta um ponto por grupo. Grupo com 2+ IDs usa a mescla de Resultados.
+
+    ``only_complete=True`` (padrão, Resultados e a outra comparação): só entra
+    quem fez todas as provas do par. O relatório ``/test/compare-groups`` passa
+    ``False`` e decide o Geral por turma em ``EvolutionGroupsService``.
+    """
     from app.models.test import Test
     from sqlalchemy.orm import joinedload
 
@@ -363,10 +369,14 @@ def build_comparison_points(
             combined_results,
             infos,
             course_name,
-            only_complete=True,
+            only_complete=only_complete,
         )
         if not merged:
-            raise ValueError("As avaliações do grupo não possuem alunos em comum no escopo selecionado")
+            if only_complete:
+                raise ValueError(
+                    "As avaliações do grupo não possuem alunos em comum no escopo selecionado"
+                )
+            raise ValueError("As avaliações do grupo não possuem resultados no escopo selecionado")
         dates = [_earliest_application(test) for test in ordered]
         built.append(
             ComparisonPointData(

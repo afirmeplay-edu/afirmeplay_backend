@@ -89,6 +89,7 @@ def load_ica_bundle(
     `loaded` mantém written_test, scope, municipio e people filtrados.
     """
     filters = filters or {}
+    # _load já recusa Matemática (ValueError → 400).
     loaded = _load(written_test_id, filters)
     people = _filter_people(loaded["people"], filters)
     alunos_raw = people_to_alunos_raw(people)

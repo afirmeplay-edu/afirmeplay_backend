@@ -40,7 +40,9 @@ from app.afirme_ler.models.reading_written_test import (
 from app.afirme_ler.services import written_test_service as svc
 from app.afirme_ler.services.written_test_service import WrittenTestService
 
-SUBJECT_ID = "subj-portugues"
+SUBJECT_ID = "subj-portugues"  # nome "Língua Portuguesa" no fixture
+SUBJECT_PT_ALT_ID = "subj-portugues-alt"  # nome "Português" — mesma disciplina resolvida
+SUBJECT_MATH_ID = "subj-matematica"
 # UUIDs com letras: no SQLite a coluna UUID tem afinidade NUMERIC e ids só com dígitos colidem.
 STAGE_ID = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 GRADE_1 = uuid.UUID("a1a1a1a1-0000-4000-8000-0000000000a1")
@@ -110,9 +112,12 @@ def flask_app():
         ]
         db.metadata.create_all(engine, tables=tables)
 
+        MATH_MC_IDS = [f"math-mc-{i:02d}" for i in range(1, 22)]
         db.session.add_all([
             EducationStage(id=STAGE_ID, name="Anos Iniciais"),
             Subject(id=SUBJECT_ID, name="Língua Portuguesa"),
+            Subject(id=SUBJECT_PT_ALT_ID, name="Português"),
+            Subject(id=SUBJECT_MATH_ID, name="Matemática"),
             Grade(id=GRADE_1, name="1º ano", education_stage_id=STAGE_ID),
             Grade(id=GRADE_2, name="2º ano", education_stage_id=STAGE_ID),
             School(id=SCHOOL_A, name="Escola A"),
@@ -121,6 +126,7 @@ def flask_app():
             Class(id=CLASS_A2, name="2º A", school_id=SCHOOL_A, grade_id=GRADE_2),
             Class(id=CLASS_B1, name="1º B", school_id=SCHOOL_B, grade_id=GRADE_1),
             *[_question(qid) for qid in MC_IDS],
+            *[_question(qid, subject_id=SUBJECT_MATH_ID) for qid in MATH_MC_IDS],
             _question("play-mc", origin="afirme_play", question_type="multiple_choice"),
             _question("dict-1", question_type="dictation", alternatives=[],
                       correct_answer="sapato", value=2.0),
@@ -156,6 +162,8 @@ def flask_app():
             Student(id="st-eva", name="Eva", registration="M005", class_id=CLASS_A2,
                     school_id=SCHOOL_A, grade_id=GRADE_2),
         ])
+        # Expõe no módulo para helpers de Matemática.
+        flask_app.math_mc_ids = MATH_MC_IDS  # type: ignore[attr-defined]
         db.session.commit()
 
         with patch(
@@ -172,6 +180,7 @@ def _scope(**overrides):
     data = {
         "title": "Avaliação escrita — 1º bimestre",
         "description": "Prova impressa",
+        "subjectId": SUBJECT_ID,
         "gradeIds": [str(GRADE_1)],
         "schoolIds": [SCHOOL_A, SCHOOL_B],
         "classIds": [str(CLASS_A1), str(CLASS_B1)],
@@ -183,6 +192,10 @@ def _scope(**overrides):
 def _pattern_ids():
     """16 múltipla escolha, ditado nas posições 17 e 18, bilhete na 19."""
     return MC_IDS[:16] + ["dict-1", "dict-2", "prod-1"]
+
+
+def _math_ids(count=16):
+    return [f"math-mc-{i:02d}" for i in range(1, count + 1)]
 
 
 def _items(ids):
@@ -203,12 +216,17 @@ def test_create_with_valid_scope(flask_app):
     stored = db.session.get(ReadingWrittenTest, written_test.id)
     assert stored.status == "rascunho"
     assert stored.created_by == "u-prof"
+    assert stored.subject_id == SUBJECT_ID
     assert stored.grade_ids == [str(GRADE_1)]
     assert stored.school_ids == [SCHOOL_A, SCHOOL_B]
     assert stored.class_ids == [str(CLASS_A1), str(CLASS_B1)]
     assert stored.published_at is None
 
     detail = svc.to_detail(written_test)
+    assert detail["subjectId"] == SUBJECT_ID
+    assert detail["subjectName"] == "Língua Portuguesa"
+    assert detail["minQuestions"] == 19
+    assert detail["maxQuestions"] == 19
     assert detail["grades"] == [{"id": str(GRADE_1), "name": "1º ano"}]
     assert [s["name"] for s in detail["schools"]] == ["Escola A", "Escola B"]
     assert detail["classes"][0] == {
@@ -219,10 +237,36 @@ def test_create_with_valid_scope(flask_app):
     assert detail["totalQuestions"] == 2
 
 
+def test_create_without_subject_id_defaults_to_portuguese(flask_app):
+    """Front antigo não envia subjectId: default Português e publica no padrão 19."""
+    from app.afirme_ler.services.written_test_subject_rules import (
+        SUBJECT_KEY_PORTUGUES,
+        resolve_subject_key,
+    )
+
+    payload = _scope()
+    payload.pop("subjectId", None)
+    written_test = WrittenTestService.create(PROFESSOR, payload)
+    assert resolve_subject_key(written_test.subject_id) == SUBJECT_KEY_PORTUGUES
+    detail = svc.to_detail(written_test)
+    assert detail["minQuestions"] == 19
+    assert detail["maxQuestions"] == 19
+
+    WrittenTestService.set_questions(
+        PROFESSOR, written_test.id, {"questions": _items(_pattern_ids())}
+    )
+    published = WrittenTestService.publish(PROFESSOR, written_test.id)
+    assert published.status == "publicada"
+    assert svc.to_detail(published)["questionsByType"] == {
+        "multipleChoice": 16, "dictation": 2, "text_production": 1,
+    }
+
+
 @pytest.mark.parametrize(
     "overrides, message",
     [
         ({"title": "  "}, "title é obrigatório"),
+        ({"subjectId": "inexistente"}, "Disciplina \\(subjectId\\) não encontrada"),
         ({"gradeIds": []}, "ao menos uma série"),
         ({"schoolIds": []}, "ao menos uma escola"),
         ({"classIds": []}, "ao menos uma turma"),
@@ -408,12 +452,108 @@ def test_publish_requires_the_written_pattern(flask_app):
 
 def test_publish_with_21_is_rejected(flask_app):
     written_test = _create(questions=_items(MC_IDS[:16]))
-    with patch("app.afirme_ler.services.written_test_service.REQUIRED_QUESTIONS", 25):
+    with pytest.raises(ValueError, match="no máximo 19 questões"):
         WrittenTestService.set_questions(PROFESSOR, written_test.id, {"questions": _items(MC_IDS)})
-    with pytest.raises(ValueError, match="exatamente 19 questões .*hoje tem 21"):
-        WrittenTestService.publish(PROFESSOR, written_test.id)
     db.session.rollback()
     assert WrittenTestService.get(written_test.id).status == "rascunho"
+
+
+# ---------------------------------------------------------------------------
+# Matemática (16–19 MC; sem ditado/bilhete)
+# ---------------------------------------------------------------------------
+
+def test_math_publish_accepts_16_and_19(flask_app):
+    for count in (16, 19):
+        draft = _create(
+            title=f"Mat {count}",
+            subjectId=SUBJECT_MATH_ID,
+            questions=_items(_math_ids(count)),
+        )
+        detail = svc.to_detail(draft)
+        assert detail["minQuestions"] == 16
+        assert detail["maxQuestions"] == 19
+        assert detail["subjectName"] == "Matemática"
+        published = WrittenTestService.publish(PROFESSOR, draft.id)
+        assert published.status == "publicada"
+        assert svc.to_detail(published)["totalQuestions"] == count
+        assert svc.to_detail(published)["questionsByType"] == {
+            "multipleChoice": count, "dictation": 0, "text_production": 0,
+        }
+
+
+def test_math_publish_rejects_15_and_20(flask_app):
+    draft = _create(subjectId=SUBJECT_MATH_ID, questions=_items(_math_ids(15)))
+    with pytest.raises(ValueError, match="entre 16 e 19 questões de múltipla escolha"):
+        WrittenTestService.publish(PROFESSOR, draft.id)
+    db.session.rollback()
+
+    with pytest.raises(ValueError, match="entre 16 e 19 questões de múltipla escolha"):
+        WrittenTestService.set_questions(
+            PROFESSOR, draft.id, {"questions": _items(_math_ids(20))}
+        )
+    db.session.rollback()
+
+
+def test_math_rejects_dictation_and_portuguese_question(flask_app):
+    draft = _create(subjectId=SUBJECT_MATH_ID)
+    with pytest.raises(ValueError, match="apenas questões de múltipla escolha"):
+        WrittenTestService.set_questions(
+            PROFESSOR, draft.id, {"questions": _items(_math_ids(15) + ["dict-1"])}
+        )
+    db.session.rollback()
+
+    with pytest.raises(ValueError, match="outra disciplina"):
+        WrittenTestService.set_questions(
+            PROFESSOR, draft.id, {"questions": _items(["mc-01"] + _math_ids(15))}
+        )
+    db.session.rollback()
+
+
+def test_portuguese_aliases_are_same_discipline(flask_app):
+    """'Português' e 'Língua Portuguesa' resolvem para a mesma disciplina."""
+    # Avaliação com subject "Português"; questões do fixture usam "Língua Portuguesa".
+    draft = _create(subjectId=SUBJECT_PT_ALT_ID, questions=_items(_pattern_ids()))
+    assert draft.subject_id == SUBJECT_PT_ALT_ID
+    published = WrittenTestService.publish(PROFESSOR, draft.id)
+    assert published.status == "publicada"
+    detail = svc.to_detail(published)
+    assert detail["minQuestions"] == 19
+    assert detail["subjectName"] == "Português"
+
+
+def test_cannot_change_subject_with_questions(flask_app):
+    draft = _create(questions=[{"id": "mc-01"}])
+    with pytest.raises(ValueError, match="trocar a disciplina enquanto houver questões"):
+        WrittenTestService.update(PROFESSOR, draft.id, {"subjectId": SUBJECT_MATH_ID})
+    db.session.rollback()
+
+    WrittenTestService.set_questions(PROFESSOR, draft.id, {"questions": []})
+    updated = WrittenTestService.update(PROFESSOR, draft.id, {"subjectId": SUBJECT_MATH_ID})
+    assert updated.subject_id == SUBJECT_MATH_ID
+    assert svc.to_detail(updated)["minQuestions"] == 16
+
+
+def test_math_writing_and_ica_are_rejected(flask_app):
+    from app.afirme_ler.services.written_test_writing_grade import save_manual_writing
+    from app.afirme_ler.services.written_test_ica_service import ica_dashboard
+
+    published = _create(
+        subjectId=SUBJECT_MATH_ID,
+        questions=_items(_math_ids(16)),
+    )
+    WrittenTestService.publish(PROFESSOR, published.id)
+
+    with pytest.raises(ValueError, match="Não se aplica a avaliações de Matemática"):
+        save_manual_writing(published.id, "st-ana", {"words": []}, reviewer_id="u-prof")
+    with pytest.raises(ValueError, match="Não se aplica a avaliações de Matemática"):
+        ica_dashboard(published.id)
+
+
+def test_list_filters_by_subject_id(flask_app):
+    _create(title="PT", subjectId=SUBJECT_ID)
+    _create(title="MAT", subjectId=SUBJECT_MATH_ID)
+    titles = [item["title"] for item in WrittenTestService.list_tests({"subject_id": SUBJECT_MATH_ID})["data"]]
+    assert titles == ["MAT"]
 
 
 def test_publish_rejects_deleted_question(flask_app):
@@ -590,6 +730,8 @@ def test_ddl_has_cascade_and_unique_constraints():
     assert 'UNIQUE (written_test_id, "order")' in ddl
     assert "CHECK (status IN ('rascunho', 'publicada'))" in ddl
     assert 'CHECK ("order" BETWEEN 1 AND 19)' in ddl
+    assert "ADD COLUMN IF NOT EXISTS subject_id VARCHAR" in ddl
+    assert "ix_reading_written_test_subject" in ddl
     assert "reading_evaluation " not in ddl
 
 

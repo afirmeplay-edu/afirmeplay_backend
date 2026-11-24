@@ -82,14 +82,24 @@ def catalog(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if filters.get(key):
             list_filters[key] = filters[key]
     listed = WrittenTestService.list_tests(list_filters)
+    from app.afirme_ler.services.written_test_subject_rules import (
+        SUBJECT_KEY_PORTUGUES,
+        subject_key_from_name,
+    )
+
     avaliacoes: List[Dict[str, Any]] = []
     for item in listed.get("data") or []:
+        # ICA / Acertos e Níveis (fonte escrita) só Português.
+        if subject_key_from_name(item.get("subjectName")) != SUBJECT_KEY_PORTUGUES:
+            continue
         avaliacoes.append(
             {
                 "id": item.get("id"),
                 "titulo": item.get("title") or item.get("titulo"),
                 "status": item.get("status"),
                 "fonte": FONTE_ESCRITA,
+                "subjectId": item.get("subjectId"),
+                "subjectName": item.get("subjectName"),
             }
         )
 

@@ -143,14 +143,17 @@ def score_multiple_choice(
     blank: List[Dict[str, Any]],
     invalid: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """1 ponto se a letra lida é o gabarito. Em branco ou marca dupla vale 0."""
+    """1 ponto se a letra lida é o gabarito. Em branco ou marca dupla vale 0.
+
+    Usa a quantidade real de objetivas da prova (16–19 em Matemática; 16 em Português).
+    """
     blank_ids = _id_set(blank)
     invalid_ids = _id_set(invalid)
     items = []
     for entry in _links(written_test_id):
         number = entry["number"]
         question = entry["question"]
-        if number > MC_MAX or question.question_type not in ("multipleChoice", "multiple_choice"):
+        if question.question_type not in ("multipleChoice", "multiple_choice"):
             continue
         question_id = str(question.id)
         answer_key = str(question.correct_answer or "").strip().upper()
@@ -178,15 +181,19 @@ def score_multiple_choice(
         })
     decided = [item["points"] for item in items if item["points"] is not None]
     points = sum(decided) if items and len(decided) == len(items) else None
-    return {"items": items, "points": points, "maxPoints": MC_MAX}
+    max_points = len(items) if items else MC_MAX
+    return {"items": items, "points": points, "maxPoints": max_points}
 
 
 def public_objective(stored: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not stored or not stored.get("items"):
         return None
+    max_points = stored.get("maxPoints")
+    if max_points is None:
+        max_points = len(stored["items"])
     return {
         "points": stored.get("points"),
-        "maxPoints": MC_MAX,
+        "maxPoints": max_points,
         "items": [
             {
                 "number": item.get("number"),
@@ -199,6 +206,16 @@ def public_objective(stored: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any
             for item in stored["items"]
         ],
     }
+
+
+def _assert_writing_allowed(written_test_id: str) -> ReadingWrittenTest:
+    written_test = db.session.get(ReadingWrittenTest, str(written_test_id))
+    if written_test is None:
+        raise LookupError("Avaliação escrita não encontrada.")
+    from app.afirme_ler.services.written_test_subject_rules import assert_not_matematica
+
+    assert_not_matematica(written_test)
+    return written_test
 
 
 def _stimulus(question: Any) -> str:
@@ -1198,6 +1215,7 @@ def confirm_writing(
     """Troca a transcrição pendente pela do professor e avalia de novo só esse texto."""
     from app.models.student import Student
 
+    _assert_writing_allowed(written_test_id)
     if not isinstance(payload, dict):
         raise ValueError("Corpo da requisição inválido.")
     student = db.session.get(Student, str(student_id))
@@ -1324,11 +1342,10 @@ def release_writing(written_test_id: str, student_id: str, reviewer_id: str) -> 
     """Libera a nota do ditado e do bilhete depois que não há item pendente."""
     from app.models.student import Student
 
+    _assert_writing_allowed(written_test_id)
     student = db.session.get(Student, str(student_id))
     if student is None:
         raise LookupError("Aluno não encontrado.")
-    if db.session.get(ReadingWrittenTest, str(written_test_id)) is None:
-        raise LookupError("Avaliação escrita não encontrada.")
     row = ReadingWrittenTestCorrection.query.filter_by(
         written_test_id=str(written_test_id), student_id=str(student_id),
     ).first()
@@ -1360,13 +1377,12 @@ def save_manual_writing(written_test_id: str, student_id: str, payload: Dict[str
     from app.models.student import Student
     from app.socioeconomic_forms.services.answer_sheet_correction import student_display_name
 
+    _assert_writing_allowed(written_test_id)
     if not isinstance(payload, dict):
         raise ValueError("Corpo da requisição inválido.")
     student = db.session.get(Student, str(student_id))
     if student is None:
         raise LookupError("Aluno não encontrado.")
-    if db.session.get(ReadingWrittenTest, str(written_test_id)) is None:
-        raise LookupError("Avaliação escrita não encontrada.")
 
     entries = {entry["number"]: entry for entry in _links(written_test_id)}
     words = _manual_words(payload, entries)

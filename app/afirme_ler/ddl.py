@@ -330,6 +330,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test (
     id VARCHAR PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
     description TEXT,
+    subject_id VARCHAR,
     grade_ids JSON NOT NULL DEFAULT '[]'::json,
     school_ids JSON NOT NULL DEFAULT '[]'::json,
     class_ids JSON NOT NULL DEFAULT '[]'::json,
@@ -341,11 +342,16 @@ CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test (
     CONSTRAINT chk_reading_written_test_status
         CHECK (status IN ('rascunho', 'publicada'))
 );
+ALTER TABLE "{schema}".reading_written_test
+    ADD COLUMN IF NOT EXISTS subject_id VARCHAR;
 CREATE INDEX IF NOT EXISTS ix_reading_written_test_status
     ON "{schema}".reading_written_test(status);
 CREATE INDEX IF NOT EXISTS ix_reading_written_test_created_by
     ON "{schema}".reading_written_test(created_by);
+CREATE INDEX IF NOT EXISTS ix_reading_written_test_subject
+    ON "{schema}".reading_written_test(subject_id);
 COMMENT ON TABLE "{schema}".reading_written_test IS 'Avaliação escrita do Afirme Ler (prova impressa com questões do banco)';
+COMMENT ON COLUMN "{schema}".reading_written_test.subject_id IS 'public.subject.id (Português ou Matemática); referência lógica, sem FK física';
 
 CREATE TABLE IF NOT EXISTS "{schema}".reading_written_test_question (
     id VARCHAR PRIMARY KEY,
@@ -445,7 +451,7 @@ CREATE INDEX IF NOT EXISTS ix_reading_written_test_correction_test
 COMMENT ON TABLE "{schema}".reading_written_test_correction IS 'Leitura do cartão-resposta da avaliação escrita: letras das objetivas, imagens e nota do ditado e do bilhete';
 COMMENT ON COLUMN "{schema}".reading_written_test_correction.answers IS 'Letra marcada por question_id das questões de múltipla escolha';
 COMMENT ON COLUMN "{schema}".reading_written_test_correction.crops IS 'Recortes PNG do ditado e do bilhete no MinIO, por question_id';
-COMMENT ON COLUMN "{schema}".reading_written_test_correction.objective IS 'Nota das 16 objetivas calculada pelo gabarito, sem participação da IA';
+COMMENT ON COLUMN "{schema}".reading_written_test_correction.objective IS 'Nota das objetivas (quantidade real da prova) calculada pelo gabarito, sem participação da IA';
 COMMENT ON COLUMN "{schema}".reading_written_test_correction.writing IS 'Nota do ditado e do bilhete: IA quando há cartão, ou lançamento manual do professor';
 COMMENT ON COLUMN "{schema}".reading_written_test_correction.ica IS 'Resultado do painel ICA já calculado: TCT, proficiência, nível e situação';
 """

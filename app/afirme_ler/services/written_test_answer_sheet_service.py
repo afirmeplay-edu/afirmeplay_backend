@@ -156,6 +156,8 @@ def card_template_context(
     return {
         "test": {"title": written_test.title},
         "items": items,
+        "has_dictation": any(item.get("type") == QUESTION_TYPE_DICTATION for item in items),
+        "has_production": any(item.get("type") == QUESTION_TYPE_TEXT_PRODUCTION for item in items),
         "sizes": SIZES,
         "bubble_png": BUBBLE_PNG,
         "anchor_png": ANCHOR_PNG,

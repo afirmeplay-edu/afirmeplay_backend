@@ -17,6 +17,8 @@ class ReadingWrittenTest(db.Model):
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     title = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text, nullable=True)
+    # Referência lógica a public.subject (sem FK física — catálogo compartilhado).
+    subject_id = db.Column(db.String, nullable=False)
     grade_ids = db.Column(db.JSON, nullable=False, default=list)
     school_ids = db.Column(db.JSON, nullable=False, default=list)
     class_ids = db.Column(db.JSON, nullable=False, default=list)
@@ -170,7 +172,7 @@ class ReadingWrittenTestCorrection(db.Model):
     invalid = db.Column(db.JSON, nullable=False, default=list)
     crops = db.Column(db.JSON, nullable=False, default=dict)
     pages = db.Column(db.JSON, nullable=False, default=list)
-    # Nota das 16 objetivas, calculada pelo gabarito. A IA não preenche este campo.
+    # Nota das objetivas (quantidade real da prova), pelo gabarito. A IA não preenche este campo.
     objective = db.Column(db.JSON, nullable=False, default=dict)
     # Nota do ditado e do bilhete: IA quando o cartão foi enviado, ou lançamento do professor.
     writing = db.Column(db.JSON, nullable=False, default=dict)

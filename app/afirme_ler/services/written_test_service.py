@@ -49,14 +49,25 @@ from app.afirme_ler.services.question_bank_service import (
     validate_dictation_marks,
 )
 from app.afirme_ler.services.scope_service import apply_visibility_filter
-
-REQUIRED_QUESTIONS = 19
-# Posições fixas da prova: 1–16 múltipla escolha, 17 e 18 ditado, 19 bilhete.
-PUBLISH_PATTERN = (
-    (range(1, 17), QUESTION_TYPE_MULTIPLE_CHOICE, "múltipla escolha"),
-    (range(17, 19), QUESTION_TYPE_DICTATION, "ditado"),
-    (range(19, 20), QUESTION_TYPE_TEXT_PRODUCTION, "bilhete"),
+from app.afirme_ler.services.written_test_subject_rules import (
+    SUBJECT_KEY_PORTUGUES,
+    SUBJECT_RULES,
+    assert_publish_composition,
+    assert_question_matches_rules,
+    find_subject_id_by_key,
+    max_questions_message,
+    resolve_subject_key,
+    rules_for_subject_id,
+    rules_for_written_test,
+    subject_payload,
+    MSG_SUBJECT_CHANGE_LOCKED,
+    MSG_SUBJECT_REQUIRED,
 )
+from app.models.subject import Subject
+
+# Compat: Português permanece 19; preferir SUBJECT_RULES / rules_for_*.
+REQUIRED_QUESTIONS = SUBJECT_RULES[SUBJECT_KEY_PORTUGUES].max_questions
+PUBLISH_PATTERN = SUBJECT_RULES[SUBJECT_KEY_PORTUGUES].publish_pattern
 ALLOWED_QUESTION_DB_TYPES = OBJECTIVE_DB_TYPES + (
     QUESTION_TYPE_DICTATION,
     QUESTION_TYPE_TEXT_PRODUCTION,
@@ -185,12 +196,17 @@ def validate_scope(data: Dict[str, Any]) -> Dict[str, List[str]]:
     return {"grade_ids": grade_ids, "school_ids": school_ids, "class_ids": class_ids}
 
 
-def parse_question_items(raw: Any) -> List[Tuple[str, int, Optional[Dict[str, Any]]]]:
+def parse_question_items(
+    raw: Any,
+    *,
+    max_questions: int = REQUIRED_QUESTIONS,
+    max_message: Optional[str] = None,
+) -> List[Tuple[str, int, Optional[Dict[str, Any]]]]:
     """Lista [{id, order, dictationMarks?}] ordenada por order."""
     if not isinstance(raw, list):
         raise ValueError("questions deve ser uma lista de {id, order}.")
-    if len(raw) > REQUIRED_QUESTIONS:
-        raise ValueError(MSG_MAX_QUESTIONS)
+    if len(raw) > max_questions:
+        raise ValueError(max_message or MSG_MAX_QUESTIONS)
 
     items: List[Tuple[str, int, Optional[Dict[str, Any]]]] = []
     seen_ids = set()
@@ -248,18 +264,13 @@ def _assert_marks_exist(
             )
 
 
-def _assert_publish_pattern(links: List[ReadingWrittenTestQuestion], found: Dict[str, Question]) -> None:
-    """Publicação só com 16 objetivas, ditado nas posições 17 e 18 e bilhete na 19."""
-    by_order = {link.order: found[link.question_id] for link in links}
-    for orders, expected, label in PUBLISH_PATTERN:
-        for order in orders:
-            actual = _type_key(by_order[order].question_type)
-            if actual != expected:
-                raise ValueError(
-                    f"A posição {order} precisa ser {label}. "
-                    "A prova tem 16 questões de múltipla escolha (1 a 16), "
-                    "2 ditados (17 e 18) e 1 bilhete (19)."
-                )
+def _assert_publish_pattern(
+    links: List[ReadingWrittenTestQuestion],
+    found: Dict[str, Question],
+    rules=None,
+) -> None:
+    """Compat: delega para assert_publish_composition (padrão Português se rules omitido)."""
+    assert_publish_composition(links, found, rules or SUBJECT_RULES[SUBJECT_KEY_PORTUGUES])
 
 
 def _assert_image_descriptions(found: Dict[str, Question]) -> None:
@@ -282,7 +293,35 @@ def _assert_allowed_type(question: Question) -> None:
         )
 
 
-def load_visible_questions(user: Dict[str, Any], question_ids: List[str]) -> Dict[str, Question]:
+def _parse_subject_id(value: Any, *, required: bool = True) -> Optional[str]:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if required:
+            raise ValueError(MSG_SUBJECT_REQUIRED)
+        return None
+    subject_id = str(value).strip()
+    if db.session.get(Subject, subject_id) is None:
+        raise ValueError("Disciplina (subjectId) não encontrada.")
+    # Só Português e Matemática entram na avaliação escrita.
+    resolve_subject_key(subject_id)
+    return subject_id
+
+
+def _resolve_create_subject_id(data: Dict[str, Any]) -> str:
+    """POST: subjectId opcional; ausente → Português pelo nome em public.subject."""
+    if "subjectId" not in data or data.get("subjectId") is None or (
+        isinstance(data.get("subjectId"), str) and not str(data.get("subjectId")).strip()
+    ):
+        return find_subject_id_by_key(SUBJECT_KEY_PORTUGUES)
+    return _parse_subject_id(data.get("subjectId"), required=True)  # type: ignore[return-value]
+
+
+def load_visible_questions(
+    user: Dict[str, Any],
+    question_ids: List[str],
+    *,
+    rules=None,
+    assessment_subject_id: Optional[str] = None,
+) -> Dict[str, Question]:
     if not question_ids:
         return {}
     query = Question.query.filter(Question.id.in_(question_ids))
@@ -291,7 +330,10 @@ def load_visible_questions(user: Dict[str, Any], question_ids: List[str]) -> Dic
         question = found.get(question_id)
         if not question:
             raise ValueError(f"Questão não encontrada ou sem acesso: {question_id}.")
-        _assert_allowed_type(question)
+        if rules is not None and assessment_subject_id is not None:
+            assert_question_matches_rules(question, rules, assessment_subject_id)
+        else:
+            _assert_allowed_type(question)
     return found
 
 
@@ -362,7 +404,7 @@ def _named(rows, ids: List[str], extra=None) -> List[Dict[str, Any]]:
 
 def _base_dict(written_test: ReadingWrittenTest) -> Dict[str, Any]:
     creator = written_test.creator
-    return {
+    data = {
         "id": written_test.id,
         "title": written_test.title,
         "description": written_test.description,
@@ -378,6 +420,8 @@ def _base_dict(written_test: ReadingWrittenTest) -> Dict[str, Any]:
         "updatedAt": written_test.updated_at.isoformat() if written_test.updated_at else None,
         "publishedAt": written_test.published_at.isoformat() if written_test.published_at else None,
     }
+    data.update(subject_payload(written_test.subject_id))
+    return data
 
 
 def to_detail(written_test: ReadingWrittenTest) -> Dict[str, Any]:
@@ -605,14 +649,30 @@ class WrittenTestService:
         assert_can_write(user)
         title = _required_title(data.get("title"))
         description = _optional_description(data.get("description"))
+        subject_id = _resolve_create_subject_id(data)
+        rules = rules_for_subject_id(subject_id)
         scope = validate_scope(data)
-        items = parse_question_items(data["questions"]) if data.get("questions") is not None else []
-        found = load_visible_questions(user, [question_id for question_id, _, _ in items])
+        items = (
+            parse_question_items(
+                data["questions"],
+                max_questions=rules.max_questions,
+                max_message=max_questions_message(rules),
+            )
+            if data.get("questions") is not None
+            else []
+        )
+        found = load_visible_questions(
+            user,
+            [question_id for question_id, _, _ in items],
+            rules=rules,
+            assessment_subject_id=subject_id,
+        )
         _assert_marks_exist(items, found)
 
         written_test = ReadingWrittenTest(
             title=title,
             description=description,
+            subject_id=subject_id,
             status=WRITTEN_TEST_STATUS_DRAFT,
             created_by=_user_id(user),
             **scope,
@@ -633,6 +693,12 @@ class WrittenTestService:
             written_test.title = _required_title(data.get("title"))
         if "description" in data:
             written_test.description = _optional_description(data.get("description"))
+        if "subjectId" in data:
+            new_subject_id = _parse_subject_id(data.get("subjectId"), required=True)
+            if new_subject_id != written_test.subject_id:
+                if written_test.questions:
+                    raise ValueError(MSG_SUBJECT_CHANGE_LOCKED)
+                written_test.subject_id = new_subject_id
         if any(key in data for key in SCOPE_FIELDS):
             merged = {
                 key: data[key] if key in data else getattr(written_test, column)
@@ -654,8 +720,18 @@ class WrittenTestService:
         _assert_draft(written_test)
         if "questions" not in data:
             raise ValueError("questions é obrigatório.")
-        items = parse_question_items(data.get("questions"))
-        found = load_visible_questions(user, [question_id for question_id, _, _ in items])
+        rules = rules_for_written_test(written_test)
+        items = parse_question_items(
+            data.get("questions"),
+            max_questions=rules.max_questions,
+            max_message=max_questions_message(rules),
+        )
+        found = load_visible_questions(
+            user,
+            [question_id for question_id, _, _ in items],
+            rules=rules,
+            assessment_subject_id=written_test.subject_id,
+        )
         _assert_marks_exist(items, found)
 
         _replace_questions(written_test, items)
@@ -670,14 +746,10 @@ class WrittenTestService:
         if written_test.status == WRITTEN_TEST_STATUS_PUBLISHED:
             raise ValueError("A avaliação já está publicada.")
 
+        rules = rules_for_written_test(written_test)
         links = list(written_test.questions or [])
-        if len(links) != REQUIRED_QUESTIONS:
-            raise ValueError(
-                f"A avaliação precisa ter exatamente {REQUIRED_QUESTIONS} questões para ser "
-                f"publicada (hoje tem {len(links)})."
-            )
         ids = [link.question_id for link in links]
-        found = {q.id: q for q in Question.query.filter(Question.id.in_(ids)).all()}
+        found = {q.id: q for q in Question.query.filter(Question.id.in_(ids)).all()} if ids else {}
         for question_id in ids:
             question = found.get(question_id)
             if not question:
@@ -685,9 +757,10 @@ class WrittenTestService:
                     f"A questão {question_id} não existe mais no banco de questões. "
                     "Troque-a antes de publicar."
                 )
-            _assert_allowed_type(question)
-        _assert_publish_pattern(links, found)
-        _assert_image_descriptions(found)
+            assert_question_matches_rules(question, rules, written_test.subject_id)
+        assert_publish_composition(links, found, rules)
+        if rules.key == SUBJECT_KEY_PORTUGUES:
+            _assert_image_descriptions(found)
 
         written_test.status = WRITTEN_TEST_STATUS_PUBLISHED
         written_test.published_at = db.func.now()
@@ -845,6 +918,11 @@ class WrittenTestService:
                 except ValueError as exc:
                     raise ValueError(f"{param} deve ser um UUID.") from exc
                 query = query.filter(cast(column, Text).like(f'%"{value}"%'))
+
+        subject_filter = (filters.get("subject_id") or filters.get("subjectId") or "").strip()
+        if subject_filter:
+            # Aceita UUID ou id string (subject.id no projeto é VARCHAR).
+            query = query.filter(ReadingWrittenTest.subject_id == subject_filter)
 
         term = (filters.get("q") or "").strip()
         if term:

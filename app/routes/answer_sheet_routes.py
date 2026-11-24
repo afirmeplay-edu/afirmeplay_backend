@@ -4391,12 +4391,22 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
 
 
 def _calcular_estatisticas_grupo_cartao(
-    class_ids, gabarito_id, periodo_bounds=None, aggregation_level: str = "escola", alunos_filtro=None
+    class_ids,
+    gabarito_id,
+    periodo_bounds=None,
+    aggregation_level: str = "escola",
+    alunos_filtro=None,
+    *,
+    serie_id_curso: Optional[str] = None,
+    filtro_resultados=None,
 ):
     """Estatísticas para um grupo de turmas (usado em resultados_detalhados).
 
     ``aggregation_level``: ``escola`` (média séries→turmas→alunos), ``serie``, ``turma`` —
     conforme o que o grupo representa (ex.: uma escola inteira vs uma série vs uma turma).
+
+    ``serie_id_curso``: série que define a escala (course_name). Sem ela, vale a série
+    única das turmas do grupo. ``filtro_resultados``: predicado extra por resultado.
     """
     if not class_ids or not gabarito_id:
         return {
@@ -4421,6 +4431,8 @@ def _calcular_estatisticas_grupo_cartao(
         alunos_filtro,
         somente_corrigidos=False,
     )
+    if filtro_resultados is not None:
+        resultados = [r for r in resultados if filtro_resultados(r)]
     participantes = len(resultados)
     participacao = _participacao_matricula_cartao(participantes, len(alunos))
     from app.utils.school_equal_weight_means import hierarchical_mean_grade_and_proficiency
@@ -4428,11 +4440,14 @@ def _calcular_estatisticas_grupo_cartao(
         course_name_and_has_matematica_for_gabarito,
     )
 
-    from app.services.cartao_resposta.gabarito_grades import grades_from_classes
+    if serie_id_curso:
+        serie_id_grp = str(serie_id_curso)
+    else:
+        from app.services.cartao_resposta.gabarito_grades import grades_from_classes
 
-    classes_grp = Class.query.filter(Class.id.in_(class_ids)).all() if class_ids else []
-    grades_grp = grades_from_classes(classes_grp)
-    serie_id_grp = grades_grp[0]["id"] if len(grades_grp) == 1 else None
+        classes_grp = Class.query.filter(Class.id.in_(class_ids)).all() if class_ids else []
+        grades_grp = grades_from_classes(classes_grp)
+        serie_id_grp = grades_grp[0]["id"] if len(grades_grp) == 1 else None
     course_name, has_matematica = course_name_and_has_matematica_for_gabarito(
         str(gabarito_id), serie_id=serie_id_grp
     )
@@ -6542,6 +6557,7 @@ def _obter_gabaritos_evolucao_cartao(
             AnswerSheetGabarito.title,
             func.min(AnswerSheetResult.corrected_at).label("data_correcao"),
             AnswerSheetGabarito.created_at,
+            func.array_agg(func.distinct(Class.id)).label("turma_ids"),
         )
         .join(AnswerSheetResult, AnswerSheetResult.gabarito_id == AnswerSheetGabarito.id)
         .join(Student, AnswerSheetResult.student_id == Student.id)
@@ -6605,24 +6621,98 @@ def _obter_gabaritos_evolucao_cartao(
     )
     rows = query.all()
 
+    turmas_info = _turmas_info_evolucao_cartao(
+        {cid for row in rows for cid in (row[4] or []) if cid}
+    )
     city_id = str(user.get("city_id") or "") or None
     result: List[Dict[str, Any]] = []
     for row in rows:
-        gab_id, title, data_corr, created_at = row[0], row[1], row[2], row[3]
+        gab_id, title, data_corr, created_at, turma_ids = row[0], row[1], row[2], row[3], row[4]
         gab = AnswerSheetGabarito.query.get(gab_id)
         if not gab or not user_can_access_gabarito(user, permissao, gab, city_id):
             continue
         data_exibir = _formatar_data_evolucao_cartao(data_corr)
         if data_exibir is None:
             data_exibir = _formatar_data_evolucao_cartao(created_at)
-        result.append(
-            {
-                "id": str(gab_id),
-                "titulo": title or "",
-                "data": data_exibir,
-            }
+        item = {
+            "id": str(gab_id),
+            "titulo": title or "",
+            "data": data_exibir,
+        }
+        item.update(
+            _detalhes_gabarito_evolucao_cartao(gab, turma_ids or [], turmas_info, data_corr or created_at)
         )
+        result.append(item)
     return result
+
+
+def _turmas_info_evolucao_cartao(class_ids: Set[Any]) -> Dict[str, Dict[str, Any]]:
+    """id da turma → {id, nome, serie_id, serie, escola_id, escola} (uma ida ao banco por tabela)."""
+    if not class_ids:
+        return {}
+    classes = Class.query.filter(Class.id.in_(list(class_ids))).all()
+    grade_ids = list({c.grade_id for c in classes if c.grade_id})
+    school_ids = list({str(c.school_id) for c in classes if c.school_id})
+    grades = (
+        {str(g.id): g.name for g in Grade.query.filter(Grade.id.in_(grade_ids)).all()}
+        if grade_ids
+        else {}
+    )
+    schools = (
+        {str(s.id): s.name for s in School.query.filter(School.id.in_(school_ids)).all()}
+        if school_ids
+        else {}
+    )
+    out: Dict[str, Dict[str, Any]] = {}
+    for c in classes:
+        gid = str(c.grade_id) if c.grade_id else None
+        sid = str(c.school_id) if c.school_id else None
+        out[str(c.id)] = {
+            "id": str(c.id),
+            "nome": c.name or "",
+            "serie_id": gid,
+            "serie": grades.get(gid) if gid else None,
+            "escola_id": sid,
+            "escola": schools.get(sid) if sid else None,
+        }
+    return out
+
+
+def _detalhes_gabarito_evolucao_cartao(
+    gab: AnswerSheetGabarito,
+    turma_ids: List[Any],
+    turmas_info: Dict[str, Dict[str, Any]],
+    data_ref: Optional[datetime],
+) -> Dict[str, Any]:
+    """Campos extras do seletor de Evolução (aba Escola · Série · Turma)."""
+    from app.services.cartao_resposta.gabarito_grades import (
+        course_name_for_grade_label,
+        get_gabarito_grades,
+    )
+
+    try:
+        disciplinas = [
+            {"id": b["id"], "nome": b["nome"]}
+            for b in _extrair_blocos_por_disciplina_cartao(gab.blocks_config or {})
+        ]
+    except Exception:
+        disciplinas = []
+    series = get_gabarito_grades(gab)
+    turmas = sorted(
+        (turmas_info[str(cid)] for cid in turma_ids if str(cid) in turmas_info),
+        key=lambda t: ((t.get("escola") or "").lower(), (t.get("serie") or "").lower(), t["nome"].lower()),
+    )
+    etapas = sorted({course_name_for_grade_label(s.get("name") or "") for s in series} - {""})
+    return {
+        "origem": "cartao_resposta",
+        "data_iso": data_ref.isoformat() if isinstance(data_ref, datetime) else None,
+        "disciplinas": disciplinas,
+        "series": series,
+        "multi_serie": len(series) > 1,
+        "etapas": etapas,
+        "turmas": turmas,
+        "total_turmas": len(turmas),
+    }
 
 
 @bp.route("/evolucao/opcoes-filtros", methods=["GET"])
@@ -7103,6 +7193,151 @@ def comparar_gabaritos_cartao():
         ids_log = gabarito_ids if "gabarito_ids" in locals() else "N/A"
         logging.error("Erro ao comparar gabaritos %s: %s", ids_log, e, exc_info=True)
         return jsonify({"error": "Erro ao comparar gabaritos", "details": str(e)}), 500
+
+
+def _calcular_compare_groups_cartao(data: dict, user: dict):
+    """
+    Body de /compare-groups (cartão) → payload de evolução por grupos.
+    Retorna (payload, None) ou (None, (response, status)).
+    """
+    from app.services.alunos_resultado_filtro import AlunosFiltroInvalido, parse_alunos_filtro
+    from app.services.answer_sheet_evolution_groups_service import (
+        PermissaoGruposCartaoError,
+        compare_gabaritos_by_groups,
+        restricao_por_perfil,
+        validar_filtros_do_perfil,
+    )
+
+    gabarito_ids, err = _parse_gabarito_ids_from_body(data)
+    if err:
+        return None, err
+
+    gabaritos, err = _validate_gabaritos_compare_access(user, gabarito_ids)
+    if err:
+        return None, err
+
+    scope_info, nivel, err = _build_compare_scope_cartao(data, user)
+    if err:
+        return None, err
+
+    try:
+        alunos_filtro = parse_alunos_filtro(data.get("alunos"))
+    except AlunosFiltroInvalido as exc:
+        return None, (jsonify({"error": str(exc)}), 400)
+
+    try:
+        restricao = restricao_por_perfil(user)
+        validar_filtros_do_perfil(restricao, scope_info)
+    except PermissaoGruposCartaoError as exc:
+        return None, (jsonify({"error": str(exc)}), exc.status)
+
+    if alunos_filtro != "todos":
+        scope_info["alunos"] = alunos_filtro
+
+    por_id = {str(g.id): g for g in gabaritos}
+    ordenados = [por_id[gid] for gid in gabarito_ids]
+    filtros_aplicados = {
+        "estado": scope_info.get("estado"),
+        "municipio": str(scope_info.get("municipio_id")),
+        "escola": scope_info.get("escola"),
+        "serie": scope_info.get("serie"),
+        "turma": scope_info.get("turma"),
+        "tipo_area": parse_area_type_filter(data.get("tipo_area")),
+        "alunos": alunos_filtro if "alunos" in data else None,
+    }
+    payload = compare_gabaritos_by_groups(
+        ordenados,
+        view_by=str(data.get("visualizar_por") or data.get("view_by") or "turma"),
+        scope_info=scope_info,
+        nivel_granularidade=nivel,
+        user=user,
+        alunos_filtro=alunos_filtro,
+        filtros_aplicados=filtros_aplicados,
+        restricao=restricao,
+    )
+    return payload, None
+
+
+@bp.route('/compare-groups', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def comparar_gabaritos_por_grupos_cartao():
+    """
+    Evolução por grupos (turma / série / escola) entre cartões-resposta.
+    Mesmo contrato de POST /test/compare-groups.
+    Body JSON:
+      - gabarito_ids (obrigatório, mín. 2): a ordem é a da linha do tempo
+      - visualizar_por: turma | serie | escola (padrão turma)
+      - estado, municipio, escola, serie, turma, tipo_area (opcionais)
+      - alunos: todos | regular | regular_adap | adap (padrão todos)
+    Números de cada grupo = GET /answer-sheets/resultados-agregados no mesmo recorte.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+
+        payload, err = _calcular_compare_groups_cartao(data, user)
+        if err:
+            return err
+        return jsonify(payload), 200
+    except Exception as e:
+        logging.error("Erro em /answer-sheets/compare-groups: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao comparar por grupos", "details": str(e)}), 500
+
+
+@bp.route('/compare-groups/export-excel', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def export_compare_groups_excel_cartao():
+    """
+    Excel da evolução por grupos (cartão-resposta). Mesmo body de POST /compare-groups,
+    mais municipality / state / department (opcionais, capa).
+    """
+    try:
+        from flask import Response
+        from app.excel_export.groups_exporter import ExcelEvolutionGroupsExporter
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+
+        payload, err = _calcular_compare_groups_cartao(data, user)
+        if err:
+            return err
+
+        city = (payload.get("filtros_aplicados") or {}).get("municipio")
+        city_data = City.query.get(city) if city else None
+        excel_file = ExcelEvolutionGroupsExporter().export(
+            payload,
+            municipality=data.get("municipality") or (city_data.name if city_data else None),
+            state=data.get("state") or getattr(city_data, "state", None),
+            department=data.get("department"),
+        )
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"relatorio_evolucao_grupos_cartoes_{timestamp}.xlsx"
+        return Response(
+            excel_file.getvalue(),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
+        )
+    except Exception as e:
+        logging.error("Erro ao exportar Excel por grupos (cartão): %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao exportar relatório Excel", "details": str(e)}), 500
 
 
 @bp.route('/evolution/export-excel', methods=['POST'])

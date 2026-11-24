@@ -94,8 +94,20 @@ def linhas_com_nota_valida(
     return saida
 
 
-def carregar_universo_da_prova(
-    test_id: Any,
+def _ids_unicos_ordenados(test_ids: Sequence[Any]) -> List[str]:
+    ids: List[str] = []
+    seen = set()
+    for test_id in test_ids or []:
+        value = str(test_id or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        ids.append(value)
+    return ids
+
+
+def carregar_universo_das_provas(
+    test_ids: Sequence[Any],
     *,
     municipio_id: Any = None,
     alunos_filtro: Optional[str] = "todos",
@@ -103,13 +115,20 @@ def carregar_universo_da_prova(
     class_ids: Optional[Iterable[Any]] = None,
     school_ids: Optional[Iterable[Any]] = None,
 ):
-    """Matrícula da prova, notas do recorte e censo. O censo vê o resultado cru."""
+    """Matrícula, notas e censo para uma ou mais provas (união de turmas/alunos).
+
+    O censo usa o resultado cru; as notas respeitam o recorte/pareamento.
+    """
     from app.models.classTest import ClassTest
     from app.models.evaluationResult import EvaluationResult
     from app.models.student import Student
     from app.services.participation_census_shadow import montar_censo_carregado
 
-    class_tests = ClassTest.query.filter(ClassTest.test_id == str(test_id)).all()
+    ids = _ids_unicos_ordenados(test_ids)
+    if not ids:
+        return [], [], None
+
+    class_tests = ClassTest.query.filter(ClassTest.test_id.in_(ids)).all()
     if class_ids is not None:
         permitidas = {str(item) for item in class_ids if item}
         class_tests = [
@@ -135,20 +154,20 @@ def carregar_universo_da_prova(
     student_ids = [student.id for student in students]
     results = (
         EvaluationResult.query.filter(
-            EvaluationResult.test_id == str(test_id),
+            EvaluationResult.test_id.in_(ids),
             EvaluationResult.student_id.in_(student_ids),
         ).all()
         if student_ids
         else []
     )
     notas = resultados_para_notas(
-        [test_id], students, results, alunos_filtro, parear=parear
+        ids, students, results, alunos_filtro, parear=parear
     )
     try:
         censo = montar_censo_carregado(
             municipio_id=municipio_id,
             universo=alunos_filtro or "todos",
-            test_ids=[test_id],
+            test_ids=ids,
             alunos=students,
             class_tests=class_tests,
             resultados=results,
@@ -156,3 +175,23 @@ def carregar_universo_da_prova(
     except Exception:
         censo = None
     return students, notas, censo
+
+
+def carregar_universo_da_prova(
+    test_id: Any,
+    *,
+    municipio_id: Any = None,
+    alunos_filtro: Optional[str] = "todos",
+    parear: bool = False,
+    class_ids: Optional[Iterable[Any]] = None,
+    school_ids: Optional[Iterable[Any]] = None,
+):
+    """Compat: uma prova. Preferir ``carregar_universo_das_provas`` para pacotes."""
+    return carregar_universo_das_provas(
+        [test_id],
+        municipio_id=municipio_id,
+        alunos_filtro=alunos_filtro,
+        parear=parear,
+        class_ids=class_ids,
+        school_ids=school_ids,
+    )

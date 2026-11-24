@@ -276,6 +276,102 @@ class TestRankingRoutesParse(unittest.TestCase):
         self.assertIsNone(filters["escola"])
         self.assertIsNone(filters["avaliacao"])
 
+    def test_parse_evaluation_ids_csv(self):
+        args = FakeArgs(evaluation_ids="e1, e2, e1", ranking_type="general")
+        _, _, _, filters = parse_ranking_request_args(args)
+        self.assertEqual(filters["evaluation_id"], "e1")
+        self.assertEqual(filters["evaluation_ids"], "e1,e2")
+
+    def test_parse_evaluation_ids_prefers_multi_over_singular(self):
+        args = FakeArgs(evaluation_ids="a,b", evaluation_id="ignored")
+        _, _, _, filters = parse_ranking_request_args(args)
+        self.assertEqual(filters["evaluation_ids"], "a,b")
+        self.assertEqual(filters["evaluation_id"], "a")
+
+
+class TestPacoteUniversoMulti(unittest.TestCase):
+    def test_pacote_single_evaluation_sem_merge(self):
+        scope = {"city_id": "city-1"}
+        filters = {
+            "evaluation_id": "e1",
+            "alunos": "regular",
+            "alunos_informado": "1",
+        }
+        notas = [object()]
+        with patch(
+            "app.services.resultado_universo.carregar_universo_das_provas",
+            return_value=([], notas, object()),
+        ) as load_mock:
+            with patch(
+                "app.services.class_peer_ranking_service.ClassPeerRankingService._resolve_tests"
+            ) as resolve_mock:
+                with patch(
+                    "app.services.class_peer_ranking_service.ClassPeerRankingService._merge_multi_instrument_student_results"
+                ) as merge_mock:
+                    pacote = RankingReportService._pacote_universo_avaliacao(scope, filters)
+        load_mock.assert_called_once()
+        self.assertEqual(load_mock.call_args[0][0], ["e1"])
+        resolve_mock.assert_not_called()
+        merge_mock.assert_not_called()
+        self.assertEqual(pacote["evaluation_id"], "e1")
+        self.assertEqual(pacote["evaluation_ids"], ["e1"])
+        self.assertIs(pacote["notas"], notas)
+        self.assertTrue(pacote["parear"])
+
+    def test_pacote_multi_evaluation_faz_merge_igual_peso(self):
+        scope = {"city_id": "city-1"}
+        filters = {
+            "evaluation_ids": "lp,mat",
+            "evaluation_id": "lp",
+            "alunos": "regular",
+            "alunos_informado": "1",
+        }
+        raw_notas = [object(), object()]
+        merged = [object()]
+        with patch(
+            "app.services.resultado_universo.carregar_universo_das_provas",
+            return_value=([object()], raw_notas, object()),
+        ) as load_mock:
+            with patch(
+                "app.services.class_peer_ranking_service.ClassPeerRankingService._resolve_tests",
+                return_value=["t-lp", "t-mat"],
+            ) as resolve_mock:
+                with patch(
+                    "app.services.class_peer_ranking_service.ClassPeerRankingService._merge_multi_instrument_student_results",
+                    return_value=merged,
+                ) as merge_mock:
+                    pacote = RankingReportService._pacote_universo_avaliacao(scope, filters)
+        load_mock.assert_called_once()
+        self.assertEqual(load_mock.call_args[0][0], ["lp", "mat"])
+        resolve_mock.assert_called_once_with(["lp", "mat"])
+        merge_mock.assert_called_once()
+        self.assertEqual(merge_mock.call_args.kwargs["evaluation_ids"], ["lp", "mat"])
+        self.assertEqual(pacote["evaluation_ids"], ["lp", "mat"])
+        self.assertIs(pacote["notas"], merged)
+
+    def test_pacote_com_answer_sheet_retorna_none(self):
+        pacote = RankingReportService._pacote_universo_avaliacao(
+            {},
+            {"evaluation_id": "e1", "answer_sheet_id": "gab-1"},
+        )
+        self.assertIsNone(pacote)
+
+    def test_resolve_discipline_options_une_varias_avaliacoes(self):
+        filters = {"evaluation_ids": "e1,e2", "evaluation_id": "e1"}
+        with patch.object(
+            RankingReportService,
+            "_discipline_options_from_evaluation",
+            side_effect=[
+                {"lp": "Língua Portuguesa"},
+                {"mat": "Matemática"},
+            ],
+        ) as opt_mock:
+            options = RankingReportService._resolve_discipline_options(filters)
+        self.assertEqual(opt_mock.call_count, 2)
+        by_id = {item["id"]: item["name"] for item in options}
+        self.assertEqual(by_id["lp"], "Língua Portuguesa")
+        self.assertEqual(by_id["mat"], "Matemática")
+
 
 class TestTeachersTopSection(unittest.TestCase):
     def test_teachers_top_lists_all_participating_teachers_not_only_top_10(self):

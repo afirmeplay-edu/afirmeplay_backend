@@ -2,6 +2,9 @@
 """
 Evolução por grupos (turma / série / escola) ao longo de múltiplas avaliações.
 Nível do grupo = classificação da proficiência média hierárquica (CLASSIFICATION_CONFIG).
+
+Cada grupo inclui ``grade_by_recorte`` só com o Geral (este relatório não
+mostra nota por disciplina) e ``evolution.percentage`` entre pares consecutivos.
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ from app.models.school import School
 from app.models.student import Student
 from app.models.test import Test
 from app.services.evaluation_calculator import EvaluationCalculator
+from app.services.evaluation_comparison_service import EvaluationComparisonService
 from app.utils.school_equal_weight_means import hierarchical_mean_grade_and_proficiency
 
 LEVEL_ORDER = [
@@ -26,7 +30,6 @@ LEVEL_ORDER = [
     "Adequado",
     "Avançado",
 ]
-
 
 def _as_naive_utc(value: Any) -> datetime:
     if value is None:
@@ -113,6 +116,87 @@ def _pp_delta(from_val: float, to_val: float) -> float:
     return round(to_val - from_val, 2)
 
 
+def _disciplinas_com_dados(results: List[Any]) -> set:
+    """IDs de disciplina presentes no subject_results dos alunos do grupo."""
+    subjects = set()
+    for result in results or []:
+        stored = getattr(result, "subject_results", None) or {}
+        if not isinstance(stored, dict):
+            continue
+        for subject_id, data in stored.items():
+            if data is None:
+                continue
+            subjects.add(str(subject_id))
+    return subjects
+
+
+def _resultados_para_geral_do_relatorio(group_results: List[Any]) -> List[Any]:
+    """Quem entra no Geral de /test/compare-groups.
+
+    AVISO (somente este relatório, 2026-11): não mostramos nota por disciplina.
+    O Geral da turma usa quem fez as duas quando as duas têm dados. Se a turma
+    só tiver uma disciplina neste ponto (ex.: 1º C fez Português e não fez
+    Matemática no diagnóstico), o Geral é essa disciplina. A nota virtual de
+    quem fez uma só já é a dessa disciplina. Resultados e a outra comparação
+    continuam exigindo o par completo (only_complete=True).
+    """
+    if not group_results:
+        return group_results
+    if not any(hasattr(result, "completo") for result in group_results):
+        return group_results
+    if len(_disciplinas_com_dados(group_results)) <= 1:
+        return list(group_results)
+    return [result for result in group_results if getattr(result, "completo", False)]
+
+
+def _grade_transitions_for_values(values: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Transições consecutivas só de nota (evolution relativa); null quando faltar dado."""
+    transitions: List[Dict[str, Any]] = []
+    for i in range(len(values) - 1):
+        a, b = values[i], values[i + 1]
+        grade_a = a.get("average_grade")
+        grade_b = b.get("average_grade")
+        evolution = None
+        if grade_a is not None and grade_b is not None:
+            evolution = EvaluationComparisonService._calculate_evolution_percentage(
+                float(grade_a), float(grade_b)
+            )
+        transitions.append(
+            {
+                "from_order": a["order"],
+                "to_order": b["order"],
+                "evolution": evolution,
+            }
+        )
+    return transitions
+
+
+def _build_grade_by_recorte(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Só o Geral. Ver ``_resultados_para_geral_do_relatorio``.
+
+    AVISO: Português e Matemática saíram deste payload de propósito. O front
+    deste relatório deve desenhar o item ``is_geral``. Não repor o recorte por
+    disciplina aqui sem rever a regra do 1º C (disciplina ausente).
+    """
+    geral_values = [
+        {
+            "evaluation_id": point.get("evaluation_id"),
+            "order": point.get("order"),
+            "average_grade": point.get("average_grade"),
+        }
+        for point in points
+    ]
+    return [
+        {
+            "recorte": "Geral",
+            "subject_id": None,
+            "is_geral": True,
+            "values": geral_values,
+            "transitions": _grade_transitions_for_values(geral_values),
+        }
+    ]
+
+
 class EvolutionGroupsService:
     @staticmethod
     def compare_by_groups(
@@ -194,11 +278,15 @@ class EvolutionGroupsService:
             if grupos and any(len(group) > 1 for group in grupos):
                 from app.services.evolution_points_service import build_comparison_points
 
+                # only_complete=False: guarda quem fez só uma disciplina para o
+                # Geral deste relatório. O corte por turma está em
+                # _resultados_para_geral_do_relatorio.
                 materialized = build_comparison_points(
                     grupos,
                     escopo_calculo,
                     alunos_filtro=alunos_filtro,
                     parear=parear,
+                    only_complete=False,
                 )
                 tests_with_dates = [
                     {"test": point.as_test(), "application_date": point.application_date}
@@ -337,6 +425,7 @@ class EvolutionGroupsService:
                         if _group_key(view_by, school_id, grade_id, class_id) != key:
                             continue
                         group_results.append(r)
+                    group_results = _resultados_para_geral_do_relatorio(group_results)
 
                     if not group_results:
                         points.append(
@@ -397,6 +486,8 @@ class EvolutionGroupsService:
                             }
                         )
 
+                grade_by_recorte = _build_grade_by_recorte(points)
+
                 # Nível atual = última prova com dados
                 current_level = None
                 for p in reversed(points):
@@ -412,6 +503,7 @@ class EvolutionGroupsService:
                         "current_level": current_level,
                         "points": points,
                         "transitions": transitions,
+                        "grade_by_recorte": grade_by_recorte,
                     }
                 )
 

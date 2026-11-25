@@ -134,13 +134,15 @@ def run_one_card(
     geom_summary = []
 
     for idx, block in enumerate(blocks):
-        x, y, w, h = block["x"], block["y"], block["w"], block["h"]
-        roi = img_a4[y : y + h, x : x + w]
+        x, y = block["x"], block["y"]
+        roi, ox, oy = omr._extract_block_roi(img_a4, block)
+        # coordenadas da imagem A4 = (x - ox, y - oy) + coordenadas do roi
+        x, y = x - ox, y - oy
         cfg = blocks_topo[idx]
         grid = omr._map_topology_to_grid(roi, cfg)
         if not grid:
             continue
-        bubbles = omr._calculate_bubble_centers(grid)
+        bubbles = omr._calculate_bubble_centers(grid, (ox, oy))
         block_id = cfg.get("block_id", idx + 1)
         # B1: refino de grid (mesma ordem do pipeline de produção)
         if hasattr(omr, "_refine_block_grid"):

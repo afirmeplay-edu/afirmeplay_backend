@@ -103,6 +103,72 @@ def is_subject_entry_absent(entry: Any) -> bool:
     return False
 
 
+def subject_is_absent(
+    entry: Any,
+    question_numbers: Iterable[int],
+    answers: Optional[Dict],
+) -> bool:
+    """Disciplina ausente: marcada como ausente no JSON ou bloco 100% em branco.
+
+    Regra única do cartão-resposta: ausente marcado e bloco em branco são a mesma coisa.
+    """
+    return is_subject_entry_absent(entry) or subject_questions_all_blank(
+        question_numbers, answers
+    )
+
+
+def _question_numbers_by_subject(blocks_config: Optional[Dict]) -> Dict[str, List[int]]:
+    """Agrupa as questões por disciplina (vários blocos da mesma disciplina somam)."""
+    by_subject: Dict[str, List[int]] = {}
+    for block in _extract_blocks_with_questions(blocks_config):
+        sid = block.get("subject_id") or f"block_{block.get('block_id', 0)}"
+        by_subject.setdefault(str(sid), []).extend(
+            int(q) for q in (block.get("question_numbers") or [])
+        )
+    return by_subject
+
+
+def result_absent_in_all_subjects(
+    proficiency_by_subject: Any,
+    detected_answers: Any,
+    blocks_config: Optional[Dict],
+    fallback_question_numbers: Optional[Iterable[int]] = None,
+) -> bool:
+    """True se o resultado do cartão é de aluno ausente em todas as disciplinas.
+
+    Um resultado assim não conta como participação. ``fallback_question_numbers``
+    (ex.: questões do gabarito) vale para gabarito sem blocos por disciplina.
+    """
+    pbs = proficiency_by_subject or {}
+    if isinstance(pbs, str):
+        import json
+
+        try:
+            pbs = json.loads(pbs) or {}
+        except Exception:
+            pbs = {}
+    if not isinstance(pbs, dict):
+        pbs = {}
+    answers = parse_detected_answers_map(detected_answers)
+
+    subjects = _question_numbers_by_subject(blocks_config)
+    if not subjects:
+        qnums = list(fallback_question_numbers or answers.keys())
+        if not qnums:
+            return False
+        subjects = {"geral": qnums}
+
+    if detected_answers is None:
+        # Sem respostas gravadas não dá para afirmar "em branco": só vale o que está
+        # marcado como ausente no JSON (não tira da participação por falta de dado).
+        return all(is_subject_entry_absent(pbs.get(sid)) for sid in subjects)
+
+    return all(
+        subject_is_absent(pbs.get(sid), qnums, answers)
+        for sid, qnums in subjects.items()
+    )
+
+
 def iter_scored_subject_entries(
     proficiency_by_subject: Optional[Dict],
 ) -> Iterator[Tuple[str, Dict[str, Any]]]:

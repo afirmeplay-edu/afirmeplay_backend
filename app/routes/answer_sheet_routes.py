@@ -3748,6 +3748,25 @@ def _dedupe_answer_sheet_results_latest_per_student(
     return list(by_student.values())
 
 
+def _questoes_do_gabarito_cartao(gabarito) -> List[int]:
+    """Números das questões do gabarito (para gabarito sem blocos por disciplina)."""
+    import json
+
+    correct = getattr(gabarito, "correct_answers", None)
+    if isinstance(correct, str):
+        try:
+            correct = json.loads(correct)
+        except Exception:
+            correct = None
+    nums: List[int] = []
+    for key in (correct or {}).keys():
+        try:
+            nums.append(int(key))
+        except (TypeError, ValueError):
+            continue
+    return sorted(nums)
+
+
 def _load_cartao_roster_and_results(
     gabarito_id: str,
     class_ids: List[Any],
@@ -3813,6 +3832,25 @@ def _load_cartao_roster_and_results(
         results,
         incluir_adap3=incluir_adap3,
     )
+
+    # Resultado de aluno ausente em todas as disciplinas (marcado ou tudo em branco)
+    # não é participação: o aluno continua na matrícula, mas sem resultado.
+    if gab is not None and results:
+        from app.services.cartao_resposta.proficiency_by_subject import (
+            result_absent_in_all_subjects,
+        )
+
+        fallback_questoes = _questoes_do_gabarito_cartao(gab)
+        results = [
+            row
+            for row in results
+            if not result_absent_in_all_subjects(
+                row.proficiency_by_subject,
+                row.detected_answers,
+                getattr(gab, "blocks_config", None),
+                fallback_questoes,
+            )
+        ]
 
     if somente_corrigidos:
         by_id = {s.id: s for s in students}
@@ -5223,19 +5261,42 @@ def _skills_payload_for_question_number(
     return out
 
 
+def _aluno_ausente_cartao(tem_resultado: bool, ausente_por_disciplina: List[bool]) -> bool:
+    """Ausente = sem correção, ou ausente (marcado ou 100% em branco) em todas as disciplinas.
+
+    No cartão-resposta, ausente marcado e bloco em branco são a mesma coisa.
+    """
+    if not tem_resultado:
+        return True
+    return bool(ausente_por_disciplina) and all(ausente_por_disciplina)
+
+
+def _montar_lista_ausentes_cartao(ausentes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ordena a lista de ausentes por escola, turma e nome."""
+    return sorted(
+        ausentes,
+        key=lambda a: (
+            str(a.get("escola") or "").lower(),
+            str(a.get("turma") or "").lower(),
+            str(a.get("nome") or "").lower(),
+        ),
+    )
+
+
 def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
     """Tabela detalhada no mesmo formato de evaluation_results.
 
-    Inclui a matrícula do recorte: quem tem correção fica ``concluida``;
-    quem falta aparece com ``status``/``status_geral`` ``pendente``.
+    Só entram em ``disciplinas[].alunos`` e ``geral.alunos`` quem fez a prova.
+    Quem não tem correção ou está ausente em todas as disciplinas sai da tabela
+    e vai para ``alunos_ausentes`` (id, nome, turma, escola, serie).
     """
     import json
     class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
     if not class_ids or not gabarito_id:
-        return {"disciplinas": [], "geral": {"alunos": []}}
+        return {"disciplinas": [], "geral": {"alunos": []}, "alunos_ausentes": []}
     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
     if not gabarito:
-        return {"disciplinas": [], "geral": {"alunos": []}}
+        return {"disciplinas": [], "geral": {"alunos": []}, "alunos_ausentes": []}
     correct_answers = gabarito.correct_answers
     if isinstance(correct_answers, str):
         correct_answers = json.loads(correct_answers)
@@ -5307,6 +5368,8 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
         return respostas
 
     disciplinas_out = []
+    ausencia_por_aluno: Dict[Any, List[bool]] = {}
+    contexto_por_aluno: Dict[Any, Dict[str, Any]] = {}
     for disc_cfg in disciplinas_config:
         subject_id = disc_cfg.get('id', '')
         subject_name = disc_cfg.get('nome', 'Outras')
@@ -5355,17 +5418,19 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
                 except Exception:
                     pbs = {}
             from app.services.cartao_resposta.proficiency_by_subject import (
-                is_subject_entry_absent,
-                subject_questions_all_blank,
+                subject_is_absent,
                 SUBJECT_ABSENT_CLASSIFICATION,
             )
             disc_data = (pbs or {}).get(str(subject_id), pbs.get(subject_id, {}))
-            disciplina_ausente = False
-            if r and (
-                is_subject_entry_absent(disc_data)
-                or subject_questions_all_blank(q_numbers, detected)
-            ):
-                disciplina_ausente = True
+            disciplina_ausente = bool(r) and subject_is_absent(disc_data, q_numbers, detected)
+            ausencia_por_aluno.setdefault(s.id, []).append(bool(disciplina_ausente))
+            contexto_por_aluno[s.id] = {
+                "id": str(s.id),
+                "nome": s.name or "N/A",
+                "turma": turma_nome,
+                "escola": escola_nome,
+                "serie": serie_nome,
+            }
             disciplina_proficiencia = (
                 None
                 if disciplina_ausente
@@ -5450,9 +5515,29 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             "alunos": alunos_disciplina
         })
 
-    student_ids_com_resultado = {str(sid) for sid in result_by_student.keys()}
+    # Ausente (sem correção, bolinha de ausente ou tudo em branco) não entra na tabela;
+    # vai para a lista própria, para o front mostrar quem não realizou a avaliação.
+    ids_ausentes = {
+        sid
+        for sid, flags in ausencia_por_aluno.items()
+        if _aluno_ausente_cartao(sid in result_by_student, flags)
+    }
+    alunos_ausentes = _montar_lista_ausentes_cartao(
+        [contexto_por_aluno[sid] for sid in ids_ausentes if sid in contexto_por_aluno]
+    )
+    ids_ausentes_str = {str(sid) for sid in ids_ausentes}
+    for disc in disciplinas_out:
+        disc["alunos"] = [a for a in disc["alunos"] if a["id"] not in ids_ausentes_str]
+
+    student_ids_com_resultado = {
+        str(sid) for sid in result_by_student.keys() if str(sid) not in ids_ausentes_str
+    }
     dados_gerais = _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name, student_ids_com_resultado)
-    return {"disciplinas": disciplinas_out, "geral": dados_gerais}
+    return {
+        "disciplinas": disciplinas_out,
+        "geral": dados_gerais,
+        "alunos_ausentes": alunos_ausentes,
+    }
 
 
 def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name, student_ids_com_resultado: Set[str]):
@@ -7725,7 +7810,11 @@ def get_resultados_agregados():
         tabela_detalhada = (
             _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds_dados)
             if gabarito_id
-            else {"disciplinas": [], "geral": {"alunos": []}}
+            else {"disciplinas": [], "geral": {"alunos": []}, "alunos_ausentes": []}
+        )
+        # Lista de quem não realizou a avaliação (nome, turma, escola, série), fora da tabela.
+        alunos_ausentes_lista = (
+            tabela_detalhada.pop("alunos_ausentes", []) if isinstance(tabela_detalhada, dict) else []
         )
         ranking = (
             _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds_dados)
@@ -7769,6 +7858,7 @@ def get_resultados_agregados():
                 "paginacao": {"page": 1, "per_page": len(resultados_detalhados), "total": len(resultados_detalhados), "total_pages": 1}
             },
             "tabela_detalhada": tabela_detalhada,
+            "alunos_ausentes_lista": alunos_ausentes_lista,
             "ranking": ranking,
             "opcoes_proximos_filtros": opcoes_proximos_filtros
         }

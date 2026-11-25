@@ -110,19 +110,16 @@ class AnswerSheetCorrectionNewGrid:
     # =========================================================================
     # FASE B — geometria / ink map / template vazio (flags com fallback)
     # =========================================================================
-    # B1: refinar grid por bloco (anel sintético + regressão robusta).
-    # Busca grossa ±45 (aprovada: offset real ~25–60px) + refino fino ±12.
+    # B1: o grid do bloco é fixo (template CSS); só se procura o deslocamento
+    # global que alinha o reticulado inteiro aos círculos impressos (Hough).
+    # Com fiducial (answer_sheet.html) o desvio medido foi 1–7px em lote real;
+    # sem fiducial (prova física híbrida) a origem do bloco erra dezenas de px.
     USE_GRID_REFINE_B1 = True
-    GRID_REFINE_COARSE_SEARCH_PX = 45
-    GRID_REFINE_FINE_SEARCH_PX = 12
-    GRID_REFINE_MATCH_MIN = 0.28
-    GRID_REFINE_MATCH_HIGH = 0.40
-    GRID_REFINE_MIN_HITS = 12
-    GRID_REFINE_MAX_RESID_PX = 4.0
-    GRID_REFINE_ROW_H_MIN = 45.0
-    GRID_REFINE_ROW_H_MAX = 62.0
-    GRID_REFINE_SPACING_MIN = 45.0
-    GRID_REFINE_SPACING_MAX = 80.0
+    GRID_REFINE_SEARCH_PX = 130.0          # janela de busca do deslocamento (±)
+    GRID_REFINE_INLIER_TOL_PX = 10.0       # círculo ↔ centro alinhado
+    GRID_REFINE_PITCH_TOL = 0.07           # passo ajustado: ±7% do nominal
+    GRID_REFINE_MIN_INLIER_FRAC = 0.25     # mínimo de bolhas com círculo alinhado
+    GRID_REFINE_EXPECTED_SHIFT_PX = 15.0   # acima disso: log de origem aproximada
     # B2: papel via dilatação elíptica (~2,6·r) + GaussianBlur σ≈10
     USE_PAPER_DILATE_B2 = True
     PAPER_DILATE_RADIUS_FACTOR = 2.6
@@ -186,6 +183,17 @@ class AnswerSheetCorrectionNewGrid:
     QUESTION_NUM_WIDTH_PX = 25     # CSS: width: 25px
     BLOCK_PADDING_TOP_PX = 8       # CSS: padding-top: 8px
     BLOCK_PADDING_LEFT_PX = 4      # CSS: padding-left: 4px
+
+    # Centro da 1ª bolha (A) da 1ª linha, relativo à origem do bloco (TL de
+    # .answer-block, obtido pelo fiducial). Derivado do CSS do answer_sheet.html
+    # (box-sizing: border-box; 1px CSS = 300/96 px na A4 normalizada):
+    #   X = borda 1 + padding-left 4 + .question-num 25 + .bubbles padding-left 6
+    #       + meia bolha 7.5 = 43.5px CSS
+    #   Y = borda 1 + padding-top 8 = 9px CSS, + meia linha (.answer-row 0.44cm)
+    # Bolhas alinhadas à esquerda: 2, 3 ou 4 alternativas usam as mesmas colunas.
+    CSS_PX_TO_A4 = 300.0 / 96.0
+    GRID_FIRST_BUBBLE_CX_PX = 43.5 * CSS_PX_TO_A4             # ≈ 135.9
+    GRID_FIRST_ROW_CY_PX = 9 * CSS_PX_TO_A4 + ROW_HEIGHT_PX / 2  # ≈ 54.1
 
     # =========================================================================
     # BOLHA "ALUNO AUSENTE" (bloco do aplicador) — CONSTANTES ISOLADAS
@@ -1844,18 +1852,12 @@ class AnswerSheetCorrectionNewGrid:
             max_rows = max(1, int((bh - self.BLOCK_OFFSET_Y) / self.ROW_HEIGHT_PX))
             max_rows = min(max_rows, 26)
             for row_idx in range(max_rows):
-                cy = int(
-                    self.BLOCK_OFFSET_Y
-                    + (self.ROW_HEIGHT_PX * row_idx)
-                    + (self.ROW_HEIGHT_PX / 2)
-                )
+                cy = int(self.GRID_FIRST_ROW_CY_PX + self.ROW_HEIGHT_PX * row_idx)
                 if cy >= bh:
                     break
                 for col_idx in range(4):
                     cx = int(
-                        self.BLOCK_OFFSET_X
-                        + (col_idx * self.BUBBLE_SPACING_PX)
-                        + (self.BUBBLE_WIDTH_PX / 2)
+                        self.GRID_FIRST_BUBBLE_CX_PX + col_idx * self.BUBBLE_SPACING_PX
                     )
                     if cx >= bw:
                         break
@@ -1916,7 +1918,10 @@ class AnswerSheetCorrectionNewGrid:
         # 🔍 DEBUG: Logs detalhados das dimensões
         self.logger.info(f"📐 Dimensões do bloco ROI: {block_width}x{block_height}px")
         self.logger.info(f"📐 row_height (CALIBRADO): {row_height:.2f}px")
-        self.logger.info(f"📐 Offsets (CALIBRADOS): X={self.BLOCK_OFFSET_X}px, Y={self.BLOCK_OFFSET_Y}px")
+        self.logger.info(
+            f"📐 1ª bolha (fixa, CSS): X={self.GRID_FIRST_BUBBLE_CX_PX:.1f}px, "
+            f"Y={self.GRID_FIRST_ROW_CY_PX:.1f}px"
+        )
         self.logger.info(f"📐 Bolha radius: {self.BUBBLE_RADIUS_PX}px, spacing: {self.BUBBLE_SPACING_PX}px (CALIBRADOS)")
         
         grid_map = {
@@ -1936,14 +1941,13 @@ class AnswerSheetCorrectionNewGrid:
                 self.logger.warning(f"⚠️ Questão {q_num} sem alternativas, pulando")
                 continue
             
-            # ⚠️ FÓRMULA CSS: cy = OFFSET_Y + (row_height * row_idx) + (row_height / 2)
-            # Centro vertical da linha (meio da altura da linha)
-            cy = self.BLOCK_OFFSET_Y + (row_height * row_idx) + (row_height / 2)
+            # Centro vertical da linha (geometria fixa do template)
+            cy = self.GRID_FIRST_ROW_CY_PX + (row_height * row_idx)
             
             # 🔍 DEBUG: Log detalhado da primeira questão
             if row_idx == 0:
                 self.logger.info(f"📐 Primeira questão (Q{q_num}): {num_cols} alternativas")
-                self.logger.info(f"   cy: {cy:.2f}px (offset={self.BLOCK_OFFSET_Y} + row={row_idx} * {row_height:.2f})")
+                self.logger.info(f"   cy: {cy:.2f}px (1ª linha={self.GRID_FIRST_ROW_CY_PX:.1f} + row={row_idx} * {row_height:.2f})")
             
             question_map = {
                 "q_num": q_num,
@@ -1954,14 +1958,13 @@ class AnswerSheetCorrectionNewGrid:
             }
             
             for col_idx, alt_letter in enumerate(alternatives):
-                # ⚠️ FÓRMULA CALIBRADA: cx = OFFSET_X + (col_idx * BUBBLE_SPACING) + (bubble_width / 2)
-                # Centro horizontal de cada bolha (espaçamento calibrado empiricamente)
-                cx = self.BLOCK_OFFSET_X + (col_idx * self.BUBBLE_SPACING_PX) + (self.BUBBLE_WIDTH_PX / 2)
+                # Centro horizontal (geometria fixa; espaçamento medido em scans)
+                cx = self.GRID_FIRST_BUBBLE_CX_PX + (col_idx * self.BUBBLE_SPACING_PX)
                 
                 # 🔍 DEBUG: Log da primeira alternativa da primeira questão
                 if row_idx == 0 and col_idx == 0:
                     self.logger.info(f"   Primeira alternativa ({alt_letter}):")
-                    self.logger.info(f"   cx: {cx:.2f}px (offset={self.BLOCK_OFFSET_X} + col={col_idx} * spacing={self.BUBBLE_SPACING_PX})")
+                    self.logger.info(f"   cx: {cx:.2f}px (coluna A={self.GRID_FIRST_BUBBLE_CX_PX:.1f} + col={col_idx} * spacing={self.BUBBLE_SPACING_PX})")
                 
                 question_map["alternatives"].append({
                     "letter": alt_letter,
@@ -2008,13 +2011,33 @@ class AnswerSheetCorrectionNewGrid:
     # ETAPA 7: CALCULAR CENTROS DAS BOLHAS
     # =========================================================================
     
-    def _calculate_bubble_centers(self, grid_map: Dict) -> List[Dict]:
+    def _extract_block_roi(
+        self, img_a4: np.ndarray, block: Dict
+    ) -> Tuple[np.ndarray, int, int]:
         """
-        Calcula centros e raios de TODAS as bolhas matematicamente
-        
+        Recorta o bloco com margem igual à janela de busca do B1, para que o
+        reticulado verdadeiro esteja sempre dentro do recorte mesmo quando a
+        origem do bloco é aproximada (sem fiducial). Retorna (roi, ox, oy):
+        posição da origem do bloco dentro do roi.
+        """
+        x, y, w, h = block["x"], block["y"], block["w"], block["h"]
+        pad = int(self.GRID_REFINE_SEARCH_PX) if self.USE_GRID_REFINE_B1 else 0
+        img_h, img_w = img_a4.shape[:2]
+        x0, y0 = max(0, x - pad), max(0, y - pad)
+        x1, y1 = min(img_w, x + w + pad), min(img_h, y + h + pad)
+        return img_a4[y0:y1, x0:x1], x - x0, y - y0
+
+    def _calculate_bubble_centers(
+        self, grid_map: Dict, origin: Tuple[int, int] = (0, 0)
+    ) -> List[Dict]:
+        """
+        Calcula centros e raios de TODAS as bolhas matematicamente.
+        `origin` = posição da origem do bloco dentro do ROI recortado.
+
         Returns:
             Lista de bolhas com cx, cy, r
         """
+        ox, oy = origin
         # ⚠️ RAIO FIXO DO CSS - NÃO CALCULAR DINAMICAMENTE!
         # .bubble { width: 15px; height: 15px; }
         bubble_radius = int(self.BUBBLE_RADIUS_PX)
@@ -2025,10 +2048,10 @@ class AnswerSheetCorrectionNewGrid:
         
         for question in grid_map["questions"]:
             q_num = question["q_num"]
-            cy = int(question["cy"])
-            
+            cy = int(question["cy"] + oy)
+
             for alt in question["alternatives"]:
-                cx = int(alt["cx"])
+                cx = int(alt["cx"] + ox)
                 letter = alt["letter"]
                 
                 bubbles.append({
@@ -2045,73 +2068,6 @@ class AnswerSheetCorrectionNewGrid:
     # =========================================================================
     # FASE B1 — REFINO DE GRID POR BLOCO
     # =========================================================================
-
-    def _synth_bubble_ring_template(self, radius: int = None, thickness: int = 2) -> np.ndarray:
-        """Anel sintético (float32) para matchTemplate TM_CCOEFF_NORMED."""
-        r = int(radius if radius is not None else self.BUBBLE_RADIUS_PX)
-        s = r * 2 + 10
-        tmpl = np.zeros((s, s), dtype=np.float32)
-        c = s // 2
-        cv2.circle(tmpl, (c, c), r, 255.0, thickness)
-        return tmpl
-
-    def _match_ring_near(
-        self,
-        inv_gray: np.ndarray,
-        cx: int,
-        cy: int,
-        tmpl: np.ndarray,
-        search: int,
-    ) -> Tuple[int, int, float]:
-        """
-        matchTemplate do anel em janela ±search em torno de (cx, cy).
-        Retorna (fx, fy, score). Se falhar, devolve (cx, cy, 0).
-        """
-        th, tw = tmpl.shape[:2]
-        h, w = inv_gray.shape[:2]
-        x0 = max(0, int(cx) - search - tw // 2)
-        y0 = max(0, int(cy) - search - th // 2)
-        x1 = min(w, int(cx) + search + tw // 2)
-        y1 = min(h, int(cy) + search + th // 2)
-        win = inv_gray[y0:y1, x0:x1]
-        if win.shape[0] < th or win.shape[1] < tw:
-            return int(cx), int(cy), 0.0
-        res = cv2.matchTemplate(win, tmpl, cv2.TM_CCOEFF_NORMED)
-        _, maxv, _, maxloc = cv2.minMaxLoc(res)
-        fx = x0 + maxloc[0] + tw // 2
-        fy = y0 + maxloc[1] + th // 2
-        return int(fx), int(fy), float(maxv)
-
-    @staticmethod
-    def _fit_line_huber(
-        idxs: List[float], vals: List[float], max_iter: int = 12
-    ) -> Tuple[Optional[float], Optional[float], float]:
-        """
-        Regressão robusta y = a + b*idx (Huber IRLS).
-        Fallback: mínimos quadrados. Retorna (a, b, residual_mediano).
-        """
-        if len(idxs) < 3:
-            return None, None, 1e9
-        x = np.asarray(idxs, dtype=np.float64)
-        y = np.asarray(vals, dtype=np.float64)
-        A = np.vstack([np.ones(len(x)), x]).T
-        coef, *_ = np.linalg.lstsq(A, y, rcond=None)
-        for _ in range(max_iter):
-            pred = A @ coef
-            resid = y - pred
-            mad = float(np.median(np.abs(resid - np.median(resid)))) + 1e-6
-            # Huber: peso 1 se |r|<k, k/|r| senão (k≈1.5·MAD·1.4826)
-            k = 1.5 * 1.4826 * mad
-            abs_r = np.abs(resid)
-            w = np.ones_like(resid)
-            mask = abs_r > k
-            w[mask] = k / abs_r[mask]
-            Aw = A * w[:, None]
-            yw = y * w
-            coef, *_ = np.linalg.lstsq(Aw, yw, rcond=None)
-        pred = A @ coef
-        resid_med = float(np.median(np.abs(y - pred)))
-        return float(coef[0]), float(coef[1]), resid_med
 
     def _hough_circles_in_block(self, gray: np.ndarray) -> List[Tuple[int, int, int]]:
         """Círculos impressos via Hough (passo grosso B1 — estável em scan binário)."""
@@ -2134,53 +2090,6 @@ class AnswerSheetCorrectionNewGrid:
             for c in circles[0]
         ]
 
-    def _offset_ink_separation(
-        self,
-        gray: np.ndarray,
-        bubbles: List[Dict],
-        dx: float,
-        dy: float,
-        row_of: Dict,
-        col_of: Dict,
-    ) -> float:
-        """
-        Qualidade de um offset (dx,dy): mediana das margens (top−2º) por questão
-        usando escuridão no disco. Maior = melhor alinhamento com marcas reais.
-        """
-        # ink rápido: paper≈percentil alto local via blur
-        g = gray.astype(np.float32)
-        paper = cv2.GaussianBlur(g, (0, 0), 8)
-        ink = np.clip(paper - g, 0, 255)
-        by_q: Dict[Any, List[float]] = defaultdict(list)
-        for b in bubbles:
-            key = (b["q_num"], b["alternative"])
-            if key not in row_of:
-                continue
-            cx = int(round(b["cx"] + dx))
-            cy = int(round(b["cy"] + dy))
-            r = int(b["r"])
-            rr = max(2, int(round(r * 0.55)))
-            h, w = ink.shape
-            if not (rr <= cx < w - rr and rr <= cy < h - rr):
-                by_q[b["q_num"]].append(0.0)
-                continue
-            yy, xx = np.ogrid[-rr : rr + 1, -rr : rr + 1]
-            mask = xx * xx + yy * yy <= rr * rr
-            patch = ink[cy - rr : cy + rr + 1, cx - rr : cx + rr + 1]
-            if patch.shape != mask.shape:
-                by_q[b["q_num"]].append(0.0)
-                continue
-            by_q[b["q_num"]].append(float(np.mean(patch[mask])))
-        margins = []
-        for scores in by_q.values():
-            if len(scores) < 2:
-                continue
-            ordered = sorted(scores, reverse=True)
-            margins.append(ordered[0] - ordered[1])
-        if not margins:
-            return -1e9
-        return float(np.median(margins))
-
     def _refine_block_grid(
         self,
         block_roi: np.ndarray,
@@ -2189,31 +2098,31 @@ class AnswerSheetCorrectionNewGrid:
         block_id: Any = None,
     ) -> Tuple[List[Dict], Dict[str, Any]]:
         """
-        B1: refina centros das bolhas por bloco.
+        B1: alinha o grid fixo do bloco aos círculos impressos.
 
-        Estratégia principal: reticulado via HoughCircles (k-means 1D em X/Y).
-        Offset global falha quando o erro de calibração ≈ 1·spacing — há dois
-        atratores e o histograma de pares escolhe o vizinho. O clustering das
-        colunas físicas evita essa ambiguidade.
+        A topologia das bolhas é fixa (template CSS); variam só a origem do
+        bloco (~0–7px com fiducial; dezenas de px na prova física sem fiducial)
+        e a escala de impressão/scan (passo ±~4%).
 
-        Fallback: offset mediano MT + pitch nominal.
+        Método: cada par (círculo Hough, centro nominal) vota num deslocamento.
+        Para cada candidato forte, ajusta-se x = ax + px·col e y = ay + py·row
+        pelos círculos alinhados (passo limitado a ±GRID_REFINE_PITCH_TOL) e
+        reconta-se. Vence o reticulado que alinha MAIS círculos; empate → menor
+        deslocamento. Um reticulado deslocado de ±1 linha/coluna deixa uma
+        linha/coluna sem círculo e perde na contagem — sem depender de tinta.
 
         Retorna (bubbles_ajustadas, diagnóstico).
         """
         diag: Dict[str, Any] = {
             "enabled": True,
             "used_refined": False,
-            "n_hits_coarse": 0,
-            "n_hits_fine": 0,
             "coarse_method": None,
-            "a_y": None,
-            "b_y": None,
-            "a_x": None,
-            "d_x": None,
-            "resid_y": None,
-            "resid_x": None,
+            "n_hits_coarse": 0,
+            "n_inliers": 0,
+            "n_nominal": len(bubbles),
             "median_dx": None,
             "median_dy": None,
+            "large_shift": False,
             "fallback_reason": None,
         }
         if not self.USE_GRID_REFINE_B1 or not bubbles:
@@ -2225,391 +2134,125 @@ class AnswerSheetCorrectionNewGrid:
             gray = cv2.cvtColor(block_roi, cv2.COLOR_BGR2GRAY)
         else:
             gray = block_roi
-        inv = (255.0 - gray.astype(np.float32))
-        tmpl = self._synth_bubble_ring_template()
-        coarse = int(self.GRID_REFINE_COARSE_SEARCH_PX)
-        match_min = float(self.GRID_REFINE_MATCH_MIN)
-        min_hits = int(self.GRID_REFINE_MIN_HITS)
-        spacing = float(self.BUBBLE_SPACING_PX)
-        row_h = float(self.ROW_HEIGHT_PX)
-
-        row_of: Dict[Tuple[Any, str], int] = {}
-        col_of: Dict[Tuple[Any, str], int] = {}
-        for qmap in grid_map.get("questions", []):
-            for alt in qmap.get("alternatives", []):
-                row_of[(qmap["q_num"], alt["letter"])] = int(qmap["row_idx"])
-                col_of[(qmap["q_num"], alt["letter"])] = int(alt["col_idx"])
-
-        n_rows = len({r for r in row_of.values()})
-        n_cols = len({c for c in col_of.values()})
-        if n_rows < 2 or n_cols < 2:
-            diag["fallback_reason"] = "grid_too_small"
-            return bubbles, diag
-
-        def _kmeans_1d(vals: np.ndarray, k: int, pitch: float, max_iter: int = 16):
-            if len(vals) < k:
-                return None
-            lo, hi = float(np.min(vals)), float(np.max(vals))
-            if hi - lo < pitch * 0.5:
-                return None
-            centers = np.linspace(lo, hi, k)
-            for _ in range(max_iter):
-                dist = np.abs(vals[:, None] - centers[None, :])
-                labels = np.argmin(dist, axis=1)
-                new_c = centers.copy()
-                for j in range(k):
-                    m = vals[labels == j]
-                    if len(m) > 0:
-                        new_c[j] = float(np.median(m))
-                if np.max(np.abs(new_c - centers)) < 0.25:
-                    centers = new_c
-                    break
-                centers = new_c
-            centers = centers[np.argsort(centers)]
-            diffs = np.diff(centers)
-            if len(diffs) == 0:
-                return None
-            if not np.all((diffs >= pitch * 0.70) & (diffs <= pitch * 1.35)):
-                return None
-            dist = np.abs(vals[:, None] - centers[None, :])
-            labels = np.argmin(dist, axis=1)
-            for j in range(k):
-                if int(np.sum(labels == j)) < 2:
-                    return None
-            return centers
 
         circles = self._hough_circles_in_block(gray)
         diag["n_hits_coarse"] = len(circles)
+        if not circles:
+            diag["fallback_reason"] = "no_printed_circles"
+            return bubbles, diag
+        circ = np.array([(float(c[0]), float(c[1])) for c in circles])
+        nominal = np.array([(float(b["cx"]), float(b["cy"])) for b in bubbles])
 
-        pad = int(coarse + spacing + 15)
-        nom_x = [int(b["cx"]) for b in bubbles]
-        nom_y = [int(b["cy"]) for b in bubbles]
-        x_lo, x_hi = min(nom_x) - pad, max(nom_x) + pad
-        y_lo, y_hi = min(nom_y) - pad, max(nom_y) + pad
-        xs = np.array(
-            [float(hx) for hx, hy, _r in circles if x_lo <= hx <= x_hi and y_lo <= hy <= y_hi],
-            dtype=np.float64,
-        )
-        ys = np.array(
-            [float(hy) for hx, hy, _r in circles if x_lo <= hx <= x_hi and y_lo <= hy <= y_hi],
-            dtype=np.float64,
-        )
+        col_of, row_of = {}, {}
+        for qm in grid_map.get("questions", []):
+            for alt in qm.get("alternatives", []):
+                col_of[(qm["q_num"], alt["letter"])] = int(alt["col_idx"])
+                row_of[(qm["q_num"], alt["letter"])] = int(qm["row_idx"])
+        cols = np.array([col_of.get((b["q_num"], b["alternative"]), 0) for b in bubbles], float)
+        rows = np.array([row_of.get((b["q_num"], b["alternative"]), 0) for b in bubbles], float)
 
-        a_x = b_y = a_y = d_x = None
-        coarse_method = None
-        # Centros nominais por coluna/linha (mediana) — âncora para escolher
-        # qual janela de clusters é A..D (evita cluster extra à esquerda).
-        nom_col_x = []
-        for cidx in range(n_cols):
-            vals = [
-                float(b["cx"])
-                for b in bubbles
-                if col_of.get((b["q_num"], b["alternative"])) == cidx
-            ]
-            nom_col_x.append(float(np.median(vals)) if vals else float("nan"))
-        nom_row_y = []
-        for ridx in range(n_rows):
-            vals = [
-                float(b["cy"])
-                for b in bubbles
-                if row_of.get((b["q_num"], b["alternative"])) == ridx
-            ]
-            nom_row_y.append(float(np.median(vals)) if vals else float("nan"))
+        search = float(self.GRID_REFINE_SEARCH_PX)
+        tol = float(self.GRID_REFINE_INLIER_TOL_PX)
+        pitch_tol = float(self.GRID_REFINE_PITCH_TOL)
+        sp0 = float(self.BUBBLE_SPACING_PX)
+        rh0 = float(self.ROW_HEIGHT_PX)
+        # origem nominal do reticulado (col 0 / row 0) no roi
+        ax0 = float(np.median(nominal[:, 0] - sp0 * cols))
+        ay0 = float(np.median(nominal[:, 1] - rh0 * rows))
 
-        def _grid_support(col_centers, row_centers):
-            """(n_cols_fortes, n_rows_fortes, n_inliers) para um reticulado."""
-            tol2 = 10.0 ** 2
-            per_c = np.zeros(len(col_centers), dtype=int)
-            per_r = np.zeros(len(row_centers), dtype=int)
-            n_inl = 0
-            for hx, hy, _r in circles:
-                if not (x_lo <= hx <= x_hi and y_lo <= hy <= y_hi):
-                    continue
-                ci = int(np.argmin(np.abs(col_centers - hx)))
-                ri = int(np.argmin(np.abs(row_centers - hy)))
-                if (hx - col_centers[ci]) ** 2 + (hy - row_centers[ri]) ** 2 <= tol2:
-                    n_inl += 1
-                    per_c[ci] += 1
-                    per_r[ri] += 1
-            strong_c = int(np.sum(per_c >= max(2, n_rows // 3)))
-            strong_r = int(np.sum(per_r >= max(2, n_cols // 3)))
-            return strong_c, strong_r, n_inl
+        def _lattice(ax, px, ay, py):
+            return np.stack([ax + px * cols, ay + py * rows], axis=1)
 
-        def _pick_col_window(centers, row_centers, n_keep, nom_targets, pitch):
-            """
-            Escolhe n_keep centros X consecutivos.
-            Prioriza cobertura forte de colunas (evita janela deslocada 1 col
-            que deixa D sem círculos). Empate: menor |offset| vs nominal.
-            """
-            if centers is None or len(centers) < n_keep or row_centers is None:
-                return None
-            best = None
-            for start in range(len(centers) - n_keep + 1):
-                win = centers[start : start + n_keep]
-                diffs = np.diff(win)
-                if len(diffs) and not np.all(
-                    (diffs >= pitch * 0.70) & (diffs <= pitch * 1.35)
-                ):
-                    continue
-                sc, sr, nin = _grid_support(win, row_centers)
-                off = float(np.median(win - np.asarray(nom_targets, float)))
-                # maximiza strong_c, strong_r, n_inl; minimiza |off|
-                tup = (sc, sr, nin, -abs(off), win)
-                if best is None or tup[:4] > best[:4]:
-                    best = tup
-            return None if best is None else best[4]
+        def _match(pts):
+            d = np.hypot(
+                circ[:, None, 0] - pts[None, :, 0],
+                circ[:, None, 1] - pts[None, :, 1],
+            )
+            j = d.argmin(axis=1)
+            ok = d[np.arange(len(circ)), j] <= tol
+            return ok, j
 
-        def _pick_row_window(centers, col_centers, n_keep, nom_targets, pitch):
-            if centers is None or len(centers) < n_keep or col_centers is None:
-                return None
-            best = None
-            for start in range(len(centers) - n_keep + 1):
-                win = centers[start : start + n_keep]
-                diffs = np.diff(win)
-                if len(diffs) and not np.all(
-                    (diffs >= pitch * 0.70) & (diffs <= pitch * 1.35)
-                ):
-                    continue
-                sc, sr, nin = _grid_support(col_centers, win)
-                off = float(np.median(win - np.asarray(nom_targets, float)))
-                tup = (sr, sc, nin, -abs(off), win)
-                if best is None or tup[:4] > best[:4]:
-                    best = tup
-            return None if best is None else best[4]
+        def _fit_axis(vals, idx, pitch_nom, a_cur, p_cur):
+            if len(np.unique(idx)) >= 2:
+                p_, a_ = np.polyfit(idx, vals, 1)
+                if abs(p_ / pitch_nom - 1.0) <= pitch_tol:
+                    return float(a_), float(p_)
+            # passo inválido/indeterminado: mantém passo, ajusta só a origem
+            return float(np.median(vals - p_cur * idx)), p_cur
 
-        # Tenta k..k+2 clusters (círculo decorativo / letra pode criar extra)
-        col_cands = []
-        for ktry in (n_cols, n_cols + 1, n_cols + 2):
-            if len(xs) >= ktry * 2:
-                cc = _kmeans_1d(xs, ktry, spacing)
-                if cc is not None:
-                    col_cands.append(cc)
-        row_cands = []
-        for ktry in (n_rows, n_rows + 1, n_rows + 2):
-            if len(ys) >= ktry * 2:
-                rc = _kmeans_1d(ys, ktry, row_h)
-                if rc is not None:
-                    row_cands.append(rc)
-
-        # Primeiro fixa linhas com k=n_rows (ou melhor suporte), depois colunas
-        row_c = None
-        if row_cands:
-            # usa colunas provisórias (k=n_cols) só para avaliar linhas
-            provisional_cols = None
-            for cc in col_cands:
-                if len(cc) == n_cols:
-                    provisional_cols = cc
+        def _fit_and_count(dx, dy):
+            ax, px, ay, py = ax0 + dx, sp0, ay0 + dy, rh0
+            ok, j = _match(_lattice(ax, px, ay, py))
+            for _ in range(3):
+                if ok.sum() < 2:
                     break
-            if provisional_cols is None and col_cands:
-                provisional_cols = col_cands[0][:n_cols]
-            for rc in row_cands:
-                picked = _pick_row_window(
-                    rc, provisional_cols, n_rows, nom_row_y, row_h
-                )
-                if picked is not None:
-                    row_c = picked
-                    break
+                ax, px = _fit_axis(circ[ok, 0], cols[j[ok]], sp0, ax, px)
+                ay, py = _fit_axis(circ[ok, 1], rows[j[ok]], rh0, ay, py)
+                ok, j = _match(_lattice(ax, px, ay, py))
+            return int(ok.sum()), ax, px, ay, py
 
-        col_c = None
-        if row_c is not None:
-            for cc in col_cands:
-                picked = _pick_col_window(cc, row_c, n_cols, nom_col_x, spacing)
-                if picked is not None:
-                    # fica com a de maior suporte entre candidatas
-                    if col_c is None:
-                        col_c = picked
-                    else:
-                        s_new = _grid_support(picked, row_c)
-                        s_old = _grid_support(col_c, row_c)
-                        off_new = abs(
-                            float(np.median(picked - np.asarray(nom_col_x, float)))
-                        )
-                        off_old = abs(
-                            float(np.median(col_c - np.asarray(nom_col_x, float)))
-                        )
-                        if (s_new[0], s_new[2], -off_new) > (
-                            s_old[0],
-                            s_old[2],
-                            -off_old,
-                        ):
-                            col_c = picked
+        # Votos: deslocamentos círculo − nominal dentro da janela de busca
+        sh = (circ[:, None, :] - nominal[None, :, :]).reshape(-1, 2)
+        sh = sh[(np.abs(sh[:, 0]) <= search) & (np.abs(sh[:, 1]) <= search)]
+        cands = [(0.0, 0.0)]
+        if len(sh):
+            bins = np.round(sh / tol).astype(int)
+            uniq, counts = np.unique(bins, axis=0, return_counts=True)
+            for k in np.argsort(-counts)[:12]:
+                m = np.all(bins == uniq[k], axis=1)
+                cands.append((float(np.median(sh[m, 0])), float(np.median(sh[m, 1]))))
 
-        if col_c is not None and row_c is not None:
-            d_x = float(np.median(np.diff(col_c)))
-            b_y = float(np.median(np.diff(row_c)))
-            a_x = float(col_c[0])
-            a_y = float(row_c[0])
-            ress = []
-            for hx, hy, _r in circles:
-                if not (x_lo <= hx <= x_hi and y_lo <= hy <= y_hi):
-                    continue
-                ci = int(np.argmin(np.abs(col_c - hx)))
-                ri = int(np.argmin(np.abs(row_c - hy)))
-                ress.append(float(np.hypot(hx - col_c[ci], hy - row_c[ri])))
-            res_med = float(np.median(ress)) if ress else 99.0
-            pitch_ok = (
-                self.GRID_REFINE_SPACING_MIN <= d_x <= self.GRID_REFINE_SPACING_MAX
-                and self.GRID_REFINE_ROW_H_MIN <= b_y <= self.GRID_REFINE_ROW_H_MAX
+        best = None
+        for dx0, dy0 in cands:
+            n, ax, px, ay, py = _fit_and_count(dx0, dy0)
+            shift = float(np.hypot(ax - ax0, ay - ay0))
+            key = (n, -shift)
+            if best is None or key > best[0]:
+                best = (key, ax, px, ay, py)
+
+        min_inl = max(4, int(round(self.GRID_REFINE_MIN_INLIER_FRAC * len(bubbles))))
+        n_inl = 0 if best is None else best[0][0]
+        if n_inl < min_inl:
+            diag["fallback_reason"] = "few_inliers"
+            diag["n_inliers"] = n_inl
+            self.logger.warning(
+                f"⚠️ [B1] Bloco {block_id}: grid fixo sem ajuste "
+                f"({n_inl} círculos alinhados, mínimo {min_inl})"
             )
-            if pitch_ok and res_med <= 12.0:
-                coarse_method = "hough_lattice"
-                diag.update(
-                    {
-                        "a_x": a_x,
-                        "d_x": d_x,
-                        "a_y": a_y,
-                        "b_y": b_y,
-                        "resid_x": res_med,
-                        "resid_y": res_med,
-                        "median_dx": a_x
-                        - (float(self.BLOCK_OFFSET_X) + float(self.BUBBLE_WIDTH_PX) / 2.0),
-                        "median_dy": a_y
-                        - (float(self.BLOCK_OFFSET_Y) + float(self.ROW_HEIGHT_PX) / 2.0),
-                        "coarse_method": coarse_method,
-                        "n_hits_fine": len(xs),
-                    }
-                )
-            else:
-                a_x = b_y = a_y = d_x = None
-
-        if a_x is None:
-            mt_dxs, mt_dys = [], []
-            for b in bubbles:
-                fx, fy, sc = self._match_ring_near(
-                    inv, int(b["cx"]), int(b["cy"]), tmpl, coarse
-                )
-                if sc >= match_min:
-                    mt_dxs.append(fx - int(b["cx"]))
-                    mt_dys.append(fy - int(b["cy"]))
-            if len(mt_dxs) < min_hits:
-                diag["fallback_reason"] = "lattice_and_mt_failed"
-                return bubbles, diag
-            med_dx = float(np.clip(np.median(mt_dxs), -coarse, coarse))
-            med_dy = float(np.clip(np.median(mt_dys), -coarse, coarse))
-            a_y = float(self.BLOCK_OFFSET_Y) + float(self.ROW_HEIGHT_PX) / 2.0 + med_dy
-            b_y = float(self.ROW_HEIGHT_PX)
-            a_x = float(self.BLOCK_OFFSET_X) + float(self.BUBBLE_WIDTH_PX) / 2.0 + med_dx
-            d_x = float(self.BUBBLE_SPACING_PX)
-            coarse_method = "match_template_offset_only"
-            diag.update(
-                {
-                    "a_x": a_x,
-                    "d_x": d_x,
-                    "a_y": a_y,
-                    "b_y": b_y,
-                    "median_dx": med_dx,
-                    "median_dy": med_dy,
-                    "coarse_method": coarse_method,
-                    "n_hits_fine": len(mt_dxs),
-                }
-            )
-
-        def _build_refined(ax, dx_, ay, by_):
-            out = []
-            for b in bubbles:
-                key = (b["q_num"], b["alternative"])
-                if key not in row_of or key not in col_of:
-                    out.append(dict(b))
-                    continue
-                nb = dict(b)
-                nb["cx"] = int(round(ax + dx_ * col_of[key]))
-                nb["cy"] = int(round(ay + by_ * row_of[key]))
-                nb["cx_nominal"] = b["cx"]
-                nb["cy_nominal"] = b["cy"]
-                out.append(nb)
-            return out
-
-        def _read_quality(bubs):
-            """
-            Qualidade sem GT: (n_colunas_com_tinta_forte, n_clear, sep).
-            Janela 1 coluna à esquerda deixa D fraco e A..C fortes nas marcas.
-            """
-            # tinta rápida por bolha
-            g = gray.astype(np.float32)
-            paper = cv2.GaussianBlur(g, (0, 0), 8)
-            ink = np.clip(paper - g, 0, 255)
-            by_q: Dict[Any, List[Tuple[str, float]]] = defaultdict(list)
-            col_ink = defaultdict(list)
-            h, w = ink.shape[:2]
-            for b in bubs:
-                cx, cy, r = int(b["cx"]), int(b["cy"]), int(b["r"])
-                rr = max(2, int(round(r * 0.55)))
-                key = (b["q_num"], b["alternative"])
-                cidx = col_of.get(key)
-                if not (rr <= cx < w - rr and rr <= cy < h - rr):
-                    sc = 0.0
-                else:
-                    yy, xx = np.ogrid[-rr : rr + 1, -rr : rr + 1]
-                    mask = xx * xx + yy * yy <= rr * rr
-                    patch = ink[cy - rr : cy + rr + 1, cx - rr : cx + rr + 1]
-                    sc = float(np.mean(patch[mask])) if patch.shape == mask.shape else 0.0
-                by_q[b["q_num"]].append((b["alternative"], sc))
-                if cidx is not None:
-                    col_ink[cidx].append(sc)
-            # colunas fortes: mediana alta (há bolhas impressas / marcas)
-            strong_cols = 0
-            for cidx, vals in col_ink.items():
-                if float(np.median(vals)) >= 8.0:
-                    strong_cols += 1
-            n_clear = 0
-            margins = []
-            for scores in by_q.values():
-                ordered = sorted(scores, key=lambda x: -x[1])
-                if len(ordered) < 2:
-                    continue
-                margin = ordered[0][1] - ordered[1][1]
-                margins.append(margin)
-                if ordered[0][1] >= 40.0 and margin >= 20.0:
-                    n_clear += 1
-            sep = float(np.median(margins)) if margins else -1e9
-            return strong_cols, n_clear, sep
-
-        # Desambigua atrator ±1 coluna (e ±1 linha em Y para bloco 1 anômalo)
-        cand_axes = [(a_x, a_y)]
-        if coarse_method == "hough_lattice":
-            cand_axes.extend(
-                [
-                    (a_x + d_x, a_y),
-                    (a_x - d_x, a_y),
-                    (a_x, a_y + b_y),
-                    (a_x, a_y - b_y),
-                ]
-            )
-
-        best_pack = None
-        for ax_c, ay_c in cand_axes:
-            trial = _build_refined(ax_c, d_x, ay_c, b_y)
-            sc, nc, sep = _read_quality(trial)
-            # prioriza colunas fortes (4), depois clears, depois sep
-            pack = (sc, nc, sep, ax_c, ay_c, trial)
-            if best_pack is None or pack[:3] > best_pack[:3]:
-                best_pack = pack
-
-        a_x, a_y = best_pack[3], best_pack[4]
-        refined = best_pack[5]
-        diag["a_x"] = a_x
-        diag["a_y"] = a_y
-        diag["median_dx"] = a_x - (
-            float(self.BLOCK_OFFSET_X) + float(self.BUBBLE_WIDTH_PX) / 2.0
-        )
-        diag["median_dy"] = a_y - (
-            float(self.BLOCK_OFFSET_Y) + float(self.ROW_HEIGHT_PX) / 2.0
-        )
-
-        sep_ref = self._offset_ink_separation(gray, refined, 0, 0, row_of, col_of)
-        sep_nom = self._offset_ink_separation(gray, bubbles, 0, 0, row_of, col_of)
-        diag["separation_refined"] = sep_ref
-        diag["separation_nominal"] = sep_nom
-        if sep_ref + 5.0 < sep_nom and coarse_method == "match_template_offset_only":
-            diag["fallback_reason"] = f"sep_worse:{sep_ref:.1f}<{sep_nom:.1f}"
             return bubbles, diag
 
-        diag["used_refined"] = True
+        _, ax, px, ay, py = best
+        dx, dy = ax - ax0, ay - ay0
+        large = max(abs(dx), abs(dy)) > float(self.GRID_REFINE_EXPECTED_SHIFT_PX)
+        pts = _lattice(ax, px, ay, py)
+
+        refined = []
+        for b, (cx, cy) in zip(bubbles, pts):
+            nb = dict(b)
+            nb["cx_nominal"] = b["cx"]
+            nb["cy_nominal"] = b["cy"]
+            nb["cx"] = int(round(cx))
+            nb["cy"] = int(round(cy))
+            refined.append(nb)
+
+        diag.update(
+            {
+                "used_refined": True,
+                "coarse_method": "lattice_vote",
+                "n_inliers": n_inl,
+                "median_dx": dx,
+                "median_dy": dy,
+                "a_x": ax,
+                "d_x": px,
+                "a_y": ay,
+                "b_y": py,
+                "large_shift": large,
+            }
+        )
         self.logger.info(
-            f"✅ [B1] Bloco {block_id}: grid refinado ({coarse_method}) "
-            f"row_h={b_y:.2f} spacing={d_x:.2f} "
-            f"a_x={a_x:.1f} a_y={a_y:.1f} sep={sep_ref:.1f}/{sep_nom:.1f} "
-            f"qual={best_pack[0]}/{best_pack[1]}"
+            f"✅ [B1] Bloco {block_id}: grid alinhado dx={dx:+.1f} dy={dy:+.1f} "
+            f"passo={px:.1f}x{py:.1f} ({n_inl}/{len(bubbles)} círculos"
+            f"{', deslocamento grande — origem do bloco aproximada' if large else ''})"
         )
         return refined, diag
 
@@ -3961,10 +3604,9 @@ class AnswerSheetCorrectionNewGrid:
             block_num = idx + 1
             self.logger.info(f"  📦 Processando bloco {block_num}")
             
-            # Extrair ROI do bloco
-            x, y, w, h = block["x"], block["y"], block["w"], block["h"]
-            block_roi = img_a4[y:y+h, x:x+w]
-            
+            # Extrair ROI do bloco (com margem para o alinhamento B1)
+            block_roi, roi_ox, roi_oy = self._extract_block_roi(img_a4, block)
+
             # Obter configuração do bloco do JSON
             if block_num - 1 >= len(blocks_topology):
                 self.logger.error(f"❌ Bloco {block_num} não encontrado no JSON")
@@ -3978,9 +3620,9 @@ class AnswerSheetCorrectionNewGrid:
                 continue
             
             # ETAPA 7: Calcular centros das bolhas (nominais do template/JSON)
-            bubbles = self._calculate_bubble_centers(grid_map)
+            bubbles = self._calculate_bubble_centers(grid_map, (roi_ox, roi_oy))
 
-            # ETAPA 7b (B1): refinar escala/offset por evidência local (±coarse/fine)
+            # ETAPA 7b (B1): alinhar o grid fixo aos círculos impressos
             block_id = block_config.get('block_id', block_num)
             bubbles, geom_diag = self._refine_block_grid(
                 block_roi, grid_map, bubbles, block_id=block_id

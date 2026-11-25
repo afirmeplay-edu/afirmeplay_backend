@@ -29,33 +29,45 @@ class TestAlunoAusenteOmr(unittest.TestCase):
         self.assertLess(empty, self.omr.FILL_THRESHOLD)
         self.assertGreater(filled, self.omr.FILL_THRESHOLD)
 
-    def _synthetic_a4(self, fill_first: bool):
+    def _synthetic_a4(self, filled_index=None, dx: int = 0, dy: int = 0):
+        """A4 com as três bolinhas do aplicador (ausente, deficiência, tempo)."""
         h, w = self.omr.A4_HEIGHT_PX, self.omr.A4_WIDTH_PX
         img = np.full((h, w, 3), 255, dtype=np.uint8)
-        blocks = [{"x": 200, "y": 1800, "w": 400, "h": 1200}]
-        band = self.omr._applicator_search_band(img, blocks)
-        self.assertIsNotNone(band)
-        cx, cy, r = self.omr._fallback_ausente_center(band)
-        # Três bolinhas empilhadas (ausente, deficiência, tempo extra)
-        gap = int(0.45 * self.omr.PX_PER_CM_A4)
+        cx = self.omr.APPLICATOR_AUSENTE_CX_PX + dx
+        cy = self.omr.APPLICATOR_AUSENTE_CY_PX + dy
+        r = self.omr.APPLICATOR_AUSENTE_RADIUS_PX - 4
+        pitch = int(round(self.omr.APPLICATOR_BUBBLE_PITCH_PX))
         for i in range(3):
-            y = cy + i * gap
-            filled = fill_first and i == 0
-            cv2.circle(img, (cx, y), r, (0, 0, 0), -1 if filled else 2)
-        return img, blocks
+            filled = filled_index == i
+            cv2.circle(img, (cx, cy + i * pitch), r, (0, 0, 0), -1 if filled else 3)
+        return img, [], (cx, cy, pitch)
 
     def test_detects_marked_absent_bubble(self):
-        img, blocks = self._synthetic_a4(fill_first=True)
+        img, blocks, _ = self._synthetic_a4(filled_index=0)
         info = self.omr._detect_aluno_ausente(img, blocks)
         self.assertTrue(info["marked"])
         self.assertGreater(info["fill_ratio"], self.omr.FILL_THRESHOLD)
-        self.assertIn(info["method"], ("hough", "fallback"))
 
     def test_empty_absent_bubble_not_marked(self):
-        img, blocks = self._synthetic_a4(fill_first=False)
+        img, blocks, (cx, cy, _p) = self._synthetic_a4()
         info = self.omr._detect_aluno_ausente(img, blocks)
         self.assertFalse(info["marked"])
         self.assertLess(info["fill_ratio"], self.omr.FILL_THRESHOLD)
+        self.assertEqual(info["method"], "column")
+        self.assertLessEqual(abs(info["cy"] - cy), 3)
+
+    def test_deficiencia_marcada_nao_e_ausente(self):
+        """Regressão 25/11: bolinha 2 ("deficiência") era lida como ausente."""
+        img, blocks, _ = self._synthetic_a4(filled_index=1)
+        info = self.omr._detect_aluno_ausente(img, blocks)
+        self.assertFalse(info["marked"])
+
+    def test_coluna_deslocada_ainda_le_bolinha_1(self):
+        """Pequeno desvio de scan: segue a coluna, não a bolinha mais próxima."""
+        img, blocks, (cx, cy, pitch) = self._synthetic_a4(filled_index=0, dx=10, dy=-30)
+        info = self.omr._detect_aluno_ausente(img, blocks)
+        self.assertTrue(info["marked"])
+        self.assertLessEqual(abs(info["cy"] - cy), 3)
 
     def test_cartao_em_branco_conta_como_ausente(self):
         correction = {
@@ -82,25 +94,14 @@ class TestAlunoAusenteOmr(unittest.TestCase):
         self.assertFalse(self.omr._cartao_sem_nenhuma_resposta(correction))
 
     def test_header_false_circle_is_not_aluno_ausente(self):
-        """Círculo no título roxo (topo da faixa) não pode marcar ausência."""
-        img, blocks = self._synthetic_a4(fill_first=False)
-        band = self.omr._applicator_search_band(img, blocks)
-        x1, y1, x2, _y2 = band
-        fb_cx, _fb_cy, r = self.omr._fallback_ausente_center(band)
-        cv2.rectangle(img, (x1, y1), (x2, y1 + int(0.5 * self.omr.PX_PER_CM_A4)), (60, 60, 60), -1)
-        cv2.circle(img, (fb_cx, y1 + 20), r, (0, 0, 0), -1)
+        """Faixa cinza do título + círculo escuro acima da coluna não contam."""
+        img, blocks, (cx, cy, pitch) = self._synthetic_a4()
+        cv2.rectangle(img, (cx - 60, cy - 100), (cx + 60, cy - 55), (60, 60, 60), -1)
+        cv2.circle(img, (cx, cy - pitch), 24, (0, 0, 0), -1)
         info = self.omr._detect_aluno_ausente(img, blocks)
         self.assertFalse(info["marked"])
         self.assertLess(info["fill_ratio"], self.omr.FILL_THRESHOLD)
-        self.assertGreater(info["cy"], y1 + int(0.7 * self.omr.PX_PER_CM_A4))
-
-    def test_fallback_center_sits_below_applicator_title(self):
-        img = np.full((self.omr.A4_HEIGHT_PX, self.omr.A4_WIDTH_PX, 3), 255, dtype=np.uint8)
-        blocks = [{"x": 200, "y": 1800, "w": 400, "h": 1200}]
-        band = self.omr._applicator_search_band(img, blocks)
-        _cx, cy, _r = self.omr._fallback_ausente_center(band)
-        y1 = band[1]
-        self.assertGreaterEqual(cy - y1, int(1.0 * self.omr.PX_PER_CM_A4))
+        self.assertLessEqual(abs(info["cy"] - cy), 3)
 
 
 if __name__ == "__main__":

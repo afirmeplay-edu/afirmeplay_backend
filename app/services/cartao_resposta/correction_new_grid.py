@@ -210,18 +210,24 @@ class AnswerSheetCorrectionNewGrid:
     CSS_PX_TO_A4 = 300.0 / 96.0  # 3.125
     APPLICATOR_BOX_HEIGHT_CM = 2.6
     APPLICATOR_CHECKBOX_CSS_PX = 18
-    # Faixa acima do topo dos retângulos de questão: caixa 2.6cm + header/padding.
-    APPLICATOR_SEARCH_ABOVE_BLOCKS_PX = int(4.2 * 118.11)  # ~496
-    # Pula títulos A–D imediatamente acima da borda preta do bloco.
-    APPLICATOR_SEARCH_SKIP_NEAR_BLOCKS_PX = int(1.0 * 118.11)  # ~118
-    # Calibração 2026-08-24 (scan Paulo Ricardo, A4 2480×3508):
-    # o Hough pegava o título roxo (~0.55 cm do topo da faixa). A bolinha 1
-    # está 1.12 cm abaixo do topo e ~3 px à direita da fórmula CSS.
-    APPLICATOR_AUSENTE_CY_OFFSET_CM = 1.12
-    APPLICATOR_AUSENTE_CX_TWEAK_PX = 3
-    APPLICATOR_AUSENTE_RADIUS_PX = 31
-    APPLICATOR_HOUGH_SKIP_HEADER_PX = int(0.75 * 118.11)  # ~89, título do aplicador
-    APPLICATOR_HOUGH_MAX_OFFSET_PX = int(0.45 * 118.11)  # ~53, 1 diâmetro de bolinha
+    # A caixa do aplicador fica em posição fixa na PÁGINA (padding da folha +
+    # cabeçalho 6.4cm + instruções 3.8cm), independente dos blocos de questão.
+    # Medido em scans normalizados (cartão-resposta e prova física, 11/2026):
+    # bolinha 1 em x≈268–274, y≈1469–1477; passo vertical 66–67px.
+    # (A versão anterior media a partir do topo do bloco e passou a ler a
+    # bolinha 2 quando o fiducial de bloco empurrou os blocos ~0.5cm.)
+    APPLICATOR_AUSENTE_CX_PX = 272
+    APPLICATOR_AUSENTE_CY_PX = 1474
+    APPLICATOR_BUBBLE_PITCH_PX = 66.5
+    APPLICATOR_PITCH_TOL_PX = 8.0
+    APPLICATOR_COLUMN_X_TOL_PX = 8.0
+    # Janela de busca da coluna de 3 bolinhas em torno da posição esperada
+    APPLICATOR_SEARCH_X_PX = 70
+    APPLICATOR_SEARCH_ABOVE_PX = 110
+    APPLICATOR_SEARCH_BELOW_PX = 230
+    # Sem a coluna completa: só aceita círculo isolado bem perto do esperado
+    APPLICATOR_NEAR_MAX_OFFSET_PX = 25
+    APPLICATOR_AUSENTE_RADIUS_PX = 28  # 18px CSS ≈ 56px de diâmetro
 
     # =========================================================================
     # FIDUCIAL LOCAL DO BLOCO (OMR V1) — .omr-block-anchor no template
@@ -3351,111 +3357,103 @@ class AnswerSheetCorrectionNewGrid:
             return 0.0
         return float(cv2.countNonZero(masked)) / float(total_pixels)
 
-    def _applicator_search_band(self, img_a4: np.ndarray, blocks: List[Dict]) -> Optional[Tuple[int, int, int, int]]:
+    def _locate_aluno_ausente_bubble(
+        self, img_a4: np.ndarray
+    ) -> Tuple[int, int, str]:
         """
-        Faixa acima dos blocos de questão onde fica o .applicator-box.
-        Não altera a detecção dos blocos; só usa o Y já encontrado.
-        """
-        if not blocks:
-            return None
-        h, w = img_a4.shape[:2]
-        grid_top = min(int(b.get("y", 0)) for b in blocks)
-        y2 = max(0, grid_top - self.APPLICATOR_SEARCH_SKIP_NEAR_BLOCKS_PX)
-        y1 = max(0, grid_top - self.APPLICATOR_SEARCH_ABOVE_BLOCKS_PX)
-        if y2 - y1 < 40:
-            return None
-        x1 = int(w * 0.05)
-        x2 = int(w * 0.22)
-        if x2 - x1 < 40:
-            return None
-        return x1, y1, x2, y2
+        Centro da bolinha "1. Aluno ausente" no A4 normalizado.
 
-    def _fallback_ausente_center(self, band: Tuple[int, int, int, int]) -> Tuple[int, int, int]:
-        """Centro estimado da 1ª bolinha (Aluno ausente) via CSS + calibração, sem Hough."""
-        x1, y1, x2, y2 = band
-        r = max(8, int(self.APPLICATOR_AUSENTE_RADIUS_PX))
-        # padding-left do cartão (2cm) − âncora (~0.2cm) + padding do conteúdo + raio
-        cx = int((2.0 - 0.2) * self.PX_PER_CM_A4 + (8 + 9) * self.CSS_PX_TO_A4)
-        cx += int(self.APPLICATOR_AUSENTE_CX_TWEAK_PX)
-        cx = min(max(cx, x1 + r), x2 - r)
-        # Centro da bolinha 1 (não o título roxo). Calibrado: 1.12 cm abaixo do topo da faixa.
-        cy = y1 + int(self.APPLICATOR_AUSENTE_CY_OFFSET_CM * self.PX_PER_CM_A4)
-        cy = min(max(cy, y1 + r), y2 - r)
-        return cx, cy, r
+        Procura, em torno da posição fixa esperada, a COLUNA das três bolinhas
+        do aplicador (mesmo x, passo ~APPLICATOR_BUBBLE_PITCH_PX) e devolve a
+        primeira. Escolher pela estrutura — e não pelo círculo mais próximo —
+        evita ler a bolinha 2 ("deficiência") ou a faixa cinza do título.
+
+        Retorna (cx, cy, método): "column", "near" ou "expected".
+        """
+        ex, ey = int(self.APPLICATOR_AUSENTE_CX_PX), int(self.APPLICATOR_AUSENTE_CY_PX)
+        h, w = img_a4.shape[:2]
+        x1 = max(0, ex - int(self.APPLICATOR_SEARCH_X_PX))
+        x2 = min(w, ex + int(self.APPLICATOR_SEARCH_X_PX))
+        y1 = max(0, ey - int(self.APPLICATOR_SEARCH_ABOVE_PX))
+        y2 = min(h, ey + int(self.APPLICATOR_SEARCH_BELOW_PX))
+        roi = img_a4[y1:y2, x1:x2]
+        if roi.size == 0:
+            return ex, ey, "expected"
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+        r = int(self.APPLICATOR_AUSENTE_RADIUS_PX)
+        try:
+            found = cv2.HoughCircles(
+                cv2.GaussianBlur(gray, (5, 5), 0),
+                cv2.HOUGH_GRADIENT,
+                dp=1.2,
+                minDist=40,
+                param1=80,
+                param2=18,
+                minRadius=max(12, int(r * 0.75)),
+                maxRadius=int(r * 1.45),
+            )
+        except cv2.error:
+            found = None
+        if found is None or len(found) == 0:
+            return ex, ey, "expected"
+
+        circles = sorted(
+            (float(c[1]) + y1, float(c[0]) + x1) for c in found[0]
+        )  # (y, x), de cima para baixo
+        pitch = float(self.APPLICATOR_BUBBLE_PITCH_PX)
+        p_tol = float(self.APPLICATOR_PITCH_TOL_PX)
+        x_tol = float(self.APPLICATOR_COLUMN_X_TOL_PX)
+
+        # Trincas (b1, b2, b3) alinhadas em x e com o passo do template
+        best = None
+        for i, (ya, xa) in enumerate(circles):
+            for yb, xb in circles[i + 1:]:
+                if abs(xb - xa) > x_tol or abs((yb - ya) - pitch) > p_tol:
+                    continue
+                for yc, xc in circles:
+                    if abs(xc - xa) > x_tol or abs((yc - yb) - pitch) > p_tol:
+                        continue
+                    dist = float(np.hypot(xa - ex, ya - ey))
+                    if best is None or dist < best[0]:
+                        best = (dist, xa, ya)
+        if best is not None:
+            return int(round(best[1])), int(round(best[2])), "column"
+
+        # Só um par alinhado (1–2 ou 2–3; ex.: bolinha preenchida sem borda
+        # para o Hough): a bolinha 1 é o topo do par ou um passo acima dele.
+        best = None
+        for i, (ya, xa) in enumerate(circles):
+            for yb, xb in circles[i + 1:]:
+                if abs(xb - xa) > x_tol or abs((yb - ya) - pitch) > p_tol:
+                    continue
+                step = yb - ya
+                for top in (ya, ya - step):
+                    dist = float(np.hypot(xa - ex, top - ey))
+                    if best is None or dist < best[0]:
+                        best = (dist, xa, top)
+        if best is not None and best[0] <= float(self.APPLICATOR_NEAR_MAX_OFFSET_PX):
+            return int(round(best[1])), int(round(best[2])), "pair"
+
+        # Coluna incompleta: aceita só um círculo bem próximo do esperado
+        near = min(circles, key=lambda c: np.hypot(c[1] - ex, c[0] - ey))
+        if np.hypot(near[1] - ex, near[0] - ey) <= float(self.APPLICATOR_NEAR_MAX_OFFSET_PX):
+            return int(round(near[1])), int(round(near[0])), "near"
+        return ex, ey, "expected"
 
     def _detect_aluno_ausente(self, img_a4: np.ndarray, blocks: List[Dict]) -> Dict[str, Any]:
         """
         Lê a bolinha "1. Aluno ausente" na imagem A4 já normalizada.
 
-        Isolado do grid de questões: não mexe em offsets/raio/espaçamento das bolhas
-        de resposta nem nos filtros de detecção de blocos.
+        Isolado do grid de questões. `blocks` é mantido na assinatura por
+        compatibilidade; a posição vem da página, não dos blocos.
         """
-        empty = {
-            "marked": False,
-            "fill_ratio": 0.0,
-            "method": "none",
-            "cx": None,
-            "cy": None,
-            "r": None,
-        }
-        band = self._applicator_search_band(img_a4, blocks)
-        if band is None:
-            self.logger.warning("⚠️ Faixa do aplicador inválida — bolinha de ausente não lida")
-            return empty
-
-        x1, y1, x2, y2 = band
-        if y2 <= y1 or x2 <= x1:
-            return empty
-
-        fb_cx, fb_cy, r = self._fallback_ausente_center(band)
-        method = "fallback"
-        cx, cy = fb_cx, fb_cy
-
-        header_skip = int(self.APPLICATOR_HOUGH_SKIP_HEADER_PX)
-        hough_y1 = min(y2 - 8, y1 + header_skip)
-        hough_roi = img_a4[hough_y1:y2, x1:x2]
-        if hough_roi.size > 0:
-            if len(hough_roi.shape) == 3:
-                gray = cv2.cvtColor(hough_roi, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = hough_roi.copy()
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            min_r = max(12, int(r * 0.65))
-            max_r = max(min_r + 2, int(r * 1.45))
-            try:
-                circles = cv2.HoughCircles(
-                    blurred,
-                    cv2.HOUGH_GRADIENT,
-                    dp=1.2,
-                    minDist=int(0.35 * self.PX_PER_CM_A4),
-                    param1=80,
-                    param2=18,
-                    minRadius=min_r,
-                    maxRadius=max_r,
-                )
-            except cv2.error:
-                circles = None
-
-            if circles is not None and len(circles) > 0:
-                best = None
-                best_dist = None
-                max_off = float(self.APPLICATOR_HOUGH_MAX_OFFSET_PX)
-                for c in np.round(circles[0]).astype(int):
-                    rcx, rcy, rr = int(c[0]), int(c[1]), int(c[2])
-                    abs_cx = x1 + rcx
-                    abs_cy = hough_y1 + rcy
-                    dist = float(np.hypot(abs_cx - fb_cx, abs_cy - fb_cy))
-                    if dist <= max_off and (best_dist is None or dist < best_dist):
-                        best = (abs_cx, abs_cy, rr)
-                        best_dist = dist
-                if best is not None:
-                    cx, cy, r = best
-                    method = "hough"
-
+        cx, cy, method = self._locate_aluno_ausente_bubble(img_a4)
+        r = int(self.APPLICATOR_AUSENTE_RADIUS_PX)
         fill_ratio = self._circle_fill_ratio(img_a4, cx, cy, r)
         marked = fill_ratio > self.FILL_THRESHOLD
 
-        self.logger.info(
+        log = self.logger.info if method == "column" else self.logger.warning
+        log(
             f"🟣 Aluno ausente: method={method} cx={cx} cy={cy} r={r} "
             f"fill={fill_ratio:.3f} marked={marked}"
         )
@@ -3464,13 +3462,12 @@ class AnswerSheetCorrectionNewGrid:
             debug_img = img_a4.copy()
             if len(debug_img.shape) == 2:
                 debug_img = cv2.cvtColor(debug_img, cv2.COLOR_GRAY2BGR)
-            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 255), 3)
             color = (0, 0, 255) if marked else (0, 255, 0)
             cv2.circle(debug_img, (cx, cy), r, color, 3)
             cv2.circle(debug_img, (cx, cy), 3, color, -1)
-            label = f"AUSENTE {'SIM' if marked else 'NAO'} {fill_ratio:.2f}"
+            label = f"AUSENTE {'SIM' if marked else 'NAO'} {fill_ratio:.2f} ({method})"
             cv2.putText(
-                debug_img, label, (x1, max(30, y1 - 10)),
+                debug_img, label, (max(10, cx - r), max(30, cy - r - 12)),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2,
             )
             self._save_debug_image("04_aluno_ausente.jpg", debug_img)

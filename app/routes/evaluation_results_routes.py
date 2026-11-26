@@ -1281,98 +1281,22 @@ def listar_avaliacoes():
             if isinstance(disciplina, dict):
                 disciplina["participantes_distribuicao"] = disciplina.get("alunos_participantes", 0)
         
-        # Aplicar paginação para resultados detalhados
+        # Agregar linhas no escopo completo; paginar só a apresentação (não cortes por ClassTest).
         try:
-            # Garantir que a sessão está limpa antes de executar as queries de paginação
             db.session.rollback()
-            
-            # Se ainda houver erro, tentar com uma nova sessão
-            try:
-                total = query_base.count()
-                offset = (page - 1) * per_page
-                class_tests_paginados = query_base.offset(offset).limit(per_page).all()
-            except Exception as inner_e:
-                if "InFailedSqlTransaction" in str(inner_e):
-                    logging.warning("Tentando paginação com nova sessão devido a transação falhada")
-                    db.session.rollback()
-                    db.session.close()
-                    # Recriar a query com nova sessão
-                    query_base = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
-                                               .join(Class, ClassTest.class_id == Class.id)\
-                                               .join(Grade, Class.grade_id == Grade.id)\
-                                               .join(School, School.id == cast(Class.school_id, String))\
-                                               .join(City, School.city_id == City.id)\
-                                               .options(
-                                                   joinedload(ClassTest.test).joinedload(Test.subject_rel),
-                                                   joinedload(ClassTest.class_).joinedload(Class.grade)
-                                                   # ❌ REMOVIDO: joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city) - Class.school é property
-                                               )
-                    # Reaplicar filtros
-                    if estado and estado.lower() != 'all':
-                        query_base = query_base.filter(City.state.ilike(f"%{estado}%"))
-                    if municipio and municipio.lower() != 'all':
-                        city_filter = City.query.get(municipio)
-                        if city_filter:
-                            query_base = query_base.filter(City.id == municipio)
-                    if avaliacao and avaliacao.lower() != 'all':
-                        if avaliacao_ids and (grupo_ctx or len(avaliacao_ids) > 1):
-                            query_base = query_base.filter(Test.id.in_(avaliacao_ids))
-                        else:
-                            test_filter = Test.query.get(avaliacao)
-                            if test_filter:
-                                query_base = query_base.filter(Test.id == avaliacao)
-                    if permissao['scope'] == 'escola' and user['role'] == 'professor':
-                        # Professor vê avaliações que criou OU que foram aplicadas em suas escolas/turmas
-                        from app.models.teacher import Teacher
-                        from sqlalchemy import or_
-                        
-                        teacher = Teacher.query.filter_by(user_id=user['id']).first()
-                        if teacher:
-                            # ✅ CORRIGIDO: Criar filtro OR com TURMAS ESPECÍFICAS onde o professor está vinculado
-                            from app.models.teacherClass import TeacherClass
-                            
-                            # Criar filtro OR: avaliações criadas pelo professor OU aplicadas em suas TURMAS
-                            filters = [Test.created_by == user['id']]
-                            
-                            # ✅ Buscar TURMAS onde o professor está vinculado (via TeacherClass)
-                            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-                            teacher_class_ids = [tc.class_id for tc in teacher_classes]
-                            
-                            if teacher_class_ids:
-                                # ✅ Avaliações aplicadas em TURMAS ESPECÍFICAS onde o professor está vinculado
-                                filters.append(
-                                    Test.id.in_(
-                                        db.session.query(ClassTest.test_id).filter(
-                                            ClassTest.class_id.in_(teacher_class_ids)
-                                        )
-                                    )
-                                )
-                            
-                            query_base = query_base.filter(or_(*filters))
-                        else:
-                            # Se não é um professor válido, não mostrar nenhuma avaliação
-                            query_base = query_base.filter(Test.created_by == user['id']).filter(Test.id == None)
-
-                    query_base = _apply_class_test_application_period(query_base, periodo_bounds_dados)
-
-                    total = query_base.count()
-                    offset = (page - 1) * per_page
-                    class_tests_paginados = query_base.offset(offset).limit(per_page).all()
-                else:
-                    raise inner_e
-                    
+            resultados_detalhados_all = _gerar_resultados_detalhados_por_granularidade(
+                todas_avaliacoes_escopo, nivel_granularidade, estatisticas_consolidadas, scope_info
+            )
+            total = len(resultados_detalhados_all or [])
+            offset = (page - 1) * per_page
+            resultados_detalhados = (resultados_detalhados_all or [])[offset : offset + per_page]
         except Exception as e:
             logging.error(f"Erro ao aplicar paginação: {str(e)}")
             db.session.rollback()
             return jsonify({"error": "Erro ao aplicar paginação", "details": str(e)}), 500
         
-        # Gerar resultados detalhados agregados por nível de granularidade
-        resultados_detalhados = _gerar_resultados_detalhados_por_granularidade(
-            class_tests_paginados, nivel_granularidade, estatisticas_consolidadas, scope_info
-        )
-        
         # Calcular total de páginas
-        total_pages = (total + per_page - 1) // per_page
+        total_pages = (total + per_page - 1) // per_page if per_page else 1
         
         # Gerar opções dos próximos filtros
         opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user)
@@ -2227,24 +2151,20 @@ def _gerar_tabela_detalhada_por_disciplina(
         return {"disciplinas": [], "geral": {"alunos": []}, "error": str(e)}
 
 
-def _classificar_proficiencia_geral(proficiencia_media: float, course_name: str) -> Optional[str]:
-    """Fallback de classificação geral quando não há EvaluationResult.classification."""
-    if "finais" in course_name.lower() or "médio" in course_name.lower() or "medio" in course_name.lower():
-        if proficiencia_media >= 340:
-            return "Avançado"
-        if proficiencia_media >= 290:
-            return "Adequado"
-        if proficiencia_media >= 212.50:
-            return "Básico"
-        return "Abaixo do Básico"
+def _classificar_proficiencia_geral(
+    proficiencia_media: float,
+    course_name: str,
+    has_matematica: Optional[bool] = None,
+) -> Optional[str]:
+    """Fallback oficial: EvaluationCalculator (sem cortes locais)."""
+    from app.services.evaluation_calculator import EvaluationCalculator
 
-    if proficiencia_media >= 263:
-        return "Avançado"
-    if proficiencia_media >= 213:
-        return "Adequado"
-    if proficiencia_media >= 163:
-        return "Básico"
-    return "Abaixo do Básico"
+    return EvaluationCalculator.determine_classification(
+        float(proficiencia_media or 0),
+        course_name or "Anos Iniciais",
+        "GERAL",
+        has_matematica=has_matematica,
+    )
 
 
 def _calcular_dados_gerais_alunos(
@@ -2367,7 +2287,8 @@ def _calcular_dados_gerais_alunos(
 
 def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     """
-    Calcula estatísticas de uma avaliação para o frontend
+    DEPRECATED (ResultadoEscopo): sem chamadores; preferir ``resultado_escopo.carregar``.
+    Mantido temporariamente para rollback.
     """
     # Buscar avaliação
     test = Test.query.get(test_id)
@@ -2441,7 +2362,7 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
 
 def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[str, Any]:
     """
-    Calcula estatísticas de uma avaliação para uma turma específica
+    DEPRECATED (ResultadoEscopo): sem chamadores; preferir ``resultado_escopo.carregar``.
     """
     # Buscar avaliação
     test = Test.query.get(test_id)
@@ -2896,13 +2817,17 @@ def _carregar_dataset_virtual_grupo(
 
 
 def _participacao_da_disciplina(participantes: int, matriculados: Optional[int]) -> Dict[str, Any]:
-    """Quem fez, quem não fez e o percentual sobre a matrícula do recorte."""
+    """Quem fez, quem não fez e o percentual sobre a matrícula do recorte.
+
+    Sem ``max(matriculados, feitos)``: se feitos > matriculados, sinaliza anomalia
+    mantendo o denominador oficial (matriculados).
+    """
     feitos = max(0, int(participantes or 0))
     if matriculados is None:
         total = feitos
     else:
-        total = max(int(matriculados or 0), feitos)
-    faltantes = total - feitos
+        total = max(0, int(matriculados or 0))
+    faltantes = max(0, total - feitos)
     percentual = round(100.0 * feitos / total, 2) if total else 0.0
     return {
         "total_alunos": total,
@@ -3294,7 +3219,8 @@ def _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, ava
 
 def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granularidade):
     """
-    Calcula estatísticas gerais baseadas no nível de granularidade
+    DEPRECATED (ResultadoEscopo): sem chamadores; card usa
+    ``_calcular_estatisticas_consolidadas_por_escopo`` + fachada.
     """
     try:
         from app.models.evaluationResult import EvaluationResult
@@ -9229,7 +9155,7 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         
         # Buscar alunos baseado no escopo (união com transferidos que têm snapshot no escopo)
         if nivel_granularidade == "avaliacao":
-            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            todos_alunos = Student.query_ativos().filter(Student.class_id.in_(class_ids)).all()
             logging.info(f"Avaliação específica: class_ids={class_ids}")
         else:
             todos_alunos = _buscar_alunos_por_escopo(escopo_calculo)
@@ -9504,6 +9430,77 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
                 exc_info=True,
             )
 
+        # Piloto ResultadoEscopo: card /avaliacoes consome a fachada (sombra + cutover).
+        nivel_from_escopo = None
+        try:
+            from app.services.resultado_escopo import (
+                carregar as carregar_resultado_escopo,
+                log_shadow_divergencia,
+                use_resultado_escopo,
+            )
+
+            city_shadow = scope_info.get("city_data")
+            municipio_escopo = (
+                getattr(city_shadow, "id", None)
+                or scope_info.get("municipio_id")
+                or scope_info.get("municipio")
+            )
+            payload_escopo = carregar_resultado_escopo(
+                test_ids,
+                escopo={
+                    "municipio_id": municipio_escopo,
+                    "school_id": scope_info.get("escola")
+                    if scope_info.get("escola") not in (None, "all")
+                    else None,
+                    "serie_id": scope_info.get("serie")
+                    if scope_info.get("serie") not in (None, "all")
+                    else None,
+                    "class_id": scope_info.get("turma")
+                    if scope_info.get("turma") not in (None, "all")
+                    else None,
+                    "class_ids": class_ids,
+                    "nivel": nivel_granularidade,
+                },
+                alunos=scope_info.get("alunos") or "todos",
+                modalidade="online",
+                target_level=nivel_granularidade,
+            )
+            log_shadow_divergencia(
+                "avaliacoes_card",
+                {
+                    "nota": round(media_nota, 2),
+                    "proficiencia_media": format_decimal_two_places(media_proficiencia),
+                    "classificacao": None,
+                    "matriculados": total_alunos,
+                    "avaliados": alunos_participantes,
+                    "percentual": percentual_comparecimento,
+                },
+                payload_escopo,
+            )
+            # Piloto: sempre usa a fachada no card (exceto grupo multidisciplinar virtual).
+            if (use_resultado_escopo() or True) and not scope_info.get("grupo"):
+                media_nota = float(payload_escopo.indicadores.nota or 0.0)
+                media_proficiencia = float(
+                    payload_escopo.indicadores.proficiencia_media or 0.0
+                )
+                total_alunos = int(payload_escopo.participacao.matriculados or total_alunos)
+                alunos_participantes = int(
+                    payload_escopo.participacao.avaliados or alunos_participantes
+                )
+                alunos_ausentes = int(payload_escopo.universo.ausentes or alunos_ausentes)
+                alunos_pendentes = int(
+                    payload_escopo.universo.pendentes or alunos_pendentes
+                )
+                percentual_comparecimento = float(
+                    payload_escopo.participacao.percentual or percentual_comparecimento
+                )
+                nivel_from_escopo = payload_escopo.indicadores.classificacao
+        except Exception:
+            logging.warning(
+                "ResultadoEscopo falhou no card /avaliacoes; mantendo cálculo legado",
+                exc_info=True,
+            )
+
         media_proficiencia_geral_fmt = format_decimal_two_places(media_proficiencia)
         course_name_nivel = "Anos Iniciais"
         first_test_nivel = (
@@ -9520,7 +9517,7 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         else:
             if len(grade_courses) == 1:
                 course_name_nivel = next(iter(grade_courses))
-            nivel_classificacao_geral = _nivel_classificacao_por_media_proficiencia(
+            nivel_classificacao_geral = nivel_from_escopo or _nivel_classificacao_por_media_proficiencia(
                 media_proficiencia_geral_fmt,
                 course_name_nivel,
                 alunos_participantes,
@@ -10577,7 +10574,7 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
         
         # Coletar todos os alunos das turmas do grupo + transferidos com snapshot nessas turmas
         class_ids = [ct.class_id for ct in class_tests_grupo]
-        base_roster = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        base_roster = Student.query_ativos().filter(Student.class_id.in_(class_ids)).all()
         base_ids_set = {a.id for a in base_roster}
 
         from app.services.evaluation_result_snapshot import (
@@ -10721,6 +10718,58 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
                 "Censo de participação falhou na linha de resultados",
                 exc_info=True,
             )
+
+        # Linhas escola/turma via ResultadoEscopo (piloto).
+        if not (scope_info or {}).get("grupo"):
+            try:
+                from app.services.resultado_escopo import (
+                    carregar as carregar_resultado_escopo,
+                    log_shadow_divergencia,
+                )
+
+                payload_linha = carregar_resultado_escopo(
+                    test_ids_grupo,
+                    escopo={
+                        "municipio_id": (scope_info or {}).get("municipio")
+                        or (scope_info or {}).get("municipio_id"),
+                        "class_ids": class_ids,
+                        "nivel": aggregation_level,
+                    },
+                    alunos=(scope_info or {}).get("alunos") or "todos",
+                    modalidade="online",
+                    target_level=aggregation_level,
+                )
+                log_shadow_divergencia(
+                    "avaliacoes_linha",
+                    {
+                        "nota": media_nota,
+                        "proficiencia_media": media_proficiencia,
+                        "matriculados": total_alunos,
+                        "avaliados": alunos_participantes,
+                        "percentual": percentual_comparecimento,
+                    },
+                    payload_linha,
+                )
+                media_nota = float(payload_linha.indicadores.nota or 0.0)
+                media_proficiencia = float(
+                    payload_linha.indicadores.proficiencia_media or 0.0
+                )
+                total_alunos = int(payload_linha.participacao.matriculados or total_alunos)
+                alunos_participantes = int(
+                    payload_linha.participacao.avaliados or alunos_participantes
+                )
+                alunos_pendentes = int(
+                    payload_linha.universo.pendentes or alunos_pendentes
+                )
+                alunos_ausentes = int(payload_linha.universo.ausentes or alunos_ausentes)
+                percentual_comparecimento = float(
+                    payload_linha.participacao.percentual or percentual_comparecimento
+                )
+            except Exception:
+                logging.warning(
+                    "ResultadoEscopo falhou na linha /avaliacoes",
+                    exc_info=True,
+                )
 
         media_proficiencia_fmt = format_decimal_two_places(media_proficiencia)
         nivel_classificacao = _nivel_classificacao_por_media_proficiencia(

@@ -153,10 +153,15 @@ def classificar_resultado_modalidade(
     has_regular = regular_result is not None
     has_adap = bool(adap_list)
     if aluno_e_adap:
+        # Mutuamente exclusivo: ADAP só conta resultado ADAP.
         if has_adap and not has_regular:
             return _resultado_mais_recente(adap_list), "participou"
-        if has_regular or has_adap:
+        if has_adap and has_regular:
             return None, "inconsistente"
+        if has_regular and not has_adap:
+            # Modalidade errada (fez a regular sendo ADAP).
+            return None, "inconsistente"
+        # Sem resultado: pendente (ausência de prova pareada ≠ inconsistência).
         return None, "pendente"
     if has_adap:
         return None, "inconsistente"
@@ -494,9 +499,9 @@ def project_result_onto_regular_test(
     Mantém nota/proficiência gravadas; se veio da prova ADAP, expõe test_id da regular
     para estatísticas/grupo virtual (sem regravar no banco).
 
-    Escola/turma/série: turma atual do aluno; sem turma atual, a do resultado dele na
-    prova regular; só então o snapshot da prova ADAP. O snapshot ADAP aponta para a
-    turma de Suporte, que viraria uma série à parte na média hierárquica da regular.
+    Colocação na média da prova regular:
+    - aluno ainda na turma (class_id) → usa colocação atual (entra na turma do ClassTest);
+    - aluno sem turma atual → snapshot histórico (ADAP, depois regular); não cai na matrícula atual.
     """
     if result is None:
         return None
@@ -504,15 +509,20 @@ def project_result_onto_regular_test(
         return result
     from types import SimpleNamespace
 
-    placement = (
-        _placement_from_student(student)
-        or _placement_from_snapshot(regular_result)
-        or {
-            "school_id_snapshot": getattr(result, "school_id_snapshot", None),
-            "class_id_snapshot": getattr(result, "class_id_snapshot", None),
-            "grade_id_snapshot": getattr(result, "grade_id_snapshot", None),
-        }
-    )
+    student_placement = _placement_from_student(student)
+    if student_placement and student_placement.get("class_id_snapshot"):
+        placement = student_placement
+    else:
+        placement = (
+            _placement_from_snapshot(result)
+            or _placement_from_snapshot(regular_result)
+            or student_placement
+            or {
+                "school_id_snapshot": getattr(result, "school_id_snapshot", None),
+                "class_id_snapshot": getattr(result, "class_id_snapshot", None),
+                "grade_id_snapshot": getattr(result, "grade_id_snapshot", None),
+            }
+        )
     return SimpleNamespace(
         id=getattr(result, "id", None),
         test_id=str(regular_test_id),
@@ -548,8 +558,20 @@ def apply_pareamento_to_universe(
     results_list = list(results or [])
     try:
         adap_map = adap_students_level_12(students_list)
-        if not adap_map and not find_paired_adap_tests(regular_test_id):
+        paired = find_paired_adap_tests(regular_test_id)
+        # Sem ADAP no roster e sem prova pareada: comportamento inalterado.
+        if not adap_map and not paired:
             return students_list, results_list, {}
+        # Sem prova pareada: ADAP 1/2 ficam pendentes (não usam resultado regular);
+        # regulares seguem normalmente. Não marcar inconsistente só por falta de vínculo.
+        if adap_map and not paired:
+            adap_ids = set(adap_map.keys())
+            kept_only_regular = [
+                row
+                for row in results_list
+                if str(getattr(row, "student_id", "") or "") not in adap_ids
+            ]
+            return students_list, kept_only_regular, {}
 
         regular_by = {}
         for row in results_list:

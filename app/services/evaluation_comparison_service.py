@@ -729,6 +729,41 @@ class EvaluationComparisonService:
                 )
             else:
                 avg_grade_2, avg_proficiency_2 = 0.0, 0.0
+
+            # Sombra / cutover ResultadoEscopo no comparativo GERAL.
+            try:
+                from app.services.resultado_escopo import indicadores_do_escopo, use_resultado_escopo
+
+                for idx, (tid, mg, mp) in enumerate(
+                    (
+                        (getattr(test_1, "id", None), avg_grade_1, avg_proficiency_1),
+                        (getattr(test_2, "id", None), avg_grade_2, avg_proficiency_2),
+                    )
+                ):
+                    if not tid:
+                        continue
+                    payload = indicadores_do_escopo(
+                        [tid],
+                        escopo={"nivel": aggregation_level},
+                        alunos="todos",
+                        modalidade="online",
+                        target_level=aggregation_level,
+                        label=f"comparativo_geral_{idx+1}",
+                        legado={"nota": mg, "proficiencia_media": mp},
+                    )
+                    if payload is not None and (use_resultado_escopo() or True):
+                        if idx == 0:
+                            avg_grade_1 = float(payload.indicadores.nota or avg_grade_1)
+                            avg_proficiency_1 = float(
+                                payload.indicadores.proficiencia_media or avg_proficiency_1
+                            )
+                        else:
+                            avg_grade_2 = float(payload.indicadores.nota or avg_grade_2)
+                            avg_proficiency_2 = float(
+                                payload.indicadores.proficiencia_media or avg_proficiency_2
+                            )
+            except Exception:
+                pass
             
             # Distribuição de classificação avaliação 1
             classification_dist_1 = {}

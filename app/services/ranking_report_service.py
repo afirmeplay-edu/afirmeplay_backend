@@ -3032,6 +3032,29 @@ class RankingReportService:
             grade, prof = hierarchical_mean_grade_and_proficiency(
                 notas, "escola", course_name=course
             )
+            # Sombra ResultadoEscopo por escola (não troca ranking individual).
+            try:
+                from app.services.resultado_escopo import log_shadow_divergencia, carregar
+
+                eid = pacote.get("evaluation_id")
+                if eid:
+                    payload = carregar(
+                        [eid],
+                        escopo={
+                            "school_id": row.get("school_id"),
+                            "nivel": "escola",
+                        },
+                        alunos=str(filters.get("alunos") or "todos"),
+                        modalidade="online",
+                        target_level="escola",
+                    )
+                    log_shadow_divergencia(
+                        "ranking_escola",
+                        {"nota": grade, "proficiencia_media": prof},
+                        payload,
+                    )
+            except Exception:
+                pass
             row["average_proficiency"] = round(float(prof or 0), 1)
             row["average_score"] = round(float(grade or 0), 1)
 

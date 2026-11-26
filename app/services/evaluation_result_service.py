@@ -64,8 +64,14 @@ class EvaluationResultService:
         return is_correct
     
     @staticmethod
-    def _calculate_subject_specific_results(test_id: str, student_id: str, questions: List[Question], 
-                                         answers: List[StudentAnswer], course_name: str) -> List[Dict[str, Any]]:
+    def _calculate_subject_specific_results(
+        test_id: str,
+        student_id: str,
+        questions: List[Question],
+        answers: List[StudentAnswer],
+        course_name: str,
+        use_simple_calculation: bool = False,
+    ) -> List[Dict[str, Any]]:
         """
         Calcula resultados específicos por disciplina quando há múltiplas disciplinas
         
@@ -75,6 +81,7 @@ class EvaluationResultService:
             questions: Lista de questões do teste
             answers: Lista de respostas do aluno
             course_name: Nome do curso
+            use_simple_calculation: Se True, nota = acertos/total × 10
             
         Returns:
             Lista de resultados por disciplina
@@ -118,13 +125,13 @@ class EvaluationResultService:
                         if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
                             correct_answers_subject += 1
             
-            # Calcular resultado para esta disciplina usando TODAS as questões (em branco conta como erro)
+            # Em branco conta como erro. Respeita grade_calculation_type da prova.
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=correct_answers_subject,
                 total_questions=total_questions_subject,
                 course_name=course_name,
                 subject_name=subject_name,
-                use_simple_calculation=False
+                use_simple_calculation=bool(use_simple_calculation),
             )
             
             score_percentage = (correct_answers_subject / total_questions_subject * 100) if total_questions_subject > 0 else 0
@@ -255,25 +262,47 @@ class EvaluationResultService:
             if use_subjects_info:
                 # Calcular resultados por disciplina
                 subject_results = EvaluationResultService._calculate_subject_specific_results(
-                    test_id, student_id, questions, answers, course_name
+                    test_id,
+                    student_id,
+                    questions,
+                    answers,
+                    course_name,
+                    use_simple_calculation=use_simple_calculation,
                 )
                 
-                # CORREÇÃO: Calcular resultado geral como média aritmética das disciplinas
+                # Regra B: proficiência geral = média das profs; nota = calculate_grade(média).
                 if subject_results:
-                    # Calcular proficiência geral como média das disciplinas
                     proficiencies = [sr['proficiency'] for sr in subject_results]
-                    grades = [sr['grade'] for sr in subject_results]
-                    
-                    proficiency_geral = sum(proficiencies) / len(proficiencies) if proficiencies else 0.0
-                    grade_geral = sum(grades) / len(grades) if grades else 0.0
-                    
-                    # Determinar se a avaliação tem Matemática (para regra do GERAL)
+                    proficiency_geral = (
+                        sum(proficiencies) / len(proficiencies) if proficiencies else 0.0
+                    )
+                    proficiency_geral = round_to_two_decimals(proficiency_geral)
+
                     has_matematica = any(
                         (sr.get('subject_name') and 'matem' in str(sr.get('subject_name')).lower())
                         for sr in subject_results
                     )
 
-                    # Classificação geral baseada na proficiência média, alinhada à disciplina efetiva do GERAL
+                    if use_simple_calculation:
+                        total_acertos = sum(int(sr.get('correct_answers') or 0) for sr in subject_results)
+                        total_qs = sum(int(sr.get('total_questions') or 0) for sr in subject_results)
+                        grade_geral = EvaluationCalculator.calculate_grade(
+                            proficiency_geral,
+                            course_name,
+                            "GERAL",
+                            use_simple_calculation=True,
+                            correct_answers=total_acertos,
+                            total_questions=total_qs,
+                            has_matematica=has_matematica,
+                        )
+                    else:
+                        grade_geral = EvaluationCalculator.calculate_grade(
+                            proficiency_geral,
+                            course_name,
+                            "GERAL",
+                            has_matematica=has_matematica,
+                        )
+
                     classification_geral = EvaluationCalculator.determine_classification(
                         proficiency_geral,
                         course_name,
@@ -282,7 +311,7 @@ class EvaluationResultService:
                     )
                     
                     result = {
-                        'proficiency': round_to_two_decimals(proficiency_geral),
+                        'proficiency': proficiency_geral,
                         'grade': round_to_two_decimals(grade_geral),
                         'classification': classification_geral,
                         'correct_answers': correct_answers,
@@ -357,6 +386,12 @@ class EvaluationResultService:
                 ):
                     if getattr(existing_result, snap_key, None) is None and placement.get(snap_key) is not None:
                         setattr(existing_result, snap_key, placement[snap_key])
+                if (
+                    getattr(existing_result, "student_name_snapshot", None) is None
+                    and student_obj is not None
+                    and getattr(student_obj, "name", None)
+                ):
+                    existing_result.student_name_snapshot = student_obj.name
 
                 evaluation_result = existing_result
             else:
@@ -376,6 +411,8 @@ class EvaluationResultService:
                 for snap_key, snap_val in placement.items():
                     if snap_val is not None:
                         setattr(evaluation_result, snap_key, snap_val)
+                if student_obj is not None and getattr(student_obj, "name", None):
+                    evaluation_result.student_name_snapshot = student_obj.name
                 db.session.add(evaluation_result)
 
             # Marcar agregados como desatualizados antes do commit (escola/turma do snapshot)
@@ -403,6 +440,8 @@ class EvaluationResultService:
                     scope_city_id = None
 
             # Marcar todos os escopos como dirty
+            # ResultadoEscopo: invalida todos os escopos (roster/alunos na chave).
+            ReportAggregateService.invalidate_for_test(test_id, commit=False)
             ReportAggregateService.mark_dirty(test_id, 'overall', None, commit=False)
             ReportAggregateService.mark_ai_dirty(test_id, 'overall', None, commit=False)
             

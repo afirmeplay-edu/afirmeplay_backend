@@ -196,8 +196,12 @@ def _build_school_grade_class_tree(
         sid = getattr(r, "student_id", None)
         if not sid:
             continue
+        # Resultado sem proficiência válida não entra na média (não vira 0).
+        raw_p = getattr(r, "proficiency", None)
+        if raw_p is None:
+            continue
         g = float(getattr(r, "grade", None) or 0)
-        p = float(getattr(r, "proficiency", None) or 0)
+        p = float(raw_p)
 
         snap_class = getattr(r, "class_id_snapshot", None)
         snap_school = getattr(r, "school_id_snapshot", None)
@@ -384,14 +388,14 @@ def hierarchical_mean_grade_and_proficiency(
     """
     if not results:
         return 0.0, 0.0
-    # Nota geral de prova com disciplinas: média das notas de cada uma.
-    # Só quando TODOS os resultados têm subject_results; caso contrário usa o
-    # GERAL já persistido em evaluation_results.proficiency/grade.
+    # GERAL com breakdown: média hierárquica das proficiências por disciplina,
+    # depois calculate_grade(média) — Regra B (nunca média das notas).
     if str(subject_name or "GERAL").upper() == "GERAL" and _all_results_have_subject_breakdown(results):
         return general_grade_from_subject_proficiencies(
             results,
             target_level,
             course_name=course_name,
+            has_matematica=has_matematica,
         )
     _media_nota_raw, media_prof = _hierarchical_mean_pair_raw(results, target_level)
     if not derive_grade_from_proficiency:
@@ -457,15 +461,17 @@ def general_grade_from_subject_proficiencies(
     *,
     course_name: str,
     fallback_subject_name: str = "Outras",
+    has_matematica: Optional[bool] = None,
 ) -> Tuple[float, float]:
     """
-    Nota geral = média das notas das disciplinas do recorte.
+    Regra B — GERAL multidisciplinar.
 
-    Cada disciplina agrega só a própria proficiência, com o peso hierárquico
-    já usado neste módulo, e vira nota pela faixa do próprio nome
-    (Matemática ou OUTRAS). A proficiência geral misturada não entra na fórmula.
+    1. Agrega a proficiência de cada disciplina (hierarquia no ``target_level``).
+    2. Proficiência geral = média simples dessas proficiências.
+    3. Nota geral = ``calculate_grade(proficiência_geral, GERAL, has_matematica)``.
+
+    Não usa média das notas disciplinares.
     """
-    from app.services.evaluation_calculator import EvaluationCalculator
     from app.utils.decimal_helpers import round_to_two_decimals
 
     if not results:
@@ -474,20 +480,23 @@ def general_grade_from_subject_proficiencies(
     if not by_subject:
         return 0.0, 0.0
 
-    grades: List[float] = []
-    proficiencies: List[float] = []
-    for subject_name, rows in by_subject.items():
-        _ignored_grade, subject_prof = _hierarchical_mean_pair_raw(rows, target_level)
-        subject_grade = EvaluationCalculator.calculate_grade(
-            float(subject_prof),
-            course_name,
-            subject_name,
+    if has_matematica is None:
+        has_matematica = any(
+            "matem" in str(name).lower() for name in by_subject.keys()
         )
-        grades.append(float(subject_grade))
+
+    proficiencies: List[float] = []
+    for _subject_name, rows in by_subject.items():
+        _ignored_grade, subject_prof = _hierarchical_mean_pair_raw(rows, target_level)
         proficiencies.append(float(subject_prof))
 
-    general_grade = sum(grades) / len(grades)
     general_prof = sum(proficiencies) / len(proficiencies)
+    general_grade = aggregated_grade_from_proficiency(
+        general_prof,
+        course_name,
+        subject_name="GERAL",
+        has_matematica=has_matematica,
+    )
     return round_to_two_decimals(general_grade), round_to_two_decimals(general_prof)
 
 
@@ -579,52 +588,51 @@ def hierarchical_means_course_aware_by_serie(
             has_matematica=has_matematica,
         )
 
-    school_grades: List[float] = []
+    # Regra B: sobe a hierarquia só com proficiência; nota = calculate_grade no final.
+    # Avaliação tem um único course_name oficial; usa fallback da avaliação.
+    course = fallback_course_name or "Anos Iniciais"
     school_profs: List[float] = []
     for _sch, by_grade in cells.items():
-        serie_grades: List[float] = []
         serie_profs: List[float] = []
         for gid, cell_results in by_grade.items():
             if not cell_results:
                 continue
             cell_course = (
-                (grade_id_to_course or {}).get(str(gid))
-                or fallback_course_name
-                or "Anos Iniciais"
+                (grade_id_to_course or {}).get(str(gid)) or course
             )
-            mg, mp = hierarchical_mean_grade_and_proficiency(
+            _mg, mp = hierarchical_mean_grade_and_proficiency(
                 cell_results,
                 "turma",
                 course_name=cell_course,
                 subject_name="GERAL",
                 has_matematica=has_matematica,
             )
-            serie_grades.append(float(mg))
             serie_profs.append(float(mp))
         if not serie_profs:
             continue
-        school_grades.append(sum(serie_grades) / len(serie_grades))
         school_profs.append(sum(serie_profs) / len(serie_profs))
 
     if not school_profs:
         return hierarchical_mean_grade_and_proficiency(
             results,
             target_level,
-            course_name=fallback_course_name or "Anos Iniciais",
+            course_name=course,
             subject_name="GERAL",
             has_matematica=has_matematica,
         )
 
     if tl == "escola" and len(school_profs) == 1:
-        return (
-            round_to_two_decimals(school_grades[0]),
-            round_to_two_decimals(school_profs[0]),
-        )
+        media_prof = school_profs[0]
+    else:
+        media_prof = sum(school_profs) / len(school_profs)
 
-    return (
-        round_to_two_decimals(sum(school_grades) / len(school_grades)),
-        round_to_two_decimals(sum(school_profs) / len(school_profs)),
+    media_nota = aggregated_grade_from_proficiency(
+        media_prof,
+        course,
+        subject_name="GERAL",
+        has_matematica=has_matematica,
     )
+    return round_to_two_decimals(media_nota), round_to_two_decimals(media_prof)
 
 
 def mean_grade_and_proficiency_equal_weight_by_school(

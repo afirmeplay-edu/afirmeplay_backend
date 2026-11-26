@@ -338,10 +338,13 @@ ALTER TABLE "{schema}".answer_sheet_results
     ADD COLUMN IF NOT EXISTS grade_id_snapshot UUID;
 ALTER TABLE "{schema}".answer_sheet_results
     ADD COLUMN IF NOT EXISTS enrollment_id_snapshot VARCHAR(36);
+ALTER TABLE "{schema}".answer_sheet_results
+    ADD COLUMN IF NOT EXISTS student_name_snapshot VARCHAR(100);
 COMMENT ON COLUMN "{schema}".answer_sheet_results.school_id_snapshot IS 'Escola no momento da participação (imutável após preenchido).';
 COMMENT ON COLUMN "{schema}".answer_sheet_results.class_id_snapshot IS 'Turma no momento da participação (imutável após preenchido).';
 COMMENT ON COLUMN "{schema}".answer_sheet_results.grade_id_snapshot IS 'Série no momento da participação (imutável após preenchido).';
 COMMENT ON COLUMN "{schema}".answer_sheet_results.enrollment_id_snapshot IS 'Matrícula vigente no momento do resultado.';
+COMMENT ON COLUMN "{schema}".answer_sheet_results.student_name_snapshot IS 'Nome do aluno no momento da correção (histórico).';
 """
 
 
@@ -370,10 +373,13 @@ ALTER TABLE "{schema}".evaluation_results
     ADD COLUMN IF NOT EXISTS grade_id_snapshot UUID;
 ALTER TABLE "{schema}".evaluation_results
     ADD COLUMN IF NOT EXISTS enrollment_id_snapshot VARCHAR(36);
+ALTER TABLE "{schema}".evaluation_results
+    ADD COLUMN IF NOT EXISTS student_name_snapshot VARCHAR(100);
 COMMENT ON COLUMN "{schema}".evaluation_results.school_id_snapshot IS 'Escola no momento da participação (imutável após preenchido).';
 COMMENT ON COLUMN "{schema}".evaluation_results.class_id_snapshot IS 'Turma no momento da participação (imutável após preenchido).';
 COMMENT ON COLUMN "{schema}".evaluation_results.grade_id_snapshot IS 'Série no momento da participação (imutável após preenchido).';
 COMMENT ON COLUMN "{schema}".evaluation_results.enrollment_id_snapshot IS 'Matrícula vigente (student_school_enrollment) no momento do resultado.';
+COMMENT ON COLUMN "{schema}".evaluation_results.student_name_snapshot IS 'Nome do aluno no momento do resultado (histórico).';
 """
 
 
@@ -388,6 +394,33 @@ def ensure_evaluation_result_snapshot_columns(schema: str) -> None:
     if not schema or not re.match(r"^city_[a-zA-Z0-9_]+$", schema):
         return
     db.session.execute(text(get_evaluation_result_snapshot_columns_ddl(schema)))
+    db.session.commit()
+
+
+def get_student_soft_delete_and_name_snapshot_ddl(schema: str) -> str:
+    """ALTER idempotente: soft delete do aluno + nome histórico nos resultados."""
+    return f"""
+ALTER TABLE "{schema}".student
+    ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE "{schema}".evaluation_results
+    ADD COLUMN IF NOT EXISTS student_name_snapshot VARCHAR(100);
+ALTER TABLE "{schema}".answer_sheet_results
+    ADD COLUMN IF NOT EXISTS student_name_snapshot VARCHAR(100);
+COMMENT ON COLUMN "{schema}".student.is_active IS 'Exclusão lógica: false = inativo (histórico preservado).';
+"""
+
+
+def ensure_student_soft_delete_and_name_snapshot(schema: str) -> None:
+    """Garante is_active e student_name_snapshot (idempotente)."""
+    import re
+
+    from sqlalchemy import text
+
+    from app import db
+
+    if not schema or not re.match(r"^city_[a-zA-Z0-9_]+$", schema):
+        return
+    db.session.execute(text(get_student_soft_delete_and_name_snapshot_ddl(schema)))
     db.session.commit()
 
 
@@ -1283,6 +1316,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
         cursor.execute(get_class_shift_column_migrations_ddl(schema_name))
         cursor.execute(get_answer_sheet_result_snapshot_columns_ddl(schema_name))
         cursor.execute(get_evaluation_result_snapshot_columns_ddl(schema_name))
+        cursor.execute(get_student_soft_delete_and_name_snapshot_ddl(schema_name))
         cursor.execute(get_municipality_availability_column_migrations_ddl(schema_name))
         cursor.execute(get_school_area_type_column_ddl(schema_name))
 

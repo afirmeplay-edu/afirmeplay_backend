@@ -135,9 +135,15 @@ def carregar_universo_das_provas(
             item for item in class_tests if str(getattr(item, "class_id", "") or "") in permitidas
         ]
     turma_ids = [item.class_id for item in class_tests if getattr(item, "class_id", None)]
-    students = (
-        Student.query.filter(Student.class_id.in_(turma_ids)).all() if turma_ids else []
-    )
+    if turma_ids:
+        q = (
+            Student.query_ativos()
+            if hasattr(Student, "query_ativos")
+            else Student.query
+        )
+        students = q.filter(Student.class_id.in_(turma_ids)).all()
+    else:
+        students = []
     if school_ids:
         escolas = {str(item) for item in school_ids if item}
         students = [

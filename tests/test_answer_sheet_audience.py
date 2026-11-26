@@ -71,10 +71,12 @@ def test_geracao_valida_devolve_o_nivel():
     assert check_generation_subturmas([_linha(), _linha(subturma_id="b")], city_id=CIDADE) == 1
 
 
-def test_adap_3_e_aceito():
-    assert check_generation_subturmas(
-        [_linha(level=3, subturma_id=ADAP3)], city_id=CIDADE, expected_level=3
-    ) == 3
+def test_adap_3_e_rejeitado_no_cartao():
+    with pytest.raises(GenerationAudienceError) as err:
+        check_generation_subturmas(
+            [_linha(level=3, subturma_id=ADAP3)], city_id=CIDADE, expected_level=3
+        )
+    assert err.value.code == "subturma_level_not_allowed"
 
 
 def test_niveis_misturados_sao_rejeitados():
@@ -158,15 +160,15 @@ def test_gabarito_regular_continua_com_a_turma_inteira():
     assert [aluno.id for aluno in audience.filter_students(alunos)] == ["regular", "marcado"]
 
 
-def test_catalogo_mostra_adap_1_2_e_3_sem_exigir_aluno():
+def test_catalogo_mostra_adap_1_e_2_sem_exigir_aluno():
     grades = {
         1: SimpleNamespace(id="serie-1"),
         2: SimpleNamespace(id="serie-2"),
         3: SimpleNamespace(id="serie-3"),
     }
     catalogo = audience_mod.adap_series_catalog(grades)
-    assert [item["nome"] for item in catalogo] == ["ADAP 1", "ADAP 2", "ADAP 3"]
-    assert [item["support_level"] for item in catalogo] == [1, 2, 3]
+    assert [item["nome"] for item in catalogo] == ["ADAP 1", "ADAP 2"]
+    assert [item["support_level"] for item in catalogo] == [1, 2]
 
 
 def test_nivel_sem_aluno_marcado_devolve_lista_vazia(monkeypatch):
@@ -250,7 +252,9 @@ def test_nivel_do_gabarito_precisa_bater_com_a_subturma():
 
 def test_validate_gabarito_grades_serie_unica_adap():
     assert validate_gabarito_grades([{"id": "s1", "name": "Suporte 1"}]) == 1
-    assert validate_gabarito_grades([{"id": "s3", "name": "ADAP 3"}]) == 3
+    with pytest.raises(GenerationAudienceError) as err:
+        validate_gabarito_grades([{"id": "s3", "name": "ADAP 3"}])
+    assert err.value.code == "gabarito_series_adap_invalida"
     assert validate_gabarito_grades([{"id": "5", "name": "5º Ano"}]) is None
 
 
@@ -271,7 +275,7 @@ def test_gabarito_adap_level_le_grades_json():
 
 # --- opções do seletor: cartão x subjetiva ----------------------------------
 
-def test_opcoes_do_cartao_pedem_adap_1_2_e_3_com_aluno(monkeypatch):
+def test_opcoes_do_cartao_pedem_adap_1_e_2_com_aluno(monkeypatch):
     chamadas = {}
 
     def fake_rows(**kwargs):
@@ -282,7 +286,7 @@ def test_opcoes_do_cartao_pedem_adap_1_2_e_3_com_aluno(monkeypatch):
 
     monkeypatch.setattr(subturma_options, "list_subturma_rows", fake_rows)
     audience_mod.list_cartao_adap_options(school_ids=["escola"], grade_ids=["serie"])
-    assert tuple(chamadas["levels"]) == (1, 2, 3)
+    assert tuple(chamadas["levels"]) == (1, 2)
     assert chamadas["only_with_students"] is True
     assert chamadas["exclude_special_parent"] is True
 
@@ -346,8 +350,8 @@ def test_payload_da_opcao_usa_id_da_subturma_e_rotulo_do_cartao():
     assert payload["escola_nome"] == "Escola Teste"
 
 
-def test_cenario_adap1_e_adap3_no_quinto_e_oitavo(monkeypatch):
-    """Dev: ADAP 1 no 5º e ADAP 3 no 8º; o gabarito escolhe um nível por vez."""
+def test_cenario_adap1_e_adap2_no_quinto_e_oitavo(monkeypatch):
+    """Cartão lista só ADAP 1/2; ADAP 3 fica de fora (subjetiva)."""
     import app.services.subturma_options as subturma_options
 
     linhas = [
@@ -359,7 +363,7 @@ def test_cenario_adap1_e_adap3_no_quinto_e_oitavo(monkeypatch):
             "students_count": 4,
         },
         {
-            "subturma": SimpleNamespace(id=ADAP3, support_level=3),
+            "subturma": SimpleNamespace(id=ADAP2, support_level=2),
             "class": SimpleNamespace(id=OUTRA_TURMA, name="B", shift="Tarde", school_id="escola"),
             "grade": SimpleNamespace(id="g8", name="8º Ano"),
             "school": SimpleNamespace(name="Escola Teste"),
@@ -375,11 +379,11 @@ def test_cenario_adap1_e_adap3_no_quinto_e_oitavo(monkeypatch):
 
     monkeypatch.setattr(subturma_options, "list_subturma_rows", fake_rows)
     todos = audience_mod.list_cartao_adap_options(school_ids=["escola"])
-    assert [row["support_level"] for row in todos] == [1, 3]
+    assert [row["support_level"] for row in todos] == [1, 2]
     assert todos[0]["name"] == "5º Ano A – ADAP 1"
-    assert todos[1]["name"] == "8º Ano B – ADAP 3"
+    assert todos[1]["name"] == "8º Ano B – ADAP 2"
     so_1 = audience_mod.list_cartao_adap_options(school_ids=["escola"], levels=[1])
     so_3 = audience_mod.list_cartao_adap_options(school_ids=["escola"], levels=[3])
     assert [row["support_level"] for row in so_1] == [1]
-    assert [row["support_level"] for row in so_3] == [3]
-    assert tuple(chamadas[0]["levels"]) == (1, 2, 3)
+    assert so_3 == []
+    assert tuple(chamadas[0]["levels"]) == (1, 2)

@@ -5,7 +5,8 @@ ADAP 1 e 2 entram. ADAP 3 fica fora de nota, proficiência, participação,
 esperados/faltas, rankings e **Lista de Frequência** de prova objetiva/impressa
 **regular** (online ou cartão). Prova/cartão direcionado a ADAP 3 mantém o 3.
 
-Geração de cartão/gabarito ADAP 3 continua permitida (pedido do gestor).
+ADAP 3 não participa de avaliações objetivas nem de cartões-resposta
+(regra oficial). Avaliações subjetivas permanecem permitidas.
 Cadastro, subturma, Avaliação Subjetiva e Relatório de Usuários mantêm o 3.
 """
 from __future__ import annotations

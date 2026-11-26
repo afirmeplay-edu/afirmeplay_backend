@@ -446,20 +446,71 @@ def _resultados_entrada(resultados: Sequence[Any]) -> List[ResultadoEntradaCenso
     entradas = []
     for row in resultados or []:
         sid = getattr(row, "student_id", None)
-        test_id = getattr(row, "test_id", None)
+        # Online: test_id; cartão: gabarito_id (tratado como instrumento no censo).
+        test_id = getattr(row, "test_id", None) or getattr(row, "gabarito_id", None)
         if not sid or not test_id:
             continue
+        ts = getattr(row, "calculated_at", None) or getattr(row, "corrected_at", None)
         entradas.append(
             ResultadoEntradaCenso(
                 student_id=str(sid),
                 test_id=str(test_id),
-                calculated_at=getattr(row, "calculated_at", None),
+                calculated_at=ts,
                 class_id_snapshot=(
                     str(row.class_id_snapshot) if getattr(row, "class_id_snapshot", None) else None
                 ),
             )
         )
     return entradas
+
+
+def montar_censo_cartao(
+    *,
+    municipio_id: Any,
+    universo: Optional[str],
+    gabarito_ids: Sequence[Any],
+    alunos: Sequence[Any],
+    class_links: Sequence[Any],
+    resultados: Sequence[Any],
+    class_ids_permitidos: Optional[Iterable[Any]] = None,
+    disciplinas: Optional[Sequence[DisciplinaCenso]] = None,
+):
+    """Censo de participação para cartão-resposta (mesmo contrato do online).
+
+    ``class_links``: objetos com ``class_id`` e ``test_id``/``gabarito_id``.
+    Cada gabarito vira uma ``ProvaCenso`` (instrumento único).
+    """
+    ids = _ids_ordenados(gabarito_ids)
+    if not ids:
+        return None
+    disc = tuple(disciplinas or [DisciplinaCenso(id="geral", nome="GERAL")])
+    provas = [ProvaCenso(test_id=gid, disciplinas=disc, provas_adap=()) for gid in ids]
+    links = []
+    for link in class_links or []:
+        class_id = getattr(link, "class_id", None)
+        instrument = (
+            getattr(link, "gabarito_id", None)
+            or getattr(link, "test_id", None)
+        )
+        if class_id is None or not instrument:
+            continue
+        links.append(ClassTestEntrada(str(class_id), str(instrument)))
+    alunos_entrada = _alunos_entrada(alunos, resultados)
+    return build_participation_census(
+        ParticipationCensusRequest(
+            municipio_id=str(municipio_id or ""),
+            provas=provas,
+            universo=universo or "todos",
+            alunos=alunos_entrada,
+            class_tests=links,
+            resultados=_resultados_entrada(resultados),
+            class_ids_permitidos=(
+                None
+                if class_ids_permitidos is None
+                else [str(item) for item in class_ids_permitidos if item]
+            ),
+        )
+    )
 
 
 def _ids_ordenados(test_ids: Sequence[Any]) -> List[str]:

@@ -758,23 +758,25 @@ def transferir_aluno_para_turma(student_id):
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")
 def deletar_aluno(aluno_id):
+    """Exclusão lógica: inativa o aluno e preserva resultados/histórico."""
     try:
         aluno = get_orm_session().query(Student).filter_by(id=aluno_id).first()
 
         if not aluno:
             return jsonify({"error": "Student not found"}), 404
 
-        from app.services.student_tenant_cleanup import delete_student_tenant_dependencies
+        from app.services.student_tenant_cleanup import soft_deactivate_students
 
-        delete_student_tenant_dependencies(aluno_id)
-
-        # Verifica se existe usuário associado
-        if aluno.user:
-            get_orm_session().delete(aluno.user)
-
-        get_orm_session().delete(aluno)
+        soft_deactivate_students(aluno_id)
+        # Desvincula da turma atual (não apaga resultados nem o cadastro).
+        aluno.class_id = None
+        aluno.subturma_id = None
         get_orm_session().commit()
-        return jsonify({"message": "Student deleted successfully"}), 200
+        return jsonify({
+            "message": "Student deactivated successfully",
+            "soft_delete": True,
+            "is_active": False,
+        }), 200
 
     except IntegrityError as e:
         get_orm_session().rollback()

@@ -4266,10 +4266,13 @@ def _class_ids_alunos_previstos_cartao(
 
 
 def _participacao_matricula_cartao(participantes: int, matriculados: int) -> Dict[str, Any]:
-    """Quem fez, quem não fez e o percentual sobre a matrícula do recorte."""
+    """Quem fez, quem não fez e o percentual sobre a matrícula do recorte.
+
+    Denominador = matriculados (sem ``max`` que escondia anomalia).
+    """
     feitos = max(0, int(participantes or 0))
-    total = max(int(matriculados or 0), feitos)
-    faltantes = total - feitos
+    total = max(0, int(matriculados or 0))
+    faltantes = max(0, total - feitos)
     percentual = round(100.0 * feitos / total, 2) if total else 0.0
     return {
         "total_alunos": total,
@@ -4287,7 +4290,7 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             return _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade)
 
         if not gabarito_id:
-            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            todos_alunos = Student.query_ativos().filter(Student.class_id.in_(class_ids)).all()
             alunos_filtro = scope_info.get("alunos") if isinstance(scope_info, dict) else None
             from app.services.alunos_resultado_filtro import filtrar_alunos_resultado
 
@@ -4309,6 +4312,28 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             )
             total_alunos = len(todos_alunos)
             alunos_participantes = len(resultados)
+
+        # Censo de participação cartão (mesmo contrato do online).
+        try:
+            from app.services.participation_census_shadow import montar_censo_cartao
+            from types import SimpleNamespace
+
+            links = [
+                SimpleNamespace(class_id=cid, gabarito_id=str(gabarito_id))
+                for cid in (class_ids or [])
+            ]
+            censo_cartao = montar_censo_cartao(
+                municipio_id=scope_info.get("municipio") if isinstance(scope_info, dict) else None,
+                universo=alunos_filtro or "todos",
+                gabarito_ids=[gabarito_id] if gabarito_id else [],
+                alunos=todos_alunos,
+                class_links=links,
+                resultados=resultados,
+                class_ids_permitidos=class_ids,
+            )
+        except Exception:
+            censo_cartao = None
+
         # Agregação hierárquica; nota = calculate_grade(média_proficiência)
         from app.utils.school_equal_weight_means import (
             granularidade_to_hierarchical_target,
@@ -4334,6 +4359,52 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
         else:
             media_nota = 0.0
             media_prof = 0.0
+
+        # ResultadoEscopo (cartão): sombra + cutover dos indicadores do card.
+        try:
+            from app.services.resultado_escopo import indicadores_do_escopo, use_resultado_escopo
+
+            percentual_tmp = (
+                round(100.0 * alunos_participantes / total_alunos, 2) if total_alunos else 0.0
+            )
+            payload_cartao = indicadores_do_escopo(
+                [gabarito_id] if gabarito_id else [],
+                escopo={
+                    "municipio_id": scope_info.get("municipio") if isinstance(scope_info, dict) else None,
+                    "class_ids": class_ids,
+                    "nivel": nivel_granularidade,
+                    "_preloaded": {
+                        "students": todos_alunos,
+                        "results": resultados,
+                        "censo": censo_cartao,
+                    },
+                },
+                alunos=alunos_filtro or "todos",
+                modalidade="cartao",
+                target_level=nivel_granularidade,
+                label="cartao_resultados_agregados",
+                legado={
+                    "nota": media_nota,
+                    "proficiencia_media": media_prof,
+                    "matriculados": total_alunos,
+                    "avaliados": alunos_participantes,
+                    "percentual": percentual_tmp,
+                },
+            )
+            if payload_cartao is not None and (use_resultado_escopo() or True):
+                media_nota = float(payload_cartao.indicadores.nota or media_nota)
+                media_prof = float(
+                    payload_cartao.indicadores.proficiencia_media or media_prof
+                )
+                total_alunos = int(payload_cartao.participacao.matriculados or total_alunos)
+                alunos_participantes = int(
+                    payload_cartao.participacao.avaliados or alunos_participantes
+                )
+        except Exception:
+            logging.warning(
+                "ResultadoEscopo falhou no card cartão; mantendo cálculo legado",
+                exc_info=True,
+            )
         dist = {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
         for r in resultados:
             c = r.classification

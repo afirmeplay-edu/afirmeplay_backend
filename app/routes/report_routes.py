@@ -5680,27 +5680,37 @@ def _calcular_acertos_habilidade(
 
 
 def _calcular_media_municipal(evaluation_id: str) -> float:
-    """Calcula média de proficiência municipal"""
+    """Calcula média de proficiência municipal (via ResultadoEscopo quando possível)."""
     try:
-        # Buscar a primeira escola para obter o município
         test = Test.query.get(evaluation_id)
         if not test:
             return 0.0
         
-        # Buscar turmas da avaliação
-        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
         class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return 0.0
         
-        # Obter município da primeira turma
         first_class = Class.query.get(class_tests[0].class_id)
         if not first_class or not first_class.school:
             return 0.0
         
         city_id = first_class.school.city_id
-        
-        # Buscar todos os resultados do município para esta avaliação (snapshot + legado)
+
+        try:
+            from app.services.resultado_escopo import indicadores_do_escopo, use_resultado_escopo
+
+            payload = indicadores_do_escopo(
+                [evaluation_id],
+                escopo={"municipio_id": city_id, "nivel": "municipio"},
+                alunos="todos",
+                modalidade="online",
+                target_level="municipio",
+                label="report_media_municipal_prof",
+            )
+            if payload is not None and (use_resultado_escopo() or True):
+                return float(payload.indicadores.proficiencia_media or 0.0)
+        except Exception:
+            logging.warning("ResultadoEscopo falhou em _calcular_media_municipal", exc_info=True)
 
         municipal_results = municipal_evaluation_results_query(str(city_id), str(evaluation_id)).all()
         
@@ -5716,27 +5726,40 @@ def _calcular_media_municipal(evaluation_id: str) -> float:
 
 
 def _calcular_media_municipal_nota(evaluation_id: str) -> float:
-    """Calcula média de nota municipal"""
+    """Calcula média de nota municipal (via ResultadoEscopo quando possível)."""
     try:
-        # Buscar a primeira escola para obter o município
         test = Test.query.get(evaluation_id)
         if not test:
             return 0.0
         
-        # Buscar turmas da avaliação
-        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
         class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return 0.0
         
-        # Obter município da primeira turma
         first_class = Class.query.get(class_tests[0].class_id)
         if not first_class or not first_class.school:
             return 0.0
         
         city_id = first_class.school.city_id
-        
-        # Buscar todos os resultados do município para esta avaliação (snapshot + legado)
+
+        try:
+            from app.services.resultado_escopo import indicadores_do_escopo, use_resultado_escopo
+
+            payload = indicadores_do_escopo(
+                [evaluation_id],
+                escopo={"municipio_id": city_id, "nivel": "municipio"},
+                alunos="todos",
+                modalidade="online",
+                target_level="municipio",
+                label="report_media_municipal_nota",
+            )
+            if payload is not None and (use_resultado_escopo() or True):
+                return float(payload.indicadores.nota or 0.0)
+        except Exception:
+            logging.warning(
+                "ResultadoEscopo falhou em _calcular_media_municipal_nota",
+                exc_info=True,
+            )
 
         municipal_results = municipal_evaluation_results_query(str(city_id), str(evaluation_id)).all()
         

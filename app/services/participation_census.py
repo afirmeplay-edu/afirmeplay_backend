@@ -522,6 +522,18 @@ def _disciplina_do_aluno(
         origens_saida = ()
 
     if not elegivel:
+        # Sem ClassTest da prova na turma → não aplicada (≠ faltante/ausente).
+        if slot.prova_regular_id not in provas_da_turma and not fora_da_taxa:
+            return DisciplinaAlunoCenso(
+                disciplina_id=slot.disciplina_id,
+                nome=slot.nome,
+                prova_regular_id=slot.prova_regular_id,
+                elegivel=False,
+                situacao="nao_aplicada",
+                motivo_inconsistencia=None,
+                origens=(),
+                test_id_valido=None,
+            )
         situacao_resposta = situacao if fora_da_taxa else "ausente"
         return DisciplinaAlunoCenso(
             disciplina_id=slot.disciplina_id,

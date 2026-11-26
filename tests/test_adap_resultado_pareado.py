@@ -180,6 +180,11 @@ def test_media_adap_pareado_entra_na_turma_atual(monkeypatch):
     monkeypatch.setattr(mod, "adap_students_level_12", lambda students: {"aluno_adap": 1})
     monkeypatch.setattr(
         mod,
+        "find_paired_adap_tests",
+        lambda *_a, **_k: [SimpleNamespace(id="adap-i", title="ADAP I - 4º ANO")],
+    )
+    monkeypatch.setattr(
+        mod,
         "resolve_adap_valid_results",
         lambda *a, **k: {
             "aluno_adap": AdapValidResult(
@@ -188,7 +193,7 @@ def test_media_adap_pareado_entra_na_turma_atual(monkeypatch):
                 source_test_id="adap-i",
                 source_test_title="ADAP I - 4º ANO",
                 result=adap_er,
-                    situation="participou",
+                situation="participou",
                 from_adap_test=True,
             )
         },
@@ -224,8 +229,8 @@ def test_projecao_sem_turma_atual_mantem_snapshot():
     assert projected.grade_id_snapshot == "g-sup"
 
 
-def test_projecao_sem_turma_atual_usa_turma_da_prova_regular():
-    """Aluno que saiu da escola: conta onde fez a prova regular, não na turma de Suporte."""
+def test_projecao_sem_turma_atual_prioriza_snapshot_adap():
+    """Snapshot do resultado ADAP prevalece sobre a prova regular (histórico)."""
     adap = _snap(
         _er(grade=1.61, proficiency=150.0, test_id="adap"),
         school="esc", grade="g-sup2", klass="c-sup",
@@ -238,8 +243,8 @@ def test_projecao_sem_turma_atual_usa_turma_da_prova_regular():
         adap, "reg", SimpleNamespace(id="s1", class_id=None, class_=None), regular
     )
     assert projected.grade == 1.61
-    assert projected.class_id_snapshot == "c-2b"
-    assert projected.grade_id_snapshot == "g-2ano"
+    assert projected.class_id_snapshot == "c-sup"
+    assert projected.grade_id_snapshot == "g-sup2"
 
 
 def test_adap3_fora_do_mapa_adap_objetivo():

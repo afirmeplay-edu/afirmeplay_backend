@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Público do cartão-resposta: turma inteira ou subturma ADAP 1, 2 ou 3.
+"""Público do cartão-resposta: turma inteira ou subturma ADAP 1 ou 2.
 
 O nível vem do gabarito: a série dele é "Suporte N" (etapa Educação Especial),
 exibida como "ADAP N", e equivale a ``subturma.support_level = N``. Gabarito com
 séries regulares gera para turmas inteiras; gabarito ADAP gera só para subturmas.
 
-A exclusão do ADAP 3 no universo de resultados/participação de provas
-regulares fica em ``alunos_resultado_filtro`` / ``adap_objetivo`` — não aqui.
-A geração de cartão/gabarito ADAP 3 continua permitida.
+ADAP 3 não participa de cartões-resposta (regra oficial). A exclusão também
+vale em ``alunos_resultado_filtro`` / ``adap_objetivo``.
 
 O recorte fica no scope_snapshot de cada geração (answer_sheet_generations):
 chave ``subturma_ids`` e ``subturma_id`` em cada item de ``class_ids``.
@@ -22,7 +21,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-ADAP_CARTAO_LEVELS = (1, 2, 3)
+# ADAP 3 fora de cartão-resposta (regra oficial).
+ADAP_CARTAO_LEVELS = (1, 2)
 PUBLICO_ADAP = "adap"
 PUBLICO_REGULAR = "regular"
 PUBLICO_MISTO = "misto"
@@ -131,7 +131,7 @@ def validate_gabarito_grades(grades: Sequence[Dict[str, Any]]) -> Optional[int]:
     level = adap_level_of_grade(special[0])
     if level not in ADAP_CARTAO_LEVELS:
         raise GenerationAudienceError(
-            "Série de Educação Especial sem nível ADAP. Use ADAP 1, ADAP 2 ou ADAP 3.",
+            "ADAP 3 não participa de cartão-resposta. Use ADAP 1 ou ADAP 2.",
             "gabarito_series_adap_invalida",
         )
     return level
@@ -249,7 +249,7 @@ def check_generation_subturmas(
     invalid = [row["label"] for row in rows if row.get("level") not in ADAP_CARTAO_LEVELS]
     if invalid:
         raise GenerationAudienceError(
-            "Nível ADAP inválido. Use ADAP 1, ADAP 2 ou ADAP 3.",
+            "ADAP 3 não participa de cartão-resposta. Use ADAP 1 ou ADAP 2.",
             "subturma_level_not_allowed",
             invalid,
         )

@@ -457,12 +457,17 @@ def calcular_proficiencia_por_disciplina(
         return proficiency_by_subject, 0.0, 0.0, SUBJECT_ABSENT_CLASSIFICATION, has_matematica_prova
 
     proficiencies = [float(v['proficiency']) for _sid, v in scored]
-    grades = [float(v['grade']) for _sid, v in scored]
     proficiency_media = round(sum(proficiencies) / len(proficiencies), 2)
-    # Nota geral = média das notas por disciplina feitas
-    grade_media = round(sum(grades) / len(grades), 2)
     has_matematica_scored = any(
         "matem" in str(v.get("subject_name") or "").lower() for _sid, v in scored
+    )
+    # Regra B: nota geral = calculate_grade(média das proficiências).
+    grade_media = EvaluationCalculator.calculate_grade(
+        proficiency_media,
+        course_name,
+        "GERAL",
+        use_simple_calculation=False,
+        has_matematica=has_matematica_scored,
     )
     classification_geral = EvaluationCalculator.determine_classification(
         proficiency_media, course_name, 'GERAL', has_matematica=has_matematica_scored

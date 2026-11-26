@@ -15,6 +15,8 @@ class Student(db.Model):
     registration = db.Column(db.String(50), nullable=True, unique=True)
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
     birth_date = db.Column(db.Date)
+    # Exclusão lógica: False = inativo (fora de listagens ativas; histórico preservado).
+    is_active = db.Column(db.Boolean, nullable=False, default=True, server_default="true")
 
     user_id = db.Column(db.String, db.ForeignKey('public.users.id'), unique=True)
     user = db.relationship('User', back_populates='student')
@@ -31,8 +33,10 @@ class Student(db.Model):
     # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
     school_id = db.Column(db.String(36), db.ForeignKey('tenant.school.id'))
 
-    # Relacionamento com StudentAnswer para permitir exclusão em cascata
+    # Relacionamento com StudentAnswer (histórico preservado na exclusão lógica).
     student_answers = db.relationship('StudentAnswer', backref='student', cascade='all, delete-orphan')
-    
-    
-    
+
+    @classmethod
+    def query_ativos(cls):
+        """Alunos ativos (is_active True ou coluna ausente em schemas antigos)."""
+        return cls.query.filter(cls.is_active.is_(True))

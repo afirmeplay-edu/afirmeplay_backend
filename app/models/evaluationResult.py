@@ -34,6 +34,8 @@ class EvaluationResult(db.Model):
     class_id_snapshot = db.Column(PGUUID(as_uuid=True), nullable=True)
     grade_id_snapshot = db.Column(PGUUID(as_uuid=True), nullable=True)
     enrollment_id_snapshot = db.Column(db.String(36), nullable=True)
+    # Nome do aluno no momento do resultado (histórico; não depende da matrícula atual).
+    student_name_snapshot = db.Column(db.String(100), nullable=True)
 
     # Metadados
     calculated_at = db.Column(db.TIMESTAMP, default=datetime.utcnow)

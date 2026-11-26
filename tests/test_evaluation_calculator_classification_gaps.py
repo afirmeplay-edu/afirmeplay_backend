@@ -77,8 +77,13 @@ def test_anos_iniciais_matematica_boundary_scan():
         assert got == expected, f"p={proficiency}: esperado {expected!r}, obtido {got!r}"
 
 
-def test_legacy_geral_anos_iniciais_closes_gap_without_has_matematica():
+def test_geral_sem_has_matematica_usa_faixas_outras():
+    """has_matematica=None alinha o GERAL à escala Outras (não às faixas legadas de Matemática)."""
     assert (
         EC.determine_classification(224.9, "Anos Iniciais", "GERAL", has_matematica=None)
-        == "Básico"
+        == "Adequado"
+    )
+    assert (
+        EC.determine_classification(149.0, "Anos Iniciais", "GERAL", has_matematica=None)
+        == "Abaixo do Básico"
     )

@@ -448,7 +448,7 @@ class DashboardService:
                     sid = str(gab.school_id)
                     class_ids_potencial = [r[0] for r in Class.query.filter(Class._school_id == sid).with_entities(Class.id).all()]
                 student_count = (
-                    Student.query.filter(Student.class_id.in_(class_ids_potencial)).count()
+                    Student.query_ativos().filter(Student.class_id.in_(class_ids_potencial)).count()
                     if class_ids_potencial
                     else 0
                 )
@@ -501,7 +501,7 @@ class DashboardService:
             )
             class_ids = [ct.class_id for ct in class_tests]
             student_count = (
-                Student.query.filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
+                Student.query_ativos().filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
             )
 
             sessions = (
@@ -665,7 +665,7 @@ class DashboardService:
                 )
                 class_ids = [ct.class_id for ct in class_tests]
                 alunos_que_vao_fazer = (
-                    Student.query.filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
+                    Student.query_ativos().filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
                 )
 
                 sessions_row = (
@@ -729,7 +729,7 @@ class DashboardService:
                     sid = str(gab.school_id)
                     class_ids_potencial = [r[0] for r in Class.query.filter(Class._school_id == sid).with_entities(Class.id).all()]
                 alunos_que_vao_fazer = (
-                    Student.query.filter(Student.class_id.in_(class_ids_potencial)).count()
+                    Student.query_ativos().filter(Student.class_id.in_(class_ids_potencial)).count()
                     if class_ids_potencial
                     else 0
                 )
@@ -2892,13 +2892,14 @@ class DashboardService:
         ranking = []
 
         def _classification_from_proficiency(proficiency: float) -> str:
-            if proficiency < 200:
-                return "Abaixo do Básico"
-            if proficiency < 500:
-                return "Básico"
-            if proficiency < 750:
-                return "Adequado"
-            return "Avançado"
+            from app.services.evaluation_calculator import EvaluationCalculator
+
+            return EvaluationCalculator.determine_classification(
+                float(proficiency or 0),
+                "Anos Iniciais",
+                "GERAL",
+                has_matematica=None,
+            )
 
         effective_limit = limit if isinstance(limit, int) and limit > 0 else DashboardService.MAX_LIST_SIZE
         for idx, row in enumerate(query.limit(effective_limit).all()):
@@ -3093,13 +3094,14 @@ class DashboardService:
             )
 
         def _classification_from_proficiency(proficiency: float) -> str:
-            if proficiency < 200:
-                return "Abaixo do Básico"
-            if proficiency < 500:
-                return "Básico"
-            if proficiency < 750:
-                return "Adequado"
-            return "Avançado"
+            from app.services.evaluation_calculator import EvaluationCalculator
+
+            return EvaluationCalculator.determine_classification(
+                float(proficiency or 0),
+                "Anos Iniciais",
+                "GERAL",
+                has_matematica=None,
+            )
 
         effective_limit = limit if isinstance(limit, int) and limit > 0 else DashboardService.MAX_LIST_SIZE
         ranking: List[Dict[str, Any]] = []
@@ -3182,7 +3184,7 @@ class DashboardService:
     def _build_professor_summary(cls, scope: Dict[str, Any], teacher: Optional[Teacher]) -> Dict[str, Any]:
         class_ids = get_teacher_classes(scope["user"]["id"]) if teacher else []
         students = (
-            Student.query.filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
+            Student.query_ativos().filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
         )
         active_students = (
             TestSession.query.join(Student, Student.id == TestSession.student_id)
@@ -3317,7 +3319,7 @@ class DashboardService:
         classes = Class.query.filter(Class.id.in_(class_ids)).all()
         data = []
         for class_obj in classes:
-            students = Student.query.filter(Student.class_id == class_obj.id).with_entities(Student.id).all()
+            students = Student.query_ativos().filter(Student.class_id == class_obj.id).with_entities(Student.id).all()
             student_ids = [row.id for row in students]
             active_students = (
                 TestSession.query.filter(TestSession.student_id.in_(student_ids))

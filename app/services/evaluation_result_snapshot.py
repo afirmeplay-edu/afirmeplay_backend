@@ -250,21 +250,12 @@ def query_evaluation_results_for_stats(
     """
     q = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids))
     snap_expr = snapshot_scope_filter_expression(escopo_calculo, class_ids)
-    legacy = and_(
-        EvaluationResult.school_id_snapshot.is_(None),
-        EvaluationResult.class_id_snapshot.is_(None),
-        EvaluationResult.student_id.in_(base_student_ids if base_student_ids else []),
-    )
+    # Legado sem snapshot NÃO entra na agregação por turma/matrícula atual
+    # (bucket explícito via ``query_legacy_results_without_snapshot``).
     if snap_expr is not None:
-        if base_student_ids:
-            q = q.filter(or_(snap_expr, legacy))
-        else:
-            q = q.filter(snap_expr)
+        q = q.filter(snap_expr)
     else:
-        if base_student_ids:
-            q = q.filter(EvaluationResult.student_id.in_(base_student_ids))
-        else:
-            q = q.filter(False)
+        q = q.filter(False)
     return q
 
 
@@ -273,23 +264,35 @@ def query_evaluation_results_for_class_group(
     class_ids: List[Any],
     base_student_ids: List[str],
 ) -> Any:
-    """Grupo de turmas (class_tests): snapshot de turma OU legado no recorte atual."""
+    """Grupo de turmas (class_tests): só snapshot de turma (legado fora da agregação)."""
     q = EvaluationResult.query.filter(EvaluationResult.test_id == evaluation_id)
-    in_classes = EvaluationResult.class_id_snapshot.in_(class_ids) if class_ids else None
-    legacy = and_(
-        EvaluationResult.school_id_snapshot.is_(None),
-        EvaluationResult.class_id_snapshot.is_(None),
-        EvaluationResult.student_id.in_(base_student_ids if base_student_ids else []),
-    )
-    if in_classes is not None and base_student_ids:
-        q = q.filter(or_(in_classes, legacy))
-    elif in_classes is not None:
-        q = q.filter(in_classes)
-    elif base_student_ids:
-        q = q.filter(EvaluationResult.student_id.in_(base_student_ids))
+    if class_ids:
+        q = q.filter(EvaluationResult.class_id_snapshot.in_(class_ids))
     else:
         q = q.filter(False)
     return q
+
+
+def query_legacy_results_without_snapshot(
+    evaluation_id: Union[str, Sequence[str]],
+) -> Any:
+    """Bucket explícito: resultados sem snapshot (fora de agregação por turma)."""
+    if isinstance(evaluation_id, str):
+        test_ids = [str(evaluation_id)]
+    else:
+        test_ids = [str(x) for x in evaluation_id if str(x).strip()]
+    if not test_ids:
+        return EvaluationResult.query.filter(False)
+    test_filter = (
+        EvaluationResult.test_id == test_ids[0]
+        if len(test_ids) == 1
+        else EvaluationResult.test_id.in_(test_ids)
+    )
+    return EvaluationResult.query.filter(
+        test_filter,
+        EvaluationResult.school_id_snapshot.is_(None),
+        EvaluationResult.class_id_snapshot.is_(None),
+    )
 
 
 def municipal_evaluation_results_query(
@@ -297,8 +300,8 @@ def municipal_evaluation_results_query(
     evaluation_id: Union[str, Sequence[str]],
 ) -> Any:
     """
-    Resultados de uma ou mais avaliações contando para o município:
-    escola em snapshot OU (linha legada sem snapshot e aluno atualmente no município).
+    Resultados de uma ou mais avaliações contando para o município
+    apenas por escola em snapshot (legado sem snapshot fica no bucket separado).
     """
     if isinstance(evaluation_id, str):
         test_ids = [str(evaluation_id)]
@@ -313,22 +316,9 @@ def municipal_evaluation_results_query(
         else EvaluationResult.test_id.in_(test_ids)
     )
     in_city_schools = db.session.query(School.id).filter(School.city_id == city_id)
-    legacy_students = (
-        db.session.query(Student.id)
-        .join(Class, Student.class_id == Class.id)
-        .join(School, cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR))
-        .filter(School.city_id == city_id)
-    )
     return EvaluationResult.query.filter(
         test_filter,
-        or_(
-            EvaluationResult.school_id_snapshot.in_(in_city_schools),
-            and_(
-                EvaluationResult.school_id_snapshot.is_(None),
-                EvaluationResult.class_id_snapshot.is_(None),
-                EvaluationResult.student_id.in_(legacy_students),
-            ),
-        ),
+        EvaluationResult.school_id_snapshot.in_(in_city_schools),
     )
 
 

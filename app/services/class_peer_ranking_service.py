@@ -961,6 +961,28 @@ class ClassPeerRankingService:
                 course_name=course_label,
                 subject_name="GERAL",
             )
+            try:
+                from app.services.resultado_escopo import log_shadow_divergencia, carregar
+
+                tid = sample.get("test_id") or sample.get("evaluation_id")
+                if tid:
+                    payload = carregar(
+                        [tid],
+                        escopo={
+                            "class_id": sample.get("class_id"),
+                            "nivel": "turma",
+                        },
+                        alunos="todos",
+                        modalidade="online",
+                        target_level="turma",
+                    )
+                    log_shadow_divergencia(
+                        "class_peer_turma",
+                        {"nota": avg_score, "proficiencia_media": avg_prof},
+                        payload,
+                    )
+            except Exception:
+                pass
             total_correct = sum(int(r.get("correct_answers") or 0) for r in class_rows)
             total_questions = sum(int(r.get("total_questions") or 0) for r in class_rows)
             items.append(

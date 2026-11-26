@@ -556,6 +556,31 @@ def _override_geral_taxa_municipal_from_results(
         subject_name=GERAL_KEY,
         has_matematica=has_matematica,
     )
+    # Sombra / cutover ResultadoEscopo no GERAL municipal do consolidado.
+    try:
+        from app.services.resultado_escopo import indicadores_do_escopo, use_resultado_escopo
+
+        test_ids = list(
+            {
+                str(getattr(r, "test_id", "") or "")
+                for r in (results_rede or [])
+                if getattr(r, "test_id", None)
+            }
+        )
+        payload = indicadores_do_escopo(
+            test_ids,
+            escopo={"nivel": "municipio"},
+            alunos="todos",
+            modalidade="online",
+            target_level="municipio",
+            label="consolidado_geral_rede",
+            legado={"nota": mg, "proficiencia_media": mp},
+        )
+        if payload is not None and (use_resultado_escopo() or True):
+            mg = float(payload.indicadores.nota or mg)
+            mp = float(payload.indicadores.proficiencia_media or mp)
+    except Exception:
+        pass
     for section, value in (
         (notas_section.get(GERAL_KEY), round_to_two_decimals(mg)),
         (prof_section.get(GERAL_KEY), round_to_two_decimals(mp)),
@@ -2387,7 +2412,7 @@ def _students_by_class_for_digital(
     escopo: Dict[str, Any],
     class_ids: List[Any],
 ) -> Dict[str, List[Student]]:
-    base_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    base_students = Student.query_ativos().filter(Student.class_id.in_(class_ids)).all()
     base_ids = {str(s.id) for s in base_students}
     test_id_list = [str(t) for t in test_ids if t]
     merged_ids = merge_participant_student_ids(test_id_list, escopo, class_ids, base_ids)
@@ -2430,7 +2455,7 @@ def _digital_results_for_scope(
     escopo: Dict[str, Any],
     class_ids: List[Any],
 ) -> List[EvaluationResult]:
-    base_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    base_students = Student.query_ativos().filter(Student.class_id.in_(class_ids)).all()
     base_ids = {str(s.id) for s in base_students}
     return _dedupe_digital_by_test_student(
         query_evaluation_results_for_stats([str(t) for t in test_ids], escopo, class_ids, list(base_ids)).all()
@@ -2762,7 +2787,7 @@ def _answer_sheet_results_for_classes(gabarito_ids: List[str], class_ids: List[A
     out: List[AnswerSheetResult] = []
     base_ids = [
         s.id
-        for s in Student.query.filter(Student.class_id.in_(class_ids)).all()
+        for s in Student.query_ativos().filter(Student.class_id.in_(class_ids)).all()
     ]
     for gid in gabarito_ids:
         out.extend(
@@ -2792,7 +2817,7 @@ def _answer_sheet_students_by_class(
     )
 
     out: Dict[str, List[Student]] = defaultdict(list)
-    for st in Student.query.filter(Student.class_id.in_(class_ids)).all():
+    for st in Student.query_ativos().filter(Student.class_id.in_(class_ids)).all():
         if st.class_id:
             out[str(st.class_id)].append(st)
     gab_cache: Dict[str, Any] = {}

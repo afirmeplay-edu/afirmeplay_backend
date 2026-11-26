@@ -129,7 +129,8 @@ class TestEvaluationGroupMerge(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         aluno = merged[0]
         self.assertTrue(aluno.completo)
-        self.assertEqual(aluno.grade, 7.0)
+        # Regra B: calculate_grade(média das profs), não média das notas (7.0).
+        self.assertEqual(aluno.grade, 6.49)
         self.assertEqual(aluno.proficiency, 230.0)
         self.assertEqual(aluno.correct_answers, 26)
         self.assertEqual(aluno.participacao["provas_realizadas"], 2)
@@ -158,7 +159,8 @@ class TestEvaluationGroupMerge(unittest.TestCase):
         self.assertFalse(aluno.completo)
         self.assertEqual(aluno.participacao["provas_realizadas"], 1)
         self.assertEqual(aluno.participacao["provas_grupo"], 2)
-        self.assertEqual(aluno.grade, 5.0)
+        # Regra B sobre a única disciplina (prof 180).
+        self.assertEqual(aluno.grade, 4.76)
         provas = {p["test_id"]: p["realizou"] for p in aluno.participacao["provas"]}
         self.assertTrue(provas["t-pt"])
         self.assertFalse(provas["t-mat"])
@@ -271,8 +273,8 @@ class TestVirtualMultidisciplinaryPipeline(unittest.TestCase):
             self.assertTrue(aluno.completo)
             self.assertIn("pt", aluno.subject_results)
             self.assertIn("mat", aluno.subject_results)
-            # GERAL do aluno = média das disciplinas (como multidisciplinar)
-            self.assertEqual(aluno.grade, 5.2)
+            # Regra B: calculate_grade(média das profs).
+            self.assertEqual(aluno.grade, 5.09)
             self.assertEqual(aluno.proficiency, 193.45)
 
         with patch(

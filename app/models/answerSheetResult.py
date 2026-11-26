@@ -51,6 +51,8 @@ class AnswerSheetResult(db.Model):
     class_id_snapshot = db.Column(PGUUID(as_uuid=True), nullable=True)
     grade_id_snapshot = db.Column(PGUUID(as_uuid=True), nullable=True)
     enrollment_id_snapshot = db.Column(db.String(36), nullable=True)
+    # Nome do aluno no momento da correção (histórico).
+    student_name_snapshot = db.Column(db.String(100), nullable=True)
     
     # Relacionamentos
     gabarito = db.relationship('AnswerSheetGabarito', backref='results')

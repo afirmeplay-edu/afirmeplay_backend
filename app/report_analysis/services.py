@@ -303,6 +303,41 @@ class ReportAggregateService:
         return cls.get_ai_analysis(test_id, scope_type, scope_id)
 
     @staticmethod
+    def compose_scope_id(
+        base_scope_id: Optional[str],
+        *,
+        alunos: str = "todos",
+        modalidade: str = "online",
+        versao_roster: Optional[str] = None,
+        course_context: Optional[str] = None,
+    ) -> Optional[str]:
+        """Chave com alunos/modalidade/roster/curso (contrato ResultadoEscopo)."""
+        parts = []
+        a = (alunos or "todos").strip().lower() or "todos"
+        m = (modalidade or "online").strip().lower() or "online"
+        if a != "todos":
+            parts.append(f"a={a}")
+        if m != "online":
+            parts.append(f"m={m}")
+        if versao_roster:
+            parts.append(f"r={versao_roster}")
+        if course_context:
+            parts.append(f"c={course_context}")
+        if not parts:
+            return base_scope_id
+        prefix = base_scope_id or "overall"
+        return f"{prefix}|{'|'.join(parts)}"
+
+    @classmethod
+    def invalidate_for_test(cls, test_id: str, commit: bool = True) -> None:
+        """Invalida cache após matrícula, transferência, ClassTest, ADAP ou resultado."""
+        cls.mark_all_dirty_for_test(test_id, commit=commit)
+
+    @classmethod
+    def invalidate_for_gabarito(cls, gabarito_id: str, commit: bool = True) -> None:
+        cls.mark_all_dirty_for_test(str(gabarito_id), commit=commit)
+
+    @staticmethod
     def _safe_commit():
         """Commit seguro com tratamento de erros"""
         try:

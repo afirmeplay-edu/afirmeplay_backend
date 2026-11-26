@@ -4,6 +4,7 @@ Implementa as fórmulas específicas conforme os requisitos do sistema
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 from app.services.special_education import course_name_is_special_education
@@ -209,24 +210,36 @@ class EvaluationCalculator:
     @classmethod
     def _determine_course_level(cls, course_name: str) -> CourseLevel:
         """Determina o nível do curso baseado no nome"""
-        course_lower = course_name.lower()
-        
+        course_lower = (course_name or "").lower()
+
         if "infantil" in course_lower:
             return CourseLevel.EDUCACAO_INFANTIL
-        elif "iniciais" in course_lower or "fundamental" in course_lower and "i" in course_lower:
-            return CourseLevel.ANOS_INICIAIS
-        elif course_name_is_special_education(course_name):
-            return CourseLevel.EDUCACAO_ESPECIAL
-        elif "eja" in course_lower:
-            return CourseLevel.EJA
-        elif "finais" in course_lower or "fundamental" in course_lower and "ii" in course_lower:
+        # Finais / Fundamental II antes de "fundamental" + "i" (evita "II" virar Iniciais).
+        if (
+            "finais" in course_lower
+            or "fundamental ii" in course_lower
+            or "fundamental 2" in course_lower
+            or re.search(r"fundamental\s*ii\b", course_lower)
+            or re.search(r"fundamental\s*2\b", course_lower)
+        ):
             return CourseLevel.ANOS_FINAIS
-        elif "médio" in course_lower or "medio" in course_lower:
+        if "médio" in course_lower or "medio" in course_lower:
             return CourseLevel.ENSINO_MEDIO
-        else:
-            # Padrão para casos não identificados
-            logging.warning(f"Curso não identificado: {course_name}. Usando Anos Iniciais como padrão.")
+        if course_name_is_special_education(course_name):
+            return CourseLevel.EDUCACAO_ESPECIAL
+        if "eja" in course_lower:
+            return CourseLevel.EJA
+        if (
+            "iniciais" in course_lower
+            or "fundamental i" in course_lower
+            or re.search(r"fundamental\s*1\b", course_lower)
+            or ("fundamental" in course_lower and "ii" not in course_lower and "2" not in course_lower)
+        ):
             return CourseLevel.ANOS_INICIAIS
+        logging.warning(
+            f"Curso não identificado: {course_name}. Usando Anos Iniciais como padrão."
+        )
+        return CourseLevel.ANOS_INICIAIS
 
     @classmethod
     def _determine_subject_type(cls, subject_name: str) -> Subject:
@@ -322,13 +335,18 @@ class EvaluationCalculator:
         course_level = cls._determine_course_level(course_name)
         if subject_name.upper() == "GERAL":
             override_subject_type = cls._resolve_subject_type_for_general(has_matematica)
-            subject_type = override_subject_type if override_subject_type is not None else cls._determine_subject_type(subject_name)
+            # None → Outras (alinha nota e classificação do GERAL).
+            subject_type = (
+                override_subject_type
+                if override_subject_type is not None
+                else Subject.OUTRAS
+            )
         else:
             subject_type = cls._determine_subject_type(subject_name)
-        
+
         config = cls.GRADE_CALCULATION_CONFIG.get(
             (course_level, subject_type),
-            {"base": 49, "divisor": 275}  # Valor padrão
+            {"base": 49, "divisor": 275},  # Valor padrão
         )
         
         # Fórmula: (Proficiência - base) / divisor × 10
@@ -366,52 +384,37 @@ class EvaluationCalculator:
             subject_type = cls._determine_subject_type(subject_name)
         
         # Tratamento especial para classificação GERAL
+        # GERAL: has_matematica True/False usa CLASSIFICATION_CONFIG.
+        # has_matematica=None → Outras (mesma escala da nota GERAL sem override).
         if subject_name.upper() == "GERAL":
-            # Se o chamador passou has_matematica, alinhar o GERAL à disciplina efetiva.
-            # Caso contrário, manter comportamento legado (faixas hardcoded).
-            if has_matematica is not None:
-                ranges = cls.CLASSIFICATION_CONFIG.get(
-                    (course_level, subject_type),
-                    [
-                        (0, 149.99, Classification.ABAIXO_BASICO),
-                        (150, 199.99, Classification.BASICO),
-                        (200, 249.99, Classification.ADEQUADO),
-                        (250, 350, Classification.AVANCADO)
-                    ],
-                )
-            else:
-                # Legado: faixas específicas para "GERAL"
-                if course_level in [CourseLevel.ANOS_FINAIS, CourseLevel.ENSINO_MEDIO]:
-                    ranges = [
-                        (0, 224.99, Classification.ABAIXO_BASICO),
-                        (225, 299.99, Classification.BASICO),
-                        (300, 349.99, Classification.ADEQUADO),
-                        (350, 425, Classification.AVANCADO)
-                    ]
-                else:
-                    ranges = [
-                        (0, 174.99, Classification.ABAIXO_BASICO),
-                        (175, 224.99, Classification.BASICO),
-                        (225, 274.99, Classification.ADEQUADO),
-                        (275, 375, Classification.AVANCADO)
-                    ]
-        else:
+            effective_type = subject_type if subject_type is not None else Subject.OUTRAS
             ranges = cls.CLASSIFICATION_CONFIG.get(
-                (course_level, subject_type),
-                # Padrão para casos não identificados
+                (course_level, effective_type),
                 [
                     (0, 149.99, Classification.ABAIXO_BASICO),
                     (150, 199.99, Classification.BASICO),
                     (200, 249.99, Classification.ADEQUADO),
-                    (250, 350, Classification.AVANCADO)
-                ]
+                    (250, 350, Classification.AVANCADO),
+                ],
             )
-        
+        else:
+            ranges = cls.CLASSIFICATION_CONFIG.get(
+                (course_level, subject_type),
+                [
+                    (0, 149.99, Classification.ABAIXO_BASICO),
+                    (150, 199.99, Classification.BASICO),
+                    (200, 249.99, Classification.ADEQUADO),
+                    (250, 350, Classification.AVANCADO),
+                ],
+            )
+
+        # Arredondamento oficial antes de classificar (evita buracos 199.995 etc.).
+        proficiency_rounded = round_to_two_decimals(proficiency)
+
         for min_val, max_val, classification in ranges:
-            if min_val <= proficiency <= max_val:
+            if min_val <= proficiency_rounded <= max_val:
                 return classification.value
-                
-        # Se não encontrar classificação, retorna o menor nível
+
         return Classification.ABAIXO_BASICO.value
 
     @classmethod

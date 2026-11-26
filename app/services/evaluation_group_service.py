@@ -506,19 +506,26 @@ def merge_student_group_results(
             continue
 
         participacao = build_participacao(tests_info, test_ids_realizados)
-        grades = [float(sr.get("grade") or 0) for sr in subject_results.values()]
         proficiencies = [float(sr.get("proficiency") or 0) for sr in subject_results.values()]
-        if proficiencies:
-            proficiency_geral = sum(proficiencies) / len(proficiencies)
-            grade_geral = sum(grades) / len(grades) if grades else 0.0
-        else:
-            proficiency_geral = 0.0
-            grade_geral = 0.0
-
         has_matematica = any(
             "matem" in str(sr.get("subject_name") or "").lower()
             for sr in subject_results.values()
         )
+        if proficiencies:
+            proficiency_geral = round_to_two_decimals(
+                sum(proficiencies) / len(proficiencies)
+            )
+            # Regra B: nota = calculate_grade(média das proficiências).
+            grade_geral = EvaluationCalculator.calculate_grade(
+                proficiency_geral,
+                course_name,
+                "GERAL",
+                has_matematica=has_matematica,
+            )
+        else:
+            proficiency_geral = 0.0
+            grade_geral = 0.0
+
         classification = EvaluationCalculator.determine_classification(
             proficiency_geral,
             course_name,

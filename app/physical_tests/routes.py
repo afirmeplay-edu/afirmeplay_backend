@@ -1179,6 +1179,10 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
                             'confidence_summary': result.get('confidence_summary', {}),
                             'needs_review': result.get('needs_review', []),
                             'needs_review_reason': result.get('needs_review_reason'),
+                            'identity_source': result.get('identity_source'),
+                            'identity_confidence': result.get('identity_confidence'),
+                            'idgrid_checksum_ok': result.get('idgrid_checksum_ok'),
+                            'identity_mismatch': result.get('identity_mismatch'),
                         }
                         
                         update_item_done(job_id, i, adapted_result)
@@ -1345,6 +1349,10 @@ def process_physical_correction(test_id):
                     "confidence_summary": result.get('confidence_summary', {}),
                     "needs_review": result.get('needs_review', []),
                     "needs_review_reason": result.get('needs_review_reason'),
+                    "identity_source": result.get("identity_source"),
+                    "identity_confidence": result.get("identity_confidence"),
+                    "idgrid_checksum_ok": result.get("idgrid_checksum_ok"),
+                    "identity_mismatch": result.get("identity_mismatch"),
                 }), 200
             else:
                 student_name = None
@@ -1959,6 +1967,26 @@ def _extract_image_from_request():
     return None, None
 
 
+def _optional_student_id_from_request(path_student_id=None):
+    """
+    Aluno opcional: path (filtro clássico) > query > form > JSON.
+    Retorna None se não informado.
+    """
+    if path_student_id:
+        return str(path_student_id).strip() or None
+    q = (request.args.get("student_id") or "").strip()
+    if q:
+        return q
+    f = (request.form.get("student_id") or "").strip()
+    if f:
+        return f
+    data = request.get_json(silent=True) or {}
+    body = data.get("student_id")
+    if body:
+        return str(body).strip() or None
+    return None
+
+
 def _assert_can_manage_test(user, test):
     if not user:
         return jsonify({"error": "User not found or token invalid"}), 401
@@ -1969,66 +1997,149 @@ def _assert_can_manage_test(user, test):
     return None
 
 
-@bp.route('/test/<string:test_id>/student/<string:student_id>/detect-answers', methods=['POST'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
-@requires_city_context
-def detect_student_answers_from_photo(test_id, student_id):
-    """
-    Detecta respostas a partir de foto da área de bolhas (sem gravar).
+def _build_photo_detect_response(
+    *,
+    doc_id,
+    doc_title,
+    questions_meta,
+    topology,
+    detection,
+    identity,
+    existing,
+    student_name=None,
+):
+    student_id = identity.get("student_id")
+    if student_name is None and student_id:
+        try:
+            student = Student.query.get(student_id)
+            student_name = getattr(student, "name", None) if student else None
+        except Exception:
+            student_name = None
 
-    Body: multipart file 'image' OU JSON/form {image: base64}
+    return {
+        "success": True,
+        "test_id": doc_id,
+        "test_title": doc_title,
+        "student_id": student_id,
+        "student_name": student_name,
+        "identity": {
+            "student_id": student_id,
+            "student_name": student_name,
+            "gabarito_id": identity.get("gabarito_id"),
+            "test_id": identity.get("test_id"),
+            "source": identity.get("identity_source"),
+            "confidence": identity.get("identity_confidence"),
+            "idgrid_checksum_ok": identity.get("idgrid_checksum_ok"),
+            # mismatch agregado (aluno ou documento). Preferir flags abaixo na UI.
+            "mismatch": bool(identity.get("identity_mismatch")),
+            "student_mismatch": bool(identity.get("student_mismatch")),
+            "document_mismatch": bool(identity.get("document_mismatch")),
+            "document_mismatch_reason": identity.get("document_mismatch_reason"),
+            # True quando a foto é desta prova/cartão (gabarito da prova ≠ “outra prova”)
+            "matches_selected_document": bool(
+                identity.get("matches_selected_document", True)
+            ),
+            "detected_gabarito_id": identity.get("detected_gabarito_id"),
+            "detected_test_id": identity.get("detected_test_id"),
+            "detected": bool(identity.get("detected")),
+            "filter_applied": bool(identity.get("filter_applied")),
+            "filter_student_id": identity.get("filter_student_id"),
+            "detected_student_id": identity.get("detected_student_id"),
+            # ID da rota (prova ou cartão selecionado na UI) — comparar com este,
+            # NÃO com gabarito_id||test_id às cegas.
+            "route_document_id": doc_id,
+        },
+        "answers": detection.get("answers", []),
+        "summary": detection.get("summary", {}),
+        "blocks_detected": detection.get("blocks_detected"),
+        "blocks_expected": detection.get("blocks_expected"),
+        "questions": [
+            {
+                "order": q.get("order"),
+                "question_id": q.get("question_id"),
+                "alternatives": q.get("alternatives"),
+                "correct_answer": q.get("correct_answer"),
+                "subject_id": q.get("subject_id"),
+                "subject_name": q.get("subject_name"),
+            }
+            for q in questions_meta
+        ],
+        "existing_answers": existing,
+        "has_existing_answers": bool(existing),
+        "topology_source": topology.get("source"),
+        "method": detection.get("method"),
+        "overlay_image": detection.get("overlay_image"),
+        "calibration": detection.get("calibration"),
+    }
 
-    Returns 200 com answers[], questions[], existing_answers, summary.
-    Erros: 400 validação, 404 entidade, 422 blocks_mismatch / falha OMR.
-    """
+
+def _detect_answers_for_test(test_id, filter_student_id=None):
+    """Núcleo detect prova: bolhas + identidade (imagem e/ou filtro opcional)."""
     from app.services.cartao_resposta.photo_answers_detector import (
         PhotoAnswersDetector,
         PhotoAnswersDetectionError,
     )
-    from app.services.cartao_resposta.photo_answers_service import PhotoAnswersService
+    from app.services.cartao_resposta.photo_answers_service import (
+        PhotoAnswersService,
+        PhotoAnswersIncompatibleError,
+    )
+    from app.services.cartao_resposta.photo_identity import (
+        detect_sheet_identity,
+        resolve_identity_with_filter,
+    )
 
-    try:
-        user = get_current_user_from_token()
-        test = Test.query.get(test_id)
-        if not test:
-            return jsonify({"error": "Prova não encontrada", "code": "test_not_found"}), 404
+    user = get_current_user_from_token()
+    test = Test.query.get(test_id)
+    if not test:
+        return jsonify({"error": "Prova não encontrada", "code": "test_not_found"}), 404
 
-        denied = _assert_can_manage_test(user, test)
-        if denied:
-            return denied
+    denied = _assert_can_manage_test(user, test)
+    if denied:
+        return denied
 
-        student = Student.query.get(student_id)
+    if filter_student_id:
+        student = Student.query.get(filter_student_id)
         if not student:
             return jsonify({"error": "Aluno não encontrado", "code": "student_not_found"}), 404
 
-        image_data, content_type = _extract_image_from_request()
-        if not image_data:
-            return jsonify({
-                "error": "Imagem não fornecida. Envie o arquivo no campo 'image'.",
-                "code": "missing_image",
-            }), 400
+    image_data, content_type = _extract_image_from_request()
+    if not image_data:
+        return jsonify({
+            "error": "Imagem não fornecida. Envie o arquivo no campo 'image'.",
+            "code": "missing_image",
+        }), 400
 
-        try:
-            PhotoAnswersService.validate_image_bytes(image_data, content_type)
-        except ValueError as ve:
-            return jsonify({"error": str(ve), "code": "invalid_image"}), 400
+    try:
+        PhotoAnswersService.validate_image_bytes(image_data, content_type)
+    except ValueError as ve:
+        return jsonify({"error": str(ve), "code": "invalid_image"}), 400
 
-        from app.services.cartao_resposta.photo_answers_service import (
-            PhotoAnswersIncompatibleError,
-        )
+    try:
+        topology = PhotoAnswersService.resolve_topology(test_id)
+    except PhotoAnswersIncompatibleError as ie:
+        return jsonify({
+            "error": ie.message,
+            "code": ie.code,
+            "details": ie.details,
+        }), 422
 
-        try:
-            topology = PhotoAnswersService.resolve_topology(test_id)
-        except PhotoAnswersIncompatibleError as ie:
-            return jsonify({
-                "error": ie.message,
-                "code": ie.code,
-                "details": ie.details,
-            }), 422
+    if not (topology.get("topology") or {}).get("blocks"):
+        return jsonify({
+            "error": "Não foi possível determinar a topologia (blocos) desta prova.",
+            "code": "missing_topology",
+        }), 422
 
-        questions_meta = PhotoAnswersService.get_questions_meta(test_id)
-        existing = PhotoAnswersService.get_existing_answers(test_id, student_id)
+    detected_id = detect_sheet_identity(image_data)
+    identity = resolve_identity_with_filter(
+        filter_student_id=filter_student_id,
+        expected_test_id=test_id,
+        detected=detected_id,
+    )
+
+    resolved_student = identity.get("student_id")
+    existing = {}
+    if resolved_student:
+        existing = PhotoAnswersService.get_existing_answers(test_id, resolved_student)
         try:
             PhotoAnswersService.assert_existing_answers_omr_compatible(existing)
         except PhotoAnswersIncompatibleError as ie:
@@ -2038,56 +2149,172 @@ def detect_student_answers_from_photo(test_id, student_id):
                 "details": ie.details,
             }), 422
 
-        if not (topology.get("topology") or {}).get("blocks"):
-            return jsonify({
-                "error": "Não foi possível determinar a topologia (blocos) desta prova.",
-                "code": "missing_topology",
-            }), 422
+    questions_meta = PhotoAnswersService.get_questions_meta(test_id)
+    detector = PhotoAnswersDetector(debug=Config.OMR_DEBUG)
+    try:
+        detection = detector.detect(image_data, topology)
+    except PhotoAnswersDetectionError as de:
+        status = 422 if de.code in (
+            "blocks_mismatch",
+            "missing_topology",
+            "topology_image_mismatch",
+            "bubbles_not_found",
+        ) else 400
+        return jsonify(de.to_dict()), status
 
-        detector = PhotoAnswersDetector(debug=Config.OMR_DEBUG)
-        try:
-            detection = detector.detect(image_data, topology)
-        except PhotoAnswersDetectionError as de:
-            status = 422 if de.code in (
-                "blocks_mismatch",
-                "missing_topology",
-                "topology_image_mismatch",
-                "bubbles_not_found",
-            ) else 400
-            return jsonify(de.to_dict()), status
+    student_name = None
+    if filter_student_id:
+        student_name = getattr(Student.query.get(filter_student_id), "name", None)
 
+    return jsonify(_build_photo_detect_response(
+        doc_id=test_id,
+        doc_title=getattr(test, "title", None),
+        questions_meta=questions_meta,
+        topology=topology,
+        detection=detection,
+        identity=identity,
+        existing=existing,
+        student_name=student_name,
+    )), 200
+
+
+def _save_answers_for_test(test_id, student_id):
+    from app.services.cartao_resposta.photo_answers_service import (
+        PhotoAnswersService,
+        PhotoAnswersIncompatibleError,
+    )
+
+    user = get_current_user_from_token()
+    test = Test.query.get(test_id)
+    if not test:
+        return jsonify({"error": "Prova não encontrada", "code": "test_not_found"}), 404
+
+    denied = _assert_can_manage_test(user, test)
+    if denied:
+        return denied
+
+    if not student_id:
         return jsonify({
-            "success": True,
-            "test_id": test_id,
-            "test_title": getattr(test, "title", None),
-            "student_id": student_id,
-            "student_name": getattr(student, "name", None),
-            "answers": detection.get("answers", []),
-            "summary": detection.get("summary", {}),
-            "blocks_detected": detection.get("blocks_detected"),
-            "blocks_expected": detection.get("blocks_expected"),
-            "questions": [
-                {
-                    "order": q.get("order"),
-                    "question_id": q.get("question_id"),
-                    "alternatives": q.get("alternatives"),
-                    "correct_answer": q.get("correct_answer"),
-                    "subject_id": q.get("subject_id"),
-                    "subject_name": q.get("subject_name"),
-                }
-                for q in questions_meta
-            ],
-            "existing_answers": existing,
-            "has_existing_answers": bool(existing),
-            "topology_source": topology.get("source"),
-            "method": detection.get("method"),
-            "overlay_image": detection.get("overlay_image"),
-            "calibration": detection.get("calibration"),
-        }), 200
+            "error": (
+                "student_id obrigatório para salvar. Informe no path, query ou body "
+                "(filtro) ou use o student_id devolvido na detecção."
+            ),
+            "code": "missing_student",
+        }), 400
 
+    student = Student.query.get(student_id)
+    if not student:
+        return jsonify({"error": "Aluno não encontrado", "code": "student_not_found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    answers = data.get("answers")
+    overwrite = bool(data.get("overwrite", False))
+
+    if not isinstance(answers, dict):
+        return jsonify({
+            "error": "Campo 'answers' deve ser um objeto {questão: alternativa}",
+            "code": "invalid_payload",
+        }), 400
+
+    try:
+        PhotoAnswersService.assert_scan_compatible(test_id)
+        result = PhotoAnswersService.save_answers(
+            test_id=test_id,
+            student_id=student_id,
+            answers=answers,
+            overwrite=overwrite,
+            corrected_by=user["id"] if user else None,
+        )
+    except PhotoAnswersIncompatibleError as ie:
+        return jsonify({
+            "error": ie.message,
+            "code": ie.code,
+            "details": ie.details,
+        }), 422
+    except FileExistsError as fe:
+        return jsonify({
+            "error": str(fe),
+            "code": "answers_exist",
+            "has_existing_answers": True,
+        }), 409
+    except LookupError as le:
+        return jsonify({"error": str(le), "code": "not_found"}), 404
+    except ValueError as ve:
+        return jsonify({"error": str(ve), "code": "validation_error"}), 400
+
+    eval_result = result.get("evaluation_result") or {}
+    return jsonify({
+        "success": True,
+        "message": (
+            "Respostas atualizadas com sucesso"
+            if result.get("overwritten")
+            else "Respostas salvas com sucesso"
+        ),
+        "test_id": test_id,
+        "student_id": student_id,
+        "student_name": getattr(student, "name", None),
+        "overwritten": result.get("overwritten"),
+        "answers_count": result.get("answers_count"),
+        "session_id": result.get("session_id"),
+        "evaluation_result_id": eval_result.get("id") if isinstance(eval_result, dict) else None,
+        "score_percentage": eval_result.get("score_percentage") if isinstance(eval_result, dict) else None,
+        "grade": eval_result.get("grade") if isinstance(eval_result, dict) else None,
+        "saved_answers": result.get("saved_answers"),
+    }), 200
+
+
+@bp.route('/test/<string:test_id>/detect-answers', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
+@requires_city_context
+def detect_test_answers_from_photo(test_id):
+    """
+    Detecta respostas por foto. Aluno opcional (query/form/JSON student_id).
+
+    Identidade: tenta QR/ID-Grid na imagem; filtro de aluno é fallback adicional.
+    """
+    try:
+        return _detect_answers_for_test(
+            test_id, filter_student_id=_optional_student_id_from_request()
+        )
     except Exception as e:
         logging.error(f"Erro em detect-answers: {e}", exc_info=True)
         return jsonify({"error": "Erro interno ao detectar respostas", "code": "internal_error"}), 500
+
+
+@bp.route('/test/<string:test_id>/student/<string:student_id>/detect-answers', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
+@requires_city_context
+def detect_student_answers_from_photo(test_id, student_id):
+    """
+    Detecta respostas por foto com filtro de aluno no path (compatível).
+
+    Body: multipart file 'image' OU JSON/form {image: base64}
+    """
+    try:
+        return _detect_answers_for_test(test_id, filter_student_id=student_id)
+    except Exception as e:
+        logging.error(f"Erro em detect-answers: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno ao detectar respostas", "code": "internal_error"}), 500
+
+
+@bp.route('/test/<string:test_id>/save-answers', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
+@requires_city_context
+def save_test_answers_from_photo(test_id):
+    """
+    Grava respostas. student_id obrigatório no body/query (filtro ou valor do detect).
+    Body: { answers, overwrite?, student_id? }
+    """
+    try:
+        return _save_answers_for_test(
+            test_id, student_id=_optional_student_id_from_request()
+        )
+    except Exception as e:
+        logging.error(f"Erro em save-answers: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno ao salvar respostas", "code": "internal_error"}), 500
 
 
 @bp.route('/test/<string:test_id>/student/<string:student_id>/save-answers', methods=['POST'])
@@ -2095,93 +2322,9 @@ def detect_student_answers_from_photo(test_id, student_id):
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 @requires_city_context
 def save_student_answers_from_photo(test_id, student_id):
-    """
-    Grava respostas revisadas do aluno e recalcula EvaluationResult.
-
-    Body JSON:
-    {
-      "answers": {"1": "A", "2": null, ...},
-      "overwrite": true
-    }
-
-    409 se já existem respostas e overwrite não for true.
-    """
-    from app.services.cartao_resposta.photo_answers_service import PhotoAnswersService
-
+    """Grava respostas com aluno no path (compatível)."""
     try:
-        user = get_current_user_from_token()
-        test = Test.query.get(test_id)
-        if not test:
-            return jsonify({"error": "Prova não encontrada", "code": "test_not_found"}), 404
-
-        denied = _assert_can_manage_test(user, test)
-        if denied:
-            return denied
-
-        student = Student.query.get(student_id)
-        if not student:
-            return jsonify({"error": "Aluno não encontrado", "code": "student_not_found"}), 404
-
-        data = request.get_json(silent=True) or {}
-        answers = data.get("answers")
-        overwrite = bool(data.get("overwrite", False))
-
-        if not isinstance(answers, dict):
-            return jsonify({
-                "error": "Campo 'answers' deve ser um objeto {questão: alternativa}",
-                "code": "invalid_payload",
-            }), 400
-
-        from app.services.cartao_resposta.photo_answers_service import (
-            PhotoAnswersIncompatibleError,
-        )
-
-        try:
-            PhotoAnswersService.assert_scan_compatible(test_id)
-            result = PhotoAnswersService.save_answers(
-                test_id=test_id,
-                student_id=student_id,
-                answers=answers,
-                overwrite=overwrite,
-                corrected_by=user["id"] if user else None,
-            )
-        except PhotoAnswersIncompatibleError as ie:
-            return jsonify({
-                "error": ie.message,
-                "code": ie.code,
-                "details": ie.details,
-            }), 422
-        except FileExistsError as fe:
-            return jsonify({
-                "error": str(fe),
-                "code": "answers_exist",
-                "has_existing_answers": True,
-            }), 409
-        except LookupError as le:
-            return jsonify({"error": str(le), "code": "not_found"}), 404
-        except ValueError as ve:
-            return jsonify({"error": str(ve), "code": "validation_error"}), 400
-
-        eval_result = result.get("evaluation_result") or {}
-        return jsonify({
-            "success": True,
-            "message": (
-                "Respostas atualizadas com sucesso"
-                if result.get("overwritten")
-                else "Respostas salvas com sucesso"
-            ),
-            "test_id": test_id,
-            "student_id": student_id,
-            "student_name": getattr(student, "name", None),
-            "overwritten": result.get("overwritten"),
-            "answers_count": result.get("answers_count"),
-            "session_id": result.get("session_id"),
-            "evaluation_result_id": eval_result.get("id") if isinstance(eval_result, dict) else None,
-            "score_percentage": eval_result.get("score_percentage") if isinstance(eval_result, dict) else None,
-            "grade": eval_result.get("grade") if isinstance(eval_result, dict) else None,
-            "saved_answers": result.get("saved_answers"),
-        }), 200
-
+        return _save_answers_for_test(test_id, student_id=student_id)
     except Exception as e:
         logging.error(f"Erro em save-answers: {e}", exc_info=True)
         return jsonify({"error": "Erro interno ao salvar respostas", "code": "internal_error"}), 500
@@ -2560,33 +2703,33 @@ def list_photo_scan_gabarito_students(gabarito_id):
         return jsonify({"error": "Erro interno ao listar alunos", "code": "internal_error"}), 500
 
 
-@bp.route('/gabarito/<string:gabarito_id>/student/<string:student_id>/detect-answers', methods=['POST'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
-@requires_city_context
-def detect_gabarito_answers_from_photo(gabarito_id, student_id):
-    """Detecta respostas por foto para cartão-resposta (sem gravar). Mesmo formato da rota de prova."""
+def _detect_answers_for_gabarito(gabarito_id, filter_student_id=None):
     from app.services.cartao_resposta.photo_answers_detector import (
         PhotoAnswersDetector,
         PhotoAnswersDetectionError,
     )
     from app.services.cartao_resposta.photo_answers_service import PhotoAnswersService
+    from app.services.cartao_resposta.photo_identity import (
+        detect_sheet_identity,
+        resolve_identity_with_filter,
+    )
     from app.services.cartao_resposta.manual_answer_sheet_service import (
         ManualAnswerSheetError,
         assert_user_can_manual_correct,
     )
 
-    try:
-        user = get_current_user_from_token()
-        if not user:
-            return jsonify({"error": "User not found or token invalid"}), 401
-        if user['role'] == 'aluno':
-            return jsonify({"error": "Alunos não podem escanear respostas"}), 403
+    user = get_current_user_from_token()
+    if not user:
+        return jsonify({"error": "User not found or token invalid"}), 401
+    if user['role'] == 'aluno':
+        return jsonify({"error": "Alunos não podem escanear respostas"}), 403
 
-        gabarito, err = _load_gabarito_for_photo(gabarito_id)
-        if err:
-            return err
-        student = _get_student_for_photo(student_id)
+    gabarito, err = _load_gabarito_for_photo(gabarito_id)
+    if err:
+        return err
+
+    if filter_student_id:
+        student = _get_student_for_photo(filter_student_id)
         if not student:
             return jsonify({"error": "Aluno não encontrado", "code": "student_not_found"}), 404
         try:
@@ -2594,67 +2737,181 @@ def detect_gabarito_answers_from_photo(gabarito_id, student_id):
         except ManualAnswerSheetError as me:
             return jsonify({"error": me.message, "code": "forbidden"}), me.status_code
 
-        image_data, content_type = _extract_image_from_request()
-        if not image_data:
-            return jsonify({
-                "error": "Imagem não fornecida. Envie o arquivo no campo 'image'.",
-                "code": "missing_image",
-            }), 400
-        try:
-            PhotoAnswersService.validate_image_bytes(image_data, content_type)
-        except ValueError as ve:
-            return jsonify({"error": str(ve), "code": "invalid_image"}), 400
-
-        if not PhotoAnswersService.is_gabarito_scan_compatible(gabarito):
-            return jsonify({
-                "error": "Este cartão não possui topologia ou gabarito configurados para leitura por foto.",
-                "code": "missing_topology",
-            }), 422
-
-        topology = PhotoAnswersService.resolve_gabarito_topology(gabarito)
-        questions_meta = PhotoAnswersService.get_gabarito_questions_meta(gabarito)
-        existing = PhotoAnswersService.get_gabarito_existing_answers(gabarito_id, student_id)
-
-        detector = PhotoAnswersDetector(debug=Config.OMR_DEBUG)
-        try:
-            detection = detector.detect(image_data, topology)
-        except PhotoAnswersDetectionError as de:
-            status = 422 if de.code in (
-                "blocks_mismatch", "missing_topology", "topology_image_mismatch", "bubbles_not_found",
-            ) else 400
-            return jsonify(de.to_dict()), status
-
+    image_data, content_type = _extract_image_from_request()
+    if not image_data:
         return jsonify({
-            "success": True,
-            "test_id": gabarito_id,
-            "test_title": gabarito.title,
-            "student_id": student_id,
-            "student_name": getattr(student, "name", None),
-            "answers": detection.get("answers", []),
-            "summary": detection.get("summary", {}),
-            "blocks_detected": detection.get("blocks_detected"),
-            "blocks_expected": detection.get("blocks_expected"),
-            "questions": [
-                {
-                    "order": q.get("order"),
-                    "question_id": q.get("question_id"),
-                    "alternatives": q.get("alternatives"),
-                    "correct_answer": q.get("correct_answer"),
-                    "subject_id": q.get("subject_id"),
-                    "subject_name": q.get("subject_name"),
-                }
-                for q in questions_meta
-            ],
-            "existing_answers": existing,
-            "has_existing_answers": bool(existing),
-            "topology_source": topology.get("source"),
-            "method": detection.get("method"),
-            "overlay_image": detection.get("overlay_image"),
-            "calibration": detection.get("calibration"),
-        }), 200
+            "error": "Imagem não fornecida. Envie o arquivo no campo 'image'.",
+            "code": "missing_image",
+        }), 400
+    try:
+        PhotoAnswersService.validate_image_bytes(image_data, content_type)
+    except ValueError as ve:
+        return jsonify({"error": str(ve), "code": "invalid_image"}), 400
+
+    if not PhotoAnswersService.is_gabarito_scan_compatible(gabarito):
+        return jsonify({
+            "error": "Este cartão não possui topologia ou gabarito configurados para leitura por foto.",
+            "code": "missing_topology",
+        }), 422
+
+    topology = PhotoAnswersService.resolve_gabarito_topology(gabarito)
+    questions_meta = PhotoAnswersService.get_gabarito_questions_meta(gabarito)
+
+    detected_id = detect_sheet_identity(image_data)
+    identity = resolve_identity_with_filter(
+        filter_student_id=filter_student_id,
+        expected_gabarito_id=gabarito_id,
+        detected=detected_id,
+    )
+    resolved_student = identity.get("student_id")
+    if resolved_student and not filter_student_id:
+        student = _get_student_for_photo(resolved_student)
+        if student:
+            try:
+                assert_user_can_manual_correct(user, gabarito, student)
+            except ManualAnswerSheetError as me:
+                return jsonify({"error": me.message, "code": "forbidden"}), me.status_code
+
+    existing = {}
+    if resolved_student:
+        existing = PhotoAnswersService.get_gabarito_existing_answers(
+            gabarito_id, resolved_student
+        )
+
+    detector = PhotoAnswersDetector(debug=Config.OMR_DEBUG)
+    try:
+        detection = detector.detect(image_data, topology)
+    except PhotoAnswersDetectionError as de:
+        status = 422 if de.code in (
+            "blocks_mismatch", "missing_topology", "topology_image_mismatch", "bubbles_not_found",
+        ) else 400
+        return jsonify(de.to_dict()), status
+
+    student_name = None
+    if filter_student_id:
+        st = _get_student_for_photo(filter_student_id)
+        student_name = getattr(st, "name", None) if st else None
+
+    return jsonify(_build_photo_detect_response(
+        doc_id=gabarito_id,
+        doc_title=gabarito.title,
+        questions_meta=questions_meta,
+        topology=topology,
+        detection=detection,
+        identity=identity,
+        existing=existing,
+        student_name=student_name,
+    )), 200
+
+
+def _save_answers_for_gabarito(gabarito_id, student_id):
+    from app.services.cartao_resposta.manual_answer_sheet_service import (
+        ManualAnswerSheetError,
+        submit_manual_correction,
+    )
+
+    user = get_current_user_from_token()
+    if not user:
+        return jsonify({"error": "User not found or token invalid"}), 401
+
+    gabarito, err = _load_gabarito_for_photo(gabarito_id)
+    if err:
+        return err
+
+    if not student_id:
+        return jsonify({
+            "error": (
+                "student_id obrigatório para salvar. Informe no path, query ou body "
+                "(filtro) ou use o student_id devolvido na detecção."
+            ),
+            "code": "missing_student",
+        }), 400
+
+    data = request.get_json(silent=True) or {}
+    answers = data.get("answers")
+    overwrite = bool(data.get("overwrite", False))
+    if not isinstance(answers, dict):
+        return jsonify({
+            "error": "Campo 'answers' deve ser um objeto {questão: alternativa}",
+            "code": "invalid_payload",
+        }), 400
+
+    existing = _get_existing_gabarito_answer_result(gabarito_id, student_id)
+    if existing and not overwrite:
+        return jsonify({
+            "error": "Já existem respostas para este aluno neste cartão",
+            "code": "answers_exist",
+            "has_existing_answers": True,
+        }), 409
+
+    try:
+        result = submit_manual_correction(
+            gabarito_id=gabarito_id,
+            test_id=None,
+            student_id=student_id,
+            raw_answers=answers,
+            user=user,
+            detection_method="photo",
+        )
+    except ManualAnswerSheetError as me:
+        return jsonify({"error": me.message, "code": "validation_error"}), me.status_code
+
+    return jsonify({
+        "success": True,
+        "message": "Respostas atualizadas com sucesso" if existing else "Respostas salvas com sucesso",
+        "test_id": gabarito_id,
+        "student_id": student_id,
+        "student_name": result.get("student_name"),
+        "overwritten": bool(existing),
+        "answers_count": len(answers),
+        "evaluation_result_id": result.get("answer_sheet_result_id"),
+        "score_percentage": result.get("percentage"),
+        "grade": (result.get("saved") or {}).get("grade") if isinstance(result.get("saved"), dict) else None,
+    }), 200
+
+
+@bp.route('/gabarito/<string:gabarito_id>/detect-answers', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
+@requires_city_context
+def detect_gabarito_answers_from_photo_optional(gabarito_id):
+    """Detect cartão com aluno opcional (query/form/JSON)."""
+    try:
+        return _detect_answers_for_gabarito(
+            gabarito_id, filter_student_id=_optional_student_id_from_request()
+        )
     except Exception as e:
         logging.error(f"Erro em gabarito detect-answers: {e}", exc_info=True)
         return jsonify({"error": "Erro interno ao detectar respostas", "code": "internal_error"}), 500
+
+
+@bp.route('/gabarito/<string:gabarito_id>/student/<string:student_id>/detect-answers', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
+@requires_city_context
+def detect_gabarito_answers_from_photo(gabarito_id, student_id):
+    """Detecta respostas por foto para cartão-resposta (filtro de aluno no path)."""
+    try:
+        return _detect_answers_for_gabarito(gabarito_id, filter_student_id=student_id)
+    except Exception as e:
+        logging.error(f"Erro em gabarito detect-answers: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno ao detectar respostas", "code": "internal_error"}), 500
+
+
+@bp.route('/gabarito/<string:gabarito_id>/save-answers', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
+@requires_city_context
+def save_gabarito_answers_from_photo_optional(gabarito_id):
+    """Save cartão; student_id no body/query se não estiver no path."""
+    try:
+        return _save_answers_for_gabarito(
+            gabarito_id, student_id=_optional_student_id_from_request()
+        )
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro em gabarito save-answers: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno ao salvar respostas", "code": "internal_error"}), 500
 
 
 @bp.route('/gabarito/<string:gabarito_id>/student/<string:student_id>/save-answers', methods=['POST'])
@@ -2667,61 +2924,8 @@ def save_gabarito_answers_from_photo(gabarito_id, student_id):
 
     Body: {"answers": {"1": "A", ...}, "overwrite": bool}. 409 se já existe resultado e overwrite falso.
     """
-    from app.services.cartao_resposta.manual_answer_sheet_service import (
-        ManualAnswerSheetError,
-        submit_manual_correction,
-    )
-
     try:
-        user = get_current_user_from_token()
-        if not user:
-            return jsonify({"error": "User not found or token invalid"}), 401
-
-        gabarito, err = _load_gabarito_for_photo(gabarito_id)
-        if err:
-            return err
-
-        data = request.get_json(silent=True) or {}
-        answers = data.get("answers")
-        overwrite = bool(data.get("overwrite", False))
-        if not isinstance(answers, dict):
-            return jsonify({
-                "error": "Campo 'answers' deve ser um objeto {questão: alternativa}",
-                "code": "invalid_payload",
-            }), 400
-
-        existing = _get_existing_gabarito_answer_result(gabarito_id, student_id)
-        if existing and not overwrite:
-            return jsonify({
-                "error": "Já existem respostas para este aluno neste cartão",
-                "code": "answers_exist",
-                "has_existing_answers": True,
-            }), 409
-
-        try:
-            result = submit_manual_correction(
-                gabarito_id=gabarito_id,
-                test_id=None,
-                student_id=student_id,
-                raw_answers=answers,
-                user=user,
-                detection_method="photo",
-            )
-        except ManualAnswerSheetError as me:
-            return jsonify({"error": me.message, "code": "validation_error"}), me.status_code
-
-        return jsonify({
-            "success": True,
-            "message": "Respostas atualizadas com sucesso" if existing else "Respostas salvas com sucesso",
-            "test_id": gabarito_id,
-            "student_id": student_id,
-            "student_name": result.get("student_name"),
-            "overwritten": bool(existing),
-            "answers_count": len(answers),
-            "evaluation_result_id": result.get("answer_sheet_result_id"),
-            "score_percentage": result.get("percentage"),
-            "grade": (result.get("saved") or {}).get("grade") if isinstance(result.get("saved"), dict) else None,
-        }), 200
+        return _save_answers_for_gabarito(gabarito_id, student_id=student_id)
     except Exception as e:
         db.session.rollback()
         logging.error(f"Erro em gabarito save-answers: {e}", exc_info=True)

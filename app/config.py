@@ -62,3 +62,9 @@ class Config:
     # OMR / cartão-resposta: salva imagens em debug_corrections_new/ quando True
     # export OMR_DEBUG=1  (ou true, yes, on)
     OMR_DEBUG = os.getenv("OMR_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+
+    # ID-Grid OMR (faixa de 12 hex abaixo do cabeçalho). Ligada por padrão.
+    # export ID_GRID_ENABLED=0  (ou false/off) desliga → PDF idêntico ao legado
+    ID_GRID_ENABLED = os.getenv("ID_GRID_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off", ""
+    )

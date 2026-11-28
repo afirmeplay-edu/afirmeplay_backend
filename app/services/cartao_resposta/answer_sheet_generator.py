@@ -184,9 +184,11 @@ class AnswerSheetGenerator:
     @staticmethod
     def _with_header_fonts(template_data: Dict) -> Dict:
         """Injeta URLs das TTFs do cabeçalho (mesmas medidas do overlay ReportLab)."""
+        from app.config import Config
         from app.services.cartao_resposta.header_label_metrics import header_font_template_vars
         merged = dict(template_data)
         merged.update(header_font_template_vars())
+        merged.setdefault("id_grid_enabled", bool(Config.ID_GRID_ENABLED))
         return merged
 
     def generate_answer_sheets_arch4(self, class_id: str, test_data: Dict, 
@@ -1410,6 +1412,33 @@ class AnswerSheetGenerator:
             
             # Desenhar QR code no overlay
             c.drawImage(qr_image_reader, QR_X, QR_Y, width=QR_SIZE, height=QR_SIZE)
+
+            # ID-Grid (faixa abaixo do cabeçalho). Não altera QR_X/QR_Y/QR_SIZE.
+            from app.config import Config
+            if Config.ID_GRID_ENABLED:
+                from app.services.cartao_resposta.identity_grid import (
+                    KIND_GABARITO,
+                    KIND_PHYSICAL,
+                    draw_identity_grid,
+                )
+                from app.services.cartao_resposta.identity_code_service import (
+                    allocate_code,
+                )
+                full_student_id = str(student.get("id") or "").strip()
+                if gabarito_id and full_student_id:
+                    id_code = allocate_code(
+                        KIND_GABARITO,
+                        full_student_id,
+                        gabarito_id=str(gabarito_id),
+                    )
+                    draw_identity_grid(c, id_code)
+                elif test_id and full_student_id:
+                    id_code = allocate_code(
+                        KIND_PHYSICAL,
+                        full_student_id,
+                        test_id=str((test_data or {}).get("id") or test_id),
+                    )
+                    draw_identity_grid(c, id_code)
 
             # ========================================================================
             # FINALIZAR OVERLAY

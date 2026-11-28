@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Detector OMR para fotos da área de respostas (sem QR / sem página A4 completa).
+Detector OMR para fotos da área de respostas (bolhas A/B/C/D).
+
+Identidade (QR / ID-Grid / filtro de aluno) fica em photo_identity.py e nas
+rotas de Correção por foto — este módulo só lê respostas.
 
 Abordagem image-first:
 1. Pré-processa (EXIF, upscale)
@@ -740,6 +743,14 @@ class PhotoAnswersDetector:
         return [float(x) for x in centers]
 
     def _cluster_row_centers(self, col_circles: np.ndarray, n_rows: int) -> List[float]:
+        """
+        Centros Y das n_rows questões de uma coluna.
+
+        Hough pode criar grupos fantasma acima/abaixo do grid. Os N mais
+        populosos às vezes incluem esses fantasmas e deslocam a grade 1 linha
+        (Q1=vazio, Q2=marca da Q1). Após a seleção, enquanto o passo na ponta
+        for absurdo vs o miolo, troca o extremo pelo próximo grupo interno.
+        """
         if len(col_circles) == 0:
             return []
         ys = col_circles[:, 1]
@@ -748,8 +759,57 @@ class PhotoAnswersDetector:
         if len(groups) == n_rows:
             return [float(g.mean()) for g in groups]
         if len(groups) > n_rows:
-            top = sorted(sorted(range(len(groups)), key=lambda i: -len(groups[i]))[:n_rows])
-            return [float(groups[i].mean()) for i in top]
+            top = sorted(
+                sorted(range(len(groups)), key=lambda i: -len(groups[i]))[:n_rows]
+            )
+
+            def _centers(idxs):
+                return [float(groups[i].mean()) for i in idxs]
+
+            # Remove fantasmas nas pontas (pode haver mais de um acima do grid)
+            for _ in range(len(groups)):
+                centers = _centers(top)
+                if len(centers) < 4:
+                    break
+                pitches = np.diff(centers)
+                med_inner = (
+                    float(np.median(pitches[1:]))
+                    if len(pitches) > 1
+                    else float(np.median(pitches))
+                )
+                if med_inner > 1e-6 and pitches[0] > med_inner * 2.2:
+                    used = set(top)
+                    replaced = False
+                    for j in range(top[0] + 1, len(groups)):
+                        if j not in used:
+                            top = sorted(top[1:] + [j])
+                            replaced = True
+                            break
+                    if replaced:
+                        continue
+                break
+
+            for _ in range(len(groups)):
+                centers = _centers(top)
+                if len(centers) < 4:
+                    break
+                pitches = np.diff(centers)
+                if len(pitches) < 2:
+                    break
+                med_inner = float(np.median(pitches[:-1]))
+                if med_inner > 1e-6 and pitches[-1] > med_inner * 2.2:
+                    used = set(top)
+                    replaced = False
+                    for j in range(top[-1] - 1, -1, -1):
+                        if j not in used:
+                            top = sorted(top[:-1] + [j])
+                            replaced = True
+                            break
+                    if replaced:
+                        continue
+                break
+
+            return _centers(top)
         # menos grupos que linhas (linhas coladas): devolve o que há; o chamador reamostra
         return [float(g.mean()) for g in groups]
 

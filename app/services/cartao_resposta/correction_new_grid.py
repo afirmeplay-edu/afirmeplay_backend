@@ -3644,6 +3644,731 @@ class AnswerSheetCorrectionNewGrid:
         }
     
     # =========================================================================
+    # ID-GRID (identidade OMR) — constantes próprias; NÃO altera FILL/âncoras/aplicador
+    # =========================================================================
+    IDGRID_MIN_SEPARATION = 18.0  # score médio filled − empty (escala ~0–255)
+    IDGRID_MARKER_SEARCH_PX = 28
+    IDGRID_OTSU_BINS = 64
+    # Warp A4 eleva baseline das bolhas vazias (~40–65); Otsu puro corta nesse
+    # platô. Preferir o maior gap entre scores ordenados quando ele for dominante.
+    IDGRID_MIN_GAP_ABS = 40.0
+    IDGRID_MIN_GAP_FRAC = 0.25
+    # Cartões impressos no layout 4×12 / 12 hex (fase de testes). Remover depois.
+    IDGRID_ACCEPT_LEGACY_4ROW = True
+    # Cartões com encode prefix K+DD+SS+C (sem linha em identity_codes). Remover depois.
+    IDGRID_ACCEPT_LEGACY_PREFIX = True
+
+    def _resolve_idgrid_prefix(
+        self, model, prefix: str, label: str
+    ) -> Tuple[Optional[str], str]:
+        """
+        Resolve prefixo hex do ID-Grid (case-insensitive).
+        Retorna (id|None, status) com status in {'ok','ambiguous','missing'}.
+        NÃO altera _resolve_qr_id.
+        """
+        text = (prefix or "").strip().lower()
+        if not text:
+            return None, "missing"
+        matches = (
+            model.query.filter(model.id.ilike(f"{text}%")).limit(2).all()
+        )
+        if len(matches) == 1:
+            return str(matches[0].id), "ok"
+        if not matches:
+            self.logger.error(f"❌ {label} não encontrado para prefixo ID-Grid {text}")
+            return None, "missing"
+        self.logger.error(f"❌ Prefixo ID-Grid ambíguo de {label}: {text}")
+        return None, "ambiguous"
+
+    def _otsu_threshold_scores(self, scores: np.ndarray) -> Optional[float]:
+        """
+        Limiar 1D para scores do ID-Grid.
+
+        Preferência: maior gap entre scores ordenados (robusto a baseline elevada
+        pós-warp). Fallback: Otsu em histograma fixo. None se degenerado.
+        """
+        if scores is None or scores.size < 2:
+            return None
+        vals = np.asarray(scores, dtype=np.float64).ravel()
+        lo, hi = float(vals.min()), float(vals.max())
+        span = hi - lo
+        if span < 1e-6:
+            return None
+
+        order = np.sort(vals)
+        gaps = np.diff(order)
+        gap_i = int(np.argmax(gaps))
+        max_gap = float(gaps[gap_i])
+        min_gap = max(
+            float(self.IDGRID_MIN_GAP_ABS),
+            float(self.IDGRID_MIN_GAP_FRAC) * span,
+        )
+        if max_gap >= min_gap:
+            return float((order[gap_i] + order[gap_i + 1]) / 2.0)
+
+        # Fallback Otsu (histograma em bins fixos)
+        hist, bin_edges = np.histogram(
+            vals, bins=int(self.IDGRID_OTSU_BINS), range=(lo, hi)
+        )
+        hist = hist.astype(np.float64)
+        total = hist.sum()
+        if total <= 0:
+            return None
+        prob = hist / total
+        omega = np.cumsum(prob)
+        mu = np.cumsum(prob * (bin_edges[:-1] + bin_edges[1:]) / 2.0)
+        mu_t = mu[-1]
+        sigma_b = (mu_t * omega - mu) ** 2 / (omega * (1.0 - omega) + 1e-12)
+        sigma_b[omega <= 0] = 0
+        sigma_b[omega >= 1] = 0
+        k = int(np.argmax(sigma_b))
+        return float((bin_edges[k] + bin_edges[k + 1]) / 2.0)
+
+    def _idgrid_refine_origin(
+        self, gray: np.ndarray, geo: Dict[str, Any]
+    ) -> Tuple[float, float]:
+        """Desloca origem da faixa via marcadores sólidos (±search)."""
+        dx = dy = 0.0
+        h, w = gray.shape[:2]
+        half = int(self.IDGRID_MARKER_SEARCH_PX)
+
+        def _marker_offset(cx: float, cy: float, size: float) -> Tuple[float, float]:
+            x0 = max(0, int(cx - size / 2 - half))
+            x1 = min(w, int(cx + size / 2 + half))
+            y0 = max(0, int(cy - size / 2 - half))
+            y1 = min(h, int(cy + size / 2 + half))
+            roi = gray[y0:y1, x0:x1]
+            if roi.size == 0:
+                return 0.0, 0.0
+            # Marcador = região mais escura
+            blur = cv2.GaussianBlur(roi, (5, 5), 0)
+            _, thr = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            ys, xs = np.where(thr > 0)
+            if xs.size < 8:
+                return 0.0, 0.0
+            found_cx = float(xs.mean()) + x0
+            found_cy = float(ys.mean()) + y0
+            return found_cx - cx, found_cy - cy
+
+        lm = geo["left_marker"]
+        rm = geo["right_marker"]
+        odx_l, ody_l = _marker_offset(lm["cx"], lm["cy"], lm["size"])
+        odx_r, ody_r = _marker_offset(rm["cx"], rm["cy"], rm["size"])
+        # Média dos dois; se um falhar (0,0) e o outro não, usa o válido
+        offsets = []
+        if abs(odx_l) + abs(ody_l) > 0.5:
+            offsets.append((odx_l, ody_l))
+        if abs(odx_r) + abs(ody_r) > 0.5:
+            offsets.append((odx_r, ody_r))
+        if offsets:
+            dx = float(np.mean([o[0] for o in offsets]))
+            dy = float(np.mean([o[1] for o in offsets]))
+            # Limita deslocamento para não pular para fora da faixa
+            dx = float(np.clip(dx, -half, half))
+            dy = float(np.clip(dy, -half, half))
+        return dx, dy
+
+    def _score_idgrid_centers(
+        self,
+        gray: np.ndarray,
+        geo: Dict[str, Any],
+        centers: List[Tuple[float, float]],
+    ) -> Tuple[Optional[np.ndarray], List[Tuple[int, int]], int, Dict[str, Any]]:
+        """Ink-map + scores nas posições. Retorna (scores, centers_xy, r, meta_roi)."""
+        slot = geo["slot"]
+        pad = max(24, int(round(float(geo["radius"]) * 2)))
+        y0 = max(0, int(slot["top"]) - pad)
+        y1 = min(gray.shape[0], int(slot["bottom"]) + pad)
+        x0 = max(0, int(slot["left"]) - pad)
+        x1 = min(gray.shape[1], int(slot["right"]) + pad)
+        roi = gray[y0:y1, x0:x1]
+        if roi.size == 0:
+            return None, [], 0, {}
+        ink_map = self._build_ink_strength_map(roi)
+        dx, dy = self._idgrid_refine_origin(gray, geo)
+        r = max(2, int(round(float(geo["radius"]))))
+        scores: List[float] = []
+        centers_xy: List[Tuple[int, int]] = []
+        for cx0, cy0 in centers:
+            cx = int(round(cx0 + dx)) - x0
+            cy = int(round(cy0 + dy)) - y0
+            feats = self._bubble_mark_features(ink_map, cx, cy, r)
+            scores.append(float(feats["score"]))
+            centers_xy.append((cx + x0, cy + y0))
+        return (
+            np.asarray(scores, dtype=np.float64),
+            centers_xy,
+            r,
+            {"slot": slot, "y0": y0, "x0": x0},
+        )
+
+    def _decode_idgrid_from_scores(
+        self,
+        scores_arr: np.ndarray,
+        *,
+        n_groups: int,
+        bits_per_group: int,
+        decode_fn,
+        group_major: bool,
+    ) -> Dict[str, Any]:
+        """
+        Otsu + nibbles.
+        group_major=True: scores em ordem grupo×bit (1×24).
+        group_major=False: scores em ordem col×row legado (4×12, row=bit).
+        """
+        thr = self._otsu_threshold_scores(scores_arr)
+        if thr is None:
+            if float(scores_arr.max()) < 25.0:
+                return {"absent": True}
+            return {
+                "present": True,
+                "checksum_ok": False,
+                "decoded": None,
+                "raw": None,
+                "reason": "sem_separacao",
+                "filled": None,
+                "separation": 0.0,
+                "threshold": None,
+                "n_filled": 0,
+            }
+
+        filled = scores_arr >= thr
+        if filled.any() and (~filled).any():
+            sep = float(scores_arr[filled].mean() - scores_arr[~filled].mean())
+        else:
+            sep = 0.0
+        n_on = int(filled.sum())
+        if n_on < 2 and sep < self.IDGRID_MIN_SEPARATION:
+            return {"absent": True}
+        if sep < self.IDGRID_MIN_SEPARATION:
+            return {
+                "present": True,
+                "checksum_ok": False,
+                "decoded": None,
+                "raw": None,
+                "reason": "separacao_insuficiente",
+                "filled": filled,
+                "separation": sep,
+                "threshold": thr,
+                "n_filled": n_on,
+            }
+
+        from app.services.cartao_resposta.identity_grid import bits_to_nibble
+
+        nibbles: List[int] = []
+        if group_major:
+            for g in range(n_groups):
+                base = g * bits_per_group
+                bits = [bool(filled[base + b]) for b in range(bits_per_group)]
+                nibbles.append(bits_to_nibble(bits))
+        else:
+            # legado: col major, cada col tem bits_per_group rows
+            for col in range(n_groups):
+                base = col * bits_per_group
+                bits = [bool(filled[base + row]) for row in range(bits_per_group)]
+                nibbles.append(bits_to_nibble(bits))
+        raw = "".join(f"{n:X}" for n in nibbles)
+        decoded = decode_fn(raw)
+        return {
+            "present": True,
+            "checksum_ok": decoded is not None,
+            "decoded": decoded,
+            "raw": raw,
+            "filled": filled,
+            "separation": sep,
+            "threshold": thr,
+            "n_filled": n_on,
+        }
+
+    def _resolve_idgrid_decoded(self, raw: Optional[str]) -> Optional[Dict[str, Any]]:
+        """
+        Token DB (v2) → IDs completos; senão legado prefix K+DD+SS+C.
+        Retorna dict no formato de decoded (com source) ou None.
+        """
+        if not raw:
+            return None
+        from app.services.cartao_resposta.identity_code_service import (
+            identity_dict_from_code,
+        )
+        from app.services.cartao_resposta.identity_grid import decode as decode_prefix
+
+        token_ids = identity_dict_from_code(raw)
+        if token_ids:
+            return token_ids
+
+        if not self.IDGRID_ACCEPT_LEGACY_PREFIX:
+            return None
+        legacy = decode_prefix(raw)
+        if not legacy:
+            return None
+        legacy = dict(legacy)
+        legacy["source"] = "prefix"
+        return legacy
+
+    def _read_identity_grid(self, img_a4: np.ndarray) -> Optional[Dict[str, Any]]:
+        """
+        Lê a faixa ID-Grid na imagem A4 normalizada (layout 1×24 / 6 hex).
+
+        Fluxo 1×24: checksum token (decode_token) → lookup DB; se miss, prefixo legado.
+        Se IDGRID_ACCEPT_LEGACY_4ROW e o layout novo falhar, tenta 4×12 / 12 hex.
+
+        Returns:
+            None se a faixa está ausente (cartão sem ID-Grid).
+            Dict com decoded/raw/checksum_ok/present=True; decoded=None se inválida.
+        """
+        from app.services.cartao_resposta.identity_grid import (
+            BITS_PER_GROUP,
+            N_COLS_LEGACY,
+            N_GROUPS,
+            N_ROWS_LEGACY,
+            decode_legacy_12,
+            decode_token,
+            grid_geometry_px,
+            grid_geometry_px_legacy_4row,
+        )
+
+        if img_a4 is None or img_a4.size == 0:
+            return None
+
+        if len(img_a4.shape) == 3:
+            gray = cv2.cvtColor(img_a4, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img_a4
+
+        # --- Layout novo 1×24 ---
+        geo = grid_geometry_px()
+        centers_new = [(float(x), float(geo["center_y"])) for x in geo["centers_x"]]
+        scores_new, centers_xy, r, _meta = self._score_idgrid_centers(
+            gray, geo, centers_new
+        )
+        if scores_new is None:
+            return None
+
+        result = self._decode_idgrid_from_scores(
+            scores_new,
+            n_groups=N_GROUPS,
+            bits_per_group=BITS_PER_GROUP,
+            decode_fn=decode_token,
+            group_major=True,
+        )
+        if result.get("absent"):
+            # Pode ser cartão sem faixa OU legado com geometria diferente —
+            # tenta legado antes de declarar ausente.
+            pass
+        elif result.get("checksum_ok"):
+            resolved = self._resolve_idgrid_decoded(result.get("raw"))
+            ok = resolved is not None
+            if self.debug:
+                self._debug_draw_idgrid(
+                    img_a4, geo["slot"], centers_xy, result["filled"], r,
+                    result.get("raw"), ok, result.get("separation") or 0.0,
+                    layout="1x24",
+                )
+            return {
+                "present": True,
+                "checksum_ok": ok,
+                "decoded": resolved,
+                "raw": result.get("raw"),
+                "separation": result.get("separation"),
+                "threshold": result.get("threshold"),
+                "n_filled": result.get("n_filled"),
+                "layout": "1x24",
+                "reason": None if ok else "code_not_found",
+            }
+
+        # --- Fallback legado 4×12 / 12 hex ---
+        # IDGRID_ACCEPT_LEGACY_4ROW: remover quando não houver mais cartões 4×12.
+        if self.IDGRID_ACCEPT_LEGACY_4ROW:
+            geo_l = grid_geometry_px_legacy_4row()
+            centers_l: List[Tuple[float, float]] = []
+            for col in range(N_COLS_LEGACY):
+                for row in range(N_ROWS_LEGACY):
+                    centers_l.append(
+                        (float(geo_l["cols_x"][col]), float(geo_l["rows_y"][row]))
+                    )
+            scores_l, centers_xy_l, r_l, _ = self._score_idgrid_centers(
+                gray, geo_l, centers_l
+            )
+            if scores_l is not None:
+                legacy = self._decode_idgrid_from_scores(
+                    scores_l,
+                    n_groups=N_COLS_LEGACY,
+                    bits_per_group=N_ROWS_LEGACY,
+                    decode_fn=decode_legacy_12,
+                    group_major=False,
+                )
+                if legacy.get("checksum_ok"):
+                    if self.debug:
+                        self._debug_draw_idgrid(
+                            img_a4, geo_l["slot"], centers_xy_l, legacy["filled"], r_l,
+                            legacy.get("raw"), True, legacy.get("separation") or 0.0,
+                            layout="4x12-legacy",
+                        )
+                    return {
+                        "present": True,
+                        "checksum_ok": True,
+                        "decoded": legacy["decoded"],
+                        "raw": legacy["raw"],
+                        "separation": legacy["separation"],
+                        "threshold": legacy["threshold"],
+                        "n_filled": legacy["n_filled"],
+                        "layout": "4x12-legacy",
+                    }
+                if result.get("absent") and legacy.get("absent"):
+                    return None
+                # Preferir o resultado novo (inválido) se legado também falhou
+                if result.get("absent") and not legacy.get("absent"):
+                    result = legacy
+
+        if result.get("absent"):
+            return None
+
+        if self.debug:
+            filled = result.get("filled")
+            self._debug_draw_idgrid(
+                img_a4, geo["slot"], centers_xy,
+                filled if filled is not None else np.zeros(len(centers_xy), dtype=bool),
+                r, result.get("raw"), bool(result.get("checksum_ok")),
+                result.get("separation") or 0.0,
+                layout=result.get("layout") or "1x24",
+            )
+
+        return {
+            "present": True,
+            "checksum_ok": bool(result.get("checksum_ok")),
+            "decoded": result.get("decoded"),
+            "raw": result.get("raw"),
+            "separation": result.get("separation"),
+            "threshold": result.get("threshold"),
+            "n_filled": result.get("n_filled"),
+            "reason": result.get("reason"),
+            "layout": result.get("layout") or "1x24",
+        }
+
+    def _debug_draw_idgrid(
+        self,
+        img_a4: np.ndarray,
+        slot: Dict[str, Any],
+        centers: List[Tuple[int, int]],
+        filled: np.ndarray,
+        r: int,
+        raw: Optional[str],
+        checksum_ok: bool,
+        sep: float,
+        layout: str,
+    ) -> None:
+        dbg = (
+            img_a4.copy()
+            if len(img_a4.shape) == 3
+            else cv2.cvtColor(img_a4, cv2.COLOR_GRAY2BGR)
+        )
+        for i, (cx, cy) in enumerate(centers):
+            on = bool(filled[i]) if filled is not None and i < len(filled) else False
+            color = (0, 200, 0) if on else (80, 80, 200)
+            cv2.circle(dbg, (int(cx), int(cy)), r, color, 2)
+        cv2.putText(
+            dbg,
+            f"IDGRID[{layout}] {raw} ok={checksum_ok} sep={sep:.1f}",
+            (int(slot["left"]), max(20, int(slot["top"]) - 12)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 255),
+            2,
+        )
+        self._save_debug_image("05_identity_grid.jpg", dbg)
+
+    def _identity_from_idgrid(
+        self, decoded: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """Resolve student/document a partir do decode do ID-Grid."""
+        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.models.student import Student
+        from app.models.test import Test
+        from app.services.cartao_resposta.identity_grid import KIND_GABARITO
+
+        # Token v2: IDs completos já vieram do banco.
+        if decoded.get("source") == "token":
+            student_id = decoded.get("student_id")
+            gabarito_id = decoded.get("gabarito_id")
+            test_id = decoded.get("test_id")
+            kind = decoded.get("kind")
+            st_ok = "ok" if student_id else "missing"
+            doc_ok = "ok" if (gabarito_id or test_id) else "missing"
+            return {
+                "student_id": student_id,
+                "student_status": st_ok,
+                "gabarito_id": gabarito_id,
+                "test_id": test_id,
+                "doc_status": doc_ok,
+                "kind": kind,
+            }
+
+        student_id, st_status = self._resolve_idgrid_prefix(
+            Student, decoded["student_prefix"], "Aluno"
+        )
+        kind = decoded["kind"]
+        if kind == KIND_GABARITO:
+            doc_id, doc_status = self._resolve_idgrid_prefix(
+                AnswerSheetGabarito, decoded["document_prefix"], "Gabarito"
+            )
+            return {
+                "student_id": student_id,
+                "student_status": st_status,
+                "gabarito_id": doc_id,
+                "test_id": None,
+                "doc_status": doc_status,
+                "kind": kind,
+            }
+        doc_id, doc_status = self._resolve_idgrid_prefix(
+            Test, decoded["document_prefix"], "Prova"
+        )
+        return {
+            "student_id": student_id,
+            "student_status": st_status,
+            "gabarito_id": None,
+            "test_id": doc_id,
+            "doc_status": doc_status,
+            "kind": kind,
+        }
+
+    def _merge_qr_and_idgrid(
+        self,
+        qr_data: Optional[Dict[str, str]],
+        idgrid: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Cruza QR e ID-Grid conforme matriz do plano.
+
+        Retorno:
+          ok, mismatch, ambiguous, identity_source, identity_confidence,
+          idgrid_checksum_ok, student_id, gabarito_id, test_id
+        """
+        qr_ok = bool(qr_data and (qr_data.get("gabarito_id") or qr_data.get("test_id")))
+        grid_present = bool(idgrid and idgrid.get("present"))
+        grid_checksum_ok = bool(idgrid and idgrid.get("checksum_ok") and idgrid.get("decoded"))
+        idgrid_checksum_ok = bool(idgrid.get("checksum_ok")) if grid_present else None
+
+        base = {
+            "ok": False,
+            "mismatch": False,
+            "ambiguous": False,
+            "identity_source": None,
+            "identity_confidence": None,
+            "idgrid_checksum_ok": idgrid_checksum_ok,
+            "identity_mismatch": False,
+            "student_id": None,
+            "gabarito_id": None,
+            "test_id": None,
+        }
+
+        # Legado: faixa ausente + QR ok
+        if not grid_present and qr_ok:
+            base.update({
+                "ok": True,
+                "identity_source": "qr",
+                "identity_confidence": None,  # igual a hoje
+                "student_id": qr_data.get("student_id"),
+                "gabarito_id": qr_data.get("gabarito_id"),
+                "test_id": qr_data.get("test_id"),
+            })
+            return base
+
+        grid_ids = None
+        if grid_checksum_ok:
+            grid_ids = self._identity_from_idgrid(idgrid["decoded"])
+            ambiguous = (
+                grid_ids["student_status"] == "ambiguous"
+                or grid_ids["doc_status"] == "ambiguous"
+            )
+            grid_resolved = (
+                grid_ids["student_status"] == "ok"
+                and grid_ids["doc_status"] == "ok"
+                and grid_ids["student_id"]
+                and (grid_ids["gabarito_id"] or grid_ids["test_id"])
+            )
+        else:
+            ambiguous = False
+            grid_resolved = False
+
+        # Prefixo ambíguo: cruza com QR; se continuar ambíguo → needs_review
+        if grid_checksum_ok and ambiguous:
+            if qr_ok:
+                # QR desempata se prefixos batem
+                same_student = (
+                    not qr_data.get("student_id")
+                    or not grid_ids["student_id"]
+                    or qr_data.get("student_id") == grid_ids["student_id"]
+                    or (
+                        grid_ids["student_status"] == "ambiguous"
+                        and qr_data.get("student_id")
+                        and str(qr_data["student_id"]).lower().startswith(
+                            idgrid["decoded"]["student_prefix"].lower()
+                        )
+                    )
+                )
+                if same_student and (
+                    (qr_data.get("gabarito_id") and grid_ids.get("gabarito_id") in (None, qr_data.get("gabarito_id")))
+                    or (qr_data.get("test_id") and grid_ids.get("test_id") in (None, qr_data.get("test_id")))
+                    or grid_ids["doc_status"] == "ambiguous"
+                ):
+                    base.update({
+                        "ok": True,
+                        "identity_source": "qr",
+                        "identity_confidence": "medium",
+                        "student_id": qr_data.get("student_id"),
+                        "gabarito_id": qr_data.get("gabarito_id"),
+                        "test_id": qr_data.get("test_id"),
+                    })
+                    return base
+            base.update({"ok": False, "ambiguous": True})
+            return base
+
+        if qr_ok and grid_resolved:
+            qr_student = qr_data.get("student_id")
+            qr_gab = qr_data.get("gabarito_id")
+            qr_test = qr_data.get("test_id")
+            g_student = grid_ids["student_id"]
+            g_gab = grid_ids.get("gabarito_id")
+            g_test = grid_ids.get("test_id")
+
+            student_match = (not qr_student) or (qr_student == g_student)
+            doc_match = True
+            if qr_gab or g_gab:
+                doc_match = qr_gab == g_gab
+            elif qr_test or g_test:
+                doc_match = qr_test == g_test
+
+            if student_match and doc_match:
+                base.update({
+                    "ok": True,
+                    "identity_source": "qr+idgrid",
+                    "identity_confidence": "high",
+                    "student_id": qr_student or g_student,
+                    "gabarito_id": qr_gab or g_gab,
+                    "test_id": qr_test or g_test,
+                })
+                return base
+
+            base.update({
+                "ok": False,
+                "mismatch": True,
+                "identity_mismatch": True,
+                "identity_source": "conflict",
+                "identity_confidence": "low",
+                "student_id": qr_student or g_student,
+                "gabarito_id": qr_gab or g_gab,
+                "test_id": qr_test or g_test,
+            })
+            return base
+
+        if qr_ok and not grid_resolved:
+            # Faixa presente mas inválida: segue só com QR (medium)
+            # Faixa ausente já tratada acima
+            conf = "medium" if grid_present else None
+            base.update({
+                "ok": True,
+                "identity_source": "qr",
+                "identity_confidence": conf,
+                "student_id": qr_data.get("student_id"),
+                "gabarito_id": qr_data.get("gabarito_id"),
+                "test_id": qr_data.get("test_id"),
+            })
+            return base
+
+        if grid_resolved and not qr_ok:
+            base.update({
+                "ok": True,
+                "identity_source": "idgrid",
+                "identity_confidence": "medium",
+                "student_id": grid_ids["student_id"],
+                "gabarito_id": grid_ids.get("gabarito_id"),
+                "test_id": grid_ids.get("test_id"),
+            })
+            return base
+
+        # Nenhum válido
+        return base
+
+    def _load_gabarito_for_identity(
+        self, gabarito_id: Optional[str], test_id: Optional[str], student_id: Optional[str]
+    ) -> Tuple[Optional[Any], Optional[Dict], Optional[str]]:
+        """
+        Carrega gabarito/topology a partir da identidade resolvida.
+        Retorna (gabarito_obj, gabarito_dict, error_msg).
+        """
+        from app.models.answerSheetGabarito import AnswerSheetGabarito
+
+        gabarito_obj = None
+        if gabarito_id:
+            gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
+            if not gabarito_obj:
+                return None, None, f"Gabarito {gabarito_id[:8]}... não encontrado"
+        elif test_id:
+            gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+            if gabarito_obj:
+                self.logger.info(
+                    f"✅ Gabarito encontrado em AnswerSheetGabarito (fonte central) "
+                    f"para test_id: {gabarito_obj.id[:8]}..."
+                )
+            else:
+                from app.models.physicalTestForm import PhysicalTestForm
+
+                physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
+                if physical_form and physical_form.blocks_config and physical_form.correct_answers:
+                    class GabaritoTemp:
+                        def __init__(self, form):
+                            self.id = f"physical_{form.test_id}"
+                            self.test_id = form.test_id
+                            self.num_questions = form.num_questions
+                            self.use_blocks = form.use_blocks
+                            self.blocks_config = form.blocks_config
+                            self.correct_answers = form.correct_answers
+
+                    gabarito_obj = GabaritoTemp(physical_form)
+                    self.logger.info(
+                        f"✅ Dados de correção encontrados em PhysicalTestForm "
+                        f"(fallback) para test_id: {test_id[:8]}..."
+                    )
+                else:
+                    self.logger.warning(
+                        f"⚠️ Dados de correção não encontrados para test_id "
+                        f"{test_id[:8]}..., montando dinamicamente"
+                    )
+                    gabarito_obj = self._criar_gabarito_de_test(test_id)
+                    if not gabarito_obj:
+                        return None, None, f"Prova {test_id[:8]}... não encontrada ou sem questões"
+        else:
+            return None, None, "Identidade sem gabarito_id ou test_id"
+
+        if not gabarito_obj:
+            return None, None, "Gabarito não encontrado"
+
+        topology_json = {
+            "num_blocks": gabarito_obj.blocks_config.get("num_blocks", 1),
+            "use_blocks": gabarito_obj.use_blocks,
+            "total_questions": gabarito_obj.num_questions,
+            "topology": gabarito_obj.blocks_config.get("topology", {}),
+        }
+        if not topology_json.get("topology") or not topology_json["topology"].get("blocks"):
+            return None, None, "Gabarito não possui estrutura de topologia. Regenere os cartões."
+
+        gabarito_raw = gabarito_obj.correct_answers or {}
+        gabarito: Dict[int, str] = {}
+        for key, value in gabarito_raw.items():
+            try:
+                gabarito[int(key)] = value
+            except (ValueError, TypeError):
+                self.logger.warning(f"⚠️ Chave de gabarito inválida: {key}")
+
+        self.logger.info(f"✅ Gabarito carregado: {len(gabarito)} questões")
+        if self.debug and len(gabarito) > 0:
+            sample_questions = sorted(list(gabarito.keys()))[:5]
+            sample_str = ", ".join([f"Q{q}={gabarito[q]}" for q in sample_questions])
+            self.logger.info(f"   Amostra gabarito: {sample_str}")
+
+        return gabarito_obj, {"topology_json": topology_json, "gabarito": gabarito}, None
+
+    # =========================================================================
     # FUNÇÃO PRINCIPAL PÚBLICA
     # =========================================================================
     
@@ -3704,12 +4429,17 @@ class AnswerSheetCorrectionNewGrid:
             precomputed_img_a4 = None
             qr_data = None
             student_id = None
+            gabarito_id = None
+            test_id = None
             gabarito_obj = None
+            identity_meta: Dict[str, Any] = {
+                "identity_source": None,
+                "identity_confidence": None,
+                "idgrid_checksum_ok": None,
+                "identity_mismatch": False,
+            }
 
-            # Compatibilidade primeiro:
-            # 1) QR na imagem original (caminho que já funcionava)
-            # 2) Âncoras (clássico → ROI fallback)
-            # 3) Se QR falhar: tentar na A4 normalizada
+            # Ordem: QR (não aborta se ausente) → âncoras → A4 → ID-Grid → identidade
             if auto_detect_qr:
                 self.logger.info("🔍 QR na imagem original (prioridade de estabilidade)...")
                 try:
@@ -3726,110 +4456,98 @@ class AnswerSheetCorrectionNewGrid:
                     error_msg = self._format_user_friendly_error(str(e))
                     return self._fail_correction(error_msg)
 
-                if not qr_data:
-                    error_msg = self._format_user_friendly_error("QR Code não encontrado no cartão")
-                    return self._fail_correction(error_msg)
-
-                student_id = qr_data.get("student_id")
-
+                if precomputed_anchors is None:
+                    precomputed_anchors = self._detect_a4_anchors(img, None)
                 if precomputed_anchors is None:
                     error_msg = self._format_user_friendly_error("Âncoras A4 não detectadas")
-                    return self._fail_correction(error_msg, student_id)
+                    return self._fail_correction(
+                        error_msg, (qr_data or {}).get("student_id")
+                    )
 
                 if precomputed_img_a4 is None:
                     precomputed_img_a4 = self._normalize_to_a4(img, precomputed_anchors)
 
-                gabarito_id = qr_data.get('gabarito_id')
-                test_id = qr_data.get('test_id')
-                
-                # Carregar gabarito do banco
-                from app.models.answerSheetGabarito import AnswerSheetGabarito
-                from app.models.test import Test
-                from app.models.testQuestion import TestQuestion
-                from app.models.question import Question
-                
-                gabarito_obj = None
-                
-                # ✅ BUSCAR por gabarito_id OU por test_id
-                if gabarito_id:
-                    gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
-                    if not gabarito_obj:
-                        error_msg = self._format_user_friendly_error(f"Gabarito {gabarito_id[:8]}... não encontrado")
-                        return self._fail_correction(error_msg, student_id)
-                
-                elif test_id:
-                    # ✅ MODIFICADO: Buscar PRIMEIRO em AnswerSheetGabarito (fonte central)
-                    # Fallback: PhysicalTestForm (compatibilidade com provas antigas)
-                    gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
-                    
-                    if gabarito_obj:
-                        self.logger.info(f"✅ Gabarito encontrado em AnswerSheetGabarito (fonte central) para test_id: {gabarito_obj.id[:8]}...")
-                    else:
-                        # Fallback: buscar em PhysicalTestForm (compatibilidade com provas antigas)
-                        from app.models.physicalTestForm import PhysicalTestForm
-                        
-                        physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
-                        
-                        if physical_form and physical_form.blocks_config and physical_form.correct_answers:
-                            # Criar objeto temporário compatível com a interface esperada
-                            class GabaritoTemp:
-                                def __init__(self, form):
-                                    self.id = f"physical_{form.test_id}"
-                                    self.test_id = form.test_id
-                                    self.num_questions = form.num_questions
-                                    self.use_blocks = form.use_blocks
-                                    self.blocks_config = form.blocks_config
-                                    self.correct_answers = form.correct_answers
-                            
-                            gabarito_obj = GabaritoTemp(physical_form)
-                            self.logger.info(f"✅ Dados de correção encontrados em PhysicalTestForm (fallback) para test_id: {test_id[:8]}...")
-                        else:
-                            # Último recurso: criar temporário a partir do Test
-                            self.logger.warning(f"⚠️ Dados de correção não encontrados para test_id {test_id[:8]}..., montando dinamicamente")
-                            gabarito_obj = self._criar_gabarito_de_test(test_id)
-                            
-                            if not gabarito_obj:
-                                error_msg = self._format_user_friendly_error(f"Prova {test_id[:8]}... não encontrada ou sem questões")
-                                return self._fail_correction(error_msg, student_id)
-                else:
-                    error_msg = self._format_user_friendly_error("QR Code sem gabarito_id ou test_id")
-                    return self._fail_correction(error_msg, student_id)
-                
-                if not gabarito_obj:
-                    error_msg = self._format_user_friendly_error("Gabarito não encontrado")
-                    return self._fail_correction(error_msg, student_id)
-                
-                # Construir topology_json
-                topology_json = {
-                    "num_blocks": gabarito_obj.blocks_config.get('num_blocks', 1),
-                    "use_blocks": gabarito_obj.use_blocks,
-                    "total_questions": gabarito_obj.num_questions,
-                    "topology": gabarito_obj.blocks_config.get('topology', {})
+                idgrid_result = None
+                try:
+                    from app.config import Config
+                    if Config.ID_GRID_ENABLED:
+                        self.logger.info("🔍 Lendo ID-Grid na imagem A4...")
+                        idgrid_result = self._read_identity_grid(precomputed_img_a4)
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Falha ao ler ID-Grid (segue com QR): {e}")
+                    idgrid_result = None
+
+                identity = self._merge_qr_and_idgrid(qr_data, idgrid_result)
+                identity_meta = {
+                    "identity_source": identity.get("identity_source"),
+                    "identity_confidence": identity.get("identity_confidence"),
+                    "idgrid_checksum_ok": identity.get("idgrid_checksum_ok"),
+                    "identity_mismatch": bool(identity.get("identity_mismatch")),
                 }
-                
-                # Validar topology
-                if not topology_json.get('topology') or not topology_json['topology'].get('blocks'):
-                    error_msg = self._format_user_friendly_error("Gabarito não possui estrutura de topologia. Regenere os cartões.")
+
+                if identity.get("mismatch"):
+                    self.logger.warning("⚠️ Identificadores QR e ID-Grid divergentes")
+                    return {
+                        "success": True,
+                        "status": "needs_review",
+                        "needs_review_reason": "identificadores_divergentes",
+                        "saved": False,
+                        "student_id": identity.get("student_id"),
+                        "gabarito_id": identity.get("gabarito_id"),
+                        "test_id": identity.get("test_id"),
+                        "total_questions": 0,
+                        "correct_answers": 0,
+                        "wrong_answers": 0,
+                        "blank_answers": 0,
+                        "invalid_answers": 0,
+                        "score": 0,
+                        "detailed_answers": [],
+                        "student_answers": {},
+                        "answer_key": {},
+                        **identity_meta,
+                    }
+
+                if identity.get("ambiguous"):
+                    self.logger.warning("⚠️ Prefixo ID-Grid ambíguo sem desempate")
+                    return {
+                        "success": True,
+                        "status": "needs_review",
+                        "needs_review_reason": "identificador_ambiguo",
+                        "saved": False,
+                        "student_id": identity.get("student_id"),
+                        "gabarito_id": identity.get("gabarito_id"),
+                        "test_id": identity.get("test_id"),
+                        "total_questions": 0,
+                        "correct_answers": 0,
+                        "wrong_answers": 0,
+                        "blank_answers": 0,
+                        "invalid_answers": 0,
+                        "score": 0,
+                        "detailed_answers": [],
+                        "student_answers": {},
+                        "answer_key": {},
+                        **identity_meta,
+                    }
+
+                if not identity.get("ok"):
+                    error_msg = self._format_user_friendly_error(
+                        "QR Code não encontrado no cartão"
+                    )
+                    return self._fail_correction(error_msg)
+
+                student_id = identity.get("student_id")
+                gabarito_id = identity.get("gabarito_id")
+                test_id = identity.get("test_id")
+
+                gabarito_obj, loaded, load_err = self._load_gabarito_for_identity(
+                    gabarito_id, test_id, student_id
+                )
+                if load_err:
+                    error_msg = self._format_user_friendly_error(load_err)
                     return self._fail_correction(error_msg, student_id)
-                
-                # Usar respostas corretas do gabarito
-                # ⚠️ CRÍTICO: Converter chaves de string para int
-                gabarito_raw = gabarito_obj.correct_answers or {}
-                gabarito = {}
-                for key, value in gabarito_raw.items():
-                    try:
-                        gabarito[int(key)] = value
-                    except (ValueError, TypeError):
-                        self.logger.warning(f"⚠️ Chave de gabarito inválida: {key}")
-                
-                self.logger.info(f"✅ Gabarito carregado: {len(gabarito)} questões")
-                
-                # 🔍 DEBUG: Mostrar primeiras questões do gabarito
-                if self.debug and len(gabarito) > 0:
-                    sample_questions = sorted(list(gabarito.keys()))[:5]
-                    sample_str = ", ".join([f"Q{q}={gabarito[q]}" for q in sample_questions])
-                    self.logger.info(f"   Amostra gabarito: {sample_str}")
-            
+                topology_json = loaded["topology_json"]
+                gabarito = loaded["gabarito"]
+
             # Validar parâmetros
             if not topology_json:
                 error_msg = self._format_user_friendly_error("topology_json é obrigatório")
@@ -3891,11 +4609,14 @@ class AnswerSheetCorrectionNewGrid:
             # ============================================
             self._print_correction_summary(topology_json, answers, gabarito, correction)
             
-            # Adicionar informações extras se auto_detect_qr
-            if auto_detect_qr and qr_data:
-                correction['gabarito_id'] = qr_data.get('gabarito_id') or gabarito_obj.id if hasattr(gabarito_obj, 'id') else None
-                correction['student_id'] = qr_data.get('student_id')
-                correction['test_id'] = qr_data.get('test_id')
+            # Identidade resolvida (QR e/ou ID-Grid)
+            if auto_detect_qr:
+                correction["student_id"] = student_id
+                correction["gabarito_id"] = gabarito_id or (
+                    getattr(gabarito_obj, "id", None) if gabarito_obj is not None else None
+                )
+                correction["test_id"] = test_id
+                correction.update(identity_meta)
             
             if aluno_ausente:
                 self.logger.info(

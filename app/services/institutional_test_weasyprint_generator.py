@@ -100,6 +100,12 @@ class InstitutionalTestWeasyPrintGenerator:
         if 'header_font_bold_url' not in template_data:
             from app.services.cartao_resposta.header_label_metrics import header_font_template_vars
             template_data = {**template_data, **header_font_template_vars()}
+        if 'id_grid_enabled' not in template_data:
+            from app.config import Config
+            template_data = {
+                **template_data,
+                'id_grid_enabled': bool(Config.ID_GRID_ENABLED),
+            }
         template = self.env.get_template(template_name)
         return template.render(**template_data)
 
@@ -1903,6 +1909,26 @@ class InstitutionalTestWeasyPrintGenerator:
                 width=QR_SIZE,
                 height=QR_SIZE,
             )
+
+            # ID-Grid (faixa abaixo do cabeçalho). Não altera QR_X/QR_Y/QR_SIZE.
+            from app.config import Config
+            if Config.ID_GRID_ENABLED:
+                from app.services.cartao_resposta.identity_grid import (
+                    KIND_PHYSICAL,
+                    draw_identity_grid,
+                )
+                from app.services.cartao_resposta.identity_code_service import (
+                    allocate_code,
+                )
+                full_student_id = str(student.get("id") or "").strip()
+                full_test_id = str((test_data or {}).get("id") or "").strip()
+                if full_student_id and full_test_id:
+                    id_code = allocate_code(
+                        KIND_PHYSICAL,
+                        full_student_id,
+                        test_id=full_test_id,
+                    )
+                    draw_identity_grid(c, id_code)
 
             c.save()
             buffer.seek(0)

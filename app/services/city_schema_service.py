@@ -2105,6 +2105,32 @@ CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_results (
     enrollment_id_snapshot VARCHAR(36)
 );
 COMMENT ON TABLE "{schema}".answer_sheet_results IS 'Resultados de correção de cartões';
+
+CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_identity_codes (
+    id VARCHAR PRIMARY KEY,
+    code CHAR(6) NOT NULL,
+    kind CHAR(1) NOT NULL,
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
+    gabarito_id VARCHAR REFERENCES "{schema}".answer_sheet_gabaritos(id),
+    test_id VARCHAR REFERENCES "{schema}".test(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT asic_kind_doc_check CHECK (
+        (kind = '1' AND gabarito_id IS NOT NULL AND test_id IS NULL)
+        OR (kind = '2' AND test_id IS NOT NULL AND gabarito_id IS NULL)
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_asic_code
+    ON "{schema}".answer_sheet_identity_codes(code);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_asic_student_gabarito
+    ON "{schema}".answer_sheet_identity_codes(student_id, gabarito_id)
+    WHERE gabarito_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_asic_student_test
+    ON "{schema}".answer_sheet_identity_codes(student_id, test_id)
+    WHERE test_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_asic_student
+    ON "{schema}".answer_sheet_identity_codes(student_id);
+COMMENT ON TABLE "{schema}".answer_sheet_identity_codes IS
+    'Token OMR ID-Grid (6 hex) 1:1:1 aluno + gabarito ou prova';
 COMMENT ON COLUMN "{schema}".answer_sheet_results.school_id_snapshot IS 'Escola no momento da participação (imutável após preenchido).';
 COMMENT ON COLUMN "{schema}".answer_sheet_results.class_id_snapshot IS 'Turma no momento da participação (imutável após preenchido).';
 COMMENT ON COLUMN "{schema}".answer_sheet_results.grade_id_snapshot IS 'Série no momento da participação (imutável após preenchido).';

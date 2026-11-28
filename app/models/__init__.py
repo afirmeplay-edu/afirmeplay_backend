@@ -44,6 +44,7 @@ from app.services.cartao_resposta.answer_sheet_gabarito_generation import Answer
 from .answerSheetGenerationJob import AnswerSheetGenerationJob
 from .answerSheetResult import AnswerSheetResult
 from .answerSheetReportAggregate import AnswerSheetReportAggregate
+from .answerSheetIdentityCode import AnswerSheetIdentityCode
 from .monitoring_action import MonitoringAction
 from .monitoring_action_history import MonitoringActionHistory
 from .saved_ata_sala import SavedAtaSala

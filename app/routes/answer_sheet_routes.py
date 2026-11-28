@@ -105,6 +105,220 @@ bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 _CARTAO_FULL_GABARITO_ACCESS_ROLES = frozenset({"admin", "aplicador", "tecadm"})
 
 
+def _answer_sheets_tmp_base() -> str:
+    """
+    Diretório base dos PDFs de cartão.
+    Em Docker: /app/tmp/answer_sheets. Em dev/WSL: /tmp/answer_sheets
+    (evita PermissionError em /app quando ANSWER_SHEETS_TMP_BASE não está setado).
+    """
+    env = (os.environ.get("ANSWER_SHEETS_TMP_BASE") or "").strip()
+    if env:
+        return env
+    docker_default = "/app/tmp/answer_sheets"
+    try:
+        os.makedirs(docker_default, exist_ok=True)
+        return docker_default
+    except OSError:
+        fallback = os.path.join(tempfile.gettempdir(), "answer_sheets")
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+
+
+# Cache curto do ping de workers (inspect remoto pode demorar segundos).
+_celery_workers_cache: Dict[str, Any] = {"ts": 0.0, "ok": False}
+
+
+def _celery_workers_available(timeout: float = 0.5) -> bool:
+    """True se houver pelo menos um worker Celery respondendo ao ping."""
+    import time as _time
+
+    # Força thread local (dev sem worker / testes manuais).
+    force = (os.environ.get("ANSWER_SHEETS_FORCE_LOCAL") or "").strip().lower()
+    if force in ("1", "true", "yes", "on"):
+        return False
+
+    now = _time.time()
+    if now - float(_celery_workers_cache.get("ts") or 0) < 15.0:
+        return bool(_celery_workers_cache.get("ok"))
+
+    ok = False
+    try:
+        if any_configured_redis_tcp_unreachable(timeout_sec=0.35):
+            ok = False
+        else:
+            from app.report_analysis.celery_app import celery_app
+
+            # Timeout curto: broker remoto sem worker pode travar o inspect.
+            insp = celery_app.control.inspect(timeout=timeout)
+            ping = insp.ping() if insp else None
+            ok = bool(ping)
+    except Exception as exc:
+        logging.debug("Celery inspect falhou (%s) — assumindo sem workers", exc)
+        ok = False
+
+    _celery_workers_cache["ts"] = now
+    _celery_workers_cache["ok"] = ok
+    return ok
+
+
+def _run_answer_sheet_batch_in_background(app, job_id: str, task_kwargs: Dict[str, Any]) -> None:
+    """
+    Executa a mesma task de geração no processo da API (thread daemon).
+    Usado quando não há worker Celery — a HTTP já retornou 202; o usuário pode sair.
+    """
+    from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
+    from app.services.answer_sheet_job_store import update_answer_sheet_job
+    from app.services.progress_store import complete_job, update_job
+
+    with app.app_context():
+        try:
+            update_answer_sheet_job(
+                job_id,
+                {
+                    "status": "processing",
+                    "stage_message": "Gerando cartões em background (sem worker Celery)...",
+                },
+            )
+            try:
+                update_job(
+                    job_id,
+                    {
+                        "status": "processing",
+                        "stage_message": "Gerando cartões em background (sem worker Celery)...",
+                        "phase": "generating",
+                    },
+                )
+            except Exception:
+                pass
+
+            async_result = generate_answer_sheets_batch_async.apply(kwargs=task_kwargs)
+            result = async_result.result if async_result.successful() else None
+
+            if async_result.successful() and isinstance(result, dict) and result.get("success"):
+                update_answer_sheet_job(
+                    job_id,
+                    {
+                        "status": "completed",
+                        "completed": 1,
+                        "successful": 1,
+                        "failed": 0,
+                        "progress_current": int(result.get("total_classes") or 0),
+                        "progress_percentage": 100,
+                        "total_students_generated": int(result.get("total_students") or 0),
+                        "classes_generated": int(result.get("total_classes") or 0),
+                        "stage_message": result.get("message") or "Cartões gerados com sucesso",
+                    },
+                )
+                try:
+                    complete_job(job_id)
+                except Exception:
+                    pass
+                logging.info(
+                    "[ROTA] ✅ Geração local concluída job=%s turmas=%s alunos=%s",
+                    job_id,
+                    result.get("total_classes"),
+                    result.get("total_students"),
+                )
+                return
+
+            err = None
+            if isinstance(result, dict):
+                err = result.get("error") or result.get("message")
+            if not err and async_result.failed():
+                err = str(async_result.result)
+            err = err or "Falha na geração local de cartões"
+            update_answer_sheet_job(
+                job_id,
+                {
+                    "status": "failed",
+                    "completed": 1,
+                    "successful": 0,
+                    "failed": 1,
+                    "progress_percentage": 100,
+                    "error": err,
+                    "stage_message": err,
+                },
+            )
+            try:
+                update_job(job_id, {"status": "failed", "stage_message": err, "phase": "done"})
+            except Exception:
+                pass
+            logging.error("[ROTA] ❌ Geração local falhou job=%s: %s", job_id, err)
+
+        except Exception as exc:
+            logging.error(
+                "[ROTA] ❌ Exceção na geração local job=%s: %s",
+                job_id,
+                exc,
+                exc_info=True,
+            )
+            try:
+                update_answer_sheet_job(
+                    job_id,
+                    {
+                        "status": "failed",
+                        "completed": 1,
+                        "failed": 1,
+                        "error": str(exc),
+                        "stage_message": str(exc),
+                    },
+                )
+            except Exception:
+                pass
+            try:
+                update_job(
+                    job_id,
+                    {"status": "failed", "stage_message": str(exc), "phase": "done"},
+                )
+            except Exception:
+                pass
+
+
+def _dispatch_answer_sheet_batch(
+    *,
+    job_id: str,
+    task_kwargs: Dict[str, Any],
+) -> Tuple[str, str]:
+    """
+    Dispara geração assíncrona sem bloquear a request.
+
+    Returns:
+        (task_id, mode) com mode in {'celery', 'local_thread'}
+    """
+    from flask import current_app
+    from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
+
+    # Garante batch_id = job_id para o progress store / DB
+    task_kwargs = dict(task_kwargs)
+    task_kwargs["batch_id"] = job_id
+
+    if _celery_workers_available():
+        task = generate_answer_sheets_batch_async.delay(**task_kwargs)
+        logging.info(
+            "[ROTA] 🚀 Batch via Celery task=%s job=%s",
+            task.id,
+            job_id,
+        )
+        return str(task.id), "celery"
+
+    task_id = f"local-{job_id}"
+    app = current_app._get_current_object()
+    thread = threading.Thread(
+        target=_run_answer_sheet_batch_in_background,
+        args=(app, job_id, task_kwargs),
+        daemon=True,
+        name=f"answer-sheet-batch-{job_id[:8]}",
+    )
+    thread.start()
+    logging.warning(
+        "[ROTA] ⚠️ Sem worker Celery — geração em thread local task=%s job=%s "
+        "(HTTP 202; usuário pode sair da página)",
+        task_id,
+        job_id,
+    )
+    return task_id, "local_thread"
+
+
 def _user_sees_all_city_gabaritos(user: dict) -> bool:
     return str(user.get("role") or "").lower() in _CARTAO_FULL_GABARITO_ACCESS_ROLES
 
@@ -1189,41 +1403,39 @@ def generate_answer_sheets():
                         questions_options_from_gabarito[q] = a
             class_ids = [str(c.id) for c in classes_to_generate]
             job_id = str(uuid.uuid4())
-            # Diretório compartilhado entre workers: /app/tmp/answer_sheets/{job_id}
-            answer_sheets_base = os.environ.get("ANSWER_SHEETS_TMP_BASE", "/app/tmp/answer_sheets")
-            os.makedirs(answer_sheets_base, exist_ok=True)
+            # Diretório compartilhado entre workers: /app/tmp/... (Docker) ou /tmp/... (dev)
+            answer_sheets_base = _answer_sheets_tmp_base()
             base_output_dir = os.path.join(answer_sheets_base, job_id)
             os.makedirs(base_output_dir, exist_ok=True)
 
             # ========================================================================
-            # OTIMIZADO: 1 Task Batch Única (sem chord)
-            # Gera 1 template base para TODAS as turmas + overlay por aluno
-            # Igual às provas físicas (simples, confiável, rápido com arch4)
+            # OTIMIZADO: 1 Task Batch Única (Celery se houver worker; senão thread local)
+            # HTTP 202 imediato — usuário pode sair da página e voltar pelo job_id
             # ========================================================================
-            from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
+            batch_kwargs = {
+                "gabarito_ids": [existing_gabarito_id],
+                "city_id": city_id_scope,
+                "num_questions": gabarito.num_questions,
+                "correct_answers": gabarito.correct_answers,
+                "test_data": test_data_complete,
+                "use_blocks": gabarito.use_blocks,
+                "blocks_config": gabarito.blocks_config or {},
+                "questions_options": questions_options_from_gabarito,
+                "scope": scope_type,
+                "class_ids": class_ids,
+                "pdf_mode": pdf_mode,
+            }
+            if adap_slices:
+                batch_kwargs["subturma_ids"] = [s.subturma_id for s in adap_slices]
 
-            task = generate_answer_sheets_batch_async.delay(
-                gabarito_ids=[existing_gabarito_id],
-                city_id=city_id_scope,
-                num_questions=gabarito.num_questions,
-                correct_answers=gabarito.correct_answers,
-                test_data=test_data_complete,
-                use_blocks=gabarito.use_blocks,
-                blocks_config=gabarito.blocks_config or {},
-                questions_options=questions_options_from_gabarito,
-                batch_id=job_id,
-                scope=scope_type,
-                class_ids=class_ids,  # Lista de turmas para processar
-                pdf_mode=pdf_mode,
-                **({'subturma_ids': [s.subturma_id for s in adap_slices]} if adap_slices else {}),
-            )
-            task_id = task.id
+            # Placeholder de task_id até o dispatch (job/DB precisam existir antes da thread).
+            pending_task_id = f"pending-{job_id}"
             create_answer_sheet_job(
                 job_id=job_id,
                 total=len(classes_to_generate),
                 gabarito_id=existing_gabarito_id,
                 user_id=str(user['id']),
-                task_ids=[task_id],
+                task_ids=[pending_task_id],
                 city_id=city_id_scope,
                 scope_type=scope_type,
             )
@@ -1235,11 +1447,24 @@ def generate_answer_sheets():
                 classes_to_generate=classes_to_generate,
                 gabarito_id=existing_gabarito_id,
                 user_id=str(user['id']),
-                task_ids=[task_id],
+                task_ids=[pending_task_id],
                 **(_adap_seed_kwargs(adap_slices) if adap_slices else {}),
             )
             gabarito.last_generation_job_id = job_id
             db.session.commit()
+
+            task_id, exec_mode = _dispatch_answer_sheet_batch(
+                job_id=job_id, task_kwargs=batch_kwargs
+            )
+            try:
+                update_answer_sheet_job(job_id, {"task_ids": [task_id]})
+            except Exception:
+                pass
+            try:
+                from app.services.progress_store import update_job as _upd_prog
+                _upd_prog(job_id, {"task_ids": [task_id]})
+            except Exception:
+                pass
 
             if adap_slices:
                 total_students = sum(s.students_count for s in adap_slices)
@@ -1254,12 +1479,18 @@ def generate_answer_sheets():
             return jsonify({
                 'status': 'processing',
                 'job_id': job_id,
+                'task_id': task_id,
+                'execution_mode': exec_mode,
                 'gabarito_id': existing_gabarito_id,
                 'scope_type': scope_type,
                 'publico': 'adap' if adap_slices else 'regular',
                 'total_classes': len(classes_to_generate),
                 'total_students': total_students,
-                'note': 'Números de alunos e turmas são estimativas. Valores reais estão no status do job.',
+                'note': (
+                    'Geração em background. Pode sair da página e acompanhar depois '
+                    'via polling_url / listagem de jobs do gabarito. '
+                    'Números de alunos e turmas são estimativas até o status completar.'
+                ),
                 'tasks': [
                     {'class_id': str(c.id), 'class_name': labels.get(str(c.id)) or c.name, 'status': 'pending'}
                     for c in classes_to_generate
@@ -1537,9 +1768,7 @@ def generate_answer_sheets():
             'institution': test_data.get('institution', ''),
         }
         
-        # ✅ 8. DISPARAR CELERY: 1 task batch (1× template WeasyPrint + overlay por aluno) — SEM chord / task por turma
-        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
-
+        # ✅ 8. DISPARAR geração assíncrona (Celery ou thread local) — HTTP 202 imediato
         if not city_id_scope:
             logging.error("[ROTA] ❌ Contexto de cidade não encontrado")
             return jsonify({"error": "City context not found"}), 500
@@ -1547,33 +1776,17 @@ def generate_answer_sheets():
         class_ids_for_batch = [str(cls.id) for cls in classes_to_generate]
         job_id = str(uuid.uuid4())
 
-        answer_sheets_base = os.environ.get("ANSWER_SHEETS_TMP_BASE", "/app/tmp/answer_sheets")
-        os.makedirs(answer_sheets_base, exist_ok=True)
+        answer_sheets_base = _answer_sheets_tmp_base()
         _base_output_dir = os.path.join(answer_sheets_base, job_id)
         os.makedirs(_base_output_dir, exist_ok=True)
 
-        task = generate_answer_sheets_batch_async.delay(
-            gabarito_ids=[gabarito_id],
-            city_id=city_id_scope,
-            num_questions=num_questions,
-            correct_answers=correct_answers,
-            test_data=test_data_complete,
-            use_blocks=use_blocks,
-            blocks_config=blocks_config or {},
-            questions_options=questions_options,
-            batch_id=job_id,
-            scope=scope_type,
-            class_ids=class_ids_for_batch,
-            pdf_mode=pdf_mode,
-        )
-        task_id = task.id
-
+        pending_task_id = f"pending-{job_id}"
         create_answer_sheet_job(
             job_id=job_id,
             total=len(classes_to_generate),
             gabarito_id=gabarito_id,
             user_id=str(user['id']),
-            task_ids=[task_id],
+            task_ids=[pending_task_id],
             city_id=city_id_scope,
             scope_type=scope_type,
         )
@@ -1584,13 +1797,40 @@ def generate_answer_sheets():
             classes_to_generate=classes_to_generate,
             gabarito_id=gabarito_id,
             user_id=str(user['id']),
-            task_ids=[task_id],
+            task_ids=[pending_task_id],
         )
         gabarito.last_generation_job_id = job_id
         db.session.commit()
 
+        task_id, exec_mode = _dispatch_answer_sheet_batch(
+            job_id=job_id,
+            task_kwargs={
+                "gabarito_ids": [gabarito_id],
+                "city_id": city_id_scope,
+                "num_questions": num_questions,
+                "correct_answers": correct_answers,
+                "test_data": test_data_complete,
+                "use_blocks": use_blocks,
+                "blocks_config": blocks_config or {},
+                "questions_options": questions_options,
+                "scope": scope_type,
+                "class_ids": class_ids_for_batch,
+                "pdf_mode": pdf_mode,
+            },
+        )
+        try:
+            update_answer_sheet_job(job_id, {"task_ids": [task_id]})
+        except Exception:
+            pass
+        try:
+            from app.services.progress_store import update_job as _upd_prog
+            _upd_prog(job_id, {"task_ids": [task_id]})
+        except Exception:
+            pass
+
         logging.info(
-            "[ROTA] ✅ Batch async disparado (1 template base / todas as turmas): task=%s job=%s gabarito=%s turmas=%s",
+            "[ROTA] ✅ Batch async disparado (mode=%s): task=%s job=%s gabarito=%s turmas=%s",
+            exec_mode,
             task_id,
             job_id,
             gabarito_id,
@@ -1614,11 +1854,17 @@ def generate_answer_sheets():
         return jsonify({
             'status': 'processing',
             'job_id': job_id,
+            'task_id': task_id,
+            'execution_mode': exec_mode,
             'gabarito_id': gabarito_id,
             'scope_type': scope_type,
             'total_classes': len(classes_to_generate),
             'total_students': total_students,
-            'note': 'Números de alunos e turmas são estimativas. Valores reais estão no status do job.',
+            'note': (
+                'Geração em background. Pode sair da página e acompanhar depois '
+                'via polling_url / listagem de jobs do gabarito. '
+                'Números de alunos e turmas são estimativas até o status completar.'
+            ),
             'tasks': response_tasks,
             'polling_url': f"/answer-sheets/jobs/{job_id}/status",
         }), 202
@@ -1772,6 +2018,11 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None, t
                             "motivo_ausencia": result.get("motivo_ausencia"),
                             "saved": bool(result.get("saved")),
                             "status": result.get("status", "corrigido"),
+                            "identity_source": result.get("identity_source"),
+                            "identity_confidence": result.get("identity_confidence"),
+                            "idgrid_checksum_ok": result.get("idgrid_checksum_ok"),
+                            "identity_mismatch": result.get("identity_mismatch"),
+                            "needs_review_reason": result.get("needs_review_reason"),
                         }
                         update_item_done(job_id, i, adapted)
                         logging.info(f"✅ Job {job_id}: Cartão resposta {i+1} processado com sucesso")
@@ -3310,6 +3561,11 @@ def correct_answer_sheet_new_pipeline():
                 "motivo_ausencia": result.get("motivo_ausencia"),
                 "saved": bool(result.get("saved")),
                 "status": result.get("status", "corrigido"),
+                "needs_review_reason": result.get("needs_review_reason"),
+                "identity_source": result.get("identity_source"),
+                "identity_confidence": result.get("identity_confidence"),
+                "idgrid_checksum_ok": result.get("idgrid_checksum_ok"),
+                "identity_mismatch": result.get("identity_mismatch"),
                 "correct": result['correct_answers'],
                 "wrong": result['wrong_answers'],
                 "blank": result['blank_answers'],
@@ -9180,9 +9436,41 @@ def get_job_status(job_id):
         total_students_generated = 0
         errors = []
         message = 'Processando...'
-        
-        if task_ids:
-            # Agora temos apenas 1 task batch
+        stored_status = str(job.get('status') or '').lower()
+        is_local_task = bool(
+            task_ids
+            and (
+                str(task_ids[0]).startswith('local-')
+                or str(task_ids[0]).startswith('pending-')
+            )
+        )
+
+        # Thread local / job já finalizado no store: não depende de AsyncResult
+        if stored_status in ('completed', 'failed') or is_local_task:
+            message = (
+                job.get('stage_message')
+                or ('Cartões gerados com sucesso' if stored_status == 'completed' else 'Processando...')
+            )
+            if stored_status == 'completed':
+                completed = 1
+                successful = 1
+                classes_generated = int(
+                    job.get('classes_generated')
+                    or job.get('progress_current')
+                    or 0
+                )
+                total_students_generated = int(job.get('total_students_generated') or 0)
+            elif stored_status == 'failed':
+                completed = 1
+                failed = 1
+                err_msg = job.get('error') or job.get('stage_message') or 'Erro ao gerar cartões'
+                message = err_msg
+                errors.append({'class_name': 'Batch', 'error': err_msg})
+            elif is_local_task:
+                message = job.get('stage_message') or 'Gerando cartões em background...'
+
+        elif task_ids:
+            # Agora temos apenas 1 task batch (Celery)
             task_id = task_ids[0]
             try:
                 from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
@@ -9190,7 +9478,7 @@ def get_job_status(job_id):
                 
                 # Determinar mensagem baseada no estado da task
                 if task_result.state == 'PENDING':
-                    message = 'Aguardando processamento...'
+                    message = 'Aguardando worker Celery...'
                 elif task_result.state == 'STARTED':
                     message = 'Gerando cartões resposta PDF (isso pode levar alguns minutos)...'
                 elif task_result.state == 'SUCCESS':
@@ -9260,7 +9548,9 @@ def get_job_status(job_id):
 
         # ✅ DETERMINAR STATUS DO JOB
         job_status = "processing"
-        if completed == len(task_ids) and task_ids:
+        if stored_status in ('completed', 'failed'):
+            job_status = stored_status
+        elif completed == len(task_ids) and task_ids:
             if failed > 0 and successful == 0:
                 job_status = "failed"
             else:

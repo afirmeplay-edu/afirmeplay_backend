@@ -174,6 +174,22 @@ def test_detect_gabarito_answers_from_photo_with_mocked_detector(monkeypatch):
 
     monkeypatch.setattr(detector_module, "PhotoAnswersDetector", FakeDetector)
 
+    import app.services.cartao_resposta.photo_identity as photo_identity
+
+    monkeypatch.setattr(
+        photo_identity,
+        "detect_sheet_identity",
+        lambda _img: {
+            "student_id": None,
+            "gabarito_id": None,
+            "test_id": None,
+            "identity_source": None,
+            "identity_confidence": None,
+            "idgrid_checksum_ok": None,
+            "identity_mismatch": False,
+            "detected": False,
+        },
+    )
     with app.test_request_context(
         "/physical-tests/gabarito/gab-1/student/student-1/detect-answers",
         method="POST",
@@ -187,6 +203,9 @@ def test_detect_gabarito_answers_from_photo_with_mocked_detector(monkeypatch):
     assert data["success"] is True
     assert data["answers"][0]["answer"] == "A"
     assert data["topology_source"] == "gabarito_legacy_blocks"
+    assert data["student_id"] == "student-1"
+    assert data["identity"]["filter_applied"] is True
+    assert data["identity"]["source"] == "filter"
 
 
 @pytest.mark.parametrize("overwrite,existing,status", [(False, object(), 409), (True, object(), 200)])

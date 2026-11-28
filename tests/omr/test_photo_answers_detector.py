@@ -82,6 +82,32 @@ class TestPhotoAnswersDetector(unittest.TestCase):
         cls.Detector = cls.mod.PhotoAnswersDetector
         cls.Error = cls.mod.PhotoAnswersDetectionError
 
+    def test_cluster_row_centers_ignores_phantom_top_row(self):
+        """Fantasma(s) acima do grid não podem deslocar Q1→Q2 (off-by-one)."""
+        import numpy as np
+
+        det = self.Detector(debug=False)
+        n_rows = 13
+        pitch, r, n_alts = 34.0, 16.0, 4
+        y0 = 200.0
+        circles = []
+        # Dois fantasmas (como no crop real: ruído + falso grupo)
+        for a in range(3):
+            circles.append([100 + a * 40, 50.0, r])
+        circles.append([120.0, 120.0, r])  # segundo fantasma fraco
+        # Grid real (uma linha com 3 círculos para competir em população)
+        for i in range(n_rows):
+            y = y0 + i * pitch
+            n = 3 if i == 5 else n_alts
+            for a in range(n):
+                circles.append([100 + a * 40, y, r])
+        col = np.array(circles, dtype=np.float32)
+        centers = det._cluster_row_centers(col, n_rows)
+        self.assertEqual(len(centers), n_rows)
+        self.assertAlmostEqual(centers[0], y0, delta=2.0)
+        self.assertAlmostEqual(centers[-1], y0 + (n_rows - 1) * pitch, delta=2.0)
+        self.assertGreater(centers[0], 150.0)
+
     def test_missing_topology(self):
         det = self.Detector(debug=False)
         with self.assertRaises(self.Error) as ctx:
